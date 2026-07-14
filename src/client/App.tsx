@@ -14,6 +14,13 @@ import {
   setupReadinessText,
   summarizeIssues
 } from "./review-copy.js";
+import {
+  CATALOG_DOMAINS,
+  SITE_CATALOG,
+  countCustomDomains,
+  parseDomainList,
+  updateDomainSelection
+} from "./site-catalog.js";
 
 type Config = {
   domains: readonly string[];
@@ -102,14 +109,6 @@ const productIdentityLabels = {
 
 function uniqueLines(value: string) {
   return [...new Set(value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean))];
-}
-
-function domainLines(value: string) {
-  return [...new Set(uniqueLines(value).map((item) => {
-    const candidate = /^https?:\/\//i.test(item) ? item : `https://${item}`;
-    try { return new URL(candidate).hostname.replace(/^www\./i, "").toLowerCase(); }
-    catch { return item.replace(/^https?:\/\//i, "").split("/")[0].replace(/^www\./i, "").toLowerCase(); }
-  }).filter(Boolean))];
 }
 
 function isGoogleSheetUrl(value: string) {
@@ -279,8 +278,10 @@ export function App() {
     else localStorage.setItem(LAST_RUN_STORAGE_KEY, run.id);
   }, [run?.id, run?.status]);
 
-  const normalizedDomains = useMemo(() => domainLines(domains), [domains]);
+  const normalizedDomains = useMemo(() => parseDomainList(domains), [domains]);
   const normalizedBrands = useMemo(() => uniqueLines(brands), [brands]);
+  const selectedDomainSet = useMemo(() => new Set(normalizedDomains), [normalizedDomains]);
+  const customDomainCount = useMemo(() => countCustomDomains(domains), [domains]);
   const checkCount = normalizedDomains.length * normalizedBrands.length;
   const sheetIsValid = isGoogleSheetUrl(sheetUrl);
   const busy = busyAction !== undefined;
@@ -703,6 +704,10 @@ export function App() {
     });
   }
 
+  function setPresetSites(targetDomains: readonly string[], selected: boolean) {
+    setDomains((current) => updateDomainSelection(current, targetDomains, selected));
+  }
+
   return <div className="app-shell">
     <a className="skip-link" href="#setup">Перейти к настройке</a>
     <header className="topbar">
@@ -710,7 +715,7 @@ export function App() {
         <span className="logo-mark" aria-hidden="true">Р</span>
         <span><strong>Сбор рейтингов</strong><small>Ежемесячное обновление таблицы</small></span>
       </a>
-      <div className="access-note"><span aria-hidden="true">●</span> Без входа и ключей Google</div>
+      <div className="access-note"><span aria-hidden="true">●</span> Без Google API-ключей</div>
     </header>
 
     <main id="top" aria-busy={busy}>
@@ -718,7 +723,7 @@ export function App() {
         <div>
           <p className="eyebrow">Отзывы и рейтинги с площадок</p>
           <h1 id="page-title">Соберите рейтинги<br />и обновите таблицу</h1>
-          <p className="intro-copy">Вставьте ссылку на таблицу, добавьте площадки и бренды. Сервис найдёт карточки, покажет спорные результаты и запишет только проверенные данные.</p>
+          <p className="intro-copy">Выберите площадки и бренды. Сервис найдёт карточки, покажет спорные результаты и запишет только проверенные данные.</p>
           <ul className="intro-benefits" aria-label="Преимущества сервиса">
             <li>Без ключей Google</li>
             <li>Проверка до записи</li>
@@ -740,14 +745,17 @@ export function App() {
 
       <form id="setup" className="card setup-card" onSubmit={start} ref={formRef} noValidate>
         <div className="card-heading">
-          <div><p className="section-number">Шаг 1</p><h2>Настройте сбор</h2><p>Вставьте ссылку на таблицу и проверьте готовые списки.</p></div>
+          <div><p className="section-number">Шаг 1</p><h2>Настройте сбор</h2><p>Укажите таблицу, затем выберите площадки и бренды.</p></div>
           {savedConfiguration && <button className="text-button" type="button" onClick={useSavedConfiguration}>Заполнить как в прошлый раз</button>}
         </div>
 
         <div className="sheet-field">
-          <label htmlFor="sheet-url">Ссылка на Google Таблицу</label>
+          <div className="field-heading">
+            <label htmlFor="sheet-url">Google Таблица для записи</label>
+            <a className="create-sheet-link" href="https://sheets.new" target="_blank" rel="noreferrer">Создать новую <span aria-hidden="true">↗</span></a>
+          </div>
           <div className={`input-with-icon ${sheetUrl && !sheetIsValid ? "invalid" : ""}`}>
-            <span aria-hidden="true">↗</span>
+            <span aria-hidden="true">▦</span>
             <input
               id="sheet-url"
               type="url"
@@ -762,8 +770,12 @@ export function App() {
             />
           </div>
           <p id="sheet-help" className={sheetUrl && !sheetIsValid ? "field-help field-error" : "field-help"}>
-            {sheetUrl && !sheetIsValid ? "Вставьте ссылку вида docs.google.com/spreadsheets/…" : "В таблице включите «Доступ по ссылке → Редактор». Google-ключи не нужны."}
+            {sheetUrl && !sheetIsValid ? "Вставьте ссылку вида docs.google.com/spreadsheets/…" : "В таблице включите «Доступ по ссылке → Редактор», затем вставьте ссылку. Новая таблица создаётся в вашем Google-аккаунте."}
           </p>
+          <details className="sheet-guide">
+            <summary>Как подготовить новую таблицу</summary>
+            <ol><li>Нажмите «Создать новую» и дождитесь открытия Google Таблиц.</li><li>Включите общий доступ по ссылке с ролью «Редактор».</li><li>Скопируйте адрес таблицы и вставьте его выше.</li></ol>
+          </details>
         </div>
 
         <div className="compact-grid">
@@ -771,19 +783,54 @@ export function App() {
           <label><span>Регион</span><input value={region} onChange={(event) => setRegion(event.target.value)} placeholder="Москва" required /></label>
         </div>
 
-        <div className="lists-grid">
-          <label>
-            <span className="label-row"><span>Площадки</span><small>{normalizedDomains.length}</small></span>
-            <textarea value={domains} onChange={(event) => setDomains(event.target.value)} rows={9} spellCheck={false} placeholder={"ozon.ru\nwildberries.ru\nmarket.yandex.ru"} required />
-            <small className="field-help">По одному домену в строке — без ссылок на товары.</small>
-          </label>
-          <label>
+        <div className="setup-lists">
+          <section className="site-picker" aria-labelledby="sites-title">
+            <div className="picker-heading">
+              <div><span className="label-row"><span id="sites-title">Площадки</span><small>{normalizedDomains.length}</small></span><p>Выберите готовые варианты или добавьте свои.</p></div>
+              <div className="picker-actions">
+                <button type="button" onClick={() => setPresetSites(CATALOG_DOMAINS, true)} disabled={CATALOG_DOMAINS.every((domain) => selectedDomainSet.has(domain))}>Выбрать все</button>
+                <button type="button" onClick={() => setDomains("")} disabled={normalizedDomains.length === 0}>Очистить</button>
+              </div>
+            </div>
+
+            <div className="site-groups">
+              {SITE_CATALOG.map((group) => {
+                const groupDomains = group.sites.map((site) => site.domain);
+                const selectedCount = groupDomains.filter((domain) => selectedDomainSet.has(domain)).length;
+                const allSelected = selectedCount === groupDomains.length;
+                return <div className="site-group" key={group.id}>
+                  <div className="site-group-heading">
+                    <div><h3>{group.label}</h3><p>{group.description}</p></div>
+                    <button type="button" onClick={() => setPresetSites(groupDomains, !allSelected)} aria-label={`${allSelected ? "Снять выбор" : "Выбрать все"}: ${group.label}`}>{allSelected ? "Снять" : `Все · ${selectedCount}/${groupDomains.length}`}</button>
+                  </div>
+                  <div className="site-options">
+                    {group.sites.map((site) => {
+                      const checked = selectedDomainSet.has(site.domain);
+                      return <label className={`site-option ${checked ? "selected" : ""}`} key={site.domain}>
+                        <input type="checkbox" checked={checked} onChange={(event) => setPresetSites([site.domain], event.target.checked)} />
+                        <span><strong>{site.label}</strong><small>{site.domain}</small></span>
+                      </label>;
+                    })}
+                  </div>
+                </div>;
+              })}
+            </div>
+
+            <details className="manual-domains">
+              <summary><span>Добавить домены списком</span>{customDomainCount > 0 && <small>{customDomainCount} своих</small>}</summary>
+              <label htmlFor="domains-list">Все выбранные домены</label>
+              <textarea id="domains-list" value={domains} onChange={(event) => setDomains(event.target.value)} rows={5} spellCheck={false} placeholder={"example.ru\nanother-site.ru"} required />
+              <small className="field-help">По одному домену в строке — без ссылок на товары. Готовый выбор выше обновится автоматически.</small>
+            </details>
+          </section>
+
+          <label className="brand-field">
             <span className="label-row"><span>Бренды</span><small>{normalizedBrands.length}</small></span>
-            <textarea value={brands} onChange={(event) => setBrands(event.target.value)} rows={9} placeholder={"Кагоцел\nАрбидол\nИнгавирин"} required />
-            <small className="field-help">По одному бренду в строке. Повторы будут убраны.</small>
+            <textarea value={brands} onChange={(event) => setBrands(event.target.value)} rows={12} placeholder={"Кагоцел\nАрбидол\nИнгавирин"} required />
+            <small className="field-help">По одному бренду в строке. Повторы будут убраны автоматически.</small>
+            <span className="brand-hint"><span aria-hidden="true">✓</span><span>Название бренда и уточнение продукта будут записаны в разные столбцы.</span></span>
           </label>
         </div>
-        <p className="normalization-note"><span aria-hidden="true">✓</span><span>В таблице бренд будет отдельным столбцом, а варианты записи вроде «табл. 10», «10 шт.» и «№10» будут приведены к единому уточнению товара.</span></p>
 
         <div className="setup-footer">
           <div className={checkCount > MAX_RUN_PARTITIONS || Boolean(sheetUrl && !sheetIsValid) ? "run-summary limit" : "run-summary"} aria-live="polite">
