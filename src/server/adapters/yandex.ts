@@ -118,7 +118,11 @@ export class YandexAdapter implements SiteAdapter {
     this.maxSitemaps = boundedInteger(options.maxSitemaps, 400, 1, 400);
     this.maxCandidates = boundedInteger(options.maxCandidates, 300, 1, 2_000);
     this.maxDocumentBytes = boundedInteger(options.maxDocumentBytes, 12_000_000, 10_000, 25_000_000);
-    this.sitemapConcurrency = boundedInteger(options.sitemapConcurrency, 6, 1, 12);
+    // Edge/cloud egress is more likely to be throttled when several multi-MB
+    // sitemap shards arrive at once. Four workers keep the complete scan fast
+    // while avoiding the burst that previously pushed production into a
+    // fallback path.
+    this.sitemapConcurrency = boundedInteger(options.sitemapConcurrency, 4, 1, 12);
     this.cacheTtlMs = boundedInteger(options.cacheTtlMs, 30 * 60_000, 0, 24 * 60 * 60_000);
     this.sitemapRetryAttempts = boundedInteger(options.sitemapRetryAttempts, 3, 1, 5);
     this.sitemapRetryBaseMs = boundedInteger(options.sitemapRetryBaseMs, 250, 0, 10_000);
@@ -449,7 +453,7 @@ export class YandexAdapter implements SiteAdapter {
         void response.body?.cancel().catch(() => undefined);
         return "<?xml version=\"1.0\"?><urlset></urlset>";
       }
-      if (response.status >= 500 && response.status <= 599) {
+      if ([408, 425, 429].includes(response.status) || response.status >= 500 && response.status <= 599) {
         lastTransient = new AdapterBlockedError(`Yandex is unavailable for ${url}: HTTP ${response.status}`);
         void response.body?.cancel().catch(() => undefined);
         if (attempt < this.sitemapRetryAttempts) {

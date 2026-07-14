@@ -198,6 +198,27 @@ describe("YandexAdapter discovery", () => {
     expect(indexRequests).toBe(2);
   });
 
+  it("retries a transient sitemap 429 instead of switching away from the free collector", async () => {
+    let modelCalls = 0;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A]));
+      if (url === MAP_A) {
+        modelCalls += 1;
+        return modelCalls === 1
+          ? new Response("rate limited", { status: 429 })
+          : xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/kagotsel--265149860"]));
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new YandexAdapter({ fetch, sitemapRetryBaseMs: 0 });
+
+    await expect(adapter.discover("Кагоцел", context())).resolves.toMatchObject([
+      { listingId: "265149860" }
+    ]);
+    expect(modelCalls).toBe(2);
+  });
+
   it("retries a bounded sitemap body-read timeout without masking valid XML", async () => {
     let modelRequests = 0;
     const fetch = vi.fn(async (input: string | URL | Request) => {
