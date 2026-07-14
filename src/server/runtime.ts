@@ -4,7 +4,6 @@ import { ResilientOzonAdapter } from "./adapters/ozon-resilient.js";
 import { WildberriesAdapter } from "./adapters/wildberries.js";
 import { YandexAdapter } from "./adapters/yandex.js";
 import { WildberriesApifyAdapter, isWildberriesApifyRef } from "./adapters/wildberries-apify.js";
-import { YandexApifyAdapter, isYandexApifyRef } from "./adapters/yandex-apify.js";
 import { BudgetedAdapter, createSerialExecutor, type AsyncExclusive } from "./adapters/budgeted.js";
 import { ResilientAdapter } from "./adapters/resilient.js";
 import { createReviewSiteAdapters } from "./adapters/review-sites.js";
@@ -113,7 +112,7 @@ export async function createCollectorRuntime(options: {
   };
   const apifyExclusive = options.apifyExclusive ?? createSerialExecutor();
   const cappedFallback = (
-    adapter: OzonAdapter | WildberriesApifyAdapter | YandexApifyAdapter,
+    adapter: OzonAdapter | WildberriesApifyAdapter,
     reserveUsd = reservePerDiscovery
   ) =>
     new BudgetedAdapter(adapter, {
@@ -145,22 +144,12 @@ export async function createCollectorRuntime(options: {
       stickyPrimaryFailure: false
     }
   );
-  const yandex = new ResilientAdapter(
-    new YandexAdapter({ fetch: options.fetch }),
-    cappedFallback(new YandexApifyAdapter({
-      fetch: options.fetch,
-      reviewsFetch: options.reviewsFetch,
-      token: env.APIFY_TOKEN,
-      maxTotalChargeUsd: reservePerDiscovery
-    })),
-    {
-      isFallbackRef: isYandexApifyRef,
-      // Reviews sitemap throttling and large-map timeouts are transient. A
-      // selective retry must return to the free first-party path instead of
-      // permanently consuming the shared paid fallback budget.
-      stickyPrimaryFailure: false
-    }
-  );
+  // Yandex Reviews has an exhaustive first-party sitemap collector. A cold
+  // cloud-browser timeout must stay an explicit fail-closed partition and be
+  // retried through that same free path; it must never silently consume the
+  // shared Apify allowance. `reviewsFetch` keeps local/direct probes on the
+  // identical adapter without introducing a second routing policy.
+  const yandex = new YandexAdapter({ fetch: options.reviewsFetch ?? options.fetch });
   const known = [ozon, wildberries, yandex, new EaptekaAdapter(evidence, options.fetch), ...createReviewSiteAdapters(evidence, options.fetch)];
   const service = new RatingsService(repository, createAdapterResolver(known, repository, evidence, options.fetch));
   return { repository, service };

@@ -256,7 +256,7 @@ describe("collector runtime fallback integration", () => {
     expect(requestedUrls.some((url) => url.hostname === "api.apify.com")).toBe(false);
   });
 
-  it("routes blocked Wildberries and Yandex primary collectors through capped Apify and back to fallback collect", async () => {
+  it("keeps blocked Yandex fail-closed and spends capped Apify only for Wildberries", async () => {
     const mocked = marketplaceFetch(1);
     const runtime = await createCollectorRuntime({
       repository: new MemoryRepository(),
@@ -270,9 +270,16 @@ describe("collector runtime fallback integration", () => {
 
     expect(run.partitions).toMatchObject([
       { domain: "wildberries.ru", brand: "Кагоцел", status: "complete", discovered: 1, collected: 1 },
-      { domain: "market.yandex.ru", brand: "Кагоцел", status: "complete", discovered: 1, collected: 1 }
+      {
+        domain: "market.yandex.ru",
+        brand: "Кагоцел",
+        status: "blocked",
+        discovered: 0,
+        collected: 0,
+        message: "parser_changed: Yandex is unavailable for https://reviews.yandex.ru/ugcpub/sitemap.xml: HTTP 503"
+      }
     ]);
-    expect(run.observations).toHaveLength(2);
+    expect(run.observations).toHaveLength(1);
     expect(run.observations.find((item) => item.domain === "wildberries.ru")).toMatchObject({
       listingId: "822686443",
       reviews: 106,
@@ -280,19 +287,15 @@ describe("collector runtime fallback integration", () => {
       status: "ok",
       source: "apify:piotrv1001/wildberries-listings-scraper:listing"
     });
-    expect(run.observations.find((item) => item.domain === "market.yandex.ru")).toMatchObject({
-      listingId: "265149860",
-      reviews: 711,
-      rating: 4.7,
-      status: "ok",
-      source: "yandex_reviews_json_ld"
-    });
-    expect(mocked.paidPaths).toHaveLength(2);
+    expect(run.observations.find((item) => item.domain === "market.yandex.ru")).toBeUndefined();
+    expect(mocked.paidPaths).toHaveLength(1);
+    expect(mocked.paidPaths[0]).toContain("piotrv1001~wildberries-listings-scraper");
+    expect(mocked.paidPaths.some((path) => path.includes("yandex-market-scraper"))).toBe(false);
     expect(mocked.maximumPaidCalls()).toBe(1);
     expect(mocked.requestedUrls.some((url) => url.hostname === "card.wb.ru")).toBe(false);
   });
 
-  it("fails both fallbacks closed against the common live monthly budget before starting an Actor", async () => {
+  it("keeps Yandex independent from an exhausted paid budget while Wildberries fails before Actor start", async () => {
     const mocked = marketplaceFetch(4.3);
     const runtime = await createCollectorRuntime({
       repository: new MemoryRepository(),
@@ -306,9 +309,93 @@ describe("collector runtime fallback integration", () => {
     expect(run.observations).toEqual([]);
     expect(run.partitions).toHaveLength(2);
     expect(run.partitions.every((partition) => partition.status === "blocked")).toBe(true);
-    expect(run.errors).toHaveLength(2);
-    expect(run.errors.every((error) => error.message.includes("quota_exceeded"))).toBe(true);
+    expect(run.partitions.find((partition) => partition.domain === "wildberries.ru")?.message).toContain("quota_exceeded");
+    expect(run.partitions.find((partition) => partition.domain === "market.yandex.ru")?.message)
+      .toBe("parser_changed: Yandex is unavailable for https://reviews.yandex.ru/ugcpub/sitemap.xml: HTTP 503");
+    expect(run.errors).toHaveLength(1);
+    expect(run.errors[0]).toMatchObject({ partition: "wildberries.ru/Кагоцел" });
+    expect(run.errors[0].message).toContain("quota_exceeded");
     expect(mocked.paidPaths).toEqual([]);
+  });
+
+  it("retries a failed Yandex partition through the same exhaustive free path without any Apify request", async () => {
+    const indexUrl = "https://reviews.yandex.ru/ugcpub/sitemap.xml";
+    const modelMapUrl = "https://reviews.yandex.ru/ugcpub/sitemap_model_260000000-269999999-0.xml";
+    const productUrl = "https://reviews.yandex.ru/product/kagotsel--265149860";
+    const requestedUrls: URL[] = [];
+    let indexCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      requestedUrls.push(url);
+      if (url.toString() === indexUrl) {
+        indexCalls += 1;
+        if (indexCalls <= 3) return new Response("temporarily unavailable", { status: 503 });
+        return new Response(
+          `<?xml version="1.0"?><sitemapindex><sitemap><loc>${modelMapUrl}</loc></sitemap></sitemapindex>`,
+          { status: 200, headers: { "content-type": "application/xml" } }
+        );
+      }
+      if (url.toString() === modelMapUrl) {
+        return new Response(
+          `<?xml version="1.0"?><urlset><url><loc>${productUrl}</loc></url></urlset>`,
+          { status: 200, headers: { "content-type": "application/xml" } }
+        );
+      }
+      if (url.toString() === productUrl || url.pathname === "/product/model--265149860") {
+        return new Response(`<script type="application/ld+json">${JSON.stringify({
+          "@context": "https://schema.org",
+          "@type": "Product",
+          name: "Кагоцел таблетки 12 мг №20",
+          aggregateRating: {
+            "@type": "AggregateRating",
+            ratingValue: 4.7,
+            reviewCount: 711,
+            ratingCount: 1827,
+            bestRating: 5
+          }
+        })}</script>`, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+      }
+      throw new Error(`Unexpected test request: ${url}`);
+    }) as unknown as typeof fetch;
+    const runtime = await createCollectorRuntime({
+      repository: new MemoryRepository(),
+      evidence: new MemoryEvidenceStore(),
+      fetch: fetchMock,
+      reviewsFetch: fetchMock,
+      env: { APIFY_TOKEN: "must-not-be-used", APIFY_MONTHLY_BUDGET_USD: "4.50" }
+    });
+    const created = await runtime.service.createRun({
+      ...request,
+      domains: ["market.yandex.ru"]
+    });
+
+    const first = await runtime.service.executeRun(created.id);
+    expect(first.partitions).toEqual([{
+      domain: "market.yandex.ru",
+      brand: "Кагоцел",
+      status: "blocked",
+      discovered: 0,
+      collected: 0,
+      message: "parser_changed: Yandex is unavailable for https://reviews.yandex.ru/ugcpub/sitemap.xml: HTTP 503"
+    }]);
+
+    const retried = await runtime.service.executeRun(created.id);
+    expect(retried.partitions).toMatchObject([{
+      domain: "market.yandex.ru",
+      brand: "Кагоцел",
+      status: "complete",
+      discovered: 1,
+      collected: 1
+    }]);
+    expect(retried.observations).toMatchObject([{
+      domain: "market.yandex.ru",
+      listingId: "265149860",
+      reviews: 711,
+      rating: 4.7,
+      status: "ok",
+      source: "yandex_reviews_json_ld"
+    }]);
+    expect(requestedUrls.some((url) => url.hostname === "api.apify.com")).toBe(false);
   });
 
   it("keeps a persistent shared reservation floor when Apify live usage is delayed", async () => {
