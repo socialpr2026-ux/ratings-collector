@@ -694,6 +694,49 @@ describe("run orchestration and fail-closed QA", () => {
     expect(run.qa).toMatchObject({ ok: true, blockers: [] });
   });
 
+  it("completes Otzovik with two valid aggregates and omits one explicitly retired search card", async () => {
+    const domain = "otzovik.com";
+    const aggregateRequest = { ...request, domains: [domain], brands: ["Оциллококцинум"] };
+    const service = new RatingsService(new MemoryRepository(), async () => ({
+      id: "otzovik-retired-search-card",
+      supportedDomains: [domain],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand: string): Promise<ProductRef[]> {
+        return ["4948", "retired", "2620333"].map((listingId) => ({
+          domain, platform: domain, listingId, brand,
+          url: `https://${domain}/reviews/${listingId}/`, metadata: {}
+        }));
+      },
+      async collect(ref: ProductRef): Promise<Observation> {
+        if (ref.listingId === "retired") {
+          return {
+            domain, platform: domain, listingId: ref.listingId, brand: ref.brand,
+            canonicalUrl: ref.url, product: ref.brand, reviews: null, rating: null,
+            status: "not_found", source: "otzovik_missing_candidate", capturedAt: new Date().toISOString()
+          };
+        }
+        return {
+          domain, platform: domain, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: `${ref.brand} отзывы`, reviews: ref.listingId === "4948" ? 394 : 1,
+          rating: ref.listingId === "4948" ? 4 : 5, status: "ok", capturedAt: new Date().toISOString(),
+          evidenceRef: `${ref.url}#aggregate`, source: "microdata",
+          productEvidence: {
+            scope: "product_family", signals: [{ source: "title", text: ref.brand }], variants: [],
+            identifiers: [{ type: "product_id", value: ref.listingId }], imageUrls: [], instructionUrls: []
+          }
+        };
+      }
+    }));
+
+    const run = await service.executeRun((await service.createRun(aggregateRequest)).id);
+
+    expect(run.observations).toHaveLength(2);
+    expect(run.observations.map((item) => item.listingId).sort()).toEqual(["2620333", "4948"]);
+    expect(run.observations.every((item) => item.status === "ok")).toBe(true);
+    expect(run.partitions).toMatchObject([{ status: "complete", discovered: 2, collected: 2 }]);
+    expect(run.qa).toMatchObject({ ok: true, blockers: [] });
+  });
+
   it("clears a marketplace default rating when written reviewCount is zero", async () => {
     class DefaultRatingWithoutReviewsAdapter extends FakeAdapter {
       override async collect(ref: ProductRef): Promise<Observation> {

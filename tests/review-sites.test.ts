@@ -487,6 +487,17 @@ describe("first-party review-site adapters", () => {
     }, context)).resolves.toMatchObject({ reviews: 37, rating: 4.9, status: "ok" });
   });
 
+  it.each([404, 410])("marks an exact retired Otzovik product as a removable search candidate: HTTP %s", async (status) => {
+    const adapter = adapterFor("otzovik.com", (async () => new Response("retired", { status })) as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "otzovik.com", platform: "otzovik.com", listingId: "retired", brand: "Оциллококцинум",
+      url: "https://otzovik.com/reviews/gomeopaticheskiy_preparat_laboratoriya_popovih_ocillokokcinum/", metadata: {}
+    }, context)).resolves.toMatchObject({
+      status: "not_found", reviews: null, rating: null, source: "otzovik_missing_candidate"
+    });
+  });
+
   it("health-checks Otzovik on a proven aggregate card instead of the protected homepage", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = urlOf(input);

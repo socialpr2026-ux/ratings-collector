@@ -1055,7 +1055,12 @@ export class ReviewSiteAdapter implements SiteAdapter {
         rating: null,
         status: "not_found",
         capturedAt,
-        source: "review-site-missing"
+        // Otzovik's first-party search can retain explicitly retired product
+        // cards. Mark that exact 404/410 proof so orchestration can omit a new
+        // stale result without weakening other missing-page handling.
+        source: this.definition.domain === "otzovik.com"
+          ? "otzovik_missing_candidate"
+          : "review-site-missing"
       };
     }
     if (status < 200 || status >= 300) {

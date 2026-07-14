@@ -374,10 +374,13 @@ export class RatingsService {
                   observation.product = historical.product;
                   observation.productIdentity = historical.productIdentity;
                   observation.brand = historical.brand;
-                } else if (observation.source === "yandex_reviews_missing_candidate") {
-                  // The search actor can occasionally return a stale modelId.
-                  // An explicit Yandex missing-page screen proves that this is
-                  // not a current product card and it must not enter the sheet.
+                } else if ([
+                  "yandex_reviews_missing_candidate",
+                  "otzovik_missing_candidate"
+                ].includes(observation.source ?? "")) {
+                  // A first-party search may retain an explicitly removed
+                  // candidate. Its exact missing-page proof means it is not a
+                  // current card and must not enter the sheet or review queue.
                   viableDiscovered -= 1;
                   continue;
                 } else {
