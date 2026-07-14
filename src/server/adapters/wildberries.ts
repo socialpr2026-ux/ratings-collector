@@ -12,14 +12,17 @@ import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 // when the same bounded query succeeds through v14 with an identical product
 // schema. Keep the free JSON route first so a run does not need Sandbox or the
 // paid Apify fallback merely because one endpoint generation is throttled.
-const SEARCH_ENDPOINT = "https://search.wb.ru/exactmatch/ru/common/v14/search";
+const SEARCH_ENDPOINTS = [
+  "https://search.wb.ru/exactmatch/ru/common/v14/search",
+  "https://search.wb.ru/exactmatch/ru/common/v18/search"
+] as const;
 const CARD_ENDPOINT = "https://card.wb.ru/cards/v4/detail";
 const MOSCOW_DESTINATION = "-1257786";
 const PLATFORM_ID = "wildberries";
 const PLATFORM_DOMAIN = "wildberries.ru";
 const DEFAULT_MAX_PAGES = 50;
 const DEFAULT_REQUEST_INTERVAL_MS = 1_500;
-const DEFAULT_DIRECT_APP_TYPES = [1, 32] as const;
+const DEFAULT_DIRECT_APP_TYPES = [1, 32, 64] as const;
 const DEFAULT_BROWSER_APP_TYPE = 32;
 const DEFAULT_BLOCKED_RETRY_BASE_MS = 100;
 const DEFAULT_BLOCKED_COOLDOWN_MS = 30_000;
@@ -50,6 +53,7 @@ export type WildberriesAdapterOptions = {
 type RequestRoute = {
   appType: string;
   browser: boolean;
+  searchEndpoint?: string;
 };
 
 function isObject(value: unknown): value is JsonObject {
@@ -203,7 +207,7 @@ export class WildberriesAdapter implements SiteAdapter {
   private readonly injectedFetch?: typeof globalThis.fetch;
   private readonly maxPages: number;
   private readonly requestIntervalMs: number;
-  private readonly searchEndpoint: string;
+  private readonly searchEndpoints: readonly string[];
   private readonly cardEndpoint: string;
   private readonly destination: string;
   private readonly now: () => Date;
@@ -253,7 +257,10 @@ export class WildberriesAdapter implements SiteAdapter {
     this.injectedFetch = options.fetch;
     this.maxPages = maxPages;
     this.requestIntervalMs = options.requestIntervalMs ?? DEFAULT_REQUEST_INTERVAL_MS;
-    this.searchEndpoint = options.searchEndpoint ?? SEARCH_ENDPOINT;
+    // An explicitly injected endpoint keeps fixtures/local overrides isolated.
+    // Production exhausts both currently supported buyer API generations: WB
+    // can rate-limit v14 and v18 independently for the same bounded query.
+    this.searchEndpoints = options.searchEndpoint ? [options.searchEndpoint] : SEARCH_ENDPOINTS;
     this.cardEndpoint = options.cardEndpoint ?? CARD_ENDPOINT;
     this.destination = options.destination ?? MOSCOW_DESTINATION;
     this.now = options.now ?? (() => new Date());
@@ -501,7 +508,7 @@ export class WildberriesAdapter implements SiteAdapter {
     page: number,
     context: AdapterContext
   ): Promise<ProductPage> {
-    const url = new URL(this.searchEndpoint);
+    const url = new URL(this.searchEndpoints[0]);
     url.searchParams.set("ab_testing", "false");
     url.searchParams.set("appType", "1");
     url.searchParams.set("curr", "rub");
@@ -540,7 +547,7 @@ export class WildberriesAdapter implements SiteAdapter {
       if (typeof fetchImplementation !== "function") {
         throw new Error("No fetch implementation is available for the Wildberries adapter");
       }
-      const routes = this.requestRoutes();
+      const routes = this.requestRoutes(url);
       const blocked: string[] = [];
 
       for (let index = 0; index < routes.length; index += 1) {
@@ -551,7 +558,8 @@ export class WildberriesAdapter implements SiteAdapter {
           context.signal?.throwIfAborted();
         }
 
-        const attemptUrl = new URL(url);
+        const attemptUrl = new URL(route.searchEndpoint ?? url.toString());
+        if (route.searchEndpoint) attemptUrl.search = url.search;
         attemptUrl.searchParams.set("appType", route.appType);
         let response: Response;
         try {
@@ -643,21 +651,43 @@ export class WildberriesAdapter implements SiteAdapter {
     });
   }
 
-  private requestRoutes(): RequestRoute[] {
+  private requestRoutes(url: URL): RequestRoute[] {
+    const isSearchRequest = url.hostname === "search.wb.ru" &&
+      /\/exactmatch\/ru\/common\/v(?:14|18)\/search$/.test(url.pathname);
+    const endpoints = isSearchRequest ? this.searchEndpoints : [undefined];
+    const preferred = isSearchRequest
+      ? this.preferredRoute.searchEndpoint ? [this.preferredRoute] : []
+      : [{ appType: this.preferredRoute.appType, browser: this.preferredRoute.browser }];
     const routes: RequestRoute[] = [
-      this.preferredRoute,
-      ...this.directAppTypes.map((appType) => ({ appType, browser: false })),
+      ...preferred,
+      // Exhaust fixed-function/direct egress across both API generations
+      // before spending any EdgeOne Sandbox quota.
+      ...endpoints.flatMap((searchEndpoint) => this.directAppTypes.map((appType) => ({
+        appType,
+        browser: false,
+        ...(searchEndpoint ? { searchEndpoint } : {})
+      }))),
       ...(this.browserFallbackAppType
-        ? [{ appType: this.browserFallbackAppType, browser: true }]
+        ? endpoints.map((searchEndpoint) => ({
+            appType: this.browserFallbackAppType!,
+            browser: true,
+            ...(searchEndpoint ? { searchEndpoint } : {})
+          }))
         : [])
     ];
     const unique = new Map<string, RequestRoute>();
-    for (const route of routes) unique.set(`${route.browser ? "browser" : "direct"}:${route.appType}`, route);
+    for (const route of routes) {
+      unique.set(
+        `${route.searchEndpoint ?? "card"}:${route.browser ? "browser" : "direct"}:${route.appType}`,
+        route
+      );
+    }
     return [...unique.values()];
   }
 
   private routeLabel(route: RequestRoute): string {
-    return `${route.browser ? "browser" : "direct"} appType=${route.appType}`;
+    const generation = route.searchEndpoint?.match(/\/common\/(v\d+)\/search$/)?.[1];
+    return `${route.browser ? "browser" : "direct"}${generation ? ` ${generation}` : ""} appType=${route.appType}`;
   }
 
   private searchNoResultsProofUrl(apiUrl: URL): URL | undefined {
