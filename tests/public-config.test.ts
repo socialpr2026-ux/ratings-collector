@@ -202,3 +202,81 @@ describe("static Ozon Translate gateway", () => {
     expect(await mismatched.text()).toContain("did not prove the requested source");
   });
 });
+
+describe("static pharmacy Translate gateway", () => {
+  const token = "p".repeat(32);
+  const callGateway = (url: string) => staticReviewFetch(
+    new Request("https://ratings.example/api/internal/static-review-fetch", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ url })
+    }),
+    { INTERNAL_AGENT_TOKEN: token }
+  );
+  const translated = (host: string, pathname: string, parameters: Record<string, string> = {}) => {
+    const target = new URL(pathname, `https://${host}`);
+    for (const [key, value] of Object.entries(parameters)) target.searchParams.set(key, value);
+    target.searchParams.set("_x_tr_sl", "ru");
+    target.searchParams.set("_x_tr_tl", "en");
+    target.searchParams.set("_x_tr_hl", "en");
+    return target;
+  };
+
+  it("accepts and compacts source-bound Farmlend product metrics", async () => {
+    const noise = "x".repeat(500_000);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head>
+      <base href="https://farmlend.ru/product/370202">
+      <link rel="canonical" href="https://farmlend.ru/product/370202">
+      <style>${noise}</style></head><body><h1>Кагоцел таблетки 12 мг №30</h1>
+      <p>Общий рейтинг 5 на основе 17 отзывов покупателей</p></body></html>`, {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    })));
+
+    const response = await callGateway(translated("farmlend-ru.translate.goog", "/product/370202").toString());
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-pharmacy-ssr");
+    expect(proof).toContain("17 отзывов покупателей");
+    expect(proof).not.toContain(noise.slice(0, 100));
+    expect(Number(response.headers.get("x-ratings-proof-bytes"))).toBeLessThan(2_000);
+  });
+
+  it("preserves Okapteka written reviews with per-review ratings", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head>
+      <base href="https://okapteka.ru/reviews/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/"></head><body>
+      <article itemprop="review" data-id="2678"><a href="https://okapteka-ru.translate.goog/kagotsyel-tab-12mg-20-529012/?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">Кагоцел</a>
+      <meta itemprop="ratingValue" content="5"></article></body></html>`, {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    })));
+    const target = translated("okapteka-ru.translate.goog", "/reviews/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/");
+
+    const response = await callGateway(target.toString());
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(proof).toContain('data-id="2678"');
+    expect(proof).toContain('itemprop="ratingValue" content="5"');
+    expect(proof).toContain("529012");
+  });
+
+  it("rejects unbounded queries and a mismatched source before metrics can become zero", async () => {
+    const upstream = vi.fn(async () => new Response(`<html><head>
+      <base href="https://farmlend.ru/search?keyword=Другой"></head><body>ничего не найдено</body></html>`, {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    }));
+    vi.stubGlobal("fetch", upstream);
+    const invalid = translated("farmlend-ru.translate.goog", "/search", {
+      keyword: "Кагоцел",
+      redirect: "https://evil.example"
+    });
+
+    expect((await callGateway(invalid.toString())).status).toBe(400);
+    expect(upstream).not.toHaveBeenCalled();
+
+    const valid = translated("farmlend-ru.translate.goog", "/search", { keyword: "Кагоцел" });
+    const mismatch = await callGateway(valid.toString());
+    expect(mismatch.status).toBe(502);
+    expect(await mismatch.text()).toContain("did not prove the requested source and metrics");
+  });
+});

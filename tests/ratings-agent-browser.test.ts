@@ -152,6 +152,30 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("routes the exact pharmacy Translate hosts through fixed function egress without Sandbox", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("compact pharmacy proof", {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    for (const target of [
+      "https://farmlend-ru.translate.goog/search?keyword=Кагоцел&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
+      "https://okapteka-ru.translate.goog/pg/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
+    ]) {
+      const response = await routedFetch(target);
+      expect(await response.text()).toBe("compact pharmacy proof");
+      const call = directFetch.mock.calls.at(-1)!;
+      expect(call[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+      expect(JSON.parse(String((call[1] as RequestInit).body))).toEqual({ url: new URL(target).toString() });
+    }
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("maps a lazy Sandbox quota failure to AdapterBlockedError", async () => {
     const run = vi.fn(async () => {
       throw new Error("Sandbox quota exceeded");

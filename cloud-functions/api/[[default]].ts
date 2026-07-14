@@ -34,6 +34,15 @@ const OZON_SEARCH_PARAMETERS = new Set([
   "page",
   "text"
 ]);
+const PHARMACY_TRANSLATE_PARAMETERS = new Set(["_x_tr_sl", "_x_tr_tl", "_x_tr_hl"]);
+const FARMLEND_TRANSLATE_HOST = "farmlend-ru.translate.goog";
+const OKAPTEKA_TRANSLATE_HOST = "okapteka-ru.translate.goog";
+
+type PharmacyTranslateTarget = {
+  kind: "farmlend-search" | "farmlend-product" | "okapteka-group" | "okapteka-reviews";
+  source: URL;
+  productId?: string;
+};
 
 type OzonTranslateTarget = {
   kind: "search" | "category" | "product";
@@ -51,6 +60,171 @@ function exactUrlSignature(url: URL): string {
     leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue)
   );
   return `${url.protocol}//${url.hostname}${url.pathname}?${new URLSearchParams(parameters).toString()}`;
+}
+
+function exactTranslateParameters(target: URL): boolean {
+  return singleSearchParameter(target, "_x_tr_sl") === "ru" &&
+    singleSearchParameter(target, "_x_tr_tl") === "en" &&
+    singleSearchParameter(target, "_x_tr_hl") === "en";
+}
+
+function parsePharmacyTranslateTarget(target: URL): PharmacyTranslateTarget | undefined {
+  if (
+    target.protocol !== "https:" || target.port || target.username || target.password || target.hash ||
+    !exactTranslateParameters(target) ||
+    [...target.searchParams.keys()].some((key) => target.searchParams.getAll(key).length !== 1)
+  ) return undefined;
+
+  const sourceHost = target.hostname === FARMLEND_TRANSLATE_HOST
+    ? "farmlend.ru"
+    : target.hostname === OKAPTEKA_TRANSLATE_HOST ? "okapteka.ru" : undefined;
+  if (!sourceHost) return undefined;
+  const source = new URL(target.pathname, `https://${sourceHost}`);
+
+  if (target.hostname === FARMLEND_TRANSLATE_HOST) {
+    if (target.pathname === "/search") {
+      if ([...target.searchParams.keys()].some((key) =>
+        !PHARMACY_TRANSLATE_PARAMETERS.has(key) && key !== "keyword"
+      )) return undefined;
+      const keyword = singleSearchParameter(target, "keyword")?.normalize("NFKC").trim() ?? "";
+      if (keyword.length < 2 || keyword.length > 160) return undefined;
+      source.searchParams.set("keyword", keyword);
+      return { kind: "farmlend-search", source };
+    }
+    const product = target.pathname.match(/^\/(?:[a-z0-9][a-z0-9-]*\/)?product\/(\d+)\/?$/i);
+    if (!product || [...target.searchParams.keys()].some((key) => !PHARMACY_TRANSLATE_PARAMETERS.has(key))) {
+      return undefined;
+    }
+    return { kind: "farmlend-product", source, productId: product[1] };
+  }
+
+  const group = target.pathname.match(/^\/(pg|reviews)\/([^/]+)\/$/i);
+  if (!group) return undefined;
+  let brand: string;
+  try { brand = decodeURIComponent(group[2]).normalize("NFKC").trim(); }
+  catch { return undefined; }
+  if (brand.length < 2 || brand.length > 160) return undefined;
+  if (group[1].toLocaleLowerCase("en-US") === "pg") {
+    if ([...target.searchParams.keys()].some((key) => !PHARMACY_TRANSLATE_PARAMETERS.has(key))) return undefined;
+    return { kind: "okapteka-group", source };
+  }
+  for (const [key, value] of target.searchParams) {
+    if (PHARMACY_TRANSLATE_PARAMETERS.has(key)) continue;
+    if (!/^(?:page|pagen_\d+|sizen_\d+)$/i.test(key) || !/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 100) {
+      return undefined;
+    }
+    source.searchParams.set(key, value);
+  }
+  return { kind: "okapteka-reviews", source };
+}
+
+function translatedSourceMatches(value: string | undefined, requested: URL): boolean {
+  if (!value) return false;
+  try {
+    return exactUrlSignature(new URL(value)) === exactUrlSignature(requested);
+  } catch {
+    return false;
+  }
+}
+
+function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslateTarget): string | undefined {
+  if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
+  const $ = load(html);
+  const title = $("title").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+  if (/(?:captcha|access denied|unusual traffic|подозрительн\w*\s+активност|проверка\s+браузера|Target URL returned error)/i.test(title) ||
+    /<(?:iframe|form|input)\b[^>]*(?:captcha|challenge)/i.test(html.slice(0, 150_000))) return undefined;
+  const baseValue = $("base[href]").first().attr("href");
+  if (!translatedSourceMatches(baseValue, requested.source)) return undefined;
+  const base = `<base href="${escapeHtml(baseValue!)}">`;
+
+  if (requested.kind === "farmlend-search") {
+    const anchors: string[] = [];
+    $("a[href]").each((_index, node) => {
+      const href = $(node).attr("href");
+      if (!href) return;
+      try {
+        const value = new URL(href, `https://${FARMLEND_TRANSLATE_HOST}`);
+        const match = value.pathname.match(/^\/(?:[a-z0-9][a-z0-9-]*\/)?product\/(\d+)\/?$/i);
+        if (!match || ![FARMLEND_TRANSLATE_HOST, "farmlend.ru"].includes(value.hostname)) return;
+        const source = `https://farmlend.ru${value.pathname}`;
+        const card = $(node).closest("article, li, [class*='product'], [class*='item']");
+        const text = ($(node).text() || card.text()).normalize("NFKC").replace(/\s+/g, " ").trim();
+        if (text) anchors.push(`<a href="${escapeHtml(source)}">${escapeHtml(text)}</a>`);
+      } catch { /* ignore unrelated links */ }
+    });
+    const pageText = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    const empty = pageText.match(/(?:ничего не найдено|товары не найдены|no products found|nothing was found)/i)?.[0];
+    if (!anchors.length && !empty) return undefined;
+    return `<html><head>${base}</head><body>${anchors.join("")}${empty ? `<p>${escapeHtml(empty)}</p>` : ""}</body></html>`;
+  }
+
+  if (requested.kind === "farmlend-product") {
+    const canonicalValue = $("link[rel='canonical'][href]").first().attr("href");
+    let canonical: URL;
+    try { canonical = new URL(canonicalValue ?? ""); }
+    catch { return undefined; }
+    const canonicalId = canonical.pathname.match(/^\/(?:[a-z0-9][a-z0-9-]*\/)?product\/(\d+)\/?$/i)?.[1];
+    if (canonical.protocol !== "https:" || canonical.hostname !== "farmlend.ru" || canonicalId !== requested.productId) return undefined;
+    const title = $("h1").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    const pageText = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    const metric = pageText.match(/(?:Общий рейтинг|Overall rating)\s*[0-5](?:[.,]\d+)?\s*(?:на основе|based on)\s*[\d\s\u00a0\u202f]+\s*(?:отзыв[а-яё]* покупателей|customer reviews?)/iu)?.[0];
+    const empty = pageText.match(/(?:Пока еще никто не оставил отзыв|No one has left a review yet)/i)?.[0];
+    if (!title || !metric && !empty) return undefined;
+    return `<html><head>${base}<link rel="canonical" href="${escapeHtml(canonical.toString())}"></head><body>` +
+      `<h1>${escapeHtml(title)}</h1><p>${escapeHtml(metric ?? empty!)}</p></body></html>`;
+  }
+
+  if (requested.kind === "okapteka-group") {
+    const anchors: string[] = [];
+    $("a[href]").each((_index, node) => {
+      const href = $(node).attr("href");
+      if (!href) return;
+      try {
+        const value = new URL(href, `https://${OKAPTEKA_TRANSLATE_HOST}`);
+        if (![OKAPTEKA_TRANSLATE_HOST, "okapteka.ru"].includes(value.hostname) ||
+          !/^\/[a-z0-9][a-z0-9-]*-\d+\/?$/i.test(value.pathname)) return;
+        const card = $(node).closest("article, li, [class*='product'], [class*='item']");
+        const text = ($(node).text() || card.text()).normalize("NFKC").replace(/\s+/g, " ").trim();
+        if (text) anchors.push(`<a href="https://okapteka.ru${escapeHtml(value.pathname)}">${escapeHtml(text)}</a>`);
+      } catch { /* ignore unrelated links */ }
+    });
+    const pageText = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    const empty = pageText.match(/(?:ничего не найдено|товары не найдены|no products found)/i)?.[0];
+    if (!anchors.length && !empty) return undefined;
+    return `<html><head>${base}</head><body>${anchors.join("")}${empty ? `<p>${escapeHtml(empty)}</p>` : ""}</body></html>`;
+  }
+
+  const reviews: string[] = [];
+  $("[itemprop='review'][data-id]").each((_index, node) => {
+    const id = $(node).attr("data-id")?.trim();
+    const href = $(node).find("a[href]").first().attr("href");
+    if (!id || !href) return;
+    try {
+      const value = new URL(href, `https://${OKAPTEKA_TRANSLATE_HOST}`);
+      if (![OKAPTEKA_TRANSLATE_HOST, "okapteka.ru"].includes(value.hostname) ||
+        !/^\/[a-z0-9][a-z0-9-]*-\d+\/?$/i.test(value.pathname)) return;
+      const score = $(node).find("[itemprop='ratingValue']").first().attr("content");
+      reviews.push(`<article itemprop="review" data-id="${escapeHtml(id)}"><a href="https://okapteka.ru${escapeHtml(value.pathname)}"></a>` +
+        `${score ? `<meta itemprop="ratingValue" content="${escapeHtml(score)}">` : ""}</article>`);
+    } catch { /* incomplete review remains unproved */ }
+  });
+  const pages: string[] = [];
+  $(".pagination a[href], .pager a[href], a[rel='next'][href]").each((_index, node) => {
+    const href = $(node).attr("href");
+    if (!href) return;
+    try {
+      const value = new URL(href, `https://${OKAPTEKA_TRANSLATE_HOST}`);
+      const parsed = parsePharmacyTranslateTarget(value.hostname === OKAPTEKA_TRANSLATE_HOST
+        ? value
+        : new URL(`${value.pathname}${value.search}`, `https://${OKAPTEKA_TRANSLATE_HOST}`));
+      if (parsed?.kind === "okapteka-reviews") pages.push(`<a rel="next" href="${escapeHtml(value.toString())}"></a>`);
+    } catch { /* ignore unsafe pagination */ }
+  });
+  const pageText = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+  const empty = pageText.match(/(?:отзывов пока нет|нет отзывов|no reviews yet|no reviews)/i)?.[0];
+  if (!reviews.length && !empty) return undefined;
+  return `<html><head>${base}</head><body>${reviews.join("")}<nav class="pagination">${pages.join("")}</nav>` +
+    `${empty ? `<p>${escapeHtml(empty)}</p>` : ""}</body></html>`;
 }
 
 function parseOzonTranslateTarget(target: URL): OzonTranslateTarget | undefined {
@@ -326,6 +500,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     target.hostname === "card.wb.ru" && target.pathname === "/cards/v4/detail"
   );
   const ozonTranslatedTarget = parseOzonTranslateTarget(target);
+  const pharmacyTranslatedTarget = parsePharmacyTranslateTarget(target);
   let ozonTarget = false;
   if (target.hostname === "www.ozon.ru" && target.pathname === "/api/composer-api.bx/page/json/v2") {
     const nested = target.searchParams.get("url") ?? "";
@@ -340,8 +515,39 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         /^\d+$/.test(page) && Number(page) >= 1 && Number(page) <= 100;
     } catch { /* invalid nested Ozon search URL */ }
   }
-  if (target.protocol !== "https:" || !(reviewTarget || wildberriesTarget || ozonTarget || ozonTranslatedTarget)) {
+  if (target.protocol !== "https:" || !(reviewTarget || wildberriesTarget || ozonTarget || ozonTranslatedTarget || pharmacyTranslatedTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
+  }
+  if (pharmacyTranslatedTarget) {
+    const upstream = await safeFetch(target.toString(), {
+      method: "GET",
+      redirect: "manual",
+      headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+    }, fetch, 0, 60_000);
+    const html = await readTextBounded(upstream, 12_000_000, 60_000);
+    if (!upstream.ok) {
+      return new Response(html, {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "text/html; charset=utf-8" }
+      });
+    }
+    if (!/(?:text\/html|application\/xhtml\+xml)/i.test(upstream.headers.get("content-type") ?? "")) {
+      return json({ error: "Translated pharmacy response is not HTML" }, 502);
+    }
+    const compactHtml = compactPharmacyTranslateHtml(html, pharmacyTranslatedTarget);
+    if (!compactHtml || compactHtml.length > 350_000) {
+      return json({ error: "Translated pharmacy page did not prove the requested source and metrics" }, 502);
+    }
+    return new Response(compactHtml, {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "google-translate-pharmacy-ssr",
+        "x-ratings-original-bytes": String(new TextEncoder().encode(html).byteLength),
+        "x-ratings-proof-bytes": String(new TextEncoder().encode(compactHtml).byteLength)
+      }
+    });
   }
   if (ozonTranslatedTarget) {
     const upstream = await safeFetch(target.toString(), {

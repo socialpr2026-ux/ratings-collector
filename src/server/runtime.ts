@@ -11,6 +11,7 @@ import { ResilientAdapter } from "./adapters/resilient.js";
 import { createReviewSiteAdapters } from "./adapters/review-sites.js";
 import { EaptekaAdapter } from "./adapters/eapteka.js";
 import { AsnaAdapter, PolzaAdapter } from "./adapters/pharmacy-recovery.js";
+import { createPharmacyAdapters } from "./adapters/pharmacies.js";
 import { FileEvidenceStore, type EvidenceStore } from "./evidence.js";
 import { createAdapterResolver, RatingsService } from "./orchestrator.js";
 import { FileRepository, type Repository } from "./repository.js";
@@ -161,6 +162,7 @@ export async function createCollectorRuntime(options: {
     new EaptekaAdapter(evidence, options.fetch),
     new PolzaAdapter(evidence, options.fetch),
     new AsnaAdapter(evidence, options.fetch),
+    ...createPharmacyAdapters(evidence, options.fetch),
     ...createReviewSiteAdapters(evidence, options.fetch)
   ];
   const service = new RatingsService(repository, createAdapterResolver(known, repository, evidence, options.fetch));

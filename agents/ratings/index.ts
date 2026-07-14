@@ -219,7 +219,11 @@ export function browserFetch(
       ].includes(url.pathname) ||
       url.hostname === "card.wb.ru" && url.pathname === "/cards/v4/detail"
     );
-    if (staticProxy && url.hostname === "www-ozon-ru.translate.goog") {
+    if (staticProxy && [
+      "www-ozon-ru.translate.goog",
+      "farmlend-ru.translate.goog",
+      "okapteka-ru.translate.goog"
+    ].includes(url.hostname)) {
       const first = await fetchViaStaticProxy(url, request.signal);
       if (![429, 502, 503, 504].includes(first.status)) return first;
       await first.body?.cancel().catch(() => undefined);
