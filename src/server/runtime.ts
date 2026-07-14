@@ -1,9 +1,11 @@
-import { OzonAdapter } from "./adapters/ozon.js";
+import type { SiteAdapter } from "../shared/types.js";
 import { OzonBrowserAdapter } from "./adapters/ozon-browser.js";
 import { ResilientOzonAdapter } from "./adapters/ozon-resilient.js";
 import { WildberriesAdapter } from "./adapters/wildberries.js";
 import { YandexAdapter } from "./adapters/yandex.js";
-import { WildberriesApifyAdapter, isWildberriesApifyRef } from "./adapters/wildberries-apify.js";
+import type { OzonAdapter } from "./adapters/ozon.js";
+import type { WildberriesApifyAdapter } from "./adapters/wildberries-apify.js";
+import type { YandexApifyAdapter } from "./adapters/yandex-apify.js";
 import { BudgetedAdapter, createSerialExecutor, type AsyncExclusive } from "./adapters/budgeted.js";
 import { ResilientAdapter } from "./adapters/resilient.js";
 import { createReviewSiteAdapters } from "./adapters/review-sites.js";
@@ -22,6 +24,10 @@ export function apifyMonthlyBudget(value: string | undefined): number {
     throw new Error("APIFY_MONTHLY_BUDGET_USD должен быть числом больше 0 и не выше 4.50");
   }
   return parsed;
+}
+
+export function apifyFallbackEnabled(value: string | undefined): boolean {
+  return value === "true";
 }
 
 async function apifyMonthlyUsageUsd(token: string | undefined, fetchImpl: typeof fetch): Promise<number> {
@@ -57,99 +63,96 @@ export async function createCollectorRuntime(options: {
   const repository = options.repository ?? await FileRepository.open();
   const evidence = options.evidence ?? new FileEvidenceStore();
   const fetchImpl = options.fetch ?? fetch;
-  const monthlyLimit = apifyMonthlyBudget(env.APIFY_MONTHLY_BUDGET_USD);
-  // Every paid Actor request is capped to the exact amount reserved below.
-  // Keeping these values coupled prevents a platform-specific environment
-  // override from making a call more expensive than the shared budget gate
-  // accounted for.
-  const reservePerDiscovery = Math.min(0.25, monthlyLimit);
-  // One Ozon Actor call covers every brand in the run. The adapter couples its
-  // maxItems safety cap to this $0.25 charge ceiling, so a capped response can
-  // never be mistaken for exhaustive discovery.
-  const ozonReservePerDiscovery = Math.min(0.25, monthlyLimit);
-  const externalUsageUsd = () => apifyMonthlyUsageUsd(env.APIFY_TOKEN, fetchImpl);
-  const usageMonth = new Date().toISOString().slice(0, 7);
-  const reserveCapacityUsd = async (amount: number) => {
-    const actual = await externalUsageUsd();
-    if (!Number.isFinite(actual) || actual < 0) {
-      throw new Error("Apify returned an invalid current-usage value");
-    }
-    // v3 stores short-lived reservation amounts separately from authoritative
-    // account usage. The previous half-hour bucket overlaps the current one,
-    // protecting against delayed Apify usage without permanently leaking the
-    // maximum reservation of completed or failed Actor calls.
-    const windowMs = 30 * 60 * 1000;
-    const bucket = Math.floor(Date.now() / windowMs);
-    // v4 starts a clean reservation namespace after introducing settlement
-    // for proven-empty Actor batches. Old v3 reservations used the maximum
-    // charge as a non-releasable hold and must not keep blocking the corrected
-    // accounting model; authoritative live Apify usage is still checked above.
-    const currentKey = `apify:v4:${usageMonth}:${bucket}`;
-    const previousKey = `apify:v4:${usageMonth}:${bucket - 1}`;
-    const [currentReserved, previousReserved] = await Promise.all([
-      repository.reserveUsage(currentKey, 0, monthlyLimit),
-      repository.reserveUsage(previousKey, 0, monthlyLimit)
+  const freeOzon = new OzonBrowserAdapter({ fetch: options.fetch });
+  const freeWildberries = new WildberriesAdapter({ fetch: options.fetch });
+  const freeYandex = new YandexAdapter({ fetch: options.reviewsFetch ?? options.fetch });
+  let ozon: SiteAdapter = freeOzon;
+  let wildberries: SiteAdapter = freeWildberries;
+  let yandex: SiteAdapter = freeYandex;
+
+  // Paid marketplace routing is deliberately absent from a normal runtime.
+  // Dynamic imports also avoid constructing the legacy module-level paid
+  // adapter singletons unless an operator explicitly opts in.
+  if (apifyFallbackEnabled(env.APIFY_FALLBACK_ENABLED)) {
+    const [ozonModule, wildberriesModule, yandexModule] = await Promise.all([
+      import("./adapters/ozon.js"),
+      import("./adapters/wildberries-apify.js"),
+      import("./adapters/yandex-apify.js")
     ]);
-    const available = monthlyLimit - actual;
-    const pending = currentReserved + previousReserved + amount;
-    if (available <= 0 || pending > available + Number.EPSILON) {
-      throw new Error(`Квота ${monthlyLimit.toFixed(2)} исчерпана: использовано ${actual.toFixed(2)}, временно зарезервировано ${(currentReserved + previousReserved).toFixed(2)}`);
-    }
-    await repository.reserveUsage(currentKey, amount, available - previousReserved);
-    // A zero-result Ozon run still has a tiny platform overhead even though it
-    // cannot incur the per-result maximum. Keep a conservative cent pending
-    // while releasing only the impossible result charge after empty proof.
-    const emptyActorFloorUsd = Math.min(amount, 0.01);
-    let released = false;
-    return {
-      release: async () => {
-        if (released) return;
-        released = true;
-        const releasable = amount - emptyActorFloorUsd;
-        if (releasable > 0) await repository.releaseUsage(currentKey, releasable);
+    const monthlyLimit = apifyMonthlyBudget(env.APIFY_MONTHLY_BUDGET_USD);
+    // Every paid Actor request is capped to the exact amount reserved below.
+    const reservePerDiscovery = Math.min(0.25, monthlyLimit);
+    const ozonReservePerDiscovery = Math.min(0.25, monthlyLimit);
+    const externalUsageUsd = () => apifyMonthlyUsageUsd(env.APIFY_TOKEN, fetchImpl);
+    const usageMonth = new Date().toISOString().slice(0, 7);
+    const reserveCapacityUsd = async (amount: number) => {
+      const actual = await externalUsageUsd();
+      if (!Number.isFinite(actual) || actual < 0) {
+        throw new Error("Apify returned an invalid current-usage value");
       }
+      const windowMs = 30 * 60 * 1000;
+      const bucket = Math.floor(Date.now() / windowMs);
+      // v4 ignores settled legacy holds while still overlapping two short
+      // buckets to protect against delayed live-usage reporting.
+      const currentKey = `apify:v4:${usageMonth}:${bucket}`;
+      const previousKey = `apify:v4:${usageMonth}:${bucket - 1}`;
+      const [currentReserved, previousReserved] = await Promise.all([
+        repository.reserveUsage(currentKey, 0, monthlyLimit),
+        repository.reserveUsage(previousKey, 0, monthlyLimit)
+      ]);
+      const available = monthlyLimit - actual;
+      const pending = currentReserved + previousReserved + amount;
+      if (available <= 0 || pending > available + Number.EPSILON) {
+        throw new Error(`Квота ${monthlyLimit.toFixed(2)} исчерпана: использовано ${actual.toFixed(2)}, временно зарезервировано ${(currentReserved + previousReserved).toFixed(2)}`);
+      }
+      await repository.reserveUsage(currentKey, amount, available - previousReserved);
+      const emptyActorFloorUsd = Math.min(amount, 0.01);
+      let released = false;
+      return {
+        release: async () => {
+          if (released) return;
+          released = true;
+          const releasable = amount - emptyActorFloorUsd;
+          if (releasable > 0) await repository.releaseUsage(currentKey, releasable);
+        }
+      };
     };
-  };
-  const apifyExclusive = options.apifyExclusive ?? createSerialExecutor();
-  const cappedFallback = (
-    adapter: OzonAdapter | WildberriesApifyAdapter,
-    reserveUsd = reservePerDiscovery
-  ) =>
-    new BudgetedAdapter(adapter, {
+    const apifyExclusive = options.apifyExclusive ?? createSerialExecutor();
+    const cappedFallback = (
+      adapter: OzonAdapter | WildberriesApifyAdapter | YandexApifyAdapter,
+      reserveUsd = reservePerDiscovery
+    ) => new BudgetedAdapter(adapter, {
       reservePerDiscovery: reserveUsd,
       monthlyLimit,
       reserveCapacityUsd,
       runExclusive: apifyExclusive
     });
-  const apifyOzon = cappedFallback(new OzonAdapter({
-    fetch: options.fetch,
-    token: env.APIFY_TOKEN,
-    maxTotalChargeUsd: ozonReservePerDiscovery
-  }), ozonReservePerDiscovery);
-  const ozon = new ResilientOzonAdapter(
-    new OzonBrowserAdapter({ fetch: options.fetch }),
-    apifyOzon
-  );
-  const wildberries = new ResilientAdapter(
-    new WildberriesAdapter({ fetch: options.fetch }),
-    cappedFallback(new WildberriesApifyAdapter({
+    const apifyOzon = cappedFallback(new ozonModule.OzonAdapter({
       fetch: options.fetch,
       token: env.APIFY_TOKEN,
-      maxTotalChargeUsd: reservePerDiscovery
-    })),
-    {
-      isFallbackRef: isWildberriesApifyRef,
-      // Buyer search throttling is transient. A failure for one brand must not
-      // route all remaining brands through the paid monthly allowance.
-      stickyPrimaryFailure: false
-    }
-  );
-  // Yandex Reviews has an exhaustive first-party sitemap collector. A cold
-  // cloud-browser timeout must stay an explicit fail-closed partition and be
-  // retried through that same free path; it must never silently consume the
-  // shared Apify allowance. `reviewsFetch` keeps local/direct probes on the
-  // identical adapter without introducing a second routing policy.
-  const yandex = new YandexAdapter({ fetch: options.reviewsFetch ?? options.fetch });
+      maxTotalChargeUsd: ozonReservePerDiscovery
+    }), ozonReservePerDiscovery);
+    ozon = new ResilientOzonAdapter(freeOzon, apifyOzon);
+    wildberries = new ResilientAdapter(
+      freeWildberries,
+      cappedFallback(new wildberriesModule.WildberriesApifyAdapter({
+        fetch: options.fetch,
+        token: env.APIFY_TOKEN,
+        maxTotalChargeUsd: reservePerDiscovery
+      })),
+      { isFallbackRef: wildberriesModule.isWildberriesApifyRef, stickyPrimaryFailure: false }
+    );
+    yandex = new ResilientAdapter(
+      freeYandex,
+      cappedFallback(new yandexModule.YandexApifyAdapter({
+        fetch: options.fetch,
+        reviewsFetch: options.reviewsFetch,
+        token: env.APIFY_TOKEN,
+        maxTotalChargeUsd: reservePerDiscovery
+      })),
+      { isFallbackRef: yandexModule.isYandexApifyRef, stickyPrimaryFailure: false }
+    );
+  }
   const known = [ozon, wildberries, yandex, new EaptekaAdapter(evidence, options.fetch), ...createReviewSiteAdapters(evidence, options.fetch)];
   const service = new RatingsService(repository, createAdapterResolver(known, repository, evidence, options.fetch));
   return { repository, service };

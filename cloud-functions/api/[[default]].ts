@@ -177,10 +177,9 @@ export default async function onRequest(context: Context): Promise<Response> {
   try {
     if (context.request.method === "POST" && url.pathname === "/api/runs") {
       const input = await context.request.json();
-      // Ozon first uses the free browser collector. The capped Apify fallback
-      // performs a live quota check immediately before each serialized Actor
-      // call, so creating a run must not fail merely because fallback credit is
-      // unavailable.
+      // Normal runs use only free marketplace adapters. An explicitly enabled
+      // paid fallback checks its quota lazily inside the Agent, so run creation
+      // never depends on Apify availability or credit.
       const run = await service.createRun(input, user.email);
       return json(pagedRun(run, url), 202);
     }
