@@ -52,6 +52,26 @@ type OzonTranslateTarget = {
   sku?: string;
 };
 
+type IrecommendTarget = {
+  kind: "search" | "product";
+  brand?: string;
+};
+
+function parseIrecommendTarget(target: URL): IrecommendTarget | undefined {
+  if (target.protocol !== "https:" || target.hostname !== "irecommend.ru" || target.port ||
+    target.username || target.password || target.hash) return undefined;
+  if (target.pathname === "/srch") {
+    if ([...target.searchParams.keys()].some((key) => key !== "query") || target.searchParams.getAll("query").length !== 1) {
+      return undefined;
+    }
+    const brand = target.searchParams.get("query")?.normalize("NFKC").trim() ?? "";
+    return brand.length >= 2 && brand.length <= 160 ? { kind: "search", brand } : undefined;
+  }
+  return !target.search && /^\/content\/[a-z0-9][a-z0-9-]*\/?$/i.test(target.pathname)
+    ? { kind: "product" }
+    : undefined;
+}
+
 function singleSearchParameter(url: URL, name: string): string | undefined {
   const values = url.searchParams.getAll(name);
   return values.length === 1 ? values[0] : undefined;
@@ -508,6 +528,75 @@ function escapeHtml(value: string): string {
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
+function validIrecommendProof(html: string, requested: URL, target: IrecommendTarget): boolean {
+  if (/(?:captcha-checker|captcha-container|\bdb-offline\b|\bin-maintenance\b)/i.test(html.slice(0, 150_000))) {
+    return false;
+  }
+  const $ = load(html);
+  if (target.kind === "search") {
+    let provedCard = false;
+    $("ul.srch-result-nodes > li .ProductTizer[data-type='2'][data-nid]").each((_index, node) => {
+      const card = $(node);
+      const nid = card.attr("data-nid")?.trim() ?? "";
+      const href = card.find(".title a[href]").first().attr("href");
+      const counter = card.find(".read-all-reviews-link .counter").first().text().replace(/[\s\u00a0]+/g, "");
+      const labelled = card.find(".reviewsLink").first().text().match(/([\d\s\u00a0]+)\s+отзыв/iu)?.[1]
+        ?.replace(/[\s\u00a0]+/g, "");
+      const rating = Number(card.find(".average-rating span").first().text().trim().replace(",", "."));
+      if (!/^\d+$/.test(nid) || !href || !/^\d+$/.test(counter) || counter !== labelled ||
+        (!Number.isFinite(rating) || rating <= 0 || rating > 5) && Number(counter) > 0) return;
+      try {
+        const product = new URL(href, requested);
+        if (product.protocol === "https:" && product.hostname === "irecommend.ru" && !product.search && !product.hash &&
+          /^\/content\/[a-z0-9][a-z0-9-]*\/?$/i.test(product.pathname)) provedCard = true;
+      } catch { /* malformed result URL is not proof */ }
+    });
+    if (provedCard) return true;
+    const heading = $("h1").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    const text = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    return Boolean(target.brand) && heading.toLocaleLowerCase("ru-RU").includes(target.brand!.toLocaleLowerCase("ru-RU")) &&
+      /Не нашли\?\s*Попробуйте поиск по сайту/iu.test(text);
+  }
+
+  const canonicalValue = $("link[rel='canonical'][href]").first().attr("href");
+  const title = $("h1 [itemprop='name'], h1").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+  const rating = Number($("[itemprop='ratingValue']").first().text().trim().replace(",", "."));
+  const voteCount = $(".total-votes [itemprop='reviewCount']").first().text().replace(/[\s\u00a0]+/g, "");
+  const noderef = $("a[href*='noderef=']").first().attr("href");
+  try {
+    const canonical = new URL(canonicalValue ?? "");
+    const nodeId = noderef ? new URL(noderef, requested).searchParams.get("noderef") ?? "" : "";
+    const exactCanonical = canonical.protocol === "https:" && canonical.hostname === "irecommend.ru" &&
+      canonical.pathname.replace(/\/$/, "") === requested.pathname.replace(/\/$/, "") && !canonical.search && !canonical.hash &&
+      canonical.search === requested.search;
+    if (exactCanonical && Boolean(title) && /^\d+$/.test(nodeId) &&
+      Number.isFinite(rating) && rating > 0 && rating <= 5 && /^\d+$/.test(voteCount)) return true;
+
+    // A cached reader can return inert Markdown converted to HTML instead of
+    // the original DOM. It may prove only the rating aggregate on this exact
+    // URL; written reviews still come exclusively from the two agreeing,
+    // explicitly labelled counters in the search ProductTizer above.
+    const documentTitle = $("title").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    const exactMetricLink = $("a[href]").toArray().some((node) => {
+      try {
+        const href = new URL($(node).attr("href") ?? "");
+        if (href.protocol !== "https:" || href.hostname !== "irecommend.ru" || href.search || href.hash ||
+          href.pathname.replace(/\/$/, "") !== requested.pathname.replace(/\/$/, "")) return false;
+        const metric = $(node).text().normalize("NFKC").replace(/\s+/g, " ").trim()
+          .match(/Среднее\s*:\s*(?:Среднее\s*:\s*)?([0-5](?:[.,]\d+)?)\s*\(\s*([\d\s\u00a0]+)\s+голос/iu);
+        const linkedRating = metric ? Number(metric[1]!.replace(",", ".")) : Number.NaN;
+        const linkedVotes = metric?.[2]?.replace(/[\s\u00a0]+/g, "") ?? "";
+        return Number.isFinite(linkedRating) && linkedRating > 0 && linkedRating <= 5 && /^\d+$/.test(linkedVotes);
+      } catch {
+        return false;
+      }
+    });
+    return exactCanonical && Boolean(documentTitle) && exactMetricLink;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The EdgeOne Agent-to-Function hop has a much smaller practical response
  * budget than a browser request. Return only the already-verified proof that
@@ -618,13 +707,13 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
   const body = await request.json() as { url?: string };
   const target = new URL(String(body.url ?? ""));
   const host = target.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
+  const irecommendTarget = parseIrecommendTarget(target);
   const reviewTarget = new Set([
     "uteka.ru",
     "megapteka.ru",
-    "irecommend.ru",
     "otzovik.com",
     "pravogolosa.net"
-  ]).has(host);
+  ]).has(host) || Boolean(irecommendTarget);
   const wildberriesTarget = (
     target.hostname === "search.wb.ru" && [
       "/exactmatch/ru/common/v14/search",
@@ -761,6 +850,41 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       }
     });
   }
+  if (irecommendTarget) {
+    try {
+      const direct = await safeFetch(target.toString(), {
+        method: "GET",
+        redirect: "follow",
+        headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+      }, fetch, 0, 60_000);
+      const directBody = await readTextBounded(direct, 12_000_000, 60_000);
+      if (direct.ok && /(?:text\/html|application\/xhtml\+xml)/i.test(direct.headers.get("content-type") ?? "") &&
+        validIrecommendProof(directBody, target, irecommendTarget)) {
+        return new Response(directBody, {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-ratings-source": "irecommend-direct" }
+        });
+      }
+    } catch { /* fall back to the bounded cached reader */ }
+
+    const reader = await safeFetch(readerProxyUrl(target).toString(), {
+      method: "GET",
+      redirect: "follow",
+      headers: { accept: "text/plain; charset=utf-8", "x-return-format": "html", dnt: "1" }
+    });
+    const readerBody = await readTextBounded(reader, 12_000_000, 60_000);
+    if (!reader.ok) return new Response(readerBody, { status: reader.status, headers: { "content-type": "text/plain; charset=utf-8" } });
+    const html = /^\s*(?:<!doctype\s+html|<html\b)/i.test(readerBody)
+      ? readerBody
+      : readerMarkdownToHtml(readerBody, target.toString());
+    if (!validIrecommendProof(html, target, irecommendTarget)) {
+      return json({ error: "iRecommend response did not prove the requested product or search result" }, 502);
+    }
+    return new Response(html, {
+      status: 200,
+      headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-ratings-source": "reader-fallback" }
+    });
+  }
   if (host === "otzovik.com" && /^\/reviews\/[a-z0-9_]+\/?$/i.test(target.pathname)) {
     if (target.search || target.hash || target.hostname !== "otzovik.com") {
       return json({ error: "Invalid Otzovik product source URL" }, 400);
@@ -806,7 +930,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       }
     });
   }
-  if (host === "megapteka.ru" || host === "irecommend.ru" || host === "otzovik.com") {
+  if (host === "megapteka.ru" || host === "otzovik.com") {
     let readerTarget = target;
     if (host === "otzovik.com" && target.pathname === "/__external_search__") {
       const brand = target.searchParams.get("brand")?.trim() ?? "";

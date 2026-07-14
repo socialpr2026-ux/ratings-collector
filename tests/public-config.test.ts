@@ -18,6 +18,80 @@ describe("public configuration", () => {
 
 });
 
+describe("static iRecommend gateway", () => {
+  const token = "i".repeat(32);
+  const callGateway = (url: string) => staticReviewFetch(
+    new Request("https://ratings.example/api/internal/static-review-fetch", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ url })
+    }),
+    { INTERNAL_AGENT_TOKEN: token }
+  );
+  const captcha = `<html><head><title>Irecommend</title><script src="/captcha-checker/assets/script.js"></script></head>` +
+    `<body class="in-maintenance db-offline"><div id="captcha-container"></div></body></html>`;
+  const provedSearch = `<html><body><h1>Кагоцел</h1><ul class="srch-result-nodes"><li>` +
+    `<div class="ProductTizer" data-type="2" data-nid="135637">` +
+    `<div class="title"><a href="/content/protivovirusnye-sredstva-kagotsel">Противовирусные средства Кагоцел</a></div>` +
+    `<a class="read-all-reviews-link"><span class="counter">430</span></a>` +
+    `<div class="fivestar-summary"><span class="average-rating">Среднее: <span>3.9</span></span></div>` +
+    `<a class="reviewsLink">430 отзывов</a></div></li></ul></body></html>`;
+
+  it("tries the exact first-party page before a cached reader and preserves written-review proof", async () => {
+    const upstream = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input.toString());
+      if (url.hostname === "irecommend.ru") return new Response(captcha, {
+        status: 521, headers: { "content-type": "text/html; charset=utf-8" }
+      });
+      expect(url.hostname).toBe("r.jina.ai");
+      expect(new Headers(init?.headers).has("x-no-cache")).toBe(false);
+      return new Response(provedSearch, { headers: { "content-type": "text/html; charset=utf-8" } });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway("https://irecommend.ru/srch?query=Кагоцел");
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("reader-fallback");
+    expect(await response.text()).toContain("430 отзывов");
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a successful CAPTCHA response instead of exposing it as product evidence", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(captcha, {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    })));
+
+    const response = await callGateway("https://irecommend.ru/content/protivovirusnye-sredstva-kagotsel");
+
+    expect(response.status).toBe(502);
+    expect(await response.text()).toContain("did not prove");
+  });
+
+  it("accepts reader rating proof for the exact product without treating votes as written reviews", async () => {
+    const source = "https://irecommend.ru/content/protivovirusnye-sredstva-kagotsel";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(input.toString());
+      if (url.hostname === "irecommend.ru") return new Response(captcha, {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+      return new Response(`Title: Противовирусные средства Кагоцел | отзывы\n` +
+        `[Среднее: Среднее: 3.9 (430 голосов)](${source})`, {
+        headers: { "content-type": "text/plain; charset=utf-8" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(source);
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(proof).toContain("430 голосов");
+    expect(proof).not.toContain("430 отзывов");
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("static Otzovik product gateway", () => {
   const token = "x".repeat(32);
   const callGateway = (url: string) => staticReviewFetch(

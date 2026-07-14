@@ -53,7 +53,8 @@ type ReviewSiteDefinition = {
 function isBlockPage(html: string): boolean {
   const title = html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/<[^>]+>/g, " ") ?? "";
   const sample = html.slice(0, 100_000);
-  const captcha = /<(?:input|iframe|form|img)\b[^>]*(?:id|class|name|src)=["'][^"']*captcha/i.test(sample);
+  const captcha = /<(?:input|iframe|form|img|div|script)\b[^>]*(?:id|class|name|src)=["'][^"']*(?:captcha|db-offline|in-maintenance)/i.test(sample) ||
+    /(?:captcha-checker|captcha-container|\bdb-offline\b|\bin-maintenance\b)/i.test(sample);
   const aggregateMetrics = /itemprop=["']reviewCount["']/i.test(sample) || /"reviewCount"\s*:/i.test(sample);
   return BLOCK_MARKERS.test(title) || captcha && !aggregateMetrics;
 }

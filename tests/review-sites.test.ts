@@ -349,6 +349,19 @@ describe("first-party review-site adapters", () => {
     }, context)).rejects.toMatchObject({ code: "parser_changed" });
   });
 
+  it("does not let discovery metrics rescue an iRecommend CAPTCHA product page", async () => {
+    const adapter = adapterFor("irecommend.ru", (async () => new Response(
+      `<html><head><title>Irecommend</title><script src="/captcha-checker/assets/script.js"></script></head>` +
+      `<body class="in-maintenance db-offline"><div id="captcha-container"></div></body></html>`
+    )) as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "irecommend.ru", platform: "irecommend.ru", listingId: "135637", brand: "Кагоцел",
+      url: "https://irecommend.ru/content/protivovirusnye-sredstva-kagotsel",
+      metadata: { reviewCount: 430, rating: 3.9 }
+    }, context)).rejects.toMatchObject({ code: "blocked" });
+  });
+
   it("discovers Otzovik through external results, rejects a false candidate and keeps discovery ids stable", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = urlOf(input);
