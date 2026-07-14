@@ -48,7 +48,7 @@ describe("YandexAdapter discovery", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("scans an index exactly at the cap and reuses cached responses", async () => {
+  it("reuses the small index but releases raw model sitemap responses between runs", async () => {
     const fetch = routeFetch({
       [INDEX]: xmlResponse(sitemapIndex([MAP_A, MAP_B, MAP_C])),
       [MAP_A]: xmlResponse(modelSitemap([])),
@@ -57,10 +57,70 @@ describe("YandexAdapter discovery", () => {
     });
     const adapter = new YandexAdapter({ fetch, maxSitemaps: 3, cacheTtlMs: 60_000 });
 
-    await adapter.discover("Кагоцел", context());
-    await adapter.discover("Кагоцел", context());
+    await adapter.discover("kagotsel", context({ runId: "run-a", brands: ["kagotsel"] }));
+    await adapter.discover("kagotsel", context({ runId: "run-b", brands: ["kagotsel"] }));
 
-    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(fetch).toHaveBeenCalledTimes(7);
+  });
+
+  it("scans every sitemap once for all brands in the same run", async () => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([MAP_A, MAP_B])),
+      [MAP_A]: xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/kagotsel--111",
+        "https://reviews.yandex.ru/product/ingavirin--112"
+      ])),
+      [MAP_B]: xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/kagotsel-tabletki--265149860",
+        "https://reviews.yandex.ru/product/ingavirin-kapsuly--265149861"
+      ]))
+    });
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 2 });
+    const shared = { runId: "run-batch", brands: ["kagotsel", "ingavirin"] } as const;
+
+    const [kagotsel, ingavirin] = await Promise.all([
+      adapter.discover("kagotsel", context(shared)),
+      adapter.discover("ingavirin", context(shared))
+    ]);
+    const repeated = await adapter.discover("kagotsel", context(shared));
+
+    expect(kagotsel.map(({ listingId }) => listingId)).toEqual(["111", "265149860"]);
+    expect(ingavirin.map(({ listingId }) => listingId)).toEqual(["112", "265149861"]);
+    expect(repeated).toEqual(kagotsel);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("fails the whole brand batch closed and retries it after one unreadable shard", async () => {
+    let mapARequests = 0;
+    let mapBRequests = 0;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A, MAP_B]));
+      if (url === MAP_A) {
+        mapARequests += 1;
+        return xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/kagotsel--111"]));
+      }
+      if (url === MAP_B) {
+        mapBRequests += 1;
+        return mapBRequests === 1
+          ? xmlResponse("<html>changed</html>")
+          : xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/ingavirin--112"]));
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 2 });
+    const shared = { runId: "run-retry", brands: ["kagotsel", "ingavirin"] } as const;
+
+    await expect(Promise.all([
+      adapter.discover("kagotsel", context(shared)),
+      adapter.discover("ingavirin", context(shared))
+    ])).rejects.toBeInstanceOf(ParserChangedError);
+    await expect(adapter.discover("ingavirin", context(shared))).resolves.toMatchObject([
+      { listingId: "112", brand: "ingavirin" }
+    ]);
+
+    expect(mapARequests).toBe(2);
+    expect(mapBRequests).toBe(2);
   });
 
   it("fails closed only when the distinct candidate count actually exceeds its cap", async () => {
@@ -186,6 +246,16 @@ describe("YandexAdapter discovery", () => {
 
     await expect(adapter.discover("kagotsel", context())).rejects.toBeInstanceOf(ParserChangedError);
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not turn a truncated model sitemap into exhaustive no_results", async () => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([MAP_A])),
+      [MAP_A]: xmlResponse("<?xml version=\"1.0\"?><urlset><url><loc>https://reviews.yandex.ru/product/other--999</loc></url>")
+    });
+    const adapter = new YandexAdapter({ fetch, sitemapRetryBaseMs: 0 });
+
+    await expect(adapter.discover("kagotsel", context())).rejects.toBeInstanceOf(ParserChangedError);
   });
 });
 

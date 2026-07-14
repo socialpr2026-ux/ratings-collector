@@ -93,6 +93,19 @@ export async function createCollectorRuntime(options: {
       throw new Error(`Квота ${monthlyLimit.toFixed(2)} исчерпана: использовано ${actual.toFixed(2)}, временно зарезервировано ${(currentReserved + previousReserved).toFixed(2)}`);
     }
     await repository.reserveUsage(currentKey, amount, available - previousReserved);
+    // A zero-result Ozon run still has a tiny platform overhead even though it
+    // cannot incur the per-result maximum. Keep a conservative cent pending
+    // while releasing only the impossible result charge after empty proof.
+    const emptyActorFloorUsd = Math.min(amount, 0.01);
+    let released = false;
+    return {
+      release: async () => {
+        if (released) return;
+        released = true;
+        const releasable = amount - emptyActorFloorUsd;
+        if (releasable > 0) await repository.releaseUsage(currentKey, releasable);
+      }
+    };
   };
   const apifyExclusive = options.apifyExclusive ?? createSerialExecutor();
   const cappedFallback = (

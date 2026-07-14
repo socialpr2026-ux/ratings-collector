@@ -159,6 +159,48 @@ describe("collector runtime fallback integration", () => {
     expect(actorCalls[0].body.searchQueries).toEqual(["Brand A", "Brand B"]);
   });
 
+  it("does not turn a second proven-empty Ozon run into quota_exceeded while live usage still lags", async () => {
+    let usageChecks = 0;
+    let actorCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.hostname === "www.ozon.ru") {
+        return new Response("captcha", { status: 403 });
+      }
+      if (url.hostname === "api.apify.com" && url.pathname === "/v2/users/me/usage/monthly") {
+        usageChecks += 1;
+        return json({ data: { totalUsageCreditsUsdAfterVolumeDiscount: 4.19 } });
+      }
+      if (url.hostname === "api.apify.com" && url.pathname.endsWith("run-sync-get-dataset-items")) {
+        actorCalls += 1;
+        return json([]);
+      }
+      if (url.hostname === "api.apify.com") return json({ data: { id: "actor" } });
+      throw new Error(`Unexpected test request: ${url}`);
+    }) as unknown as typeof fetch;
+    const runtime = await createCollectorRuntime({
+      repository: new MemoryRepository(),
+      evidence: new MemoryEvidenceStore(),
+      fetch: fetchMock,
+      env: { APIFY_TOKEN: "test-token", APIFY_MONTHLY_BUDGET_USD: "4.50" }
+    });
+    const runRequest = {
+      ...request,
+      domains: ["ozon.ru"],
+      brands: ["No Such Brand"]
+    };
+
+    const first = await runtime.service.executeRun((await runtime.service.createRun(runRequest)).id);
+    const second = await runtime.service.executeRun((await runtime.service.createRun(runRequest)).id);
+
+    expect(first.partitions).toMatchObject([{ status: "no_results", discovered: 0, collected: 0 }]);
+    expect(second.partitions).toMatchObject([{ status: "no_results", discovered: 0, collected: 0 }]);
+    expect(first.errors).toEqual([]);
+    expect(second.errors).toEqual([]);
+    expect(actorCalls).toBe(2);
+    expect(usageChecks).toBe(2);
+  });
+
   it("completes Wildberries through the alternate free app type without checking or spending Apify", async () => {
     const requestedUrls: URL[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {

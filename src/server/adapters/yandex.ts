@@ -23,6 +23,11 @@ type Cached<T> = {
   value: Promise<T>;
 };
 
+type BrandDiscovery = {
+  brand: string;
+  refs: Map<string, ProductRef>;
+};
+
 export type YandexAdapterOptions = {
   fetch?: typeof globalThis.fetch;
   sitemapIndexUrl?: string;
@@ -98,7 +103,12 @@ export class YandexAdapter implements SiteAdapter {
   private readonly now: () => Date;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private indexCache?: Cached<string[]>;
-  private readonly sitemapCache = new Map<string, Cached<string>>();
+  /**
+   * One Yandex run asks for every brand concurrently. Coalesce those calls into
+   * one exhaustive sitemap pass and keep only the small matched-ref index.
+   * Raw multi-megabyte sitemap XML is deliberately never cached here.
+   */
+  private readonly discoveryBatches = new Map<string, Promise<Map<string, ProductRef[]>>>();
 
   constructor(options: YandexAdapterOptions = {}) {
     this.fallbackFetch = options.fetch ?? globalThis.fetch;
@@ -145,54 +155,95 @@ export class YandexAdapter implements SiteAdapter {
       refs.set(listingId, productRefFromPreviousId(listingId, brand));
     }
 
+    const brands = uniqueDiscoveryBrands(brand, context.brands ?? []);
+    const batchKey = discoveryBatchKey(context.runId, brands);
+    const discoveredByBrand = batchKey
+      ? await this.loadDiscoveryBatch(batchKey, brands, context)
+      : await this.scanDiscoveryBatch(brands, context);
+    for (const ref of discoveredByBrand.get(brandKey(brand)) ?? []) {
+      refs.set(ref.listingId, ref);
+    }
+
+    if (refs.size > this.maxCandidates) {
+      throw new AdapterBlockedError(
+        `Yandex discovery for ${brand} found more than ${this.maxCandidates} distinct models`
+      );
+    }
+
+    return [...refs.values()]
+      .sort((a, b) => (a.title ?? "").localeCompare(b.title ?? "", "ru") || compareIds(a.listingId, b.listingId));
+  }
+
+  private async loadDiscoveryBatch(
+    key: string,
+    brands: string[],
+    context: AdapterContext
+  ): Promise<Map<string, ProductRef[]>> {
+    const cached = this.discoveryBatches.get(key);
+    if (cached) return cached;
+
+    const value = this.scanDiscoveryBatch(brands, context);
+    this.discoveryBatches.set(key, value);
+    // Agent isolates may occasionally be reused. A handful of tiny matched-ref
+    // indexes is enough for overlapping requests; never grow an unbounded cache.
+    while (this.discoveryBatches.size > 4) {
+      const oldest = this.discoveryBatches.keys().next().value as string | undefined;
+      if (!oldest || oldest === key) break;
+      this.discoveryBatches.delete(oldest);
+    }
+    value.catch(() => {
+      // An unreadable shard invalidates exhaustiveness. Do not make that
+      // transient failure sticky: a selective retry must perform a fresh pass.
+      if (this.discoveryBatches.get(key) === value) this.discoveryBatches.delete(key);
+    });
+    return value;
+  }
+
+  private async scanDiscoveryBatch(
+    brands: string[],
+    context: AdapterContext
+  ): Promise<Map<string, ProductRef[]>> {
     const sitemapUrls = await this.loadSitemapIndex(context);
     if (sitemapUrls.length > this.maxSitemaps) {
       throw new AdapterBlockedError(
         `Yandex sitemap index contains ${sitemapUrls.length} model maps, above the complete-scan limit ${this.maxSitemaps}`
       );
     }
-    if (refs.size > this.maxCandidates) {
-      throw new AdapterBlockedError(
-        `Yandex previous registry contains ${refs.size} models, above the discovery limit ${this.maxCandidates}`
-      );
-    }
     const selected = prioritizeSitemaps(sitemapUrls, context.previousIds ?? []);
-    const productUrlGroups = await mapWithConcurrency(
+    const discoveries = new Map<string, BrandDiscovery>(brands.map((candidate) => [
+      brandKey(candidate),
+      { brand: candidate, refs: new Map() }
+    ]));
+    await mapWithConcurrency(
       selected,
       this.sitemapConcurrency,
-      async (sitemapUrl) => ({
-        sitemapUrl,
-        urls: matchingProductUrls(await this.loadModelSitemap(sitemapUrl, context), brand)
-      })
-    );
-
-    for (const { sitemapUrl, urls } of productUrlGroups) {
-      for (const url of urls) {
-        const listingId = extractModelId(url);
-        if (!listingId) continue;
-
-        refs.set(listingId, {
-          domain: "market.yandex.ru",
-          platform: this.id,
-          listingId,
-          brand,
-          url: canonicalizeUrl(url),
-          title: titleFromProductUrl(url),
-          metadata: {
-            discovery: "reviews_sitemap",
-            sourceSitemap: sitemapUrl
+      async (sitemapUrl) => {
+        const xml = await this.fetchModelSitemap(sitemapUrl, context);
+        // Parse each large document once for the complete run brand set. `xml`
+        // and its loc array become unreachable when this worker iteration ends.
+        for (const url of parseXmlLocs(xml)) {
+          if (!isAllowedProductUrl(url)) continue;
+          const listingId = extractModelId(url);
+          if (!listingId) continue;
+          for (const discovery of discoveries.values()) {
+            if (!urlMatchesBrand(url, discovery.brand)) continue;
+            discovery.refs.set(listingId, productRefFromSitemap(listingId, url, discovery.brand, sitemapUrl));
+            if (discovery.refs.size > this.maxCandidates) {
+              throw new AdapterBlockedError(
+                `Yandex discovery for ${discovery.brand} found more than ${this.maxCandidates} distinct models`
+              );
+            }
           }
-        });
-        if (refs.size > this.maxCandidates) {
-          throw new AdapterBlockedError(
-            `Yandex discovery for ${brand} found more than ${this.maxCandidates} distinct models`
-          );
         }
       }
-    }
+    );
 
-    return [...refs.values()]
-      .sort((a, b) => (a.title ?? "").localeCompare(b.title ?? "", "ru") || compareIds(a.listingId, b.listingId));
+    return new Map([...discoveries].map(([key, discovery]) => [
+      key,
+      [...discovery.refs.values()].sort((a, b) =>
+        (a.title ?? "").localeCompare(b.title ?? "", "ru") || compareIds(a.listingId, b.listingId)
+      )
+    ]));
   }
 
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
@@ -366,18 +417,6 @@ export class YandexAdapter implements SiteAdapter {
     return [...new Set(modelMaps)];
   }
 
-  private async loadModelSitemap(url: string, context: AdapterContext): Promise<string> {
-    const cached = this.sitemapCache.get(url);
-    if (cached && cached.expiresAt >= Date.now()) return cached.value;
-
-    const value = this.fetchModelSitemap(url, context);
-    this.sitemapCache.set(url, { expiresAt: Date.now() + this.cacheTtlMs, value });
-    value.catch(() => {
-      if (this.sitemapCache.get(url)?.value === value) this.sitemapCache.delete(url);
-    });
-    return value;
-  }
-
   private async fetchModelSitemap(url: string, context: AdapterContext): Promise<string> {
     if (!isAllowedModelSitemap(url)) throw new ParserChangedError("Unsafe model sitemap URL in Yandex index");
     const xml = await this.fetchSitemapDocument(url, context, "model");
@@ -434,7 +473,8 @@ export class YandexAdapter implements SiteAdapter {
           throw new AdapterBlockedError(`Yandex blocked ${kind === "index" ? "sitemap index access" : `model sitemap ${url}`}`);
         }
         const expectedRoot = kind === "index" ? /<sitemapindex\b/i : /<urlset\b/i;
-        if (!expectedRoot.test(xml)) {
+        const expectedClose = kind === "index" ? /<\/sitemapindex\s*>/i : /<\/urlset\s*>/i;
+        if (!expectedRoot.test(xml) || !expectedClose.test(xml)) {
           throw new ParserChangedError(
             kind === "index"
               ? "Yandex sitemap index XML shape changed"
@@ -546,10 +586,6 @@ function parseXmlLocs(xml: string): string[] {
   return locs;
 }
 
-function matchingProductUrls(xml: string, brand: string): string[] {
-  return parseXmlLocs(xml).filter((url) => isAllowedProductUrl(url) && urlMatchesBrand(url, brand));
-}
-
 function decodeXmlEntities(value: string): string {
   return value
     .replace(/&amp;/gi, "&")
@@ -608,6 +644,51 @@ function productRefFromPreviousId(listingId: string, brand: string): ProductRef 
     url: `${REVIEWS_ORIGIN}/product/model--${listingId}`,
     metadata: { discovery: "previous_registry" }
   };
+}
+
+function productRefFromSitemap(
+  listingId: string,
+  url: string,
+  brand: string,
+  sitemapUrl: string
+): ProductRef {
+  return {
+    domain: "market.yandex.ru",
+    platform: "yandex",
+    listingId,
+    brand,
+    url: canonicalizeUrl(url),
+    title: titleFromProductUrl(url),
+    metadata: {
+      discovery: "reviews_sitemap",
+      sourceSitemap: sitemapUrl
+    }
+  };
+}
+
+function brandKey(brand: string): string {
+  return brand
+    .normalize("NFKC")
+    .toLocaleLowerCase("ru-RU")
+    .replace(/ё/g, "е")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function uniqueDiscoveryBrands(requested: string, all: readonly string[]): string[] {
+  const result = new Map<string, string>();
+  for (const brand of [requested, ...all]) {
+    const key = brandKey(brand);
+    if (key && !result.has(key)) result.set(key, brand.trim());
+  }
+  return [...result.values()];
+}
+
+function discoveryBatchKey(runId: string | undefined, brands: readonly string[]): string | undefined {
+  const scope = runId?.trim();
+  if (!scope) return undefined;
+  return `${scope}\u001e${brands.map(brandKey).sort().join("\u001f")}`;
 }
 
 function prioritizeSitemaps(sitemaps: string[], previousIds: string[]): string[] {
@@ -820,11 +901,17 @@ async function mapWithConcurrency<T, R>(
 ): Promise<R[]> {
   const results = new Array<R>(values.length);
   let cursor = 0;
+  let failure: unknown;
   const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
-    while (cursor < values.length) {
+    while (cursor < values.length && failure === undefined) {
       const index = cursor;
       cursor += 1;
-      results[index] = await mapper(values[index]);
+      try {
+        results[index] = await mapper(values[index]);
+      } catch (error) {
+        failure ??= error;
+        throw error;
+      }
     }
   });
   await Promise.all(workers);

@@ -16,6 +16,7 @@ export type RepositoryRpc =
   | { action: "getPublication"; key: string }
   | { action: "savePublication"; key: string; publication: PublicationRecord }
   | { action: "reserveUsage"; key: string; amount: number; limit: number }
+  | { action: "releaseUsage"; key: string; amount: number }
   | { action: "acquireLease"; scope: string; leaseMs: number }
   | { action: "releaseLease"; lease: { token: string; keys: string[] } }
   | { action: "putEvidence"; payload: unknown };
@@ -55,6 +56,7 @@ export class RemoteRepository implements Repository {
   getPublication(key: string) { return this.call<PublicationRecord | undefined>({ action: "getPublication", key }); }
   async savePublication(key: string, publication: PublicationRecord) { await this.call({ action: "savePublication", key, publication }); }
   reserveUsage(key: string, amount: number, limit: number) { return this.call<number>({ action: "reserveUsage", key, amount, limit }); }
+  releaseUsage(key: string, amount: number) { return this.call<number>({ action: "releaseUsage", key, amount }); }
   acquireLease(scope: string, leaseMs: number) { return this.call<{ token: string; keys: string[] }>({ action: "acquireLease", scope, leaseMs }); }
   async releaseLease(lease: { token: string; keys: string[] }) { await this.call({ action: "releaseLease", lease }); }
 }

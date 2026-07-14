@@ -55,6 +55,7 @@ async function repositoryRpc(request: Request, env: Record<string, string | unde
     case "getPublication": result = await repository.getPublication(body.key); break;
     case "savePublication": await repository.savePublication(body.key, body.publication); result = null; break;
     case "reserveUsage": result = await repository.reserveUsage(body.key, body.amount, body.limit); break;
+    case "releaseUsage": result = await repository.releaseUsage(body.key, body.amount); break;
     case "acquireLease": result = await repository.acquireLease(body.scope, body.leaseMs, 1); break;
     case "releaseLease": await repository.releaseLease(body.lease); result = null; break;
     case "putEvidence": result = await new BlobEvidenceStore().put(body.payload); break;

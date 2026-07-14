@@ -199,6 +199,48 @@ describe("OzonAdapter discovery", () => {
     });
   });
 
+  it("releases a reservation only after the complete Ozon batch proves no matching products", async () => {
+    const emptyRelease = vi.fn(async () => undefined);
+    const emptyInner = new OzonAdapter(adapterOptions({
+      fetch: vi.fn(async () => jsonResponse([])) as unknown as typeof fetch
+    }));
+    const empty = new BudgetedAdapter(emptyInner, {
+      reservePerDiscovery: 0.25,
+      monthlyLimit: 4.5,
+      reserveCapacityUsd: async () => ({ release: emptyRelease })
+    });
+    const context: AdapterContext = {
+      runId: "run-empty-batch",
+      brands: ["Brand A", "Brand B"],
+      region: "Moscow",
+      month: "2026-07"
+    };
+
+    await expect(empty.discover("Brand A", context)).resolves.toEqual([]);
+    await expect(empty.discover("Brand B", context)).resolves.toEqual([]);
+    expect(emptyRelease).toHaveBeenCalledTimes(1);
+
+    const nonEmptyRelease = vi.fn(async () => undefined);
+    const nonEmptyInner = new OzonAdapter(adapterOptions({
+      fetch: vi.fn(async () => jsonResponse([{
+        sku: 202002,
+        url: "https://www.ozon.ru/product/brand-b-202002/",
+        title: "Brand B capsules",
+        rating: 4.9,
+        reviewCount: 20
+      }])) as unknown as typeof fetch
+    }));
+    const nonEmpty = new BudgetedAdapter(nonEmptyInner, {
+      reservePerDiscovery: 0.25,
+      monthlyLimit: 4.5,
+      reserveCapacityUsd: async () => ({ release: nonEmptyRelease })
+    });
+
+    await expect(nonEmpty.discover("Brand A", { ...context, runId: "run-non-empty-batch" })).resolves.toEqual([]);
+    await expect(nonEmpty.discover("Brand B", { ...context, runId: "run-non-empty-batch" })).resolves.toHaveLength(1);
+    expect(nonEmptyRelease).not.toHaveBeenCalled();
+  });
+
   it("couples maxItems to the paid charge cap so truncation remains detectable", async () => {
     const fetchSpy = vi.fn(async () => jsonResponse([]));
     const brands = Array.from({ length: 17 }, (_, index) => `Brand ${index + 1}`);
