@@ -126,6 +126,25 @@ function readerMetrics(markdown: string, source: URL): { title: string; reviews:
   return { title, reviews, rating: reviews === 0 ? null : rating!, ratingCount };
 }
 
+function hasExactListingCanary(html: string): boolean {
+  const $ = load(html);
+  let proved = false;
+  $(".listing-card[itemscope]").each((_index, node) => {
+    if (proved) return;
+    const root = $(node);
+    const link = root.find("link[itemprop='url']").first().attr("content") ?? root.find("link[itemprop='url']").first().attr("href");
+    let listingId: string | undefined;
+    try { listingId = link ? listingIdFromUrl(new URL(link, ORIGIN)) : undefined; }
+    catch { listingId = undefined; }
+    const aggregate = root.find("[itemprop='aggregateRating']").first();
+    const metricScope = aggregate.length ? aggregate : root;
+    const reviews = parseNonNegativeInteger(metricScope.find("meta[itemprop='reviewCount']").first().attr("content"));
+    const rating = parseRating(metricScope.find("meta[itemprop='ratingValue']").first().attr("content"));
+    if (listingId && reviews !== undefined && (reviews === 0 || rating !== undefined && rating > 0 && rating <= 5)) proved = true;
+  });
+  return proved;
+}
+
 function previousRefs(brand: string, context: AdapterContext): ProductRef[] {
   const refs = new Map<string, ProductRef>();
   for (const previous of context.previousRefs ?? []) {
@@ -163,11 +182,14 @@ export class EaptekaAdapter implements SiteAdapter {
     try {
       const direct = await this.request(HEALTH_URL, context);
       if (direct.response.ok && !isBlockedPage(direct.html)) {
+        if (!hasExactListingCanary(direct.html)) {
+          return { ok: false, checkedAt, message: `parser_changed: ${DOMAIN} direct canary has no exact aggregate listing card` };
+        }
         return { ok: true, checkedAt, message: `${DOMAIN}: direct search is healthy` };
       }
       const { html } = await this.requestTranslated(HEALTH_URL, context);
-      const $ = translatedSource(html, new URL(HEALTH_URL));
-      if ($(".listing-card link[itemprop='url']").length === 0) {
+      translatedSource(html, new URL(HEALTH_URL));
+      if (!hasExactListingCanary(html)) {
         return { ok: false, checkedAt, message: `parser_changed: ${DOMAIN} translated canary has no exact listing cards` };
       }
       return { ok: true, checkedAt, message: `${DOMAIN}: fixed translated search is healthy` };

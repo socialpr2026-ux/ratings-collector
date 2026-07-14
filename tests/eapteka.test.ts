@@ -125,6 +125,15 @@ describe("EaptekaAdapter", () => {
     expect(health.message).toContain("blocked_free_mode");
   });
 
+  it("fails the health canary when an accessible search loses aggregate listing cards", async () => {
+    const fetchMock = vi.fn(async () => new Response("<html><h1>Поиск</h1></html>", { status: 200 })) as unknown as typeof fetch;
+    const adapter = new EaptekaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const health = await adapter.healthCheck(context);
+    expect(health).toMatchObject({ ok: false });
+    expect(health.message).toContain("parser_changed");
+  });
+
   it("recovers a cloud-blocked search and product through fixed source-bound routes", async () => {
     const productUrl = "https://www.eapteka.ru/goods/id208826/";
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -133,7 +142,9 @@ describe("EaptekaAdapter", () => {
       if (url.hostname === "www-eapteka-ru.translate.goog") {
         const source = "https://www.eapteka.ru/search/?q=%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB";
         return new Response(`<html><base href="${source}"><script data-source-url="${source}"></script>
-          <div class="listing-card" itemscope><link itemprop="url" content="${productUrl}"></div></html>`, {
+          <div class="listing-card" itemscope><link itemprop="url" content="${productUrl}">
+            <span itemprop="aggregateRating"><meta itemprop="reviewCount" content="125"><meta itemprop="ratingValue" content="4.93"></span>
+          </div></html>`, {
           headers: { "content-type": "text/html" }
         });
       }
