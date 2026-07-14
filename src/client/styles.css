@@ -181,6 +181,7 @@ input::placeholder, textarea::placeholder { color: #9aa09d; }
 .companion-copy p { margin: 4px 0 0; color: #526b60; font-size: 11px; line-height: 1.5; }
 .companion-copy small { display: block; margin-top: 5px; color: #6b7c74; font-size: 10px; }
 .companion-card .button { white-space: nowrap; }
+.companion-actions { display: flex; align-items: center; gap: 8px; }
 .new-sites-title { display: flex; gap: 11px; align-items: flex-start; }
 .new-sites-title > span { width: 28px; height: 28px; flex: 0 0 28px; display: grid; place-items: center; color: #fff; border-radius: 50%; background: var(--amber); font-weight: 800; }
 .new-sites-title strong, .new-sites-title p { display: block; }
@@ -334,7 +335,8 @@ footer { display: flex; justify-content: space-between; gap: 20px; padding: 18px
   .collection-warning-actions { grid-column: 1 / -1; width: 100%; align-items: stretch; flex-direction: column; }
   .collection-warning-actions .button { width: 100%; }
   .companion-card { grid-template-columns: 35px 1fr; align-items: start; }
-  .companion-card .button { width: 100%; grid-column: 1 / -1; }
+  .companion-actions { width: 100%; grid-column: 1 / -1; align-items: stretch; flex-direction: column; }
+  .companion-card .button { width: 100%; }
   .list-filter { align-items: stretch; flex-direction: column; gap: 6px; }
   .list-filter-field { width: 100%; }
   .list-filter > span { padding-left: 2px; }

@@ -477,14 +477,31 @@ export function analyzeProductIdentity(item: ProductNameInput): ProductIdentity 
     const variantGroups = new Map<string, ProductParts>();
     for (const text of evidenceVariants) {
       const parts = parseProduct(item.brand, text);
+      if (parts.generic) continue;
       const baseKey = [parts.modifier, parts.form, [...parts.doses].sort().join("+"), parts.count, parts.multipack].map((value) => value ?? "").join("|");
       const previous = variantGroups.get(baseKey);
       if (!previous || specificity(parts) > specificity(previous)) variantGroups.set(baseKey, parts);
     }
-    const count = Math.max(variantGroups.size || evidenceVariants.length, 1);
+    if (variantGroups.size === 0 && evidenceVariants.length === 0) {
+      const line = lineName(primary);
+      return {
+        label: line ? `Общий рейтинг линейки «${line}»` : "Общий рейтинг бренда",
+        granularity: line ? "line" : "family",
+        confidence: "partial",
+        missing: [],
+        reasons: ["Площадка публикует единый рейтинг без списка товарных вариантов"]
+      };
+    }
+    const count = variantGroups.size || evidenceVariants.length;
     const line = lineName(primary);
+    const humanVariants = [...variantGroups.values()].map(render);
+    const visibleVariants = humanVariants.slice(0, 3);
+    const hiddenVariantCount = Math.max(0, humanVariants.length - visibleVariants.length);
+    const variantDetails = visibleVariants.length
+      ? `${visibleVariants.join("; ")}${hiddenVariantCount ? `; ещё ${hiddenVariantCount}` : ""}`
+      : `${count} ${variantWord(count)}`;
     return {
-      label: line ? `Общая карточка линейки «${line}» (${count} ${variantWord(count)})` : `Общая карточка бренда (${count} ${variantWord(count)})`,
+      label: line ? `Общий рейтинг линейки «${line}»: ${variantDetails}` : `Общий рейтинг: ${variantDetails}`,
       granularity: line ? "line" : "family",
       confidence: evidenceVariants.length ? "exact" : "partial",
       missing: [],

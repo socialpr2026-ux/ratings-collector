@@ -498,7 +498,7 @@ export function App() {
       } else if (caught instanceof LocalCompanionError && caught.code === "unavailable") {
         setCompanionState({
           status: "unavailable",
-          message: "Запустите файл «Установить и запустить» на этом компьютере и оставьте окно помощника открытым."
+          message: "Помощник ещё не запущен. Скачайте его кнопкой рядом, откройте файл и оставьте окно помощника открытым."
         });
       } else {
         setCompanionState({ status: "error", message: caught instanceof Error ? caught.message : "Локальный сбор Ozon не завершён" });
@@ -872,8 +872,8 @@ export function App() {
           <span className="notice-icon" aria-hidden="true">!</span>
           <div><strong>{busyAction === "retry" ? "Повторно проверяем проблемные площадки…" : "Сбор неполный — публикация отключена"}</strong><p>{busyAction === "retry" ? "Готовые результаты остаются на месте. После завершения список и проверка публикации обновятся автоматически." : "Данные не будут записаны частично. Можно повторить только неуспешные площадки, не запуская весь сбор заново."}</p></div>
           <div className="collection-warning-actions">
-            <a className="button button-quiet" href="#publish-status">Посмотреть причины</a>
             {canRetry && <button className="button button-secondary" type="button" onClick={retryFailedPartitions} disabled={busy}>{busyAction === "retry" ? "Повторяем…" : "Повторить неуспешные площадки"}</button>}
+            <a className="button button-quiet" href="#publish-status">Посмотреть причины</a>
           </div>
         </div>}
 
@@ -882,14 +882,19 @@ export function App() {
           <div className="companion-copy">
             <strong>Ozon можно собрать через Chrome на этом компьютере</strong>
             <p>{companionState.message ?? `Облачный сбор не завершился для ${companionBrands.length} ${plural(companionBrands.length, "бренда", "брендов", "брендов")}. Локальный помощник использует обычное подключение этого компьютера и вернёт только карточки, отзывы и рейтинг.`}</p>
-            {companionState.status === "unavailable" && <small>Установка нужна один раз; Google‑ключ и Apify не используются.</small>}
+            <small>{companionState.status === "unavailable"
+              ? "Откройте скачанный файл, оставьте его окно открытым и нажмите «Проверить после запуска»."
+              : "При первом использовании скачайте и запустите помощник один раз; Google‑ключ и Apify не используются."}</small>
           </div>
-          <button className="button button-secondary" type="button" onClick={collectOzonOnThisComputer} disabled={busy}>
-            {busyAction === "companion"
-              ? companionState.status === "importing" ? "Добавляем в запуск…" : companionState.status === "collecting" ? "Собираем Ozon…" : "Проверяем помощник…"
-              : companionState.status === "captcha" ? "Я прошёл проверку — повторить"
-                : companionState.status === "unavailable" ? "Проверить снова" : "Собрать через Chrome"}
-          </button>
+          <div className="companion-actions">
+            <a className="button button-quiet" href="/ratings-ozon-helper.cmd" download>Скачать помощник</a>
+            <button className="button button-secondary" type="button" onClick={collectOzonOnThisComputer} disabled={busy}>
+              {busyAction === "companion"
+                ? companionState.status === "importing" ? "Добавляем в запуск…" : companionState.status === "collecting" ? "Собираем Ozon…" : "Проверяем помощник…"
+                : companionState.status === "captcha" ? "Я прошёл проверку — повторить"
+                  : companionState.status === "unavailable" ? "Проверить после запуска" : "Проверить и собрать"}
+            </button>
+          </div>
         </div>}
 
         {run.observations.length > 8 && <div className="list-filter" role="search" aria-label="Фильтр найденных карточек">

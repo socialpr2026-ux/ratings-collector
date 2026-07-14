@@ -9,7 +9,7 @@ import type {
   SiteProfile
 } from "../shared/types.js";
 import { observationSchema, productRefSchema, runRequestSchema } from "../shared/types.js";
-import { isKnownReviewAggregateDomain } from "../shared/review-aggregates.js";
+import { hasDeterministicAggregateProof, isKnownReviewAggregateDomain } from "../shared/review-aggregates.js";
 import type { EvidenceStore } from "./evidence.js";
 import { GenericSiteAdapter } from "./generic/adapter.js";
 import { profileSite } from "./generic/profiler.js";
@@ -414,7 +414,11 @@ export class RatingsService {
                   url: observation.canonicalUrl,
                   evidence: observation.productEvidence
                 });
-                if (["ok", "no_reviews"].includes(observation.status) && observation.productIdentity.granularity !== "variant") {
+                if (
+                  ["ok", "no_reviews"].includes(observation.status) &&
+                  observation.productIdentity.granularity !== "variant" &&
+                  !hasDeterministicAggregateProof(observation)
+                ) {
                   observation.status = "needs_review";
                 }
               }

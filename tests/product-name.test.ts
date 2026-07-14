@@ -186,7 +186,7 @@ describe("canonical product descriptors", () => {
   });
 
   it("represents a review page with several variants as a family aggregate", () => {
-    expect(analyzeProductIdentity({
+    const identity = analyzeProductIdentity({
       brand: "Бактоблис",
       product: "Бактоблис Плюс отзывы",
       evidence: {
@@ -195,7 +195,32 @@ describe("canonical product descriptors", () => {
         variants: ["1500 мг, порошок, 15 саше", "таблетки для рассасывания без сахара, 30 шт"],
         identifiers: [], imageUrls: [], instructionUrls: []
       }
-    })).toMatchObject({ granularity: "family", label: "Общая карточка бренда (2 варианта)", variantCount: 2 });
+    });
+    expect(identity).toMatchObject({ granularity: "family", variantCount: 2 });
+    expect(identity.label).toContain("порошок");
+    expect(identity.label).toContain("1500 мг");
+    expect(identity.label).toContain("№15");
+    expect(identity.label).toContain("таблетки для рассасывания");
+    expect(identity.label).toContain("№30");
+  });
+
+  it("does not invent one unnamed variant for a brand aggregate", () => {
+    const identity = analyzeProductIdentity({
+      brand: "Кагоцел",
+      product: "Кагоцел отзывы",
+      evidence: {
+        scope: "product_family",
+        signals: [{ source: "title", text: "Кагоцел отзывы" }],
+        variants: [], identifiers: [], imageUrls: [], instructionUrls: []
+      }
+    });
+
+    expect(identity).toMatchObject({
+      granularity: "family",
+      confidence: "partial",
+      label: "Общий рейтинг бренда"
+    });
+    expect(identity.variantCount).toBeUndefined();
   });
 
   it("counts distinct named lines and uses correct Russian plural forms in family labels", () => {
@@ -209,7 +234,9 @@ describe("canonical product descriptors", () => {
         identifiers: [], imageUrls: [], instructionUrls: []
       }
     });
-    expect(identity).toMatchObject({ granularity: "family", label: "Общая карточка бренда (2 варианта)", variantCount: 2 });
+    expect(identity).toMatchObject({ granularity: "family", variantCount: 2 });
+    expect(identity.label).toContain("таблетки №20");
+    expect(identity.label).not.toContain("Вариант не определён");
   });
 
   it("keeps compound strength and is idempotent across repeated publications", () => {

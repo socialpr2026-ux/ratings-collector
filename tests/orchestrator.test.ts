@@ -514,6 +514,70 @@ describe("run orchestration and fail-closed QA", () => {
     await expect(service.commitSuccessfulRun(approved)).resolves.toBeUndefined();
   });
 
+  it("keeps a fully proved dedicated aggregate ready without manual review", async () => {
+    const domain = "irecommend.ru";
+    const aggregateRequest = { ...request, domains: [domain] };
+    const makeService = (profileVersion?: number) => new RatingsService(new MemoryRepository(), async () => ({
+      id: profileVersion === undefined ? "dedicated-aggregate" : "generic-aggregate",
+      supportedDomains: [domain],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand: string) {
+        return [{ domain, platform: domain, listingId: "proved", brand, url: `https://${domain}/content/brand`, metadata: {} }];
+      },
+      async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain, platform: domain, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: `${ref.brand} отзывы`, reviews: 12, rating: 4.8,
+          status: "ok", capturedAt: new Date().toISOString(), evidenceRef: "memory://aggregate-proof",
+          source: "json-ld", ...(profileVersion === undefined ? {} : { profileVersion }),
+          productEvidence: {
+            scope: "product_family", signals: [{ source: "title", text: `${ref.brand} отзывы` }],
+            variants: [], identifiers: [], imageUrls: [], instructionUrls: []
+          }
+        };
+      }
+    }));
+
+    const dedicated = makeService();
+    const ready = await dedicated.executeRun((await dedicated.createRun(aggregateRequest)).id);
+    expect(ready).toMatchObject({ qa: { ok: true, blockers: [] }, observations: [{ status: "ok" }] });
+
+    const generic = makeService(1);
+    const review = await generic.executeRun((await generic.createRun(aggregateRequest)).id);
+    expect(review.observations[0].status).toBe("needs_review");
+    expect(review.qa?.ok).toBe(false);
+  });
+
+  it("auto-accepts a dedicated Yandex model aggregate with a stable model id", async () => {
+    const domain = "market.yandex.ru";
+    const service = new RatingsService(new MemoryRepository(), async () => ({
+      id: "yandex-model-aggregate",
+      supportedDomains: [domain],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand: string) {
+        return [{
+          domain, platform: "yandex", listingId: "265149860", brand,
+          url: "https://reviews.yandex.ru/product/kagotsel--265149860", metadata: {}
+        }];
+      },
+      async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: ref.brand, reviews: 711, rating: 4.7,
+          status: "ok", capturedAt: new Date().toISOString(),
+          evidenceRef: `${ref.url}#json-ld`, source: "yandex_reviews_direct",
+          productEvidence: {
+            scope: "listing", signals: [{ source: "json_ld", text: ref.brand }], variants: [],
+            identifiers: [{ type: "model_id", value: ref.listingId }], imageUrls: [], instructionUrls: []
+          }
+        };
+      }
+    }));
+
+    const run = await service.executeRun((await service.createRun({ ...request, domains: [domain], brands: ["Кагоцел"] })).id);
+    expect(run).toMatchObject({ qa: { ok: true, blockers: [] }, observations: [{ status: "ok" }] });
+  });
+
   it("keeps a disappeared registry card as a verified empty month without losing history", async () => {
     const repository = new MemoryRepository();
     await repository.saveProducts("test_sheet", [{
