@@ -21,5 +21,7 @@ describe("Google Apps Script bridge source", () => {
     expect(source).toContain("sheet.setFrozenColumns(Math.min(3, columns));");
     expect(source).toContain("sheet.setHiddenGridlines(true);");
     expect(source).toContain('sheet.setTabColor("#154f3d");');
+    expect(source).toContain("sheet.setColumnWidth(metricColumn, 112);");
+    expect(source).toContain("sheet.setColumnWidth(metricColumn + 1, 86);");
   });
 });

@@ -162,9 +162,9 @@ export function observationMatchesQuery(
 export function observationIssueText(item: Pick<Observation, "reviews" | "rating" | "productIdentity">) {
   const identity = item.productIdentity;
   if (identity?.granularity === "not_product") return "Не является товаром";
-  if (item.reviews === null) return "Отзывы не получены";
+  if (item.reviews === null) return "Отзывы / оценки не получены";
   if (item.reviews > 0 && item.rating === null) return "Рейтинг не получен";
-  if (item.reviews === 0 && item.rating !== null) return "Проверьте число отзывов";
+  if (item.reviews === 0 && item.rating !== null) return "Проверьте число отзывов / оценок";
   if (!identity || identity.granularity === "unresolved" || identity.confidence !== "exact") return "Не хватает данных о варианте";
   return "Нужно сверить карточку";
 }

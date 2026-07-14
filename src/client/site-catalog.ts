@@ -24,7 +24,7 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
   {
     id: "review-sites",
     label: "Отзовики",
-    description: "Площадки с отзывами о брендах и товарах",
+    description: "Площадки с отзывами и оценками брендов и товаров",
     sites: [
       { domain: "irecommend.ru", label: "iRecommend" },
       { domain: "otzovik.com", label: "Отзовик" },

@@ -92,7 +92,7 @@ const runStatusLabels: Record<RunState["status"], string> = {
 
 const observationStatusLabels: Record<Observation["status"], string> = {
   ok: "Готово",
-  no_reviews: "Без отзывов",
+  no_reviews: "Без отзывов / оценок",
   not_found: "Не найдено",
   blocked: "Нет доступа",
   needs_review: "Нужно проверить",
@@ -692,7 +692,7 @@ export function App() {
     const confirmed = new Set(confirmedProfileExamples[domain] ?? []);
     const confirmedCount = profile.testExamples.filter((example) => confirmed.has(example.url)).length;
     if (confirmedCount !== 3) return `Откройте и отметьте все три контрольные карточки (${confirmedCount}/3).`;
-    if ((profileMeanings[domain] ?? "unknown") === "unknown") return "Укажите, что означает счётчик рядом с рейтингом.";
+    if ((profileMeanings[domain] ?? "unknown") === "unknown") return "Укажите, что площадка включает в общий счётчик.";
     return "Контрольные карточки и смысл счётчика проверены.";
   }
 
@@ -722,7 +722,7 @@ export function App() {
     <main id="top" aria-busy={busy}>
       <section className="intro" aria-labelledby="page-title">
         <div>
-          <p className="eyebrow">Отзывы и рейтинги с площадок</p>
+          <p className="eyebrow">Отзывы, оценки и рейтинги с площадок</p>
           <h1 id="page-title">Соберите рейтинги<br />и обновите таблицу</h1>
           <p className="intro-copy">Выберите площадки и бренды. Сервис найдёт карточки, покажет спорные результаты и запишет только проверенные данные.</p>
           <ul className="intro-benefits" aria-label="Преимущества сервиса">
@@ -883,7 +883,7 @@ export function App() {
           <span className="companion-icon" aria-hidden="true">◉</span>
           <div className="companion-copy">
             <strong>Ozon можно собрать через Chrome на этом компьютере</strong>
-            <p>{companionState.message ?? `Облачный сбор не завершился для ${companionBrands.length} ${plural(companionBrands.length, "бренда", "брендов", "брендов")}. Локальный помощник использует обычное подключение этого компьютера и вернёт только карточки, отзывы и рейтинг.`}</p>
+            <p>{companionState.message ?? `Облачный сбор не завершился для ${companionBrands.length} ${plural(companionBrands.length, "бренда", "брендов", "брендов")}. Локальный помощник использует обычное подключение этого компьютера и вернёт только карточки, отзывы / оценки и рейтинг.`}</p>
             <small>{companionState.status === "unavailable"
               ? "Откройте скачанный файл, оставьте его окно открытым и нажмите «Проверить после запуска»."
               : "При первом использовании скачайте и запустите помощник один раз; Google‑ключ и Apify не используются."}</small>
@@ -935,11 +935,11 @@ export function App() {
                       <a href={example.url} target="_blank" rel="noreferrer">Карточка {index + 1}<span aria-hidden="true">↗</span></a>
                     </label>)}
                   </div>
-                  <label className="profile-meaning"><span>Что показывает счётчик рядом с рейтингом?</span><select value={profileMeanings[domain] ?? "unknown"} onChange={(event) => setProfileMeanings((current) => ({ ...current, [domain]: event.target.value as ReviewCountMeaning }))}>
+                  <label className="profile-meaning"><span>Что площадка включает в общий счётчик?</span><select value={profileMeanings[domain] ?? "unknown"} onChange={(event) => setProfileMeanings((current) => ({ ...current, [domain]: event.target.value as ReviewCountMeaning }))}>
                     <option value="unknown">Выберите вариант</option>
-                    <option value="reviews">Текстовые отзывы</option>
-                    <option value="ratings">Все оценки</option>
-                    <option value="feedback">Отзывы и оценки вместе</option>
+                    <option value="reviews">Отзывы</option>
+                    <option value="ratings">Оценки / голоса</option>
+                    <option value="feedback">Отзывы и оценки</option>
                   </select></label>
                 </>}
               </div>;
@@ -953,7 +953,7 @@ export function App() {
 
         <div className="table-wrap" tabIndex={0} aria-label="Список найденных карточек">
           <table>
-            <thead><tr><th scope="col" className="check-column"><span className="sr-only">Выбор</span></th><th scope="col">Площадка</th><th scope="col">Бренд</th><th scope="col">Продукт в таблице</th><th scope="col">Отзывы</th><th scope="col">Рейтинг</th><th scope="col">Результат</th></tr></thead>
+            <thead><tr><th scope="col" className="check-column"><span className="sr-only">Выбор</span></th><th scope="col">Площадка</th><th scope="col">Бренд</th><th scope="col">Продукт в таблице</th><th scope="col">Отзывы / оценки</th><th scope="col">Рейтинг</th><th scope="col">Результат</th></tr></thead>
             <tbody>
               {visibleItems.map((item) => {
                 const confirmable = canConfirmObservation(item);
@@ -966,7 +966,7 @@ export function App() {
                   <td data-label="Площадка"><span className="domain-name">{item.domain}</span></td>
                   <td className="brand-cell" data-label="Бренд"><strong>{item.brand}</strong></td>
                   <td className="product-cell" data-label="Продукт"><a href={item.canonicalUrl} target="_blank" rel="noreferrer" aria-label={`Открыть карточку «${item.product}» на ${item.domain} в новой вкладке`}>{canonicalProduct}<span aria-hidden="true">↗</span></a><div className={`identity-badge identity-${identity.granularity}`}>{productIdentityLabels[identity.granularity]}</div><small>Название на площадке: {item.product} · ID {item.listingId}</small>{(identity.reasons.length > 0 || (item.productEvidence?.variants.length ?? 0) > 0) && <details className="product-proof"><summary>На основании каких данных</summary>{identity.reasons.map((reason) => <p key={reason}>{reason}</p>)}{(item.productEvidence?.variants.length ?? 0) > 0 && <ul>{item.productEvidence!.variants.slice(0, 6).map((variant) => <li key={variant}>{variant}</li>)}</ul>}</details>}</td>
-                  <td className="number-cell" data-label="Отзывы">{formatReviews(item.reviews)}</td>
+                  <td className="number-cell" data-label="Отзывы / оценки">{formatReviews(item.reviews)}</td>
                   <td className="number-cell" data-label="Рейтинг">{formatRating(item.rating)}</td>
                   <td data-label="Результат"><span className={`result-badge result-${item.status}`}>{observationStatusLabels[item.status]}</span>{item.status === "needs_review" && !confirmable && <small className={`result-note ${identity.granularity === "not_product" ? "result-note-error" : ""}`}>{observationIssueText(item)}</small>}</td>
                 </tr>;
@@ -981,7 +981,7 @@ export function App() {
       {run?.qa && <section id="publish-status" className={`card publish-card ${run.qa.ok ? "publish-ready" : "publish-blocked"}`} aria-labelledby="publish-title">
         <div className="publish-summary">
           <span className="publish-icon" aria-hidden="true">{run.qa.ok ? "✓" : "!"}</span>
-          <div><p className="section-number">Шаг 4</p><h2 id="publish-title">{run.status === "published" ? "Готово — таблица обновлена" : run.qa.ok ? "Всё готово к записи" : "Сначала устраните замечания"}</h2><p>{run.status === "published" ? `Данные за ${formatMonth(run.request.month)} сохранены в исходном листе: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")}.` : run.qa.ok ? `Будет записано: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")} за ${formatMonth(run.request.month)} Столбцы: Бренд · Ссылка · Продукт · Отзывы · Рейтинг.` : "Разберите отмеченные карточки или повторите проблемные площадки. Частичный результат в таблицу не попадёт."}</p></div>
+          <div><p className="section-number">Шаг 4</p><h2 id="publish-title">{run.status === "published" ? "Готово — таблица обновлена" : run.qa.ok ? "Всё готово к записи" : "Сначала устраните замечания"}</h2><p>{run.status === "published" ? `Данные за ${formatMonth(run.request.month)} сохранены в исходном листе: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")}.` : run.qa.ok ? `Будет записано: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")} за ${formatMonth(run.request.month)} Столбцы: Бренд · Ссылка · Продукт · Отзывы / оценки · Рейтинг.` : "Разберите отмеченные карточки или повторите проблемные площадки. Частичный результат в таблицу не попадёт."}</p></div>
         </div>
 
         {visibleBlockers.length > 0 && <div className="issue-list"><strong>Что нужно исправить</strong><ul>{visibleBlockers.map((item) => <li key={item}>{item}</li>)}</ul></div>}

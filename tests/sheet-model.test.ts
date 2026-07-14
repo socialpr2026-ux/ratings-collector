@@ -27,6 +27,7 @@ describe("Google Sheets model", () => {
     const row = document.values.find((_, index) => document.rowKinds[index] === "product")!;
     expect(row.slice(0, 6)).toEqual(["Кагоцел", current.canonicalUrl, "таблетки 12 мг №20", null, 5800, 4.7]);
     expect(document.values[0].slice(0, 5)).toEqual(["Бренд", "Ссылка", "Продукт", null, "Июль 2026"]);
+    expect(document.values[1].slice(4, 6)).toEqual(["Отзывы / оценки", "Рейтинг"]);
     expect(document.merges).toContainEqual({ startRow: 0, endRow: 2, startColumn: 0, endColumn: 1 });
     expect(document.merges).toContainEqual({ startRow: 0, endRow: 2, startColumn: 1, endColumn: 2 });
     expect(document.merges).toContainEqual({ startRow: 0, endRow: 2, startColumn: 2, endColumn: 3 });
@@ -219,16 +220,36 @@ describe("Google Sheets model", () => {
   it("re-reads the new brand/link/product layout without losing history", () => {
     const existing = { values: [
       ["Бренд", "Ссылка", "Продукт", null, "Июнь 2026"],
-      [null, null, null, null, "Отзывы", "Рейтинг"],
+      [null, null, null, null, "Отзывы / оценки", "Рейтинг"],
       ["ozon.ru", null, "Продукт", null],
       ["Кагоцел", "https://www.ozon.ru/product/kagotsel-99/", "таблетки 12 мг №20", null, 9, 4.8]
     ] };
     const document = buildSheetDocument(existing, request, [], { "2026-07": {} });
     const row = document.values.find((_, index) => document.rowKinds[index] === "product")!;
     expect(document.months).toEqual(["2026-06", "2026-07"]);
+    expect(document.values[1].slice(4, 8)).toEqual(["Отзывы / оценки", "Рейтинг", "Отзывы / оценки", "Рейтинг"]);
     expect(row.slice(0, 8)).toEqual([
       "Кагоцел", "https://www.ozon.ru/product/kagotsel-99/", "таблетки 12 мг №20", null, 9, 4.8, null, null
     ]);
+  });
+
+  it("uses unified feedback wording in the summary without changing formulas", () => {
+    const document = buildSheetDocument({ values: [] }, request, [], {
+      "2026-07": { "ozon.ru:149024615": observation("149024615", 12) }
+    });
+    const summaryLabels = document.values
+      .filter((_row, index) => document.rowKinds[index] === "summary")
+      .map((row) => row[0]);
+    const footnote = document.values[document.rowKinds.indexOf("footnote")][0];
+
+    expect(summaryLabels).toEqual([
+      "Всего отзывов / оценок",
+      "Карточки с рейтингом ≥4 баллов",
+      "Карточки с рейтингом <4 баллов",
+      "Карточки без отзывов / оценок"
+    ]);
+    expect(footnote).toContain("отзывов, оценок и голосов");
+    expect(document.formulas.flat().filter(Boolean).join("\n")).toContain("=SUM(E$3:E");
   });
 
   it("does not publish a medical article as a product row", () => {

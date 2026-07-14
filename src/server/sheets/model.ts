@@ -224,7 +224,7 @@ export function buildSheetDocument(
   }
   months.forEach((month, index) => {
     const column = 4 + index * 2;
-    title[column] = monthLabel(month); subheader[column] = "Отзывы"; subheader[column + 1] = "Рейтинг";
+    title[column] = monthLabel(month); subheader[column] = "Отзывы / оценки"; subheader[column + 1] = "Рейтинг";
     merges.push({ startRow: 0, endRow: 1, startColumn: column, endColumn: column + 2 });
   });
   add("title", title); add("subheader", subheader);
@@ -249,7 +249,7 @@ export function buildSheetDocument(
   const summaryHeaderRow = values.length;
   add("summaryHeader", summaryHeader);
   merges.push({ startRow: summaryHeaderRow, endRow: summaryHeaderRow + 1, startColumn: 0, endColumn: 3 });
-  const labels = ["Отзывов всего", "Карточки с рейтингом ≥4 баллов", "Карточки с рейтингом <4 баллов", "Карточки без отзывов"];
+  const labels = ["Всего отзывов / оценок", "Карточки с рейтингом ≥4 баллов", "Карточки с рейтингом <4 баллов", "Карточки без отзывов / оценок"];
   labels.forEach((label, metricIndex) => {
     const row: SheetScalar[] = [label]; const formula: Array<string | null> = [];
     months.forEach((_, index) => {
@@ -269,7 +269,7 @@ export function buildSheetDocument(
     add("summary", row, formula);
     merges.push({ startRow: summaryRow, endRow: summaryRow + 1, startColumn: 0, endColumn: 3 });
   });
-  add("footnote", ["*Публичные агрегаты отзывов и рейтингов; ошибки и блокировки не подменяются нулевыми значениями."]);
+  add("footnote", ["*Публичные агрегаты отзывов, оценок и голосов; ошибки и блокировки не подменяются нулевыми значениями."]);
   merges.push({ startRow: values.length - 1, endRow: values.length, startColumn: 0, endColumn: 3 });
   return { values, formulas, rowKinds, months, productStartRow, productEndRow, summaryStartRow, columnCount, merges };
 }

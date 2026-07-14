@@ -86,6 +86,8 @@ describe("plain-language feedback", () => {
 
   it("explains why a card cannot be confirmed", () => {
     const exact = { label: "таблетки №20", granularity: "variant" as const, confidence: "exact" as const, missing: [], reasons: [] };
+    expect(observationIssueText({ reviews: null, rating: null, productIdentity: exact })).toBe("Отзывы / оценки не получены");
+    expect(observationIssueText({ reviews: 0, rating: 4.8, productIdentity: exact })).toBe("Проверьте число отзывов / оценок");
     expect(observationIssueText({ reviews: 12, rating: null, productIdentity: exact })).toBe("Рейтинг не получен");
     expect(observationIssueText({ reviews: 12, rating: 4.8, productIdentity: { ...exact, granularity: "unresolved", confidence: "partial" } })).toBe("Не хватает данных о варианте");
   });

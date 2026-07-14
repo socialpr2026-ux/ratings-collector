@@ -482,7 +482,12 @@ function applyLayout_(sheet, rows, columns) {
   if (columns >= 2) sheet.setColumnWidth(2, 360);
   if (columns >= 3) sheet.setColumnWidth(3, 300);
   if (columns >= 4) sheet.setColumnWidth(4, 20);
-  if (columns > 4) sheet.setColumnWidths(5, columns - 4, 86);
+  // The first column in every monthly pair is the combined public counter
+  // "Отзывы / оценки"; keep it wider than the compact rating column.
+  for (var metricColumn = 5; metricColumn <= columns; metricColumn += 2) {
+    sheet.setColumnWidth(metricColumn, 112);
+    if (metricColumn + 1 <= columns) sheet.setColumnWidth(metricColumn + 1, 86);
+  }
   if (rows > 0) sheet.autoResizeRows(1, rows);
   if (rows >= 2) sheet.setRowHeights(1, 2, 30);
 }
