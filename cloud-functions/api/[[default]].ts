@@ -694,6 +694,75 @@ function escapeHtml(value: string): string {
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
+function otzovikSourceProductUrl(value: string, searchSource: URL): URL | undefined {
+  try {
+    const candidate = new URL(value, searchSource);
+    const host = candidate.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
+    if (!["otzovik.com", "otzovik-com.translate.goog"].includes(host) ||
+      !/^\/reviews\/[a-z0-9_-]+\/?$/i.test(candidate.pathname) || candidate.hash) return undefined;
+    if (host === "otzovik-com.translate.goog" &&
+      [...candidate.searchParams.keys()].some((key) => !["_x_tr_sl", "_x_tr_tl", "_x_tr_hl"].includes(key))) return undefined;
+    const source = new URL(candidate.pathname.replace(/\/?$/, "/"), "https://otzovik.com");
+    return source;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Turns the source-bound first-party Otzovik search into a tiny inert result
+ * page. The live site sometimes hides product links in split document.write
+ * calls, so reconstruct only its fixed /reviews/<slug>/ pattern without
+ * executing page JavaScript.
+ */
+function compactOtzovikSearchHtml(html: string, requested: URL, brand: string): string | undefined {
+  if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
+  const $ = load(html);
+  if (!translatedSourceMatches($("base[href]").first().attr("href"), requested) ||
+    !translatedSourceMatches($("link[rel='canonical'][href]").first().attr("href"), requested)) return undefined;
+  const counterText = $(".product-counter").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+  const declaredCount = Number(counterText.match(/\b(\d+)\b/u)?.[1]);
+  const items = $(".product-list .item.sortable");
+  if (!Number.isSafeInteger(declaredCount) || declaredCount < 0 || declaredCount > 100 || items.length !== declaredCount) {
+    return undefined;
+  }
+
+  const results = new Map<string, string>();
+  let malformed = false;
+  items.each((_index, node) => {
+    const item = $(node);
+    if (!/^\d+$/.test(item.attr("data-pid") ?? "") || !/^\d+$/.test(item.attr("data-reviews") ?? "") ||
+      !/^\d+$/.test(item.attr("data-rating") ?? "")) {
+      malformed = true;
+      return;
+    }
+    const direct = item.find("a.product-name[href]").first();
+    let title = direct.text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    let product = direct.attr("href") ? otzovikSourceProductUrl(direct.attr("href")!, requested) : undefined;
+    if (!product) {
+      const script = item.find("h3.text script").first().text();
+      const slug = script.match(/iews\/([a-z0-9_-]+)\//i)?.[1];
+      const embeddedTitle = script.match(/class=['"]product-name['"]>([\s\S]*?)<\/a>/i)?.[1];
+      if (slug && embeddedTitle) {
+        product = otzovikSourceProductUrl(`/reviews/${slug}/`, requested);
+        title = embeddedTitle.replace(/\\"/g, '"').replace(/\\'/g, "'")
+          .normalize("NFKC").replace(/\s+/g, " ").trim();
+      }
+    }
+    if (!product || !title) {
+      malformed = true;
+      return;
+    }
+    if (matchesBrand(title, brand)) results.set(product.toString(), title);
+  });
+  if (malformed || declaredCount > 0 && results.size === 0) return undefined;
+  if (declaredCount === 0) {
+    return `<!doctype html><html><head><title>${escapeHtml(brand)}</title></head><body><h1>No results found for ${escapeHtml(brand)}</h1></body></html>`;
+  }
+  return `<!doctype html><html><head><title>${escapeHtml(brand)}</title></head><body>${[...results]
+    .map(([url, title]) => `<a class="result__a" href="${escapeHtml(url)}">${escapeHtml(title)}</a>`).join("\n")}</body></html>`;
+}
+
 function compactRuOtzyvTranslateHtml(html: string, requested: RuOtzyvTarget): string | undefined {
   if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
   const leadingHtml = html.slice(0, 150_000);
@@ -1240,7 +1309,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     }
     return json({ error: "iRecommend response did not prove the requested product or search result" }, 502);
   }
-  if (host === "otzovik.com" && /^\/reviews\/[a-z0-9_]+\/?$/i.test(target.pathname)) {
+  if (host === "otzovik.com" && /^\/reviews\/[a-z0-9_-]+\/?$/i.test(target.pathname)) {
     if (target.search || target.hash || target.hostname !== "otzovik.com") {
       return json({ error: "Invalid Otzovik product source URL" }, 400);
     }
@@ -1291,6 +1360,25 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       const brand = target.searchParams.get("brand")?.trim() ?? "";
       if (brand.length < 2 || brand.length > 160 || [...target.searchParams.keys()].some((key) => key !== "brand")) {
         return json({ error: "Invalid Otzovik external discovery query" }, 400);
+      }
+      const sourceSearch = new URL("https://otzovik.com/");
+      sourceSearch.searchParams.set("search_text", brand);
+      const translatedSearch = new URL(sourceSearch.pathname, "https://otzovik-com.translate.goog");
+      for (const [key, value] of sourceSearch.searchParams) translatedSearch.searchParams.set(key, value);
+      translatedSearch.searchParams.set("_x_tr_sl", "ru");
+      translatedSearch.searchParams.set("_x_tr_tl", "en");
+      translatedSearch.searchParams.set("_x_tr_hl", "en");
+      const translated = await safeFetch(translatedSearch.toString(), {
+        method: "GET", redirect: "follow",
+        headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+      });
+      const translatedBody = await readTextBounded(translated, 12_000_000, 60_000);
+      const compact = translated.ok ? compactOtzovikSearchHtml(translatedBody, sourceSearch, brand) : undefined;
+      if (compact) {
+        return new Response(compact, { status: 200, headers: {
+          "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
+          "x-ratings-source": "google-translate-otzovik-search"
+        } });
       }
       readerTarget = new URL("https://html.duckduckgo.com/html/");
       readerTarget.searchParams.set("q", `site:otzovik.com/reviews/ "${brand}"`);

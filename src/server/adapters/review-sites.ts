@@ -376,7 +376,7 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
       brand: "Кагоцел"
     },
     searchUrl: (brand) => `https://otzovik.com/__external_search__?brand=${encodeURIComponent(brand)}`,
-    isProductUrl: (url) => /^\/reviews\/[a-z0-9_]+\/?$/i.test(url.pathname),
+    isProductUrl: (url) => /^\/reviews\/[a-z0-9_-]+\/?$/i.test(url.pathname),
     idFromUrl: (url) => hashId(`${url.hostname.replace(/^www\./, "")}${url.pathname.replace(/\/$/, "")}`),
     parse: parseOtzovik
   },
@@ -690,7 +690,7 @@ export class ReviewSiteAdapter implements SiteAdapter {
         const redirected = target.searchParams.get("uddg");
         if (redirected) target = new URL(redirected);
         if (!sameSite(target, "otzovik.com")) return;
-        const slug = target.pathname.match(/^\/reviews\/([a-z0-9_]+)(?:\/|$)/i)?.[1];
+        const slug = target.pathname.match(/^\/reviews\/([a-z0-9_-]+)(?:\/|$)/i)?.[1];
         if (!slug) return;
         const canonical = `https://otzovik.com/reviews/${slug}/`;
         refs.set(canonical, {

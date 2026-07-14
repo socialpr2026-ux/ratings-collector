@@ -215,6 +215,78 @@ describe("static Otzovik product gateway", () => {
     expect(response.status).toBe(502);
     expect(await response.text()).toContain("did not prove the requested product aggregate");
   });
+
+  it("discovers exact Otzovik products from the source-bound first-party search", async () => {
+    const brand = "Оциллококцинум";
+    const source = `https://otzovik.com/?search_text=${encodeURIComponent(brand)}`;
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(input.toString());
+      expect(url).toMatchObject({ hostname: "otzovik-com.translate.goog", pathname: "/" });
+      expect(url.searchParams.get("search_text")).toBe(brand);
+      return new Response(`<!doctype html><html><head><base href="${source}"><link rel="canonical" href="${source}"></head><body>
+        <div class="product-counter">3</div><div class="product-list">
+          <div class="item sortable" data-pid="4948" data-reviews="394" data-rating="401394">
+            <h3><a class="product-name" href="https://otzovik-com.translate.goog/reviews/gomeopaticheskoe_sredstvo_ot_grippa_i_prostudnih_zabolevaniy_buaron_ocillokokcinum/?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">Гомеопатический препарат Буарон "Оциллококцинум"</a></h3>
+          </div>
+          <div class="item sortable" data-pid="2620333" data-reviews="1" data-rating="50001">
+            <h3><a class="product-name" href="https://otzovik.com/reviews/gomeopaticheskiy_preparat_boiron_ocillokokcinum_zaschita_ot_virusov/">Гомеопатический препарат Boiron "Оциллококцинум защита от вирусов"</a></h3>
+          </div>
+          <div class="item sortable" data-pid="999" data-reviews="7" data-rating="40007">
+            <h3><a class="product-name" href="https://otzovik.com/reviews/drug_analogue/">Другой препарат</a></h3>
+          </div>
+        </div></body></html>`);
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(`https://otzovik.com/__external_search__?brand=${encodeURIComponent(brand)}`);
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-otzovik-search");
+    expect(proof.match(/class="result__a"/g)).toHaveLength(2);
+    expect(proof).toContain("https://otzovik.com/reviews/gomeopaticheskoe_sredstvo_ot_grippa_i_prostudnih_zabolevaniy_buaron_ocillokokcinum/");
+    expect(proof).toContain("https://otzovik.com/reviews/gomeopaticheskiy_preparat_boiron_ocillokokcinum_zaschita_ot_virusov/");
+    expect(proof).not.toContain("drug_analogue");
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it("recovers a split first-party product link without executing page scripts", async () => {
+    const brand = "Тикализис";
+    const source = `https://otzovik.com/?search_text=${encodeURIComponent(brand)}`;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<!doctype html><html><head>
+      <base href="${source}"><link rel="canonical" href="${source}"></head><body>
+      <div class="product-counter">1</div><div class="product-list">
+        <div class="item sortable" data-pid="2733023" data-reviews="1" data-rating="50001"><h3 class="text"><script>
+          document.write("<a hr"+"ef='/rev");
+          document.write("iews/tabletki_r-farm_tikalizis/' rel='nofollow' class='product-name'>Таблетки Р-Фарм \\"Тикализис\\"</a>");
+        </script></h3></div>
+      </div></body></html>`)));
+
+    const response = await callGateway(`https://otzovik.com/__external_search__?brand=${encodeURIComponent(brand)}`);
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(proof).toContain("https://otzovik.com/reviews/tabletki_r-farm_tikalizis/");
+    expect(proof).toContain("Тикализис");
+    expect(proof).not.toContain("document.write");
+  });
+
+  it("fails closed when first-party Otzovik results do not match the requested brand", async () => {
+    const brand = "Оциллококцинум";
+    const source = `https://otzovik.com/?search_text=${encodeURIComponent(brand)}`;
+    const upstream = vi.fn()
+      .mockResolvedValueOnce(new Response(`<!doctype html><html><head><base href="${source}"><link rel="canonical" href="${source}"></head><body>
+        <div class="product-counter">1</div><div class="product-list"><div class="item sortable" data-pid="999" data-reviews="7" data-rating="40007">
+        <h3><a class="product-name" href="https://otzovik.com/reviews/drug_analogue/">Другой препарат</a></h3></div></div></body></html>`))
+      .mockResolvedValueOnce(new Response("reader unavailable", { status: 507 }));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(`https://otzovik.com/__external_search__?brand=${encodeURIComponent(brand)}`);
+
+    expect(response.status).toBe(507);
+    expect(await response.text()).toBe("reader unavailable");
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("static ru.otzyv.com product gateway", () => {
