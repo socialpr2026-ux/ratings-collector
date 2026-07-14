@@ -15,4 +15,11 @@ describe("Google Apps Script bridge source", () => {
     expect(source).toContain("ошибка вычисления");
     expect(source).toContain("/^\\s*#/u.test(displayed)");
   });
+
+  it("keeps the operational sheet readable during monthly work", () => {
+    expect(source).toContain("sheet.setFrozenRows(Math.min(2, rows));");
+    expect(source).toContain("sheet.setFrozenColumns(Math.min(3, columns));");
+    expect(source).toContain("sheet.setHiddenGridlines(true);");
+    expect(source).toContain('sheet.setTabColor("#154f3d");');
+  });
 });

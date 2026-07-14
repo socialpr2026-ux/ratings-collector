@@ -410,7 +410,7 @@ function applyFormatting_(sheet, rowKinds, rows, columns) {
   var whole = sheet.getRange(1, 1, rows, columns);
   whole
     .setFontFamily("Arial")
-    .setFontSize(9)
+    .setFontSize(10)
     .setFontColor("#000000")
     .setFontWeight("normal")
     .setFontStyle("normal")
@@ -423,19 +423,19 @@ function applyFormatting_(sheet, rowKinds, rows, columns) {
     var kind = rowKinds[row];
     var rowRange = sheet.getRange(row + 1, 1, 1, columns);
     if (kind === "title") {
-      rowRange.setBackground("#20124d").setFontColor("#ffffff").setFontWeight("bold");
+      rowRange.setBackground("#154f3d").setFontColor("#ffffff").setFontWeight("bold").setFontSize(10);
     } else if (kind === "subheader" && columns > 4) {
       sheet.getRange(row + 1, 5, 1, columns - 4)
-        .setBackground("#20124d").setFontColor("#ffffff").setFontWeight("bold");
+        .setBackground("#154f3d").setFontColor("#ffffff").setFontWeight("bold").setFontSize(10);
     } else if (kind === "section") {
-      rowRange.setBackground("#d0e0e3");
-      sheet.getRange(row + 1, 1).setFontWeight("bold").setFontColor("#1155cc").setFontLine("underline");
+      rowRange.setBackground("#e6f1eb");
+      sheet.getRange(row + 1, 1).setFontWeight("bold").setFontColor("#154f3d").setFontLine("underline");
     } else if (kind === "summaryHeader") {
-      rowRange.setBackground("#d9ead3").setFontWeight("bold");
+      rowRange.setBackground("#edf4f0").setFontWeight("bold").setFontColor("#154f3d");
     } else if (kind === "summary") {
       sheet.getRange(row + 1, 1).setFontWeight("bold");
     } else if (kind === "footnote") {
-      rowRange.setFontStyle("italic").setFontColor("#666666");
+      rowRange.setFontStyle("italic").setFontColor("#68706c").setFontSize(9);
     } else if (kind === "product") {
       sheet.getRange(row + 1, 2).setFontColor("#1155cc").setFontLine("underline");
     }
@@ -463,7 +463,7 @@ function applyFormatting_(sheet, rowKinds, rows, columns) {
 
   if (columns > 4) {
     sheet.getRange(1, 5, rows, columns - 4).setBorder(
-      null, true, null, true, true, null, "#000000", SpreadsheetApp.BorderStyle.DOTTED
+      null, true, null, true, true, null, "#d5ddd8", SpreadsheetApp.BorderStyle.DOTTED
     );
   }
 
@@ -472,13 +472,19 @@ function applyFormatting_(sheet, rowKinds, rows, columns) {
 function applyLayout_(sheet, rows, columns) {
   // Apply sizing after merges: Google Sheets can otherwise retain dimensions
   // from the previous three-column layout during an in-place migration.
-  sheet.setColumnWidth(1, 150);
-  if (columns >= 2) sheet.setColumnWidth(2, 430);
-  if (columns >= 3) sheet.setColumnWidth(3, 330);
-  if (columns >= 4) sheet.setColumnWidth(4, 24);
-  if (columns > 4) sheet.setColumnWidths(5, columns - 4, 92);
+  sheet.setHiddenGridlines(true);
+  sheet.setFrozenRows(Math.min(2, rows));
+  // Summary labels and the footnote end at column C; the blank D column stays
+  // as a visual separator before the monthly metrics.
+  sheet.setFrozenColumns(Math.min(3, columns));
+  sheet.setTabColor("#154f3d");
+  sheet.setColumnWidth(1, 130);
+  if (columns >= 2) sheet.setColumnWidth(2, 360);
+  if (columns >= 3) sheet.setColumnWidth(3, 300);
+  if (columns >= 4) sheet.setColumnWidth(4, 20);
+  if (columns > 4) sheet.setColumnWidths(5, columns - 4, 86);
   if (rows > 0) sheet.autoResizeRows(1, rows);
-  if (rows >= 2) sheet.setRowHeights(1, 2, 28);
+  if (rows >= 2) sheet.setRowHeights(1, 2, 30);
 }
 
 function documentMismatches_(readback, document) {

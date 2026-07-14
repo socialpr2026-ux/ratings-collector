@@ -34,8 +34,14 @@ describe("Google Sheets model", () => {
       .map((kind, index) => kind === "summary" ? index : -1)
       .filter((index) => index >= 0);
     for (const summaryRow of summaryRows) {
-      expect(document.merges).toContainEqual({ startRow: summaryRow, endRow: summaryRow + 1, startColumn: 0, endColumn: 4 });
+      expect(document.merges).toContainEqual({ startRow: summaryRow, endRow: summaryRow + 1, startColumn: 0, endColumn: 3 });
     }
+    expect(document.merges).toContainEqual({
+      startRow: document.rowKinds.indexOf("footnote"),
+      endRow: document.rowKinds.indexOf("footnote") + 1,
+      startColumn: 0,
+      endColumn: 3
+    });
   });
 
   it("merges a legacy URL-hash row into a new stable platform ID without losing history", () => {

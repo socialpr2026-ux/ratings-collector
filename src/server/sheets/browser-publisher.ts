@@ -112,26 +112,26 @@ function cellCss(document: SheetDocument, row: number, column: number, cell: Exp
   const metric = column >= 4;
   const css = [
     "overflow:hidden",
-    "padding:2px 3px",
+    "padding:4px 6px",
     "vertical-align:middle",
     "font-family:Arial",
-    `font-size:${kind === "section" ? 11 : 9}pt`,
+    `font-size:${kind === "footnote" ? 9 : 10}pt`,
     "white-space:normal"
   ];
   if (kind === "title" || kind === "subheader" && column > 0) {
-    css.push("background-color:#20124d", "color:#ffffff");
+    css.push("background-color:#154f3d", "color:#ffffff");
     if (kind === "title" || metric) css.push("font-weight:bold");
   }
   if (kind === "section") {
-    css.push("background-color:#d0e0e3", "border:1px dotted #000000");
-    if (column === 0) css.push("font-weight:bold", "color:#1155cc", "text-decoration:underline");
+    css.push("background-color:#e6f1eb", "border:1px dotted #d5ddd8");
+    if (column === 0) css.push("font-weight:bold", "color:#154f3d", "text-decoration:underline");
   }
-  if (kind === "summaryHeader") css.push("background-color:#d9ead3", "font-weight:bold");
+  if (kind === "summaryHeader") css.push("background-color:#edf4f0", "color:#154f3d", "font-weight:bold");
   if (kind === "summary" && column === 0) css.push("font-weight:bold");
-  if (kind === "footnote") css.push("font-style:italic", "color:#666666");
+  if (kind === "footnote") css.push("font-style:italic", "color:#68706c");
   if (kind === "product" && column === 1) css.push("color:#1155cc", "text-decoration:underline");
   if (metric && ["title", "subheader", "section", "product", "summaryHeader", "summary"].includes(kind)) {
-    css.push("border-left:1px dotted #000000", "border-right:1px dotted #000000", "text-align:center");
+    css.push("border-left:1px dotted #d5ddd8", "border-right:1px dotted #d5ddd8", "text-align:center");
   }
   if ((kind === "product" || kind === "summary") && metric) {
     const share = kind === "summary" && (column - 4) % 2 === 1;
@@ -188,11 +188,11 @@ export function buildBrowserSheetClipboardPlan(document: SheetDocument, locale =
         : html(value);
       htmlCells.push(`<td ${attributes.join(" ")}>${content}</td>`);
     }
-    htmlRows.push(`<tr style="height:24px">${htmlCells.join("")}</tr>`);
+    htmlRows.push(`<tr style="height:28px">${htmlCells.join("")}</tr>`);
   }
-  const widths = [150, 430, 330, 24, ...Array(Math.max(0, document.columnCount - 4)).fill(92)];
+  const widths = [130, 360, 300, 20, ...Array(Math.max(0, document.columnCount - 4)).fill(86)];
   const colgroup = `<colgroup>${widths.map((width) => `<col width="${width}">`).join("")}</colgroup>`;
-  const htmlText = `<google-sheets-html-origin><table xmlns="http://www.w3.org/1999/xhtml" cellspacing="0" cellpadding="0" dir="ltr" data-sheets-root="1" style="table-layout:fixed;font-size:9pt;font-family:Arial;width:0px">${colgroup}<tbody>${htmlRows.join("")}</tbody></table></google-sheets-html-origin>`;
+  const htmlText = `<google-sheets-html-origin><table xmlns="http://www.w3.org/1999/xhtml" cellspacing="0" cellpadding="0" dir="ltr" data-sheets-root="1" style="table-layout:fixed;font-size:10pt;font-family:Arial;width:0px">${colgroup}<tbody>${htmlRows.join("")}</tbody></table></google-sheets-html-origin>`;
   return {
     payload: { plainText, htmlText }, cells, merges,
     range: `A1:${columnLetter(document.columnCount)}${document.values.length}`

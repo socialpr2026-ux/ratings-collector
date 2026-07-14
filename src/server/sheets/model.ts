@@ -248,7 +248,7 @@ export function buildSheetDocument(
   months.forEach((_, index) => { summaryHeader[4 + index * 2] = "Кол-во"; summaryHeader[5 + index * 2] = "Доля"; });
   const summaryHeaderRow = values.length;
   add("summaryHeader", summaryHeader);
-  merges.push({ startRow: summaryHeaderRow, endRow: summaryHeaderRow + 1, startColumn: 0, endColumn: 4 });
+  merges.push({ startRow: summaryHeaderRow, endRow: summaryHeaderRow + 1, startColumn: 0, endColumn: 3 });
   const labels = ["Отзывов всего", "Карточки с рейтингом ≥4 баллов", "Карточки с рейтингом <4 баллов", "Карточки без отзывов"];
   labels.forEach((label, metricIndex) => {
     const row: SheetScalar[] = [label]; const formula: Array<string | null> = [];
@@ -267,10 +267,10 @@ export function buildSheetDocument(
     });
     const summaryRow = values.length;
     add("summary", row, formula);
-    merges.push({ startRow: summaryRow, endRow: summaryRow + 1, startColumn: 0, endColumn: 4 });
+    merges.push({ startRow: summaryRow, endRow: summaryRow + 1, startColumn: 0, endColumn: 3 });
   });
   add("footnote", ["*Публичные агрегаты отзывов и рейтингов; ошибки и блокировки не подменяются нулевыми значениями."]);
-  merges.push({ startRow: values.length - 1, endRow: values.length, startColumn: 0, endColumn: columnCount });
+  merges.push({ startRow: values.length - 1, endRow: values.length, startColumn: 0, endColumn: 3 });
   return { values, formulas, rowKinds, months, productStartRow, productEndRow, summaryStartRow, columnCount, merges };
 }
 
