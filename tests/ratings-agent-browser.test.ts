@@ -122,6 +122,33 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("routes the exact Ozon Translate render host through fixed function egress", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("translated Ozon html", {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const target = new URL("https://www-ozon-ru.translate.goog/search/");
+    target.searchParams.set("text", "Кагоцел");
+    target.searchParams.set("from_global", "true");
+    target.searchParams.set("_x_tr_sl", "ru");
+    target.searchParams.set("_x_tr_tl", "en");
+    target.searchParams.set("_x_tr_hl", "en");
+
+    const response = await routedFetch(target, { headers: { accept: "text/html" } });
+
+    expect(await response.text()).toBe("translated Ozon html");
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(directFetch.mock.calls[0]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+    const init = directFetch.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toEqual({ url: target.toString() });
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("maps a lazy Sandbox quota failure to AdapterBlockedError", async () => {
     const run = vi.fn(async () => {
       throw new Error("Sandbox quota exceeded");

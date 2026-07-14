@@ -219,6 +219,9 @@ export function browserFetch(
       ].includes(url.pathname) ||
       url.hostname === "card.wb.ru" && url.pathname === "/cards/v4/detail"
     );
+    if (staticProxy && url.hostname === "www-ozon-ru.translate.goog") {
+      return fetchViaStaticProxy(url, request.signal);
+    }
     if (staticProxy && fixedWildberriesTarget) {
       try {
         const direct = await fetch(request);

@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { load } from "cheerio";
 import { INITIAL_BRANDS, INITIAL_DOMAINS } from "../../src/shared/constants.js";
 import type { RunState } from "../../src/shared/types.js";
 import { authenticate, authConfig, type AuthUser } from "../../src/server/auth.js";
@@ -20,6 +21,174 @@ const json = (value: unknown, status = 200) => new Response(JSON.stringify(value
 function secureEqual(left: string, right: string): boolean {
   const a = Buffer.from(left); const b = Buffer.from(right);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+const OZON_TRANSLATE_HOST = "www-ozon-ru.translate.goog";
+const OZON_SOURCE_HOST = "www.ozon.ru";
+const OZON_TRANSLATE_PARAMETERS = new Set(["_x_tr_sl", "_x_tr_tl", "_x_tr_hl"]);
+const OZON_SEARCH_PARAMETERS = new Set([
+  "category_was_predicted",
+  "deny_category_prediction",
+  "from_global",
+  "page",
+  "text"
+]);
+
+type OzonTranslateTarget = {
+  kind: "search" | "category" | "product";
+  source: URL;
+  sku?: string;
+};
+
+function singleSearchParameter(url: URL, name: string): string | undefined {
+  const values = url.searchParams.getAll(name);
+  return values.length === 1 ? values[0] : undefined;
+}
+
+function exactUrlSignature(url: URL): string {
+  const parameters = [...url.searchParams.entries()].sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+    leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue)
+  );
+  return `${url.protocol}//${url.hostname}${url.pathname}?${new URLSearchParams(parameters).toString()}`;
+}
+
+function parseOzonTranslateTarget(target: URL): OzonTranslateTarget | undefined {
+  if (
+    target.protocol !== "https:" || target.hostname !== OZON_TRANSLATE_HOST || target.port ||
+    target.username || target.password || target.hash
+  ) return undefined;
+  if (
+    singleSearchParameter(target, "_x_tr_sl") !== "ru" ||
+    singleSearchParameter(target, "_x_tr_tl") !== "en" ||
+    singleSearchParameter(target, "_x_tr_hl") !== "en"
+  ) return undefined;
+
+  const product = target.pathname.match(/^\/product\/[a-z0-9-]*-(\d+)\/$/i);
+  if (product) {
+    if ([...target.searchParams.keys()].some((key) => !OZON_TRANSLATE_PARAMETERS.has(key))) return undefined;
+    return { kind: "product", source: new URL(target.pathname, `https://${OZON_SOURCE_HOST}`), sku: product[1] };
+  }
+
+  const isSearch = target.pathname === "/search/";
+  const isCategory = /^\/category\/[a-z0-9-]+\/$/i.test(target.pathname);
+  if (!isSearch && !isCategory) return undefined;
+  if ([...target.searchParams.keys()].some((key) =>
+    !OZON_TRANSLATE_PARAMETERS.has(key) && !OZON_SEARCH_PARAMETERS.has(key)
+  )) return undefined;
+  if ([...target.searchParams.keys()].some((key) => target.searchParams.getAll(key).length !== 1)) return undefined;
+
+  const text = singleSearchParameter(target, "text")?.normalize("NFKC").trim() ?? "";
+  const page = singleSearchParameter(target, "page") ?? "1";
+  if (
+    text.length < 1 || text.length > 200 || singleSearchParameter(target, "from_global") !== "true" ||
+    !/^\d+$/.test(page) || Number(page) < 1 || Number(page) > 100
+  ) return undefined;
+  if (isSearch && (
+    target.searchParams.has("category_was_predicted") || target.searchParams.has("deny_category_prediction")
+  )) return undefined;
+  if (isCategory && (
+    singleSearchParameter(target, "category_was_predicted") !== "true" ||
+    singleSearchParameter(target, "deny_category_prediction") !== "true"
+  )) return undefined;
+
+  const source = new URL(target.pathname, `https://${OZON_SOURCE_HOST}`);
+  for (const [key, value] of target.searchParams) {
+    if (!OZON_TRANSLATE_PARAMETERS.has(key)) source.searchParams.set(key, value);
+  }
+  return { kind: isSearch ? "search" : "category", source };
+}
+
+function ozonJsonLdEntries(value: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(value)) return value.flatMap(ozonJsonLdEntries);
+  if (!value || typeof value !== "object") return [];
+  const object = value as Record<string, unknown>;
+  const graph = Array.isArray(object["@graph"]) ? object["@graph"].flatMap(ozonJsonLdEntries) : [];
+  return [object, ...graph];
+}
+
+function validOzonTranslateRedirect(html: string, requested: OzonTranslateTarget): boolean {
+  if (requested.kind !== "search") return false;
+  const encoded = html.match(/location\.replace\(("(?:\\.|[^"\\])*")\)/)?.[1];
+  if (!encoded) return false;
+  try {
+    const redirected = new URL(JSON.parse(encoded) as string);
+    if (
+      redirected.protocol !== "https:" || redirected.hostname !== OZON_SOURCE_HOST || redirected.port ||
+      redirected.username || redirected.password || redirected.hash ||
+      !/^\/category\/[a-z0-9-]+\/$/i.test(redirected.pathname)
+    ) return false;
+    if ([...redirected.searchParams.keys()].some((key) => !OZON_SEARCH_PARAMETERS.has(key))) return false;
+    if ([...redirected.searchParams.keys()].some((key) => redirected.searchParams.getAll(key).length !== 1)) return false;
+    return redirected.searchParams.get("text") === requested.source.searchParams.get("text") &&
+      redirected.searchParams.get("from_global") === "true" &&
+      (redirected.searchParams.get("page") ?? "1") === (requested.source.searchParams.get("page") ?? "1") &&
+      redirected.searchParams.get("category_was_predicted") === "true" &&
+      redirected.searchParams.get("deny_category_prediction") === "true";
+  } catch {
+    return false;
+  }
+}
+
+function provesOzonTranslateHtml(html: string, requested: OzonTranslateTarget): boolean {
+  if (!/<\/html>\s*$/i.test(html)) return false;
+  if (validOzonTranslateRedirect(html, requested)) return true;
+  if (!html.includes("window.__NUXT__.state=")) return false;
+  const $ = load(html);
+  const baseValue = $("base[href]").first().attr("href");
+  if (!baseValue) return false;
+  try {
+    if (exactUrlSignature(new URL(baseValue)) !== exactUrlSignature(requested.source)) return false;
+  } catch {
+    return false;
+  }
+
+  if (requested.kind === "search" || requested.kind === "category") {
+    const state = $("script").toArray().map((script) => $(script).text())
+      .find((text) => text.includes("window.__NUXT__.state="));
+    if (!state) return false;
+    const totals = [...state.matchAll(/"totalPages":(\d+)/g)].map((match) => Number(match[1]));
+    if (new Set(totals).size !== 1 || totals.length === 0) return false;
+    const products = $('[data-widget="tileGridDesktop"] .tile-root').length;
+    const explicitEmpty = state.includes("catalog.searchEmptyState");
+    return products > 0 ? !explicitEmpty : explicitEmpty;
+  }
+
+  const products: Array<Record<string, unknown>> = [];
+  for (const script of $('script[type="application/ld+json"]').toArray()) {
+    try {
+      products.push(...ozonJsonLdEntries(JSON.parse($(script).text()) as unknown));
+    } catch {
+      return false;
+    }
+  }
+  const product = products.find((entry) => {
+    const types = Array.isArray(entry["@type"]) ? entry["@type"] : [entry["@type"]];
+    return types.includes("Product") && String(entry.sku ?? "") === requested.sku &&
+      typeof entry.name === "string" && entry.name.trim().length > 0;
+  });
+  if (!product) return false;
+  const scoreValue = $('[id^="state-webSingleProductScore"][data-state]').first().attr("data-state");
+  if (!scoreValue) return false;
+  let scoreText: string;
+  try {
+    const score = JSON.parse(scoreValue) as { text?: unknown };
+    if (typeof score.text !== "string" || !score.text.trim()) return false;
+    scoreText = score.text.replace(/\s+/g, " ").trim();
+  } catch {
+    return false;
+  }
+  const aggregate = product.aggregateRating;
+  if (aggregate && typeof aggregate === "object") {
+    const value = aggregate as Record<string, unknown>;
+    const reviewsText = String(value.reviewCount ?? "");
+    const ratingValue = Number(String(value.ratingValue ?? "").replace(",", "."));
+    const scoreMatch = scoreText.match(/^([0-5](?:[.,]\d+)?)\s*[•·]\s*([\d\s\u00a0\u202f]+)\s*отзыв(?:а|ов)?$/iu);
+    const scoreRating = scoreMatch ? Number(scoreMatch[1]!.replace(",", ".")) : Number.NaN;
+    const scoreReviews = scoreMatch ? Number(scoreMatch[2]!.replace(/[\s\u00a0\u202f]+/g, "")) : Number.NaN;
+    return /^\d+$/.test(reviewsText) && Number(reviewsText) > 0 && ratingValue > 0 && ratingValue <= 5 &&
+      scoreReviews === Number(reviewsText) && scoreRating === ratingValue;
+  }
+  return /^нет отзывов$/iu.test(scoreText);
 }
 
 function assertOwner(run: RunState, user: AuthUser): void {
@@ -86,6 +255,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     ].includes(target.pathname) ||
     target.hostname === "card.wb.ru" && target.pathname === "/cards/v4/detail"
   );
+  const ozonTranslatedTarget = parseOzonTranslateTarget(target);
   let ozonTarget = false;
   if (target.hostname === "www.ozon.ru" && target.pathname === "/api/composer-api.bx/page/json/v2") {
     const nested = target.searchParams.get("url") ?? "";
@@ -100,8 +270,35 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         /^\d+$/.test(page) && Number(page) >= 1 && Number(page) <= 100;
     } catch { /* invalid nested Ozon search URL */ }
   }
-  if (target.protocol !== "https:" || !(reviewTarget || wildberriesTarget || ozonTarget)) {
+  if (target.protocol !== "https:" || !(reviewTarget || wildberriesTarget || ozonTarget || ozonTranslatedTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
+  }
+  if (ozonTranslatedTarget) {
+    const upstream = await safeFetch(target.toString(), {
+      method: "GET",
+      redirect: "manual",
+      headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+    }, fetch, 0, 60_000);
+    const html = await readTextBounded(upstream, 12_000_000, 60_000);
+    if (!upstream.ok) {
+      return new Response(html, {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "text/html; charset=utf-8" }
+      });
+    }
+    if (!/(?:text\/html|application\/xhtml\+xml)/i.test(upstream.headers.get("content-type") ?? "") ||
+      /(?:incidentId|Antibot Captcha|abt-challenge|Target URL returned error 403)/i.test(html) ||
+      !provesOzonTranslateHtml(html, ozonTranslatedTarget)) {
+      return json({ error: "Ozon translated page did not prove the requested source and product semantics" }, 502);
+    }
+    return new Response(html, {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "google-translate-ozon-ssr"
+      }
+    });
   }
   if (host === "otzovik.com" && /^\/reviews\/[a-z0-9_]+\/?$/i.test(target.pathname)) {
     if (target.search || target.hash || target.hostname !== "otzovik.com") {

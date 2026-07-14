@@ -67,3 +67,93 @@ describe("static Otzovik product gateway", () => {
     expect(await response.text()).toContain("did not prove the requested product aggregate");
   });
 });
+
+describe("static Ozon Translate gateway", () => {
+  const token = "z".repeat(32);
+  const callGateway = (url: string) => staticReviewFetch(
+    new Request("https://ratings.example/api/internal/static-review-fetch", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ url })
+    }),
+    { INTERNAL_AGENT_TOKEN: token }
+  );
+  const sourceFromTarget = (target: URL) => {
+    const source = new URL(target.toString());
+    source.hostname = "www.ozon.ru";
+    source.searchParams.delete("_x_tr_sl");
+    source.searchParams.delete("_x_tr_tl");
+    source.searchParams.delete("_x_tr_hl");
+    return source;
+  };
+  const translatedTarget = (pathname: string, parameters: Record<string, string> = {}) => {
+    const target = new URL(pathname, "https://www-ozon-ru.translate.goog");
+    for (const [key, value] of Object.entries(parameters)) target.searchParams.set(key, value);
+    target.searchParams.set("_x_tr_sl", "ru");
+    target.searchParams.set("_x_tr_tl", "en");
+    target.searchParams.set("_x_tr_hl", "en");
+    return target;
+  };
+
+  it("accepts only source-bound Ozon search, category and product HTML", async () => {
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const target = new URL(input.toString());
+      const source = sourceFromTarget(target);
+      const base = source.toString().replaceAll("&", "&amp;");
+      if (target.pathname.startsWith("/product/")) {
+        return new Response(`<html><head><base href="${base}">
+          <script type="application/ld+json">${JSON.stringify({
+            "@type": "Product",
+            sku: "1234567890",
+            name: "Кагоцел таблетки 12 мг №20",
+            aggregateRating: { ratingValue: "4.8", reviewCount: "711" }
+          })}</script></head><body>
+          <div id="state-webSingleProductScore-1" data-state='{"text":"4.8 • 711 отзывов"}'></div>
+          <script>window.__NUXT__.state={}</script></body></html>`, {
+          headers: { "content-type": "text/html; charset=utf-8" }
+        });
+      }
+      return new Response(`<html><head><base href="${base}"></head><body>
+        <div data-widget="tileGridDesktop"><div class="tile-root">proved product tile</div></div>
+        <script>window.__NUXT__.state={"catalog":{"totalPages":2}}</script></body></html>`, {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+    const search = translatedTarget("/search/", { text: "Кагоцел", from_global: "true" });
+    const category = translatedTarget("/category/apteka-6000/", {
+      text: "Кагоцел",
+      from_global: "true",
+      category_was_predicted: "true",
+      deny_category_prediction: "true"
+    });
+    const product = translatedTarget("/product/kagotsel-1234567890/");
+
+    for (const target of [search, category, product]) {
+      const response = await callGateway(target.toString());
+      expect(response.status).toBe(200);
+      expect(response.headers.get("x-ratings-source")).toBe("google-translate-ozon-ssr");
+    }
+    expect(upstream).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejects unbounded Ozon Translate queries before fetch and fails closed on wrong source HTML", async () => {
+    const upstream = vi.fn(async () => new Response(`<html><head>
+      <base href="https://www.ozon.ru/search/?text=Другой&amp;from_global=true"></head><body>
+      <div data-widget="tileGridDesktop"><div class="tile-root"></div></div>
+      <script>window.__NUXT__.state={"catalog":{"totalPages":1}}</script></body></html>`, {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    }));
+    vi.stubGlobal("fetch", upstream);
+    const invalid = translatedTarget("/search/", { text: "Кагоцел", from_global: "true", redirect: "https://evil.example" });
+
+    const rejected = await callGateway(invalid.toString());
+    expect(rejected.status).toBe(400);
+    expect(upstream).not.toHaveBeenCalled();
+
+    const valid = translatedTarget("/search/", { text: "Кагоцел", from_global: "true" });
+    const mismatched = await callGateway(valid.toString());
+    expect(mismatched.status).toBe(502);
+    expect(await mismatched.text()).toContain("did not prove the requested source");
+  });
+});
