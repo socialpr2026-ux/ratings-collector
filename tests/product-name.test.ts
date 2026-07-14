@@ -11,6 +11,29 @@ describe("canonical product descriptors", () => {
     expect(values).toEqual(Array(3).fill("таблетки 100 мг №10"));
   });
 
+  it("does not turn the ordinary word 'про' into a product line", () => {
+    const identity = analyzeProductIdentity({
+      brand: "Кагоцел",
+      product: "Кагоцел, таблетки 12 мг, 10 шт.",
+      evidence: {
+        scope: "listing",
+        signals: [
+          { source: "title", text: "Кагоцел, таблетки 12 мг, 10 шт." },
+          { source: "description", text: "Отзывы про Кагоцел, таблетки 12 мг, 10 шт." }
+        ],
+        variants: [], identifiers: [], imageUrls: [], instructionUrls: []
+      }
+    });
+
+    expect(identity).toMatchObject({
+      label: "таблетки 12 мг №10",
+      granularity: "variant",
+      confidence: "exact"
+    });
+    expect(canonicalProductDescriptor("Кагоцел", "Кагоцел Форте, таблетки 12 мг, 10 шт."))
+      .toBe("Форте таблетки 12 мг №10");
+  });
+
   it("never fills complementary partial names from neighbouring listings", () => {
     const values = canonicalProductDescriptors([
       { brand: "Кагоцел", product: "Кагоцел табл. 10" },

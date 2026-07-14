@@ -56,7 +56,6 @@ const MODIFIERS: Array<{ value: string; pattern: RegExp }> = [
   { value: "Нео", pattern: /(?<![\p{L}\p{N}])нео(?![\p{L}\p{N}])/iu },
   { value: "Кидс", pattern: /(?<![\p{L}\p{N}])кидс(?![\p{L}\p{N}])/iu },
   { value: "Иммуно", pattern: /(?<![\p{L}\p{N}])иммуно(?![\p{L}\p{N}])/iu },
-  { value: "Про", pattern: /(?<![\p{L}\p{N}])про(?![\p{L}\p{N}])/iu },
   { value: "с лоратадином", pattern: /(?<![\p{L}\p{N}])с\s+лоратадином(?![\p{L}\p{N}])/iu },
   { value: "пролонгированные", pattern: /(?<![\p{L}\p{N}])(?:пролонгированн(?:ого|ые|ая|ый)|пролонг)(?![\p{L}\p{N}])/iu },
   { value: "кишечнорастворимые", pattern: /(?<![\p{L}\p{N}])кишечнорастворим(?:ые|ая|ый|ого)(?![\p{L}\p{N}])/iu },
@@ -247,7 +246,6 @@ function productHintFromUrl(url: string | undefined): string {
       .replace(/\bgranuly\b/giu, " гранулы ")
       .replace(/\b(?:d rassas|dlia rassasyvaniia)\b/giu, " для рассасывания ")
       .replace(/\b(?:plyus|plius)\b/giu, " плюс ")
-      .replace(/\bpro\b/giu, " про ")
       .replace(/\bdetyam\b/giu, " детский ")
       .replace(/\bs loratadinom\b/giu, " с лоратадином ")
       .replace(/\bsupp vag i rekt\b/giu, " суппозитории вагинальные и ректальные ")
@@ -336,7 +334,7 @@ function render(parts: ProductParts): string {
   return chunks.join(" ") || "Общая карточка бренда";
 }
 
-const LINE_NAMES = ["Максимум", "Дуо", "Форте", "Экспресс", "Лайт", "Интенс", "Нео", "Кидс", "Иммуно", "Про"];
+const LINE_NAMES = ["Максимум", "Дуо", "Форте", "Экспресс", "Лайт", "Интенс", "Нео", "Кидс", "Иммуно"];
 const PACK_MEASURE_FORMS = new Set(["порошок", "гранулы", "раствор", "сироп", "суспензия", "спрей", "капли", "гель", "крем", "мазь", "лиофилизат"]);
 
 function lineName(parts: ProductParts): string | undefined {
