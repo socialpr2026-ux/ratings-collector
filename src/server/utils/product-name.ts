@@ -24,6 +24,7 @@ const FORM_RULES: Array<{ value: string; pattern: RegExp }> = [
   { value: "капсулы", pattern: /(?<![\p{L}\p{N}])(?:капс?\.?|капсул(?:а|ы|у|ой|ок)?)(?![\p{L}\p{N}])/iu },
   { value: "саше", pattern: /(?<![\p{L}\p{N}])(?:саше(?:[-\s]?пакет(?:ы|ов|а)?)?|пакетик(?:и|ов)?|стик(?:и|ов)?)(?![\p{L}\p{N}])/iu },
   { value: "порошок", pattern: /(?<![\p{L}\p{N}])(?:пор(?:ошок|ошка)?\.?)(?![\p{L}\p{N}])/iu },
+  { value: "гранулы гомеопатические", pattern: /(?<![\p{L}\p{N}])гранул(?:ы|а|ах)?\s+гомеопатическ(?:ие|их|ими)?(?![\p{L}\p{N}])/iu },
   { value: "гранулы", pattern: /(?<![\p{L}\p{N}])гранул(?:ы|а|ах)?(?![\p{L}\p{N}])/iu },
   { value: "раствор", pattern: /(?<![\p{L}\p{N}])раствор(?:а|ом)?(?![\p{L}\p{N}])/iu },
   { value: "сироп", pattern: /(?<![\p{L}\p{N}])сироп(?:а|ом)?(?![\p{L}\p{N}])/iu },
@@ -427,7 +428,14 @@ function uniqueParsedCandidates(item: ProductNameInput): ProductParts[] {
     const parsed = parseProduct(item.brand, text);
     // Instruction text and image metadata are valuable fallbacks, but must not
     // overturn a concrete title/JSON-LD/variant with incompatible attributes.
-    if (isExactVariant(parsed) && strongExact.length && !strongExact.every((candidate) => partsCompatible(candidate, parsed))) continue;
+    if (isExactVariant(parsed) && strongExact.length) {
+      if (!strongExact.every((candidate) => partsCompatible(candidate, parsed))) continue;
+      // A listing title/JSON-LD/variant already proves an exact sellable item.
+      // Descriptions and instructions may contain ingredient concentrations,
+      // administration doses and neighbouring packs.  They can corroborate
+      // the exact item, but must not enrich it into a second artificial SKU.
+      if (!strongExact.some((candidate) => partsSubsumes(candidate, parsed))) continue;
+    }
     const key = partsKey(parsed);
     const previous = byKey.get(key);
     if (!previous || specificity(parsed) > specificity(previous)) byKey.set(key, parsed);

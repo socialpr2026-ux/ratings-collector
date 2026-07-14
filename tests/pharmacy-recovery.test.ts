@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AsnaAdapter, PolzaAdapter } from "../src/server/adapters/pharmacy-recovery.js";
 import { MemoryEvidenceStore } from "../src/server/evidence.js";
+import { analyzeProductIdentity } from "../src/server/utils/product-name.js";
 
 function translated(source: string, body: string): string {
   return `<html><head><base href="${source}"></head><body><script data-source-url="${source}"></script>${body}</body></html>`;
@@ -99,6 +100,48 @@ describe("recovered first-party pharmacy adapters", () => {
     expect(refs.find((item) => item.listingId === "14666")?.title).toBe("Кагоцел 12 мг №10 таблетки");
     const result = await adapter.collect(refs[0], { region: "Москва" });
     expect(result).toMatchObject({ product: "Кагоцел 12 мг №10 таблетки", reviews: 29, rating: 5, status: "ok", source: "asna-product-microdata:google-translate" });
+  });
+
+  it("derives exact human Oscillococcinum variants from ASNA card slugs", async () => {
+    const cards = [6, 12, 30].map((count) =>
+      `https://www.asna.ru/cards/otsillokoktsinum_1_doza_n${count}_granuly_gomeopaticheskie_laboratoires_boiron.html`
+    );
+    const ids = new Map(cards.map((card, index) => [new URL(card).pathname, String(9533 + index)]));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www.asna.ru" && url.pathname.endsWith("sitemap_cards.xml")) {
+        return new Response(`<urlset>${cards.map((card) => `<url><loc>${card}</loc></url>`).join("")}</urlset>`);
+      }
+      if (url.hostname === "www.asna.ru" && url.pathname.endsWith("sitemap_cards1.xml")) {
+        return new Response("<urlset></urlset>");
+      }
+      if (url.hostname === "www-asna-ru.translate.goog") {
+        const source = `https://www.asna.ru${url.pathname}`;
+        return new Response(asnaCard(source, ids.get(url.pathname)!, 4), { headers: { "content-type": "text/html" } });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const refs = await adapter.discover("Оциллококцинум", { region: "Москва" });
+    expect(refs.map((item) => item.title).sort()).toEqual([
+      "Оциллококцинум гранулы гомеопатические 1 доза №12",
+      "Оциллококцинум гранулы гомеопатические 1 доза №30",
+      "Оциллококцинум гранулы гомеопатические 1 доза №6"
+    ]);
+    for (const ref of refs) {
+      const result = await adapter.collect(ref, { region: "Москва" });
+      expect(analyzeProductIdentity({
+        brand: result.brand,
+        product: result.product,
+        url: result.canonicalUrl,
+        evidence: result.productEvidence
+      })).toMatchObject({
+        label: `гранулы гомеопатические №${ref.url.match(/_n(\d+)_/)?.[1]}`,
+        granularity: "variant",
+        confidence: "exact"
+      });
+    }
   });
 
   it("fails closed when translated aggregate proof is incomplete", async () => {

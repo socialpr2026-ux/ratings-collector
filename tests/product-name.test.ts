@@ -195,6 +195,30 @@ describe("canonical product descriptors", () => {
     })).toMatchObject({ granularity: "variant", confidence: "exact", label: "таблетки 12 мг №10" });
   });
 
+  it("keeps the exact Oscillococcinum listing separate from ingredient doses and neighbouring packs", () => {
+    expect(analyzeProductIdentity({
+      brand: "Оциллококцинум",
+      product: "Оциллококцинум гранулы гомеопатические 12 шт",
+      evidence: {
+        scope: "listing",
+        signals: [
+          { source: "title", text: "Оциллококцинум гранулы гомеопатические 12 шт" },
+          { source: "json_ld", text: "Оциллококцинум гранулы гомеопатические 12 шт" },
+          { source: "description", text: "Основное вещество 200К — 0,01 мл. Формы выпуска: гранулы 6 шт, 12 шт и 30 шт" },
+          { source: "instruction", text: "Принимать по 1 дозе утром и вечером" },
+          { source: "image_alt", text: "Купить Оциллококцинум гранулы гомеопатические 30 шт" }
+        ],
+        variants: ["Оциллококцинум гранулы гомеопатические 12 шт"],
+        identifiers: [{ type: "product_id", value: "212495" }],
+        imageUrls: [], instructionUrls: []
+      }
+    })).toMatchObject({
+      granularity: "variant",
+      confidence: "exact",
+      label: "гранулы гомеопатические №12"
+    });
+  });
+
   it("never exposes draft wording in product labels", () => {
     const labels = canonicalProductDescriptors([
       { brand: "Амиксин", product: "Модель 128489946 amiksin" },

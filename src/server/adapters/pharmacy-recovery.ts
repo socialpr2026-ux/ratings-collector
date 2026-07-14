@@ -331,6 +331,18 @@ function asnaTitle(url: string, brand: string, slugs: readonly string[]): string
   );
   const withoutBrand = brandSlug ? pathSlug.slice(brandSlug.length).replace(/^_+/, "") : pathSlug;
   const parts = withoutBrand.split("_").filter(Boolean);
+  const granulesIndex = parts.findIndex((part) => /^granuly$/i.test(part));
+  if (granulesIndex >= 0) {
+    const dose = parts.slice(0, granulesIndex).join("_").match(/(?:^|_)(\d+(?:[.,]\d+)?)_doza(?:_|$)/i)?.[1];
+    const count = parts.slice(0, granulesIndex).map((part) => part.match(/^n(\d+)$/i)?.[1]).find(Boolean);
+    const homeopathic = /^gomeopaticheskie$/i.test(parts[granulesIndex + 1] ?? "");
+    return [
+      brand,
+      homeopathic ? "гранулы гомеопатические" : "гранулы",
+      dose ? `${dose.replace(".", ",")} доза` : undefined,
+      count ? `№${count}` : undefined
+    ].filter(Boolean).join(" ");
+  }
   const formIndex = parts.findIndex((part) => /^(?:tab|tabl|kaps|por|poroshok|rastvor|sirop|sprey|maz|gel|supp|susp)$/i.test(part));
   const productParts = (formIndex >= 0 ? parts.slice(0, formIndex + 1) : parts.slice(0, 3)).map((part) => part
     .replace(/^(\d+(?:[.,]\d+)?)(mg|ml|g)$/i, (_full, value: string, unit: string) => `${value} ${unit.toLowerCase() === "mg" ? "мг" : unit.toLowerCase() === "ml" ? "мл" : "г"}`)
