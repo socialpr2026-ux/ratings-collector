@@ -1,0 +1,5 @@
+allowBuilds:
+  esbuild: true
+nodeLinker: hoisted
+minimumReleaseAgeExclude:
+  - tsx@4.23.1

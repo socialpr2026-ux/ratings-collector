@@ -1,0 +1,21 @@
+node_modules/
+dist/
+dist-server/
+*.tsbuildinfo
+coverage/
+outputs/
+.tmp-*
+.env
+.env.local
+.env.edgeone.secrets
+.edgeone/
+.edgeone-agent-fixed/
+.tmp-ozon-mcp/
+data/
+*.log
+
+# Tencent Cloud EdgeOne
+.env
+.edgeone/*
+.tef_dist/*
+  

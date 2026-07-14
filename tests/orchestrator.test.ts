@@ -1,0 +1,637 @@
+import { describe, expect, it } from "vitest";
+import type { AdapterContext, Observation, ProductRef, SiteAdapter } from "../src/shared/types.js";
+import { AdapterQuotaError } from "../src/server/adapters/errors.js";
+import { RatingsService } from "../src/server/orchestrator.js";
+import { MemoryRepository } from "../src/server/repository.js";
+
+const request = { sheetUrl: "https://docs.google.com/spreadsheets/d/test_sheet/edit", month: "2026-07", region: "Москва", domains: ["example.com"], brands: ["Бренд"] };
+class FakeAdapter implements SiteAdapter {
+  id = "fake"; supportedDomains = ["example.com"];
+  constructor(private readonly healthy = true) {}
+  async healthCheck() { return { ok: this.healthy, checkedAt: new Date().toISOString(), message: this.healthy ? undefined : "changed" }; }
+  async discover(brand: string, _context: AdapterContext): Promise<ProductRef[]> { return [{ domain: "example.com", platform: "fake", listingId: "1", brand, url: "https://example.com/p/1", metadata: {} }]; }
+  async collect(ref: ProductRef): Promise<Observation> { return { domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand, canonicalUrl: ref.url, product: `${ref.brand} таблетки 100 мг №10`, reviews: 5, rating: 4.5, status: "ok", capturedAt: new Date().toISOString() }; }
+}
+
+describe("run orchestration and fail-closed QA", () => {
+  it("retries only failed partitions and preserves successful observations", async () => {
+    const repository = new MemoryRepository();
+    const calls = new Map<string, number>();
+    let flakyAttempts = 0;
+    const service = new RatingsService(repository, async (domain) => ({
+      id: domain,
+      supportedDomains: [domain],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        calls.set(domain, (calls.get(domain) ?? 0) + 1);
+        if (domain === "example.org" && flakyAttempts++ === 0) {
+          throw new AdapterQuotaError("temporary quota gate");
+        }
+        return [{
+          domain, platform: domain, listingId: "1", brand,
+          url: `https://${domain}/p/1`, metadata: {}
+        }];
+      },
+      async collect(ref) {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId,
+          brand: ref.brand, canonicalUrl: ref.url, product: `${ref.brand} таблетки 100 мг №10`,
+          reviews: 5, rating: 4.5, status: "ok", capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+    const created = await service.createRun({ ...request, domains: ["example.com", "example.org"] });
+    const first = await service.executeRun(created.id);
+    const preserved = first.observations.find((item) => item.domain === "example.com")!;
+    const firstHash = first.payloadHash;
+
+    expect(first.partitions.map((item) => [item.domain, item.status])).toEqual([
+      ["example.com", "complete"],
+      ["example.org", "blocked"]
+    ]);
+    expect(first.qa?.ok).toBe(false);
+
+    const retried = await service.executeRun(created.id);
+
+    expect(calls).toEqual(new Map([["example.com", 1], ["example.org", 2]]));
+    expect(retried.progress).toMatchObject({ totalPartitions: 2, completedPartitions: 2 });
+    expect(retried.partitions.map((item) => [item.domain, item.status])).toEqual([
+      ["example.com", "complete"],
+      ["example.org", "complete"]
+    ]);
+    expect(retried.observations).toHaveLength(2);
+    expect(retried.observations.find((item) => item.domain === "example.com")).toEqual(preserved);
+    expect(retried.errors).toEqual([]);
+    expect(retried.qa).toMatchObject({ ok: true, blockers: [] });
+    expect(retried.payloadHash).not.toBe(firstHash);
+  });
+
+  it("keeps successful partitions intact when a selective retry fails again", async () => {
+    const repository = new MemoryRepository();
+    const calls = new Map<string, number>();
+    const service = new RatingsService(repository, async (domain) => ({
+      id: domain,
+      supportedDomains: [domain],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        calls.set(domain, (calls.get(domain) ?? 0) + 1);
+        if (domain === "example.org") throw new AdapterQuotaError("still unavailable");
+        return [{ domain, platform: domain, listingId: "1", brand, url: `https://${domain}/p/1`, metadata: {} }];
+      },
+      async collect(ref) {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId,
+          brand: ref.brand, canonicalUrl: ref.url, product: ref.brand,
+          reviews: 1, rating: 5, status: "ok", capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+    const id = (await service.createRun({ ...request, domains: ["example.com", "example.org"] })).id;
+    const first = await service.executeRun(id);
+    const successfulSnapshot = first.observations[0];
+
+    const second = await service.executeRun(id);
+
+    expect(calls).toEqual(new Map([["example.com", 1], ["example.org", 2]]));
+    expect(second.observations).toEqual([successfulSnapshot]);
+    expect(second.partitions.map((item) => [item.domain, item.status])).toEqual([
+      ["example.com", "complete"],
+      ["example.org", "blocked"]
+    ]);
+    expect(second.progress.completedPartitions).toBe(2);
+    expect(second.errors).toHaveLength(1);
+    expect(second.qa?.ok).toBe(false);
+  });
+
+  it("treats a repeated execution after all partitions succeeded as an idempotent no-op", async () => {
+    const repository = new MemoryRepository();
+    let resolutions = 0;
+    const service = new RatingsService(repository, async () => {
+      resolutions += 1;
+      return new FakeAdapter();
+    });
+    const first = await service.executeRun((await service.createRun(request)).id);
+
+    const repeated = await service.executeRun(first.id);
+
+    expect(resolutions).toBe(1);
+    expect(repeated).toEqual(first);
+  });
+
+  it("rejects a concurrent duplicate before the first repository read completes", async () => {
+    let releaseDiscovery!: () => void;
+    let discoveryStarted!: () => void;
+    const started = new Promise<void>((resolve) => { discoveryStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
+    class SlowAdapter extends FakeAdapter {
+      override async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
+        discoveryStarted();
+        await release;
+        return super.discover(brand, context);
+      }
+    }
+    const service = new RatingsService(new MemoryRepository(), async () => new SlowAdapter());
+    const id = (await service.createRun(request)).id;
+    const first = service.executeRun(id);
+    await started;
+
+    await expect(service.executeRun(id)).rejects.toThrow("Запуск уже выполняется");
+    releaseDiscovery();
+    await expect(first).resolves.toMatchObject({ status: "review" });
+  });
+
+  it("canonicalizes the Yandex Reviews collection alias to the marketplace domain", async () => {
+    const repository = new MemoryRepository();
+    const service = new RatingsService(repository, async () => new FakeAdapter());
+    const run = await service.createRun({ ...request, domains: ["reviews.yandex.ru", "market.yandex.ru"] });
+
+    expect(run.request.domains).toEqual(["market.yandex.ru"]);
+    expect(run.progress.totalPartitions).toBe(1);
+  });
+
+  it("deduplicates equivalent brand spellings before creating partitions", async () => {
+    const service = new RatingsService(new MemoryRepository(), async () => new FakeAdapter());
+
+    const run = await service.createRun({
+      ...request,
+      brands: ["Цитовир-3", " цитовир 3 ", "ЦИТОВИР—3", "Кагоцел"]
+    });
+
+    expect(run.request.brands).toEqual(["Цитовир-3", "Кагоцел"]);
+    expect(run.progress.totalPartitions).toBe(2);
+  });
+
+  it("collects a repeated listing from search only once", async () => {
+    let collections = 0;
+    class DuplicateSearchAdapter extends FakeAdapter {
+      override async discover(brand: string): Promise<ProductRef[]> {
+        const ref = {
+          domain: "example.com", platform: "fake", listingId: "1", brand,
+          url: "https://example.com/p/1", metadata: {}
+        };
+        return [ref, { ...ref, url: "https://example.com/p/1?from=sponsored" }];
+      }
+      override async collect(ref: ProductRef): Promise<Observation> {
+        collections += 1;
+        return super.collect(ref);
+      }
+    }
+    const service = new RatingsService(new MemoryRepository(), async () => new DuplicateSearchAdapter());
+
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    expect(collections).toBe(1);
+    expect(run.partitions).toMatchObject([{ status: "complete", discovered: 1, collected: 1 }]);
+    expect(run.observations).toHaveLength(1);
+    expect(run.qa).toMatchObject({ ok: true, blockers: [] });
+  });
+
+  it("fails a partition clearly when collect returns another stable ID", async () => {
+    class MismatchedCardAdapter extends FakeAdapter {
+      override async collect(ref: ProductRef): Promise<Observation> {
+        return { ...await super.collect(ref), listingId: "another-id" };
+      }
+    }
+    const service = new RatingsService(new MemoryRepository(), async () => new MismatchedCardAdapter());
+
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    expect(run.observations).toEqual([]);
+    expect(run.partitions).toMatchObject([{
+      status: "blocked",
+      discovered: 0,
+      collected: 0,
+      message: expect.stringContaining("parser_changed")
+    }]);
+    expect(run.qa?.blockers).toHaveLength(1);
+    expect(run.qa?.blockers[0]).toContain("сборщик вернул другую карточку или бренд");
+  });
+
+  it("persists a self-contained partition checkpoint and retries only unfinished work after interruption", async () => {
+    class CheckpointCrashRepository extends MemoryRepository {
+      private crashOnce = true;
+      override async saveRun(run: import("../src/shared/types.js").RunState): Promise<void> {
+        await super.saveRun(run);
+        if (this.crashOnce && run.status === "running" && run.progress.completedPartitions === 1) {
+          this.crashOnce = false;
+          throw new Error("simulated worker interruption");
+        }
+      }
+    }
+    const repository = new CheckpointCrashRepository();
+    const calls = new Map<string, number>();
+    const adapter: SiteAdapter = {
+      id: "checkpoint",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        calls.set(brand, (calls.get(brand) ?? 0) + 1);
+        return [{
+          domain: "example.com", platform: "fake", listingId: brand, brand,
+          url: `https://example.com/p/${encodeURIComponent(brand)}`, metadata: {}
+        }];
+      },
+      async collect(ref) { return new FakeAdapter().collect(ref); }
+    };
+    const service = new RatingsService(repository, async () => adapter);
+    const created = await service.createRun({ ...request, brands: ["Бренд А", "Бренд Б"] });
+
+    await expect(service.executeRun(created.id)).rejects.toThrow("simulated worker interruption");
+    const checkpoint = (await repository.getRun(created.id))!;
+    expect(checkpoint.partitions).toHaveLength(1);
+    expect(checkpoint.observations).toHaveLength(1);
+    checkpoint.status = "failed";
+    checkpoint.errors.push({ partition: "orchestrator", message: "simulated worker interruption" });
+    await repository.saveRun(checkpoint);
+
+    const recovered = await service.executeRun(created.id);
+
+    expect(calls).toEqual(new Map([["Бренд А", 1], ["Бренд Б", 1]]));
+    expect(recovered.partitions).toHaveLength(2);
+    expect(recovered.observations).toHaveLength(2);
+    expect(recovered.errors).toEqual([]);
+    expect(recovered.qa).toMatchObject({ ok: true, blockers: [] });
+  });
+
+  it("finalizes an interrupted run without recollecting when every partition is checkpointed", async () => {
+    const repository = new MemoryRepository();
+    let resolutions = 0;
+    const service = new RatingsService(repository, async () => {
+      resolutions += 1;
+      return new FakeAdapter();
+    });
+    const completed = await service.executeRun((await service.createRun(request)).id);
+    completed.status = "failed";
+    completed.payloadHash = undefined;
+    completed.qa = undefined;
+    completed.errors = [{ partition: "orchestrator", message: "final state write failed" }];
+    await repository.saveRun(completed);
+
+    const recovered = await service.executeRun(completed.id);
+
+    expect(resolutions).toBe(1);
+    expect(recovered.status).toBe("review");
+    expect(recovered.payloadHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(recovered.errors).toEqual([]);
+    expect(recovered.qa).toMatchObject({ ok: true, blockers: [] });
+  });
+
+  it("collects all partitions and only commits history after explicit publication step", async () => {
+    const repository = new MemoryRepository(); const service = new RatingsService(repository, async () => new FakeAdapter());
+    const created = await service.createRun(request); const run = await service.executeRun(created.id);
+    expect(run.status).toBe("review"); expect(run.qa?.ok).toBe(true); expect(await repository.listProducts("test_sheet")).toHaveLength(0);
+    await service.commitSuccessfulRun(run);
+    expect(await repository.listProducts("test_sheet")).toHaveLength(1); expect(Object.keys((await repository.getSnapshots("test_sheet"))["2026-07"])).toEqual(["example.com:1"]);
+  });
+
+  it("keeps correct first and last seen bounds when an older month is published later", async () => {
+    const repository = new MemoryRepository();
+    await repository.saveProducts("test_sheet", [{
+      key: "example.com:1", domain: "example.com", listingId: "1", brand: "Бренд",
+      canonicalUrl: "https://example.com/p/1", product: "Бренд таблетки 100 мг №10", platform: "fake",
+      firstSeenMonth: "2026-08", lastSeenMonth: "2026-09"
+    }]);
+    const service = new RatingsService(repository, async () => new FakeAdapter());
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    await service.commitSuccessfulRun(run);
+
+    expect((await repository.listProducts("test_sheet"))[0]).toMatchObject({
+      firstSeenMonth: "2026-07",
+      lastSeenMonth: "2026-09"
+    });
+  });
+
+  it("blocks publication if a canary health check fails", async () => {
+    const service = new RatingsService(new MemoryRepository(), async () => new FakeAdapter(false));
+    const run = await service.executeRun((await service.createRun(request)).id);
+    expect(run.qa?.ok).toBe(false); expect(run.partitions[0].status).toBe("blocked");
+    await expect(service.commitSuccessfulRun(run)).rejects.toThrow("Публикация заблокирована");
+  });
+
+  it("keeps access blocks and exhausted quotas distinct from a changed parser", async () => {
+    const profile = {
+      domain: "example.com", version: 1, status: "approved" as const,
+      sitemapUrls: [], ratingScale: 5, reviewCountMeaning: "reviews" as const,
+      rateLimitMs: 0, canaryUrls: [], testExamples: [],
+      createdAt: "2026-07-13T00:00:00.000Z", updatedAt: "2026-07-13T00:00:00.000Z", notes: []
+    };
+    class UnhealthyAdapter extends FakeAdapter {
+      constructor(private readonly failureMessage: string) { super(); }
+      override async healthCheck() {
+        return { ok: false, checkedAt: new Date().toISOString(), message: this.failureMessage };
+      }
+    }
+    const blockedRepository = new MemoryRepository();
+    await blockedRepository.saveProfile(profile);
+    const blockedService = new RatingsService(
+      blockedRepository,
+      async () => new UnhealthyAdapter("blocked_free_mode: origin HTTP 403")
+    );
+
+    const blockedRun = await blockedService.executeRun((await blockedService.createRun(request)).id);
+
+    expect(blockedRun.partitions[0].message).toContain("blocked: blocked_free_mode");
+    expect((await blockedRepository.getProfile("example.com"))?.status).toBe("approved");
+
+    const nonApifyService = new RatingsService(
+      new MemoryRepository(),
+      async () => new UnhealthyAdapter("blocked_free_mode: origin HTTP 403; Apify не используется")
+    );
+    const nonApifyRun = await nonApifyService.executeRun((await nonApifyService.createRun(request)).id);
+    expect(nonApifyRun.partitions[0].message).toContain("blocked: blocked_free_mode");
+    expect(nonApifyRun.partitions[0].message).not.toContain("quota_exceeded");
+
+    const quotaService = new RatingsService(
+      new MemoryRepository(),
+      async () => new UnhealthyAdapter("Monthly sandbox quota exceeded")
+    );
+    const quotaRun = await quotaService.executeRun((await quotaService.createRun(request)).id);
+    expect(quotaRun.partitions[0].message).toContain("quota_exceeded: Monthly sandbox quota exceeded");
+  });
+
+  it("does not allow review mutations after publication has started", async () => {
+    const repository = new MemoryRepository();
+    const service = new RatingsService(repository, async () => new FakeAdapter());
+    const run = await service.executeRun((await service.createRun(request)).id);
+    run.status = "publishing";
+    await repository.saveRun(run);
+
+    await expect(service.approveObservations(run.id, ["example.com:1"]))
+      .rejects.toThrow("Нельзя подтверждать карточки из статуса publishing");
+  });
+
+  it("accepts a proven product or aggregate but never a bare pharmaceutical form", async () => {
+    const makeService = (product: string, productEvidence?: Observation["productEvidence"]) => new RatingsService(
+      new MemoryRepository(),
+      async () => ({
+        id: "identity-review",
+        supportedDomains: ["example.com"],
+        async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+        async discover(brand: string) {
+          return [{ domain: "example.com", platform: "identity-review", listingId: "1", brand, url: "https://example.com/p/1", metadata: {} }];
+        },
+        async collect(ref: ProductRef): Promise<Observation> {
+          return {
+            domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+            canonicalUrl: ref.url, product, reviews: 5, rating: 4.8, status: "needs_review",
+            capturedAt: new Date().toISOString(), productEvidence
+          };
+        }
+      })
+    );
+
+    const productService = makeService("Бренд таблетки №20");
+    const productRun = await productService.executeRun((await productService.createRun(request)).id);
+    await expect(productService.approveObservations(productRun.id, ["example.com:1"]))
+      .resolves.toMatchObject({ observations: [{ status: "ok", productIdentity: { label: "таблетки №20" } }] });
+
+    const bareFormService = makeService("Бренд капсулы");
+    const bareFormRun = await bareFormService.executeRun((await bareFormService.createRun(request)).id);
+    await expect(bareFormService.approveObservations(bareFormRun.id, ["example.com:1"]))
+      .rejects.toThrow("не содержит доказанного товарного варианта");
+
+    const aggregateService = makeService("Бренд отзывы", {
+      scope: "product_family", signals: [{ source: "title", text: "Бренд отзывы" }],
+      variants: [], identifiers: [], imageUrls: [], instructionUrls: []
+    });
+    const aggregateRun = await aggregateService.executeRun((await aggregateService.createRun(request)).id);
+    await expect(aggregateService.approveObservations(aggregateRun.id, ["example.com:1"]))
+      .resolves.toMatchObject({ observations: [{ status: "ok", productIdentity: { granularity: "family" } }] });
+
+    const legacyReviewRequest = { ...request, domains: ["irecommend.ru"] };
+    const legacyReviewService = new RatingsService(new MemoryRepository(), async () => ({
+      id: "legacy-review-aggregate",
+      supportedDomains: ["irecommend.ru"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand: string) {
+        return [{ domain: "irecommend.ru", platform: "irecommend.ru", listingId: "11557796", brand, url: "https://irecommend.ru/content/brand", metadata: {} }];
+      },
+      async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: `${ref.brand} отзывы`, reviews: 12, rating: 4.8,
+          status: "needs_review", capturedAt: new Date().toISOString(),
+          productEvidence: { scope: "listing", signals: [{ source: "title", text: `${ref.brand} отзывы` }], variants: [], identifiers: [], imageUrls: [], instructionUrls: [] }
+        };
+      }
+    }));
+    const legacyReviewRun = await legacyReviewService.executeRun((await legacyReviewService.createRun(legacyReviewRequest)).id);
+    await expect(legacyReviewService.approveObservations(legacyReviewRun.id, ["irecommend.ru:11557796"]))
+      .resolves.toMatchObject({ observations: [{ status: "ok", productIdentity: { granularity: "family" } }] });
+  });
+
+  it("keeps a disappeared registry card as a verified empty month without losing history", async () => {
+    const repository = new MemoryRepository();
+    await repository.saveProducts("test_sheet", [{
+      key: "example.com:old",
+      domain: "example.com",
+      listingId: "old",
+      brand: "Бренд",
+      canonicalUrl: "https://example.com/p/old",
+      product: "Бренд — старая упаковка",
+      platform: "fake",
+      firstSeenMonth: "2026-05",
+      lastSeenMonth: "2026-06"
+    }]);
+    const missingAdapter: SiteAdapter = {
+      id: "missing",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand, context) {
+        return [{
+          domain: "example.com", platform: "fake", listingId: context.previousIds![0], brand,
+          url: "https://example.com/changed/old", metadata: {}
+        }];
+      },
+      async collect(ref) {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: "Бренд", reviews: null, rating: null,
+          status: "not_found", capturedAt: new Date().toISOString()
+        };
+      }
+    };
+    const service = new RatingsService(repository, async () => missingAdapter);
+
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    expect(run.qa?.ok).toBe(true);
+    expect(run.observations[0]).toMatchObject({
+      status: "not_found",
+      historical: true,
+      canonicalUrl: "https://example.com/p/old",
+      product: "Бренд — старая упаковка",
+      reviews: null,
+      rating: null
+    });
+    await service.commitSuccessfulRun(run);
+    expect((await repository.listProducts("test_sheet"))[0]).toMatchObject({
+      firstSeenMonth: "2026-05",
+      lastSeenMonth: "2026-06"
+    });
+    expect((await repository.getSnapshots("test_sheet"))["2026-07"]["example.com:old"])
+      .toMatchObject({ historical: true, reviews: null, rating: null });
+  });
+
+  it("does not treat a new 404 as a successful historical result", async () => {
+    class NewMissingAdapter extends FakeAdapter {
+      override async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: ref.brand, reviews: null, rating: null,
+          status: "not_found", capturedAt: new Date().toISOString()
+        };
+      }
+    }
+    const service = new RatingsService(new MemoryRepository(), async () => new NewMissingAdapter());
+
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    expect(run.observations[0]).toMatchObject({ status: "needs_review", historical: false });
+    expect(run.qa?.ok).toBe(false);
+  });
+
+  it("excludes a new Yandex candidate only after the adapter proves its Reviews page missing", async () => {
+    class MissingYandexCandidateAdapter extends FakeAdapter {
+      override supportedDomains = ["market.yandex.ru"];
+      override async discover(brand: string): Promise<ProductRef[]> {
+        return [{
+          domain: "market.yandex.ru", platform: "yandex", listingId: "1", brand,
+          url: "https://reviews.yandex.ru/product/model--1", metadata: {}
+        }];
+      }
+      override async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain: ref.domain,
+          platform: "yandex",
+          listingId: ref.listingId,
+          brand: ref.brand,
+          canonicalUrl: ref.url,
+          product: ref.brand,
+          reviews: null,
+          rating: null,
+          status: "not_found",
+          source: "yandex_reviews_missing_candidate",
+          capturedAt: new Date().toISOString()
+        };
+      }
+    }
+    const service = new RatingsService(
+      new MemoryRepository(),
+      async () => new MissingYandexCandidateAdapter()
+    );
+
+    const run = await service.executeRun((await service.createRun({
+      ...request,
+      domains: ["market.yandex.ru"]
+    })).id);
+
+    expect(run.observations).toEqual([]);
+    expect(run.partitions).toMatchObject([{
+      domain: "market.yandex.ru",
+      status: "no_results",
+      discovered: 0,
+      collected: 0
+    }]);
+    expect(run.qa).toMatchObject({ ok: true, blockers: [] });
+  });
+
+  it("clears a marketplace default rating when written reviewCount is zero", async () => {
+    class DefaultRatingWithoutReviewsAdapter extends FakeAdapter {
+      override async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain: ref.domain,
+          platform: ref.platform,
+          listingId: ref.listingId,
+          brand: ref.brand,
+          canonicalUrl: ref.url,
+          product: `${ref.brand} таблетки 100 мг №10`,
+          reviews: 0,
+          rating: 5,
+          rawRating: 5,
+          rawRatingScale: 5,
+          status: "no_reviews",
+          capturedAt: new Date().toISOString()
+        };
+      }
+    }
+    const service = new RatingsService(
+      new MemoryRepository(),
+      async () => new DefaultRatingWithoutReviewsAdapter()
+    );
+
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    expect(run.observations[0]).toMatchObject({
+      reviews: 0,
+      rating: null,
+      rawRating: 5,
+      status: "no_reviews"
+    });
+    expect(run.qa).toMatchObject({ ok: true, blockers: [] });
+  });
+
+  it("normalizes an adapter's ok status to no_reviews when reviewCount is zero", async () => {
+    class InconsistentZeroReviewAdapter extends FakeAdapter {
+      override async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain: ref.domain,
+          platform: ref.platform,
+          listingId: ref.listingId,
+          brand: ref.brand,
+          canonicalUrl: ref.url,
+          product: `${ref.brand} таблетки 100 мг №10`,
+          reviews: 0,
+          rating: 4.9,
+          ratingUnavailable: true,
+          status: "ok",
+          capturedAt: new Date().toISOString()
+        };
+      }
+    }
+    const service = new RatingsService(
+      new MemoryRepository(),
+      async () => new InconsistentZeroReviewAdapter()
+    );
+
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    expect(run.observations[0]).toMatchObject({ reviews: 0, rating: null, status: "no_reviews" });
+    expect(run.observations[0]).not.toHaveProperty("ratingUnavailable");
+    expect(run.qa?.ok).toBe(true);
+  });
+
+  it("serializes brand partitions for a generated generic domain", async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const adapter: SiteAdapter = {
+      id: "generic:example.com:v1",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active -= 1;
+        return [{
+          domain: "example.com", platform: "example.com", listingId: brand, brand,
+          url: `https://example.com/p/${encodeURIComponent(brand)}`, metadata: {}
+        }];
+      },
+      async collect(ref) {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: `${ref.brand} таблетки 100 мг №10`, reviews: 1, rating: 5,
+          status: "ok", capturedAt: new Date().toISOString()
+        };
+      }
+    };
+    const service = new RatingsService(new MemoryRepository(), async () => adapter);
+
+    const run = await service.executeRun((await service.createRun({ ...request, brands: ["Бренд А", "Бренд Б"] })).id);
+
+    expect(run.qa?.ok).toBe(true);
+    expect(maximumActive).toBe(1);
+  });
+});

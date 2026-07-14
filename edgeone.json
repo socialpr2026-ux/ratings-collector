@@ -1,0 +1,25 @@
+{
+  "name": "ratings-collector",
+  "buildCommand": "pnpm build",
+  "installCommand": "pnpm install --frozen-lockfile --config.node-linker=hoisted",
+  "outputDirectory": "dist",
+  "nodeVersion": "20.18.0",
+  "agents": {
+    "framework": "openai-agents-sdk",
+    "dir": "agents",
+    "timeout": 3600,
+    "externalNodeModules": [
+      "playwright-core",
+      "chromium-bidi"
+    ],
+    "sandbox": {
+      "timeout": 3600
+    }
+  },
+  "cloudFunctions": {
+    "nodejs": {
+      "maxDuration": 120
+    },
+    "overseasRegions": ["ap-bangkok"]
+  }
+}
