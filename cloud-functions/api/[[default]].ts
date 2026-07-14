@@ -441,15 +441,24 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
     const cards: string[] = [];
     $(".productOuter, [class*='productOuter']").each((_index, node) => {
       const root = $(node);
-      const link = root.find(".productName a[href], a[href$='.html'], a[href*='.html?']").first();
       const productId = root.find("[data-id]").first().attr("data-id")?.trim();
-      const titleText = (link.text() || root.find("img[alt]").first().attr("alt") || "").normalize("NFKC").replace(/\s+/g, " ").trim();
-      if (!productId || !/^\d+$/.test(productId) || !titleText) return;
-      let product: URL;
-      try { product = new URL(link.attr("href") ?? "", requested.source); }
-      catch { return; }
-      if (![NFAPTEKA_TRANSLATE_HOST, "nfapteka.ru"].includes(product.hostname) ||
-        !/^\/(?:[a-z0-9-]+\/)*catalog\/(?:[a-z0-9-]+\/)*[a-z0-9-]+\.html$/i.test(product.pathname)) return;
+      if (!productId || !/^\d+$/.test(productId)) return;
+      let selected: { product: URL; title: string } | undefined;
+      for (const candidate of root.find("a[href$='.html'], a[href*='.html?']").toArray()) {
+        const link = $(candidate);
+        const titleText = (link.text() || link.find("img[alt]").first().attr("alt") || "")
+          .normalize("NFKC").replace(/\s+/g, " ").trim();
+        if (!titleText) continue;
+        let product: URL;
+        try { product = new URL(link.attr("href") ?? "", requested.source); }
+        catch { continue; }
+        if (![NFAPTEKA_TRANSLATE_HOST, "nfapteka.ru"].includes(product.hostname) ||
+          !/^\/(?:[a-z0-9-]+\/)*catalog\/(?:[a-z0-9-]+\/)*[a-z0-9-]+\.html$/i.test(product.pathname)) continue;
+        selected = { product, title: titleText };
+        break;
+      }
+      if (!selected) return;
+      const { product, title: titleText } = selected;
       cards.push(`<div class="productOuter"><div class="productName"><a href="https://nfapteka.ru${escapeHtml(product.pathname)}">${escapeHtml(titleText)}</a></div>` +
         `<a data-id="${escapeHtml(productId)}"></a></div>`);
     });
@@ -1236,7 +1245,7 @@ function compactAptekaRuHtml(html: string, requested: AptekaRuTarget): string | 
       catch { return; }
       const id = product.pathname.match(/^\/product\/[a-z0-9-]+-([a-f0-9]{24})\/$/i)?.[1];
       const productTitle = ($(node).attr("aria-label") || $(node).text()).normalize("NFKC").replace(/\s+/g, " ").trim();
-      if (product.protocol !== "https:" || product.hostname !== "apteka.ru" || !id || !productTitle) return;
+      if (product.protocol !== "https:" || ![APTEKA_TRANSLATE_HOST, "apteka.ru"].includes(product.hostname) || !id || !productTitle) return;
       products.set(id, { url: `https://apteka.ru${product.pathname}`, title: productTitle });
     });
     const pageText = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();

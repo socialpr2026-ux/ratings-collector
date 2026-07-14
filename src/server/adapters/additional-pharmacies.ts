@@ -329,12 +329,23 @@ export class NfAptekaAdapter extends AdditionalPharmacyAdapter {
     source.searchParams.set("q", brand);
     const page = await requestPage(source, context, this.fetchImpl, NF_TRANSLATE_HOST);
     page.$(".productOuter, [class*='productOuter']").each((_index, node) => {
-      const link = page.$(node).find(".productName a[href], a[href$='.html'], a[href*='.html?']").first();
-      const id = page.$(node).find("[data-id]").first().attr("data-id")?.trim();
+      const root = page.$(node);
+      const id = root.find("[data-id]").first().attr("data-id")?.trim();
       if (!id) return;
-      const parsed = nfRef(link.attr("href") ?? "", id);
-      const title = compactText(link.text() || page.$(node).find("img[alt]").first().attr("alt") || "");
-      if (!parsed || !matchesBrand(title, brand)) return;
+      let selected: { parsed: { id: string; url: string }; title: string } | undefined;
+      for (const candidate of root.find("a[href$='.html'], a[href*='.html?']").toArray()) {
+        const link = page.$(candidate);
+        const title = compactText(link.text() || link.find("img[alt]").first().attr("alt") || "");
+        if (!title) continue;
+        const parsed = nfRef(link.attr("href") ?? "", id);
+        if (!parsed) continue;
+        selected = { parsed, title };
+        break;
+      }
+      if (!selected) return;
+      const parsed = selected.parsed;
+      const title = selected.title;
+      if (!matchesBrand(title, brand)) return;
       refs.set(parsed.id, {
         domain: NF_DOMAIN, platform: NF_DOMAIN, listingId: parsed.id, brand,
         url: parsed.url, title, metadata: { discovery: "translated-first-party-search" }
@@ -477,6 +488,14 @@ export class EtablAdapter extends AdditionalPharmacyAdapter {
 const BUD_DOMAIN = "budzdorov.ru";
 const BUD_TRANSLATE_HOST = "www-budzdorov-ru.translate.goog";
 const BUD_PRODUCT = /^\/product\/(?:[a-z0-9-]+-)?(\d+)\/?$/i;
+const BUD_FORM_SLUG_ALIASES: Record<string, string> = {
+  "оциллококцинум": "ocillokokcinum"
+};
+
+function budFormSlug(brand: string): string {
+  const normalized = brand.normalize("NFKC").toLocaleLowerCase("ru-RU").replace(/ё/g, "е").trim();
+  return BUD_FORM_SLUG_ALIASES[normalized] ?? transliterate(brand);
+}
 
 function budRef(value: string, expectedId?: string): { id: string; url: string } | undefined {
   const url = sourceHref(value, `www.${BUD_DOMAIN}`);
@@ -498,7 +517,7 @@ export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = historicalRefs(BUD_DOMAIN, brand, context, budRef);
-    const source = new URL(`https://www.${BUD_DOMAIN}/forms/${transliterate(brand)}`);
+    const source = new URL(`https://www.${BUD_DOMAIN}/forms/${budFormSlug(brand)}`);
     const page = await requestPage(source, context, this.fetchImpl, BUD_TRANSLATE_HOST);
     page.$("a[href*='/product/']").each((_index, node) => {
       const parsed = budRef(page.$(node).attr("href") ?? "");

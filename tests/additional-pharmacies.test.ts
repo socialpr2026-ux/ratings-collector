@@ -67,7 +67,7 @@ describe("additional pharmacy adapters", () => {
     const path = "/tambov/catalog/prostuda/otsillokoktsinum-gran-gomeopat-1-doza-1-g-12.html";
     const searchSource = "https://nfapteka.ru/catalog/?q=%D0%9E%D1%86%D0%B8%D0%BB%D0%BB%D0%BE%D0%BA%D0%BE%D0%BA%D1%86%D0%B8%D0%BD%D1%83%D0%BC";
     const productSource = `https://nfapteka.ru${path}`;
-    const search = translated(searchSource, `<main><h1>Результаты поиска по запросу Оциллококцинум</h1><div class="productOuter"><div class="productName"><a href="https://nfapteka-ru.translate.goog${path}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">Оциллококцинум гранулы 1 г №12</a></div><a data-id="97307"></a></div></main>`);
+    const search = translated(searchSource, `<main><h1>Результаты поиска по запросу Оциллококцинум</h1><div class="productOuter"><a href="https://nfapteka-ru.translate.goog${path}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en"><img src="image.jpg"></a><div class="productName"><a href="https://nfapteka-ru.translate.goog${path}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">Оциллококцинум гранулы 1 г №12</a></div><a data-id="97307"></a></div></main>`);
     const product = translated(productSource, `<link rel="canonical" href="${productSource}"><h1>Оциллококцинум гранулы 1 г №12</h1><input name="productId" value="97307"><div itemprop="aggregateRating"><meta itemprop="ratingValue" content="4.3"><span itemprop="reviewCount">3</span></div>`);
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
@@ -91,14 +91,16 @@ describe("additional pharmacy adapters", () => {
       { id: 3, ratings: [{ attribute_code: "Оценка", value: 5 }] }
     ];
     const product = translated(productSource, `<h1>Оциллококцинум гранулы 6 доз</h1><div allreviewsqty="3"></div><script>window.__INITIAL_STATE__=${JSON.stringify({ productView: { reviews } })};document.currentScript.remove()</script>`);
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
       return new Response(url.pathname.startsWith("/forms/") ? form : product, { status: 200, headers: { "content-type": "text/html" } });
-    }) as unknown as typeof fetch;
+    });
+    const fetchMock = fetchSpy as unknown as typeof fetch;
     const adapter = new BudZdorovAdapter(new MemoryEvidenceStore(), fetchMock);
 
     const refs = await adapter.discover("Оциллококцинум", context);
     expect(refs).toHaveLength(1);
+    expect(new URL(String(fetchSpy.mock.calls[0][0])).pathname).toBe("/forms/ocillokokcinum");
     await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({ reviews: 3, rating: 4.7, status: "ok" });
   });
 

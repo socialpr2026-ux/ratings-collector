@@ -649,7 +649,7 @@ describe("static pharmacy Translate gateway", () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
       if (url.pathname === "/catalog/") return new Response(`<html><head><base href="${searchSource}"></head><body>
-        <div class="productOuter"><div class="productName"><a href="https://nfapteka-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">Оциллококцинум гранулы №12</a></div><a data-id="97307"></a></div>
+        <div class="productOuter"><a href="https://nfapteka-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en"><img src="empty-title.jpg"></a><div class="productName"><a href="https://nfapteka-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">Оциллококцинум гранулы №12</a></div><a data-id="97307"></a></div>
       </body></html>`, { headers: { "content-type": "text/html" } });
       const source = `https://nfapteka.ru${productPath}`;
       return new Response(`<html><head><base href="${source}"><link rel="canonical" href="${source}"></head><body>
@@ -705,6 +705,21 @@ describe("static pharmacy Translate gateway", () => {
     expect(proof).toContain('"reviewCount":44');
     expect(proof).toContain('"ratingCount":57');
     expect((await callGateway("https://apteka.ru/search?q=Оциллококцинум")).status).toBe(400);
+  });
+
+  it("canonicalizes translated Apteka.ru preparation links to the source host", async () => {
+    const source = "https://apteka.ru/preparation/otsillokoktsinum/";
+    const id = "5e3268eaca7bdc000192d316";
+    const path = `/product/oczillokokczinum-30-sht-granuly-${id}/`;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"><link rel="canonical" href="${source}"></head><body>
+      <h1>Оциллококцинум</h1><a href="https://apteka-ru.translate.goog${path}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en" aria-label="Оциллококцинум гранулы 30 шт">Оциллококцинум гранулы 30 шт</a>
+    </body></html>`, { headers: { "content-type": "text/html" } })));
+
+    const response = await callGateway(translated("apteka-ru.translate.goog", new URL(source).pathname).toString());
+    const proof = await response.text();
+    expect(response.status).toBe(200);
+    expect(proof).toContain(`href="https://apteka.ru${path}"`);
+    expect(proof).not.toContain("_x_tr_");
   });
 
   it("rejects unbounded queries and a mismatched source before metrics can become zero", async () => {
