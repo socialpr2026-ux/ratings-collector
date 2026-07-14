@@ -426,8 +426,7 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
   if (/(?:captcha|access denied|unusual traffic|подозрительн\w*\s+активност|проверка\s+браузера|Target URL returned error)/i.test(title) ||
     /<(?:iframe|form|input)\b[^>]*(?:captcha|challenge)/i.test(html.slice(0, 150_000))) return undefined;
   const baseValue = $("base[href]").first().attr("href");
-  const dataSource = $("[data-source-url]").first().attr("data-source-url");
-  if (!translatedSourceMatches(baseValue, requested.source) && !translatedSourceMatches(dataSource, requested.source)) return undefined;
+  if (!translatedSourceMatches(baseValue, requested.source)) return undefined;
   const base = `<base href="${escapeHtml(requested.source.toString())}">`;
 
   if (requested.kind === "apteka-preparation" || requested.kind === "apteka-product") {

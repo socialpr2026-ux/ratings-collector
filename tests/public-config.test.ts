@@ -726,6 +726,19 @@ describe("static pharmacy Translate gateway", () => {
     expect(mismatch.status).toBe(502);
     expect(await mismatch.text()).toContain("did not prove the requested source and metrics");
   });
+
+  it("does not trust an upstream data-source-url when the translated base points elsewhere", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head>
+      <base href="https://farmlend.ru/search?keyword=another-brand"></head><body>
+      <div data-source-url="https://farmlend.ru/search?keyword=kagocel">No products</div>
+    </body></html>`, { headers: { "content-type": "text/html; charset=utf-8" } })));
+
+    const target = translated("farmlend-ru.translate.goog", "/search", { keyword: "kagocel" });
+    const response = await callGateway(target.toString());
+
+    expect(response.status).toBe(502);
+    expect(await response.text()).toContain("did not prove the requested source and metrics");
+  });
 });
 
 describe("fixed first-party collection egress", () => {
