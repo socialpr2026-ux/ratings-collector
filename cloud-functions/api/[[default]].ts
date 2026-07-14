@@ -419,6 +419,37 @@ function compactZdravcityTranslateHtml(html: string, requested: URL): string | u
     `<script id="__NEXT_DATA__" type="application/json">${compactNext}</script></body></html>`;
 }
 
+function parseAssignedJsonObject(script: string, prefix: string): Record<string, unknown> | undefined {
+  const assignment = script.indexOf(prefix);
+  if (assignment < 0) return undefined;
+  const start = assignment + prefix.length;
+  let objectStart = start;
+  while (/\s/.test(script[objectStart] ?? "")) objectStart += 1;
+  if (script[objectStart] !== "{") return undefined;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = objectStart; index < script.length; index += 1) {
+    const character = script[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        try { return JSON.parse(script.slice(objectStart, index + 1)) as Record<string, unknown>; }
+        catch { return undefined; }
+      }
+    }
+  }
+  return undefined;
+}
+
 function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslateTarget): string | undefined {
   if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
   const $ = load(html);
@@ -509,11 +540,10 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
     const total = $("[allreviewsqty]").first().attr("allreviewsqty")?.trim();
     const stateScript = $("script").toArray().map((node) => $(node).html() ?? "").find((value) => value.startsWith("window.__INITIAL_STATE__="));
     if (!heading || !total || !/^\d+$/.test(total) || !stateScript) return undefined;
-    const raw = stateScript.slice("window.__INITIAL_STATE__=".length);
-    const marker = raw.indexOf(";document.currentScript.remove()");
     let state: { productView?: { reviews?: unknown } };
-    try { state = JSON.parse(marker >= 0 ? raw.slice(0, marker) : raw.replace(/;\s*$/, "")) as typeof state; }
-    catch { return undefined; }
+    const parsedState = parseAssignedJsonObject(stateScript, "window.__INITIAL_STATE__=");
+    if (!parsedState) return undefined;
+    state = parsedState as typeof state;
     if (!Array.isArray(state.productView?.reviews) || state.productView.reviews.length !== Number(total)) return undefined;
     const reviews: Array<{ id: string; ratings: Array<{ attribute_code: string; value: number }> }> = [];
     const ids = new Set<string>();

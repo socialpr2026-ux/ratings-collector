@@ -678,7 +678,7 @@ describe("static pharmacy Translate gateway", () => {
     ];
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"></head><body>
       <h1>Оциллококцинум гранулы 6 доз</h1><div allreviewsqty="2"></div>
-      <script>window.__INITIAL_STATE__=${JSON.stringify({ productView: { reviews } })};document.currentScript.remove()</script>
+      <script>window.__INITIAL_STATE__=${JSON.stringify({ productView: { reviews } })};(function(){var s;s=document.currentScript;}())</script>
     </body></html>`, { headers: { "content-type": "text/html" } })));
 
     const response = await callGateway(translated("www-budzdorov-ru.translate.goog", "/product/otsillokoktsinum-granuly-6doz-2511").toString());
