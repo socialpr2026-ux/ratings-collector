@@ -173,7 +173,45 @@ describe("WildberriesAdapter.discover", () => {
     const headers = new Headers(vi.mocked(fetchMock).mock.calls[3][1]?.headers);
     expect(headers.get("x-ratings-browser")).toBe("1");
     expect(headers.get("x-ratings-browser-mode")).toBe("wildberries-api");
-    expect(sleeps).toEqual([10, 30, 90]);
+    expect(sleeps).toEqual([10, 20, 40]);
+  });
+
+  it("bounds total free-route backoff while preserving endpoint and appType order", async () => {
+    const sleeps: number[] = [];
+    const requests: string[] = [];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const browser = new Headers(init?.headers).get("x-ratings-browser") === "1";
+      requests.push(`${url.pathname}:${url.searchParams.get("appType")}:${browser ? "browser" : "direct"}`);
+      if (url.pathname.includes("/v18/") && url.searchParams.get("appType") === "64") {
+        return jsonResponse({
+          total: 1,
+          products: [{ id: 822669569, name: "Оциллококцинум гранулы 30 шт", nmReviewRating: 5, nmFeedbacks: 24 }]
+        });
+      }
+      return new Response("rate limited", { status: 429 });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new WildberriesAdapter({
+      fetch: fetchMock,
+      requestIntervalMs: 0,
+      blockedRetryBaseMs: 100,
+      sleep: async (milliseconds) => { sleeps.push(milliseconds); }
+    });
+
+    await expect(adapter.discover("Оциллококцинум", context())).resolves.toMatchObject([
+      { listingId: "822669569", metadata: { nmFeedbacks: 24, nmReviewRating: 5 } }
+    ]);
+
+    expect(requests).toEqual([
+      "/exactmatch/ru/common/v14/search:1:direct",
+      "/exactmatch/ru/common/v14/search:32:direct",
+      "/exactmatch/ru/common/v14/search:64:direct",
+      "/exactmatch/ru/common/v18/search:1:direct",
+      "/exactmatch/ru/common/v18/search:32:direct",
+      "/exactmatch/ru/common/v18/search:64:direct"
+    ]);
+    expect(sleeps).toEqual([100, 150, 150, 150, 150]);
+    expect(sleeps.reduce((sum, value) => sum + value, 0)).toBe(700);
   });
 
   it("accepts only an explicit rendered no-results proof after every JSON API route is blocked", async () => {

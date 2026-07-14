@@ -26,6 +26,8 @@ const DEFAULT_DIRECT_APP_TYPES = [1, 32, 64] as const;
 const DEFAULT_BROWSER_APP_TYPE = 32;
 const DEFAULT_BLOCKED_RETRY_BASE_MS = 100;
 const DEFAULT_BLOCKED_COOLDOWN_MS = 30_000;
+const MAX_BLOCKED_RETRY_DELAY_MS = 150;
+const MAX_BLOCKED_RETRY_TOTAL_MS = 1_200;
 const TRANSIENT_BLOCK_STATUSES = new Set([403, 407, 423, 429, 498, 502, 503, 504]);
 
 type JsonObject = Record<string, unknown>;
@@ -553,8 +555,7 @@ export class WildberriesAdapter implements SiteAdapter {
       for (let index = 0; index < routes.length; index += 1) {
         const route = routes[index];
         if (index > 0 && this.blockedRetryBaseMs > 0) {
-          const delay = Math.min(10_000, this.blockedRetryBaseMs * 3 ** (index - 1));
-          await this.sleep(delay);
+          await this.sleep(this.blockedRetryDelay(index));
           context.signal?.throwIfAborted();
         }
 
@@ -608,8 +609,7 @@ export class WildberriesAdapter implements SiteAdapter {
       const proofUrl = this.searchNoResultsProofUrl(url);
       if (proofUrl) {
         if (this.blockedRetryBaseMs > 0) {
-          const delay = Math.min(10_000, this.blockedRetryBaseMs * 3 ** Math.max(0, routes.length - 1));
-          await this.sleep(delay);
+          await this.sleep(this.blockedRetryDelay(routes.length));
           context.signal?.throwIfAborted();
         }
         try {
@@ -688,6 +688,18 @@ export class WildberriesAdapter implements SiteAdapter {
   private routeLabel(route: RequestRoute): string {
     const generation = route.searchEndpoint?.match(/\/common\/(v\d+)\/search$/)?.[1];
     return `${route.browser ? "browser" : "direct"}${generation ? ` ${generation}` : ""} appType=${route.appType}`;
+  }
+
+  private blockedRetryDelay(attemptIndex: number): number {
+    let remaining = MAX_BLOCKED_RETRY_TOTAL_MS;
+    for (let index = 1; index <= attemptIndex; index += 1) {
+      const exponential = this.blockedRetryBaseMs * 2 ** Math.min(index - 1, 10);
+      const delay = Math.min(remaining, MAX_BLOCKED_RETRY_DELAY_MS, exponential);
+      if (index === attemptIndex) return delay;
+      remaining -= delay;
+      if (remaining <= 0) return 0;
+    }
+    return 0;
   }
 
   private searchNoResultsProofUrl(apiUrl: URL): URL | undefined {
