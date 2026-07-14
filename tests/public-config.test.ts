@@ -345,7 +345,7 @@ describe("fixed first-party collection egress", () => {
       const product = {
         id: "D875DF4F-3A76-4BEB-89A1-DF358BD5538A",
         attributes: { name: "Kagocel tablets 12 mg No. 10", url: url.pathname, rating: 5, sku: "33978" },
-        reviews: [{ ID: "6548", rate: 5 }]
+        reviews: [{ ID: "6548", rate: 5 }, { ID: "6549", rate: 0 }]
       };
       return new Response(`<html><head><base href="${source}"></head><body>
         <div>${"x".repeat(500_000)}</div>
@@ -362,7 +362,7 @@ describe("fixed first-party collection egress", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("x-ratings-source")).toBe("google-translate-zdravcity-ssr");
     expect(Number(response.headers.get("x-ratings-proof-bytes"))).toBeLessThan(2_000);
-    expect(await response.text()).toContain('"reviews":[{"ID":"6548","rate":5}]');
+    expect(await response.text()).toContain('"reviews":[{"ID":"6548","rate":5},{"ID":"6549","rate":0}]');
     expect((await callGateway("https://zdravcity.ru/g_kagocel/?redirect=https://evil.example")).status).toBe(400);
     expect((await callGateway("https://reviews.yandex.ru/ugcpub/private.xml")).status).toBe(400);
     expect(upstream).toHaveBeenCalledTimes(3);

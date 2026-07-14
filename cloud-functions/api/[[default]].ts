@@ -208,7 +208,9 @@ function compactZdravcityTranslateHtml(html: string, requested: URL): string | u
       const review = value as { ID?: unknown; rate?: unknown };
       const reviewId = String(review.ID ?? "").trim();
       const rate = Number(review.rate);
-      if (!reviewId || reviewIds.has(reviewId) || !Number.isFinite(rate) || rate <= 0 || rate > 5) return undefined;
+      // Zdravcity uses 0 for written reviews where the author left text but
+      // no star score. They still count toward the written-review total.
+      if (!reviewId || reviewIds.has(reviewId) || !Number.isInteger(rate) || rate < 0 || rate > 5) return undefined;
       reviewIds.add(reviewId);
       reviews.push({ ID: reviewId, rate });
     }
