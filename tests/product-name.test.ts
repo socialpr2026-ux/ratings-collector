@@ -99,7 +99,12 @@ describe("canonical product descriptors", () => {
   });
 
   it("uses clean labels for partial evidence and treats form plus pack as a complete product", () => {
-    expect(analyzeProductIdentity({ brand: "Бактоблис", product: "Бактоблис Плюс" })).toMatchObject({ granularity: "line", confidence: "partial", label: "Общая карточка линейки «Плюс»" });
+    expect(analyzeProductIdentity({ brand: "Бактоблис", product: "Бактоблис Плюс" })).toMatchObject({
+      granularity: "family", confidence: "partial", label: "Общая карточка бренда"
+    });
+    expect(analyzeProductIdentity({ brand: "Кагоцел", product: "Ниармедик плюс Кагоцел" })).toMatchObject({
+      granularity: "family", confidence: "partial", label: "Общая карточка бренда"
+    });
     expect(analyzeProductIdentity({ brand: "Анвифен", product: "Анвифен капсулы" })).toMatchObject({ granularity: "unresolved", label: "Общая карточка формы «капсулы»", missing: ["pack"] });
     expect(analyzeProductIdentity({ brand: "Кагоцел", product: "Кагоцел таблетки №20" })).toMatchObject({ granularity: "variant", confidence: "exact", label: "таблетки №20", missing: [] });
     expect(analyzeProductIdentity({ brand: "Кагоцел", product: "Кагоцел 12 мг №20" })).toMatchObject({ granularity: "variant", confidence: "exact", label: "12 мг №20", missing: [] });
@@ -112,7 +117,7 @@ describe("canonical product descriptors", () => {
 
   it("does not promote a marketing modifier or an administration dose to an exact product", () => {
     expect(analyzeProductIdentity({ brand: "Бактоблис", product: "Бактоблис Плюс №20" })).toMatchObject({
-      granularity: "line", confidence: "partial", label: "Общая карточка линейки «Плюс»"
+      granularity: "unresolved", confidence: "partial", label: "№20"
     });
     expect(analyzeProductIdentity({ brand: "Анвифен", product: "Анвифен: принимать по 2 капсулы 3 раза в день" })).toMatchObject({
       granularity: "unresolved", confidence: "partial", label: "Общая карточка формы «капсулы»"
@@ -167,7 +172,7 @@ describe("canonical product descriptors", () => {
         variants: ["1500 мг, порошок, 15 саше", "таблетки для рассасывания без сахара, 30 шт"],
         identifiers: [], imageUrls: [], instructionUrls: []
       }
-    })).toMatchObject({ granularity: "line", label: "Общая карточка линейки «Плюс» (2 варианта)", variantCount: 2 });
+    })).toMatchObject({ granularity: "family", label: "Общая карточка бренда (2 варианта)", variantCount: 2 });
   });
 
   it("counts distinct named lines and uses correct Russian plural forms in family labels", () => {
@@ -193,6 +198,6 @@ describe("canonical product descriptors", () => {
     expect(canonicalProductDescriptor("Бактоблис", "Общая карточка бренда (3 варианта)"))
       .toBe("Общая карточка бренда (3 варианта)");
     expect(canonicalProductDescriptor("Бактоблис", "Общая карточка линейки «Плюс» (2 варианта)"))
-      .toBe("Общая карточка линейки «Плюс» (2 варианта)");
+      .toBe("Общая карточка бренда (2 варианта)");
   });
 });

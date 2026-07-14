@@ -280,6 +280,9 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
     normalizeText(prefix) === normalizeText(brand) ? "" : full
   );
   const withoutBrand = removeBrand(withoutStoredPrefix, brand)
+    // "Ниармедик Плюс" is a company name seen in marketplace
+    // titles, not a Кагоцел product line or sellable variant.
+    .replace(/(?<![\p{L}\p{N}])ниармедик\s+плюс(?![\p{L}\p{N}])/giu, " ")
     .replace(/^[-—–,.:;\s]+|[-—–,.:;\s]+$/g, "")
     .trim();
   const count = countFromText(withoutBrand);
@@ -287,10 +290,15 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
   const doses = extractDoses(brand, withoutBrand, form, count);
   const multipackMatch = withoutBrand.match(/(?:[xх×]\s*|(?<![\p{L}\p{N}]))(\d+)\s*(?:уп(?:аковк)?\.?|упаков(?:ки|ок|ка))(?![\p{L}\p{N}])/iu);
   const multipack = multipackMatch ? Number(multipackMatch[1]) : undefined;
-  const modifiers = MODIFIERS.filter((item) => item.pattern.test(withoutBrand)).map((item) => item.value);
+  const modifiers = MODIFIERS.filter((item) => item.pattern.test(withoutBrand))
+    .map((item) => item.value)
+    // "Плюс" can qualify a concrete dosage form, but by itself it does
+    // not prove a product or a separate line.
+    .filter((value) => value !== "Плюс" || Boolean(form || doses.length));
   const modifier = modifiers.length ? modifiers.join(" ") : undefined;
   const generic = !form && !count && doses.length === 0 && !modifier;
-  const genericPage = /(?:отзыв|инструкц|цен[аы]|аналог|лекарственн|ноотропн|препарат|средство)/iu.test(withoutBrand);
+  const fallbackText = generic ? withoutBrand.replace(/^плюс(?:\s+отзывы?)?$/iu, "").trim() : withoutBrand;
+  const genericPage = !fallbackText || /(?:отзыв|инструкц|цен[аы]|аналог|лекарственн|ноотропн|препарат|средство)/iu.test(fallbackText);
   const contentPage = /(?:пародонтолог|стать[яи]|книг[аи]|методическ|исследован|применение\s+.{0,100}\s+в\s+)/iu.test(withoutBrand);
   const unknownModel = /^\s*(?:модель\s*)?\d{5,}\s*$/iu.test(withoutBrand) || /^\s*модель\s+\d+/iu.test(withoutBrand);
   return {
@@ -300,7 +308,7 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
     count,
     multipack,
     fallback: generic
-      ? unknownModel ? "Общая карточка бренда" : genericPage ? "Общая карточка отзывов" : cleanFallback(withoutBrand)
+      ? unknownModel ? "Общая карточка бренда" : genericPage ? "Общая карточка отзывов" : cleanFallback(fallbackText)
       : undefined,
     generic,
     genericPage,
@@ -328,7 +336,7 @@ function render(parts: ProductParts): string {
   return chunks.join(" ") || "Общая карточка бренда";
 }
 
-const LINE_NAMES = ["Максимум", "Плюс", "Дуо", "Форте", "Экспресс", "Лайт", "Интенс", "Нео", "Кидс", "Иммуно", "Про"];
+const LINE_NAMES = ["Максимум", "Дуо", "Форте", "Экспресс", "Лайт", "Интенс", "Нео", "Кидс", "Иммуно", "Про"];
 const PACK_MEASURE_FORMS = new Set(["порошок", "гранулы", "раствор", "сироп", "суспензия", "спрей", "капли", "гель", "крем", "мазь", "лиофилизат"]);
 
 function lineName(parts: ProductParts): string | undefined {
@@ -492,6 +500,13 @@ export function analyzeProductIdentity(item: ProductNameInput): ProductIdentity 
   const storedLine = item.product.trim().match(/^Общая карточка линейки «([^»]+)»(?:\s*\((\d+)\s+вариант(?:а|ов)?\))?$/iu);
   if (storedLine) {
     const variantCount = storedLine[2] ? Number(storedLine[2]) : undefined;
+    if (normalizeText(storedLine[1]) === "плюс") {
+      return {
+        label: `Общая карточка бренда${variantCount ? ` (${variantCount} ${variantWord(variantCount)})` : ""}`,
+        granularity: "family", confidence: variantCount ? "exact" : "partial",
+        missing: [], reasons: ["Метка «Плюс» не считается отдельной товарной линейкой"], variantCount
+      };
+    }
     return {
       label: item.product.trim(), granularity: "line", confidence: variantCount ? "exact" : "partial",
       missing: [], reasons: ["Сохранённая общая карточка линейки"], variantCount
