@@ -502,6 +502,24 @@ export class ReviewSiteAdapter implements SiteAdapter {
           message: "pravogolosa.net search returned an explicit no-results proof"
         };
       }
+      if (this.definition.domain === "irecommend.ru") {
+        const refs = await this.discoverIrecommend("Кагоцел", context);
+        const proved = refs.find((ref) => {
+          const reviews = ref.metadata.reviewCount;
+          const rating = ref.metadata.rating;
+          return /^\d+$/.test(ref.listingId) && typeof reviews === "number" &&
+            Number.isInteger(reviews) && reviews >= 0 &&
+            (reviews === 0 || typeof rating === "number" && Number.isFinite(rating) && rating > 0 && rating <= 5);
+        });
+        if (!proved) {
+          return { ok: false, checkedAt, message: "irecommend.ru search canary has no proven review counter" };
+        }
+        return {
+          ok: true,
+          checkedAt,
+          message: `irecommend.ru search canary reviewCount=${proved.metadata.reviewCount}, rating=${proved.metadata.rating ?? "n/a"}`
+        };
+      }
       const target = this.definition.healthCanary?.url ?? this.definition.origin;
       const { html, status } = await this.request(target, context);
       if (status < 200 || status >= 300) return { ok: false, checkedAt, message: `HTTP ${status}` };

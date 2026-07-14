@@ -337,6 +337,25 @@ describe("first-party review-site adapters", () => {
     expect(result).toMatchObject({ reviews: 430, rating: 3.9, ratingCount: 417, status: "ok" });
   });
 
+  it("checks iRecommend through its strict search route instead of the now-disallowed origin", async () => {
+    const requested: URL[] = [];
+    const adapter = adapterFor("irecommend.ru", (async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      requested.push(url);
+      if (url.pathname === "/") return new Response("origin must not be requested", { status: 400 });
+      return new Response(`<ul class="srch-result-nodes"><li><div class="ProductTizer" data-type="2" data-nid="135637">
+        <div class="title"><a href="/content/protivovirusnye-sredstva-kagotsel">Противовирусные средства Кагоцел</a></div>
+        <a class="read-all-reviews-link"><span class="counter">430</span></a><span class="reviewsLink">430 отзывов</span>
+        <div class="fivestar-summary"><span class="average-rating">Среднее: <span>3.9</span></span></div>
+      </div></li></ul>`);
+    }) as typeof fetch);
+
+    await expect(adapter.healthCheck(context)).resolves.toMatchObject({ ok: true });
+    expect(requested).toHaveLength(1);
+    expect(requested[0].pathname).toBe("/srch");
+    expect(requested[0].searchParams.get("query")).toBe("Кагоцел");
+  });
+
   it("never substitutes iRecommend votes for an unproved review count", async () => {
     const adapter = adapterFor("irecommend.ru", (async () => new Response(
       `<h1>Противовирусные средства Кагоцел — отзывы</h1>` +
