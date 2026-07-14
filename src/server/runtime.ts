@@ -81,8 +81,12 @@ export async function createCollectorRuntime(options: {
     // maximum reservation of completed or failed Actor calls.
     const windowMs = 30 * 60 * 1000;
     const bucket = Math.floor(Date.now() / windowMs);
-    const currentKey = `apify:v3:${usageMonth}:${bucket}`;
-    const previousKey = `apify:v3:${usageMonth}:${bucket - 1}`;
+    // v4 starts a clean reservation namespace after introducing settlement
+    // for proven-empty Actor batches. Old v3 reservations used the maximum
+    // charge as a non-releasable hold and must not keep blocking the corrected
+    // accounting model; authoritative live Apify usage is still checked above.
+    const currentKey = `apify:v4:${usageMonth}:${bucket}`;
+    const previousKey = `apify:v4:${usageMonth}:${bucket - 1}`;
     const [currentReserved, previousReserved] = await Promise.all([
       repository.reserveUsage(currentKey, 0, monthlyLimit),
       repository.reserveUsage(previousKey, 0, monthlyLimit)

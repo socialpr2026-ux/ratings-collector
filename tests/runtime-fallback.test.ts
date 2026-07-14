@@ -136,7 +136,10 @@ describe("collector runtime fallback integration", () => {
     }) as unknown as typeof fetch;
     const runtime = await createCollectorRuntime({
       repository: new MemoryRepository({
-        usage: { [`apify:v2:${new Date().toISOString().slice(0, 7)}`]: 4.48 }
+        usage: {
+          [`apify:v2:${new Date().toISOString().slice(0, 7)}`]: 4.48,
+          [`apify:v3:${new Date().toISOString().slice(0, 7)}:${Math.floor(Date.now() / (30 * 60 * 1000))}`]: 4.48
+        }
       }),
       evidence: new MemoryEvidenceStore(),
       fetch: fetchMock,
