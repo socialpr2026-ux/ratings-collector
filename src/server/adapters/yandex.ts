@@ -13,6 +13,9 @@ import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 
 const DEFAULT_SITEMAP_INDEX = "https://reviews.yandex.ru/ugcpub/sitemap.xml";
 const REVIEWS_ORIGIN = "https://reviews.yandex.ru";
+const TRANSLATE_ORIGIN = "https://reviews-yandex-ru.translate.goog";
+const DIRECT_SOURCE = "yandex_reviews_json_ld";
+const TRANSLATE_SOURCE = "yandex_reviews_json_ld_google_translate";
 const MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_\d+-\d+-\d+\.xml$/i;
 const MODEL_ID_AT_END = /--(\d+)(?:[/?#]|$)/;
 
@@ -27,6 +30,15 @@ type BrandDiscovery = {
   brand: string;
   refs: Map<string, ProductRef>;
 };
+
+type ProductPage =
+  | { kind: "missing"; requestUrl: string }
+  | {
+      kind: "html";
+      html: string;
+      responseUrl: string;
+      translated: boolean;
+    };
 
 export type YandexAdapterOptions = {
   fetch?: typeof globalThis.fetch;
@@ -254,47 +266,42 @@ export class YandexAdapter implements SiteAdapter {
     const listingId = normalizeListingId(ref.listingId) ?? extractModelId(ref.url);
     if (!listingId) throw new ParserChangedError(`Invalid Yandex modelId: ${ref.listingId}`);
 
-    let requestUrl = reviewsUrlForRef(ref.url, listingId);
-    const numericUrl = `${REVIEWS_ORIGIN}/product/${listingId}`;
-    let triedNumericRoute = requestUrl === numericUrl;
-    let response: Response;
-    const requestNumericRoute = async (): Promise<Response> => {
-      requestUrl = numericUrl;
-      triedNumericRoute = true;
-      return this.request(requestUrl, context, "text/html,application/xhtml+xml");
-    };
+    let page: ProductPage;
     try {
-      response = await this.request(requestUrl, context, "text/html,application/xhtml+xml");
+      page = await this.loadDirectProductPage(ref, listingId, context);
     } catch (error) {
       if (!(error instanceof AdapterBlockedError)) throw error;
-      // Some model--ID routes reset connections for removed products. The
-      // same-origin numeric route either redirects to the canonical product
-      // or renders Yandex's explicit missing-page screen.
-      response = await requestNumericRoute();
-    }
-    if (response.status === 404 || response.status === 410) {
-      // A model--ID route can disappear while the fixed numeric route still
-      // resolves a live model. Only the second independent route may prove a
-      // newly discovered actor candidate stale.
-      if (!triedNumericRoute) response = await requestNumericRoute();
-      if (response.status === 404 || response.status === 410) {
-        return this.emptyObservation(
-          ref,
-          listingId,
-          requestUrl,
-          "not_found",
-          "yandex_reviews_missing_candidate"
+      try {
+        // The fixed Google Translate renderer returns the source page's SSR
+        // HTML without running a browser and is reachable from cloud egress
+        // ranges that Yandex sometimes challenges. The source is accepted
+        // only after exact numeric-route, canonical and modelId checks below.
+        page = await this.loadTranslatedProductPage(listingId, context);
+      } catch (translatedError) {
+        if (!(translatedError instanceof AdapterBlockedError)) throw translatedError;
+        throw new AdapterBlockedError(
+          `Yandex product ${listingId} is unavailable through direct and translated collectors: ` +
+          `${errorMessage(error)}; ${errorMessage(translatedError)}`
         );
       }
     }
-    assertUsableResponse(response, requestUrl);
-    const html = await readBoundedBody(response, this.maxDocumentBytes, requestUrl);
-    if (looksBlocked(html)) throw new AdapterBlockedError(`Yandex blocked product request for model ${listingId}`);
+
+    if (page.kind === "missing") {
+      return this.emptyObservation(
+        ref,
+        listingId,
+        page.requestUrl,
+        "not_found",
+        "yandex_reviews_missing_candidate"
+      );
+    }
+
+    const { html } = page;
     if (looksMissingProduct(html)) {
       return this.emptyObservation(
         ref,
         listingId,
-        requestUrl,
+        page.responseUrl,
         "not_found",
         "yandex_reviews_missing_candidate"
       );
@@ -304,11 +311,11 @@ export class YandexAdapter implements SiteAdapter {
     if (products.length === 0) {
       throw new ParserChangedError(`Yandex model ${listingId} has no JSON-LD Product`);
     }
-    const product = products.find((candidate) => isObject(candidate.aggregateRating)) ?? products[0];
+    const canonicalUrl = extractAndValidateCanonical(html, page.responseUrl, listingId);
+    const product = selectJsonLdProduct(products, listingId);
     const title = nonEmptyString(product.name);
     if (!title) throw new ParserChangedError(`Yandex model ${listingId} JSON-LD Product has no name`);
 
-    const canonicalUrl = extractAndValidateCanonical(html, response.url || requestUrl, listingId);
     const description = nonEmptyString(product.description);
     const productEvidence = extractPageProductEvidence(html, canonicalUrl, ref.brand, {
       structuredSignals: [title, description].filter((value): value is string => Boolean(value))
@@ -320,6 +327,11 @@ export class YandexAdapter implements SiteAdapter {
       structuredBrandNames.some((candidate) => matchesBrand(candidate, ref.brand)) || matchesBrand(title, ref.brand);
 
     if (!aggregate) {
+      if (page.translated && !hasExplicitZeroReviewProof(html, product)) {
+        throw new ParserChangedError(
+          `Yandex translated model ${listingId} has no AggregateRating or explicit zero-review proof`
+        );
+      }
       return {
         domain: "market.yandex.ru",
         platform: this.id,
@@ -334,7 +346,7 @@ export class YandexAdapter implements SiteAdapter {
         capturedAt: this.now().toISOString(),
         evidenceRef: `${canonicalUrl}#json-ld`,
         productEvidence,
-        source: "yandex_reviews_json_ld"
+        source: page.translated ? TRANSLATE_SOURCE : DIRECT_SOURCE
       };
     }
 
@@ -374,7 +386,78 @@ export class YandexAdapter implements SiteAdapter {
       capturedAt: this.now().toISOString(),
       evidenceRef: `${canonicalUrl}#json-ld`,
       productEvidence,
-      source: "yandex_reviews_json_ld"
+      source: page.translated ? TRANSLATE_SOURCE : DIRECT_SOURCE
+    };
+  }
+
+  private async loadDirectProductPage(
+    ref: ProductRef,
+    listingId: string,
+    context: AdapterContext
+  ): Promise<ProductPage> {
+    let requestUrl = reviewsUrlForRef(ref.url, listingId);
+    const numericUrl = `${REVIEWS_ORIGIN}/product/${listingId}`;
+    let triedNumericRoute = requestUrl === numericUrl;
+    const requestNumericRoute = async (): Promise<Response> => {
+      requestUrl = numericUrl;
+      triedNumericRoute = true;
+      return this.request(requestUrl, context, "text/html,application/xhtml+xml");
+    };
+
+    let response: Response;
+    try {
+      response = await this.request(requestUrl, context, "text/html,application/xhtml+xml");
+    } catch (error) {
+      if (!(error instanceof AdapterBlockedError)) throw error;
+      // Some model--ID routes reset connections for removed products. The
+      // same-origin numeric route either redirects to the canonical product
+      // or renders Yandex's explicit missing-page screen.
+      response = await requestNumericRoute();
+    }
+    if (response.status === 404 || response.status === 410) {
+      if (!triedNumericRoute) response = await requestNumericRoute();
+      if (response.status === 404 || response.status === 410) {
+        return { kind: "missing", requestUrl };
+      }
+    }
+    assertUsableResponse(response, requestUrl);
+    const html = await readBoundedBody(response, this.maxDocumentBytes, requestUrl);
+    if (looksBlocked(html)) throw new AdapterBlockedError(`Yandex blocked product request for model ${listingId}`);
+    return {
+      kind: "html",
+      html,
+      responseUrl: response.url || requestUrl,
+      translated: false
+    };
+  }
+
+  private async loadTranslatedProductPage(
+    listingId: string,
+    context: AdapterContext
+  ): Promise<ProductPage> {
+    const sourceUrl = `${REVIEWS_ORIGIN}/product/${listingId}`;
+    const endpoint = new URL(`/product/${listingId}`, TRANSLATE_ORIGIN);
+    endpoint.searchParams.set("_x_tr_sl", "ru");
+    endpoint.searchParams.set("_x_tr_tl", "en");
+    endpoint.searchParams.set("_x_tr_hl", "en");
+    const response = await this.request(endpoint.toString(), context, "text/html,application/xhtml+xml");
+    assertUsableResponse(response, endpoint.toString());
+    const actualUrl = new URL(response.url || endpoint.toString());
+    if (actualUrl.protocol !== "https:" || actualUrl.hostname !== "reviews-yandex-ru.translate.goog" ||
+      actualUrl.pathname !== `/product/${listingId}`) {
+      throw new ParserChangedError(`Yandex translated model ${listingId} escaped its fixed product route`);
+    }
+    const html = await readBoundedBody(response, this.maxDocumentBytes, endpoint.toString());
+    if (looksBlocked(html)) throw new AdapterBlockedError(`Yandex blocked translated product request for model ${listingId}`);
+    if (!/<html\b/i.test(html) || !/<\/html\s*>/i.test(html)) {
+      throw new ParserChangedError(`Yandex translated model ${listingId} returned incomplete HTML`);
+    }
+    assertTranslatedSource(html, sourceUrl, listingId);
+    return {
+      kind: "html",
+      html,
+      responseUrl: sourceUrl,
+      translated: true
     };
   }
 
@@ -793,6 +876,54 @@ function extractJsonLdProducts(html: string): JsonObject[] {
   return products;
 }
 
+function selectJsonLdProduct(products: JsonObject[], listingId: string): JsonObject {
+  const identified = products.filter((product) => productIdentifiesModel(product, listingId));
+  if (identified.length === 1) return identified[0];
+  if (identified.length > 1) {
+    throw new ParserChangedError(`Yandex model ${listingId} has multiple identifying JSON-LD Products`);
+  }
+  // A page-level canonical binds one sole Product to the requested model. If
+  // several Products are present, aggregateRating alone is not sufficient:
+  // it may belong to a recommendation or another item embedded in the page.
+  if (products.length === 1) return products[0];
+  throw new ParserChangedError(`Yandex model ${listingId} has ambiguous JSON-LD Products`);
+}
+
+function productIdentifiesModel(product: JsonObject, listingId: string): boolean {
+  for (const value of [product.productID, product.sku, product.mpn]) {
+    if ((typeof value === "string" || typeof value === "number") && String(value).trim() === listingId) return true;
+  }
+  for (const value of [product.url, product["@id"]]) {
+    if (typeof value !== "string") continue;
+    if (extractModelId(value) === listingId) return true;
+    try {
+      const url = new URL(value, REVIEWS_ORIGIN);
+      if (url.hostname === "reviews.yandex.ru" && url.pathname === `/product/${listingId}`) return true;
+    } catch {
+      // Non-URL identifiers are checked by the scalar fields above.
+    }
+  }
+  return false;
+}
+
+function hasExplicitZeroReviewProof(html: string, product: JsonObject): boolean {
+  const signals: string[] = [];
+  const description = nonEmptyString(product.description);
+  if (description) signals.push(description);
+  const title = html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+  if (title) signals.push(decodeHtmlEntities(title.replace(/<[^>]+>/g, " ")));
+  for (const tag of html.match(/<meta\b[^>]*>/gi) ?? []) {
+    const name = (htmlAttribute(tag, "name") ?? htmlAttribute(tag, "property") ?? "").toLowerCase();
+    if (name !== "description" && name !== "og:description") continue;
+    const content = htmlAttribute(tag, "content");
+    if (content) signals.push(content);
+  }
+  return signals.some((signal) =>
+    /(?:^|\s)0\s*(?:текстов(?:ых|ые)?\s+)?отзыв(?:ов|а|ы)?\b/iu.test(signal) ||
+    /(?:^|\s)0\s+(?:written\s+)?reviews?\b/iu.test(signal)
+  );
+}
+
 function visitJson(root: unknown, visitor: (value: JsonObject) => void): void {
   const queue: unknown[] = [root];
   let visited = 0;
@@ -859,6 +990,25 @@ function extractAndValidateCanonical(html: string, responseUrl: string, listingI
     throw new ParserChangedError(`Yandex model ${listingId} canonical URL does not identify the requested model`);
   }
   return canonicalizeUrl(url.toString());
+}
+
+function assertTranslatedSource(html: string, expectedSourceUrl: string, listingId: string): void {
+  const baseTag = html.match(/<base\b[^>]*>/i)?.[0];
+  const sourceValue = baseTag ? htmlAttribute(baseTag, "href") : undefined;
+  if (!sourceValue) {
+    throw new ParserChangedError(`Yandex translated model ${listingId} has no source URL proof`);
+  }
+  let sourceUrl: URL;
+  try {
+    sourceUrl = new URL(sourceValue);
+  } catch {
+    throw new ParserChangedError(`Yandex translated model ${listingId} has an invalid source URL proof`);
+  }
+  const expected = new URL(expectedSourceUrl);
+  if (sourceUrl.protocol !== "https:" || sourceUrl.hostname !== "reviews.yandex.ru" ||
+    sourceUrl.pathname !== expected.pathname || sourceUrl.search || sourceUrl.hash) {
+    throw new ParserChangedError(`Yandex translated model ${listingId} returned a different source page`);
+  }
 }
 
 function htmlAttribute(tag: string, name: string): string | undefined {

@@ -477,7 +477,7 @@ describe("run orchestration and fail-closed QA", () => {
     }));
     const yandexRun = await yandexService.executeRun((await yandexService.createRun(yandexRequest)).id);
     await expect(yandexService.approveObservations(yandexRun.id, ["market.yandex.ru:900082876"]))
-      .resolves.toMatchObject({ observations: [{ status: "ok", productIdentity: { granularity: "unresolved" } }] });
+      .resolves.toMatchObject({ observations: [{ status: "ok", productIdentity: { granularity: "family" } }] });
   });
 
   it("does not gate a dedicated review-site observation on a stale generic profile", async () => {

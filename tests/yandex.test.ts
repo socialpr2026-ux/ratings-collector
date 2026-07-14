@@ -8,6 +8,7 @@ const INDEX = "https://reviews.yandex.ru/ugcpub/sitemap.xml";
 const MAP_A = "https://reviews.yandex.ru/ugcpub/sitemap_model_0-9999999-0.xml";
 const MAP_B = "https://reviews.yandex.ru/ugcpub/sitemap_model_260000000-269999999-0.xml";
 const MAP_C = "https://reviews.yandex.ru/ugcpub/sitemap_model_500000000-509999999-0.xml";
+const MAP_695 = "https://reviews.yandex.ru/ugcpub/sitemap_model_690000000-699999999-0.xml";
 
 describe("YandexAdapter discovery", () => {
   it("discovers model cards by Cyrillic brand transliteration and deduplicates modelId", async () => {
@@ -33,6 +34,32 @@ describe("YandexAdapter discovery", () => {
     );
     expect(refs.every((ref) => ref.platform === "yandex" && ref.domain === "market.yandex.ru")).toBe(true);
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining("evil.example"), expect.anything());
+  });
+
+  it("discovers every current Kagocel model across distant sitemap shards", async () => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([MAP_B, MAP_695])),
+      [MAP_B]: xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/kagotsel--265149860"
+      ])),
+      [MAP_695]: xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/kagotsel-tabletki-12-mg-10-sht--695943742",
+        "https://reviews.yandex.ru/product/kagotsel-tabletki-12-mg-20-sht--695940046",
+        "https://reviews.yandex.ru/product/kagotsel-tabletki-12-mg-30-sht--695941716",
+        "https://reviews.yandex.ru/product/ingavirin--695999999"
+      ]))
+    });
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 2 });
+
+    const refs = await adapter.discover("Кагоцел", context({ runId: "kagocel-live-shape", brands: ["Кагоцел"] }));
+
+    expect(new Set(refs.map(({ listingId }) => listingId))).toEqual(new Set([
+      "265149860",
+      "695940046",
+      "695941716",
+      "695943742"
+    ]));
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 
   it("fails closed before scanning when the sitemap index exceeds the cap", async () => {
@@ -322,6 +349,136 @@ describe("YandexAdapter collection", () => {
     });
   });
 
+  it("recovers a cloud-blocked product through the fixed translated numeric route", async () => {
+    const modelId = "695943742";
+    const directUrl = `https://reviews.yandex.ru/product/kagotsel-tabletki-12-mg-10-sht--${modelId}`;
+    const translatedUrl = `https://reviews-yandex-ru.translate.goog/product/${modelId}?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en`;
+    const canonical = `https://reviews.yandex.ru/product/kagotsel-tabletki-12-mg-10-sht--${modelId}`;
+    const fetch = routeFetch({
+      [directUrl]: new Response("blocked", { status: 403 }),
+      [translatedUrl]: htmlResponse(translatedProductHtml({
+        source: `https://reviews.yandex.ru/product/${modelId}`,
+        canonical,
+        product: {
+          "@context": "https://schema.org",
+          "@type": "Product",
+          name: "Кагоцел, таблетки 12 мг, 10 шт.",
+          brand: { "@type": "Brand", name: "Без бренда" },
+          aggregateRating: {
+            "@type": "AggregateRating",
+            ratingValue: "5.0",
+            ratingCount: "7",
+            reviewCount: "2"
+          }
+        }
+      }))
+    });
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.collect(ref({ listingId: modelId, url: directUrl }), context())).resolves.toMatchObject({
+      listingId: modelId,
+      canonicalUrl: canonical,
+      reviews: 2,
+      ratingCount: 7,
+      rating: 5,
+      status: "ok",
+      source: "yandex_reviews_json_ld_google_translate"
+    });
+    expect(fetch.mock.calls.map(([input]) => input)).toEqual([directUrl, translatedUrl]);
+  });
+
+  it("binds translated metrics to the Product identifying the requested model", async () => {
+    const modelId = "695943742";
+    const directUrl = `https://reviews.yandex.ru/product/kagotsel--${modelId}`;
+    const translatedUrl = `https://reviews-yandex-ru.translate.goog/product/${modelId}?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en`;
+    const fetch = routeFetch({
+      [directUrl]: new Response("blocked", { status: 403 }),
+      [translatedUrl]: htmlResponse(translatedProductHtml({
+        source: `https://reviews.yandex.ru/product/${modelId}`,
+        canonical: directUrl,
+        product: [
+          {
+            "@type": "Product",
+            url: "https://reviews.yandex.ru/product/unrelated--999999999",
+            name: "Соседний товар",
+            aggregateRating: { "@type": "AggregateRating", ratingValue: 1, reviewCount: 999 }
+          },
+          {
+            "@type": "Product",
+            url: directUrl,
+            name: "Кагоцел, таблетки 12 мг, 10 шт.",
+            aggregateRating: { "@type": "AggregateRating", ratingValue: 5, reviewCount: 2 }
+          }
+        ]
+      }))
+    });
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.collect(ref({ listingId: modelId, url: directUrl }), context())).resolves.toMatchObject({
+      product: "Кагоцел, таблетки 12 мг, 10 шт.",
+      reviews: 2,
+      rating: 5
+    });
+  });
+
+  it("never turns a partial translated Product without AggregateRating into zero reviews", async () => {
+    const modelId = "695943742";
+    const directUrl = `https://reviews.yandex.ru/product/kagotsel--${modelId}`;
+    const translatedUrl = `https://reviews-yandex-ru.translate.goog/product/${modelId}?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en`;
+    const partial = `<html><head><base href="https://reviews.yandex.ru/product/${modelId}"><link rel="canonical" href="${directUrl}"><script type="application/ld+json">${JSON.stringify({
+      "@type": "Product",
+      name: "Кагоцел"
+    })}</script></head>`;
+    const fetch = routeFetch({
+      [directUrl]: new Response("blocked", { status: 403 }),
+      [translatedUrl]: htmlResponse(partial)
+    });
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.collect(ref({ listingId: modelId, url: directUrl }), context()))
+      .rejects.toThrow(/incomplete HTML/);
+  });
+
+  it("requires explicit zero-review proof on a complete translated Product without AggregateRating", async () => {
+    const modelId = "695943742";
+    const directUrl = `https://reviews.yandex.ru/product/kagotsel--${modelId}`;
+    const translatedUrl = `https://reviews-yandex-ru.translate.goog/product/${modelId}?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en`;
+    const fetch = routeFetch({
+      [directUrl]: new Response("blocked", { status: 403 }),
+      [translatedUrl]: htmlResponse(translatedProductHtml({
+        source: `https://reviews.yandex.ru/product/${modelId}`,
+        canonical: directUrl,
+        product: { "@type": "Product", name: "Кагоцел" }
+      }))
+    });
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.collect(ref({ listingId: modelId, url: directUrl }), context()))
+      .rejects.toThrow(/explicit zero-review proof/);
+  });
+
+  it("fails closed when the translated renderer cannot prove the exact source model", async () => {
+    const modelId = "695943742";
+    const directUrl = `https://reviews.yandex.ru/product/kagotsel--${modelId}`;
+    const translatedUrl = `https://reviews-yandex-ru.translate.goog/product/${modelId}?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en`;
+    const fetch = routeFetch({
+      [directUrl]: new Response("blocked", { status: 403 }),
+      [translatedUrl]: htmlResponse(translatedProductHtml({
+        source: "https://reviews.yandex.ru/product/265149860",
+        canonical: directUrl,
+        product: {
+          "@type": "Product",
+          name: "Кагоцел",
+          aggregateRating: { "@type": "AggregateRating", ratingValue: 5, reviewCount: 2 }
+        }
+      }))
+    });
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.collect(ref({ listingId: modelId, url: directUrl }), context()))
+      .rejects.toThrow(/different source page/);
+  });
+
   it("finds Product inside @graph and falls back to its title for brand validation", async () => {
     const fetch = productFetch({
       "@context": "https://schema.org",
@@ -575,4 +732,16 @@ function modelSitemap(urls: string[]): string {
 
 function productHtml({ canonical, product }: { canonical: string; product: unknown }): string {
   return `<!doctype html><html><head><link href="${canonical}" rel="canonical"><script type="application/ld+json">${JSON.stringify(product)}</script></head><body></body></html>`;
+}
+
+function translatedProductHtml({
+  source,
+  canonical,
+  product
+}: {
+  source: string;
+  canonical: string;
+  product: unknown;
+}): string {
+  return `<!doctype html><html><head><base href="${source}"><link href="${canonical}" rel="canonical"><script type="application/ld+json">${JSON.stringify(product)}</script></head><body></body></html>`;
 }

@@ -347,7 +347,7 @@ describe("YandexApifyAdapter discovery", () => {
     expect(reviewsFetch).toHaveBeenCalledTimes(3);
   });
 
-  it("fails closed after bounded attempts on both fixed Reviews routes", async () => {
+  it("fails closed after bounded attempts on all three fixed Reviews routes", async () => {
     const actorFetch = vi.fn(async () => jsonResponse([product()]));
     const reviewsFetch = vi.fn(async () => {
       throw new TypeError("fetch failed");
@@ -359,7 +359,9 @@ describe("YandexApifyAdapter discovery", () => {
     const [ref] = await adapter.discover(String(product().title), CONTEXT);
 
     await expect(adapter.collect(ref, CONTEXT)).rejects.toBeInstanceOf(AdapterBlockedError);
-    expect(reviewsFetch).toHaveBeenCalledTimes(6);
+    // Each bounded attempt exhausts the model URL, numeric URL and fixed
+    // translated numeric URL without turning their access failures into zero.
+    expect(reviewsFetch).toHaveBeenCalledTimes(9);
   });
 
   it("stops Reviews retry backoff immediately when the run is aborted", async () => {
