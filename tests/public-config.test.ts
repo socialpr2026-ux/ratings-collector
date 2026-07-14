@@ -671,7 +671,7 @@ describe("static pharmacy Translate gateway", () => {
   });
 
   it("compacts the complete Bud Zdorov review state", async () => {
-    const source = "https://www.budzdorov.ru/product/2511";
+    const source = "https://www.budzdorov.ru/product/otsillokoktsinum-granuly-6doz-2511";
     const reviews = [
       { id: 1, ratings: [{ attribute_code: "Оценка", value: 5 }] },
       { id: 2, ratings: [{ attribute_code: "Оценка", value: 4 }] }
@@ -681,7 +681,7 @@ describe("static pharmacy Translate gateway", () => {
       <script>window.__INITIAL_STATE__=${JSON.stringify({ productView: { reviews } })};document.currentScript.remove()</script>
     </body></html>`, { headers: { "content-type": "text/html" } })));
 
-    const response = await callGateway(translated("www-budzdorov-ru.translate.goog", "/product/2511").toString());
+    const response = await callGateway(translated("www-budzdorov-ru.translate.goog", "/product/otsillokoktsinum-granuly-6doz-2511").toString());
     const proof = await response.text();
     expect(response.status).toBe(200);
     expect(proof).toContain('allreviewsqty="2"');

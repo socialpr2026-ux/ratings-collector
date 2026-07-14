@@ -206,7 +206,7 @@ function parsePharmacyTranslateTarget(target: URL): PharmacyTranslateTarget | un
   if (target.hostname === BUDZDOROV_TRANSLATE_HOST) {
     if ([...target.searchParams.keys()].some((key) => !PHARMACY_TRANSLATE_PARAMETERS.has(key))) return undefined;
     if (/^\/forms\/[a-z0-9][a-z0-9-]*$/i.test(target.pathname)) return { kind: "budzdorov-family", source };
-    const product = target.pathname.match(/^\/product\/(\d+)$/i);
+    const product = target.pathname.match(/^\/product\/(?:[a-z0-9-]+-)?(\d+)$/i);
     return product ? { kind: "budzdorov-product", source, productId: product[1] } : undefined;
   }
 
