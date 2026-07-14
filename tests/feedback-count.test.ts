@@ -28,6 +28,20 @@ describe("unified feedback count", () => {
     expect(item).toMatchObject({ reviews: 1828, writtenReviewCount: 711, ratingCount: 1828, evidenceRef: "blob://immutable-evidence" });
   });
 
+  it("uses iRecommend reviews and votes as one participation metric without summing them", () => {
+    const item = observation({ domain: "irecommend.ru", reviews: 430, ratingCount: 417, rating: 3.9 });
+
+    normalizeObservationFeedback(item);
+
+    expect(item).toMatchObject({
+      reviews: 430,
+      writtenReviewCount: 430,
+      ratingCount: 417,
+      rating: 3.9,
+      status: "ok"
+    });
+  });
+
   it("promotes a Megapteka no_reviews observation when one rating is proven", () => {
     const item = observation({ domain: "megapteka.ru", reviews: 0, ratingCount: 1, status: "no_reviews" });
 
@@ -50,7 +64,20 @@ describe("unified feedback count", () => {
     normalizeObservationFeedback(item);
 
     expect(item.reviews).toBe(20);
-    expect(item).not.toHaveProperty("writtenReviewCount");
+    expect(item).toMatchObject({ writtenReviewCount: 20, ratingCount: 20 });
+  });
+
+  it("does not clear an unrelated review gate while normalizing its proven metrics", () => {
+    const item = observation({ reviews: 2, ratingCount: 7, status: "needs_review" });
+
+    normalizeObservationFeedback(item);
+
+    expect(item).toMatchObject({
+      reviews: 7,
+      writtenReviewCount: 2,
+      ratingCount: 7,
+      status: "needs_review"
+    });
   });
 
   it("does not synthesize metrics for blocked observations", () => {

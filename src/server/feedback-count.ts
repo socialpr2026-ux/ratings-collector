@@ -16,9 +16,15 @@ export function normalizeObservationFeedback(observation: Observation): void {
   const candidates = [writtenReviews, ratingCount].filter((value): value is number => value !== null);
   if (candidates.length === 0) return;
 
+  // Once another proven participation counter exists, keep the original
+  // written-review value explicitly. `reviews` is the public unified metric
+  // after this point, while these raw counters remain available for audit.
+  if (ratingCount !== null && !("writtenReviewCount" in observation)) {
+    observation.writtenReviewCount = writtenReviews;
+  }
+
   const feedbackCount = Math.max(...candidates);
   if (feedbackCount !== writtenReviews) {
-    if (!("writtenReviewCount" in observation)) observation.writtenReviewCount = writtenReviews;
     observation.reviews = feedbackCount;
   }
 
