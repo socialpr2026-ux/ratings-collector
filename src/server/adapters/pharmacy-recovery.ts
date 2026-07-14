@@ -207,6 +207,29 @@ function polzaRef(value: string | URL): { listingId: string; canonicalUrl: strin
   }
 }
 
+function polzaProductTitle(canonicalUrl: string, brand: string): string {
+  const slug = new URL(canonicalUrl).pathname.split("/").filter(Boolean).at(-1)?.replace(/_\d+$/, "") ?? "";
+  const brandSlug = [...brandSlugs(brand)].sort((left, right) => right.length - left.length)
+    .find((candidate) => slug === candidate || slug.startsWith(`${candidate}-`));
+  const detail = (brandSlug ? slug.slice(brandSlug.length).replace(/^-+/, "") : slug)
+    .split("-")
+    .filter(Boolean)
+    .map((token) => ({
+      granuly: "гранулы",
+      gomeopaticheskie: "гомеопатические",
+      tabletki: "таблетки",
+      kapsuly: "капсулы",
+      poroshok: "порошок",
+      mg: "мг",
+      ml: "мл",
+      g: "г",
+      sht: "шт.",
+      doz: "доз"
+    })[token] ?? token)
+    .join(" ");
+  return `${brand}${detail ? ` ${detail}` : ""}`.replace(/\s+/g, " ").trim();
+}
+
 function polzaProduct($: CheerioAPI, expectedId?: string): ParsedProduct | undefined {
   const roots = expectedId
     ? $(`meta[itemprop='sku'][content='${expectedId}']`).closest("[itemscope]")
@@ -283,7 +306,7 @@ export class PolzaAdapter implements SiteAdapter {
         if (!slugMatches(productSlug, slugs)) return;
         refs.set(parsed.listingId, {
           domain: "polza.ru", platform: "polza.ru", listingId: parsed.listingId, brand,
-          url: parsed.canonicalUrl, title: brand,
+          url: parsed.canonicalUrl, title: polzaProductTitle(parsed.canonicalUrl, brand),
           metadata: { discovery: "polza-current-sitemap-family", familyUrl: familyUrl.toString() }
         });
       });
@@ -304,7 +327,7 @@ export class PolzaAdapter implements SiteAdapter {
     if (root.length !== 1 || reviews === undefined || reviews > 0 && rating === undefined) {
       throw new ParserChangedError(`polza.ru:${ref.listingId}: product aggregate is incomplete`);
     }
-    return observation("polza.ru", ref, {
+    return observation("polza.ru", { ...ref, title: ref.title || polzaProductTitle(parsedRef.canonicalUrl, ref.brand) }, {
       listingId: parsedRef.listingId,
       canonicalUrl: parsedRef.canonicalUrl,
       reviews,

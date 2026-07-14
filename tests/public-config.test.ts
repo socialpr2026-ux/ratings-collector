@@ -421,6 +421,36 @@ describe("static pharmacy Translate gateway", () => {
     expect(upstream).toHaveBeenCalledOnce();
   });
 
+  it("accepts and compacts source-bound Polza family and product metrics", async () => {
+    const familySource = "https://polza.ru/product/otsillokoktsinum/";
+    const productSource = "https://polza.ru/catalog/otsillokoktsinum-granuly-1-g-6-doz_20630/";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      const source = url.pathname.startsWith("/product/") ? familySource : productSource;
+      const card = `<div class="catalog-card" itemscope itemtype="https://schema.org/Product">
+        <link itemprop="url" href="/catalog/otsillokoktsinum-granuly-1-g-6-doz_20630/">
+        <meta itemprop="sku" content="20630"><meta itemprop="name" content="Оциллококцинум, гранулы 1 г, 6 доз">
+        <span itemprop="aggregateRating"><meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5"></span>
+      </div>`;
+      return new Response(`<html><head><base href="${source}"></head><body>` +
+        (url.pathname.startsWith("/product/")
+          ? `<div class="catalog__block--cards"><div class="catalog-block__items">${card}</div></div>`
+          : `<main itemscope>${card}</main>`) + `</body></html>`, { headers: { "content-type": "text/html" } });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const family = await callGateway(translated("polza-ru.translate.goog", "/product/otsillokoktsinum/").toString());
+    const familyProof = await family.text();
+    expect(family.status).toBe(200);
+    expect(familyProof).toContain('itemprop="sku" content="20630"');
+    expect(familyProof).toContain('itemprop="name" content="Оциллококцинум, гранулы 1 г, 6 доз"');
+
+    const product = await callGateway(translated("polza-ru.translate.goog", "/catalog/otsillokoktsinum-granuly-1-g-6-doz_20630/").toString());
+    expect(product.status).toBe(200);
+    expect(await product.text()).toContain('itemprop="reviewCount" content="1"');
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects unbounded queries and a mismatched source before metrics can become zero", async () => {
     const upstream = vi.fn(async () => new Response(`<html><head>
       <base href="https://farmlend.ru/search?keyword=Другой"></head><body>ничего не найдено</body></html>`, {

@@ -39,9 +39,11 @@ const FARMLEND_TRANSLATE_HOST = "farmlend-ru.translate.goog";
 const OKAPTEKA_TRANSLATE_HOST = "okapteka-ru.translate.goog";
 const ZDRAVCITY_TRANSLATE_HOST = "zdravcity-ru.translate.goog";
 const ASNA_TRANSLATE_HOST = "www-asna-ru.translate.goog";
+const POLZA_TRANSLATE_HOST = "polza-ru.translate.goog";
 
 type PharmacyTranslateTarget = {
-  kind: "farmlend-search" | "farmlend-product" | "okapteka-group" | "okapteka-reviews" | "asna-product";
+  kind: "farmlend-search" | "farmlend-product" | "okapteka-group" | "okapteka-reviews" | "asna-product" |
+    "polza-family" | "polza-product";
   source: URL;
   productId?: string;
 };
@@ -119,7 +121,9 @@ function parsePharmacyTranslateTarget(target: URL): PharmacyTranslateTarget | un
     ? "farmlend.ru"
     : target.hostname === OKAPTEKA_TRANSLATE_HOST
       ? "okapteka.ru"
-      : target.hostname === ASNA_TRANSLATE_HOST ? "www.asna.ru" : undefined;
+      : target.hostname === ASNA_TRANSLATE_HOST
+        ? "www.asna.ru"
+        : target.hostname === POLZA_TRANSLATE_HOST ? "polza.ru" : undefined;
   if (!sourceHost) return undefined;
   const source = new URL(target.pathname, `https://${sourceHost}`);
 
@@ -144,6 +148,15 @@ function parsePharmacyTranslateTarget(target: URL): PharmacyTranslateTarget | un
     if ([...target.searchParams.keys()].some((key) => !PHARMACY_TRANSLATE_PARAMETERS.has(key)) ||
       !/^\/cards\/[a-z0-9_.-]+\.html$/i.test(target.pathname)) return undefined;
     return { kind: "asna-product", source };
+  }
+
+  if (target.hostname === POLZA_TRANSLATE_HOST) {
+    if ([...target.searchParams.keys()].some((key) => !PHARMACY_TRANSLATE_PARAMETERS.has(key))) return undefined;
+    if (/^\/product\/[a-z0-9][a-z0-9-]*\/$/i.test(target.pathname)) {
+      return { kind: "polza-family", source };
+    }
+    const product = target.pathname.match(/^\/catalog\/[a-z0-9][a-z0-9-]*_(\d+)\/$/i);
+    return product ? { kind: "polza-product", source, productId: product[1] } : undefined;
   }
 
   const group = target.pathname.match(/^\/(pg|reviews)\/([^/]+)\/$/i);
@@ -338,6 +351,54 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
   const baseValue = $("base[href]").first().attr("href");
   if (!translatedSourceMatches(baseValue, requested.source)) return undefined;
   const base = `<base href="${escapeHtml(baseValue!)}">`;
+
+  if (requested.kind === "polza-family") {
+    const cards: string[] = [];
+    $(".catalog__block--cards .catalog-block__items > .catalog-card[itemscope]").each((_index, node) => {
+      const root = $(node);
+      const sku = root.find("meta[itemprop='sku']").first().attr("content")?.trim();
+      const href = root.find("link[itemprop='url']").first().attr("href");
+      const name = root.find("meta[itemprop='name']").first().attr("content")?.normalize("NFKC").replace(/\s+/g, " ").trim();
+      const aggregate = root.find("[itemprop='aggregateRating']").first();
+      const reviews = aggregate.find("meta[itemprop='reviewCount']").first().attr("content")?.trim();
+      const rating = aggregate.find("meta[itemprop='ratingValue']").first().attr("content")?.trim();
+      if (!sku || !/^\d+$/.test(sku) || !href || !name || !reviews || !/^\d+$/.test(reviews)) return;
+      let product: URL;
+      try { product = new URL(href, requested.source); }
+      catch { return; }
+      const productId = product.pathname.match(/^\/catalog\/[a-z0-9][a-z0-9-]*_(\d+)\/$/i)?.[1];
+      const reviewCount = Number(reviews);
+      const ratingValue = rating && /^\d(?:[.,]\d+)?$/.test(rating) ? Number(rating.replace(",", ".")) : Number.NaN;
+      if (product.protocol !== "https:" || product.hostname !== "polza.ru" || productId !== sku ||
+        !Number.isSafeInteger(reviewCount) || reviewCount < 0 ||
+        reviewCount > 0 && (!Number.isFinite(ratingValue) || ratingValue <= 0 || ratingValue > 5)) return;
+      cards.push(`<div class="catalog-card" itemscope itemtype="https://schema.org/Product">` +
+        `<link itemprop="url" href="${escapeHtml(product.pathname)}"><meta itemprop="sku" content="${escapeHtml(sku)}">` +
+        `<meta itemprop="name" content="${escapeHtml(name)}"><span itemprop="aggregateRating">` +
+        `<meta itemprop="reviewCount" content="${escapeHtml(reviews)}">` +
+        `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</span></div>`);
+    });
+    if (!cards.length) return undefined;
+    return `<html><head>${base}</head><body><script data-source-url="${escapeHtml(requested.source.toString())}"></script>` +
+      `<div class="catalog__block--cards"><div class="catalog-block__items">${cards.join("")}</div></div></body></html>`;
+  }
+
+  if (requested.kind === "polza-product") {
+    const roots = $(`meta[itemprop='sku'][content='${requested.productId}']`).closest("[itemscope]");
+    if (roots.length !== 1) return undefined;
+    const root = roots.first();
+    const aggregate = root.find("[itemprop='aggregateRating']").first();
+    const reviews = aggregate.find("meta[itemprop='reviewCount']").first().attr("content")?.trim();
+    const rating = aggregate.find("meta[itemprop='ratingValue']").first().attr("content")?.trim();
+    const reviewCount = reviews && /^\d+$/.test(reviews) ? Number(reviews) : Number.NaN;
+    const ratingValue = rating && /^\d(?:[.,]\d+)?$/.test(rating) ? Number(rating.replace(",", ".")) : Number.NaN;
+    if (!Number.isSafeInteger(reviewCount) || reviewCount < 0 ||
+      reviewCount > 0 && (!Number.isFinite(ratingValue) || ratingValue <= 0 || ratingValue > 5)) return undefined;
+    return `<html><head>${base}</head><body><script data-source-url="${escapeHtml(requested.source.toString())}"></script>` +
+      `<main itemscope itemtype="https://schema.org/Product"><meta itemprop="sku" content="${escapeHtml(requested.productId!)}">` +
+      `<div itemprop="aggregateRating" itemscope><meta itemprop="reviewCount" content="${escapeHtml(reviews!)}">` +
+      `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</div></main></body></html>`;
+  }
 
   if (requested.kind === "asna-product") {
     const canonicalValue = $("link[rel='canonical'][href]").first().attr("href");

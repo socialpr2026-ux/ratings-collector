@@ -5,6 +5,8 @@ import {
   SITE_CATALOG,
   countCustomDomains,
   parseDomainList,
+  parseRunnableDomainList,
+  parseTemporarilyBlockedDomainList,
   updateDomainSelection
 } from "../src/client/site-catalog.js";
 
@@ -38,6 +40,14 @@ describe("site picker catalog", () => {
       "https://market.yandex.ru/search?text=test",
       "custom.example/path"
     ].join("\n"))).toEqual(["ozon.ru", "market.yandex.ru", "custom.example"]);
+  });
+
+  it("keeps a manually pasted unavailable site visible but excludes it from the runnable set", () => {
+    const value = "https://medum.ru/\npolza.ru\ncustom.example";
+
+    expect(parseDomainList(value)).toEqual(["medum.ru", "polza.ru", "custom.example"]);
+    expect(parseRunnableDomainList(value)).toEqual(["polza.ru", "custom.example"]);
+    expect(parseTemporarilyBlockedDomainList(value)).toEqual(["medum.ru"]);
   });
 
   it("keeps unrelated manual entries unchanged when a preset is toggled", () => {

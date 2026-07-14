@@ -579,7 +579,6 @@ describe("first-party review-site adapters", () => {
         <a href="/otzyvcategory?page=show_category&amp;catid=41247&amp;order=0&amp;expand=0">Читать все отзывы (4)</a>
       </div>
     `)) as typeof fetch);
-
     await expect(adapter.discover("Оциллококцинум", context)).rejects.toMatchObject({ code: "parser_changed" });
   });
 

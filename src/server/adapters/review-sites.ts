@@ -747,6 +747,12 @@ export class ReviewSiteAdapter implements SiteAdapter {
           if (!resultTitle || !matchesBrand(resultTitle, brand)) return;
           const categoryReviews = integerFrom($(node).text().match(/(?:все|читать\s+все)\s+отзывы\s*\(?([\d\s\u00a0]+)\)?/iu)?.[1]);
           if (categoryReviews === undefined || categoryReviews <= 0 || categoryReviews !== count) return;
+          const resultBlock = $(node).closest(".module, article, li, [class*='item'], [class*='result']");
+          const resultText = resultBlock.length ? resultBlock.text().replace(/\s+/g, " ").trim() : "";
+          // Search can return a manufacturer-wide category (for example,
+          // "ООО Буарон") for a product query. Its aggregate belongs to many
+          // products and must never be attached to the requested brand.
+          if (!matchesBrand(resultText, brand)) return;
           target.protocol = "https:";
           target.search = "";
           target.searchParams.set("page", "show_category");

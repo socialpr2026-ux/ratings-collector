@@ -19,7 +19,8 @@ import {
   SELECTABLE_CATALOG_DOMAINS,
   SITE_CATALOG,
   countCustomDomains,
-  parseDomainList,
+  parseRunnableDomainList,
+  parseTemporarilyBlockedDomainList,
   updateDomainSelection
 } from "./site-catalog.js";
 
@@ -279,7 +280,8 @@ export function App() {
     else localStorage.setItem(LAST_RUN_STORAGE_KEY, run.id);
   }, [run?.id, run?.status]);
 
-  const normalizedDomains = useMemo(() => parseDomainList(domains), [domains]);
+  const normalizedDomains = useMemo(() => parseRunnableDomainList(domains), [domains]);
+  const temporarilyBlockedDomains = useMemo(() => parseTemporarilyBlockedDomainList(domains), [domains]);
   const normalizedBrands = useMemo(() => uniqueLines(brands), [brands]);
   const selectedDomainSet = useMemo(() => new Set(normalizedDomains), [normalizedDomains]);
   const customDomainCount = useMemo(() => countCustomDomains(domains), [domains]);
@@ -823,6 +825,9 @@ export function App() {
               <label htmlFor="domains-list">Все выбранные домены</label>
               <textarea id="domains-list" value={domains} onChange={(event) => setDomains(event.target.value)} rows={5} spellCheck={false} placeholder={"example.ru\nanother-site.ru"} required />
               <small className="field-help">По одному домену в строке — без ссылок на товары. Готовый выбор выше обновится автоматически.</small>
+              {temporarilyBlockedDomains.length > 0 && <small className="field-help field-warning">
+                {temporarilyBlockedDomains.join(", ")} временно пропускается и не помешает сбору с остальных площадок.
+              </small>}
             </details>
           </section>
 

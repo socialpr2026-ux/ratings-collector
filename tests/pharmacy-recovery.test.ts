@@ -74,6 +74,37 @@ describe("recovered first-party pharmacy adapters", () => {
     expect(result.productEvidence?.identifiers).toContainEqual({ type: "product_id", value: "6853" });
   });
 
+  it("derives the exact human Polza variant from a source-bound product URL", async () => {
+    const family = "https://polza.ru/product/otsillokoktsinum/";
+    const card = "https://polza.ru/catalog/otsillokoktsinum-granuly-1-g-6-doz_20630/";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "polza.ru") return new Response(`<urlset><url><loc>${family}</loc></url></urlset>`);
+      if (url.pathname.startsWith("/product/")) return new Response(translated(family, `
+        <div class="catalog__block--cards"><div class="catalog-block__items"><div class="catalog-card" itemscope>
+          <link itemprop="url" href="${card}"><meta itemprop="sku" content="20630">
+          <span itemprop="aggregateRating"><meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5"></span>
+        </div></div></div>`), { headers: { "content-type": "text/html" } });
+      if (url.pathname.includes("_20630")) return new Response(translated(card, `
+        <main itemscope><meta itemprop="sku" content="20630"><div itemprop="aggregateRating">
+          <meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5">
+        </div></main>`), { headers: { "content-type": "text/html" } });
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new PolzaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const refs = await adapter.discover("Оциллококцинум", { region: "Москва" });
+    expect(refs).toMatchObject([{ listingId: "20630", title: "Оциллококцинум гранулы 1 г 6 доз" }]);
+    const result = await adapter.collect(refs[0], { region: "Москва" });
+    expect(result).toMatchObject({ product: "Оциллококцинум гранулы 1 г 6 доз", reviews: 1, rating: 5 });
+    expect(analyzeProductIdentity({
+      brand: result.brand,
+      product: result.product,
+      url: result.canonicalUrl,
+      evidence: result.productEvidence
+    })).toMatchObject({ label: "гранулы 1000 мг №6", granularity: "variant", confidence: "exact" });
+  });
+
   it("discovers current ASNA card URLs from both bounded card sitemaps and verifies every aggregate", async () => {
     const card10 = "https://www.asna.ru/cards/kagotsel_12mg_n10_tab_niarmedik_plyus_ooo.html";
     const card20 = "https://www.asna.ru/cards/kagotsel_12mg_n20_tab_niarmedik_plyus_ooo.html";

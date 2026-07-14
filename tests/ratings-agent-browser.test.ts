@@ -186,7 +186,8 @@ describe("ratings Agent lazy Sandbox routing", () => {
     for (const target of [
       "https://farmlend-ru.translate.goog/search?keyword=Кагоцел&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
       "https://okapteka-ru.translate.goog/pg/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
-      "https://www-asna-ru.translate.goog/cards/kagotsel_12mg_n10_tab_niarmedik_plyus_ooo.html?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
+      "https://www-asna-ru.translate.goog/cards/kagotsel_12mg_n10_tab_niarmedik_plyus_ooo.html?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
+      "https://polza-ru.translate.goog/product/otsillokoktsinum/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
     ]) {
       const response = await routedFetch(target);
       expect(await response.text()).toBe("compact pharmacy proof");

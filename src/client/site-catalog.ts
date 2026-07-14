@@ -55,6 +55,9 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
 ] as const;
 
 export const CATALOG_DOMAINS = SITE_CATALOG.flatMap((group) => group.sites.map((site) => site.domain));
+export const TEMPORARILY_BLOCKED_CATALOG_DOMAINS = SITE_CATALOG.flatMap((group) =>
+  group.sites.filter((site) => site.availability === "temporarily_blocked").map((site) => site.domain)
+);
 export const SELECTABLE_CATALOG_DOMAINS = SITE_CATALOG.flatMap((group) =>
   group.sites.filter((site) => site.availability !== "temporarily_blocked").map((site) => site.domain)
 );
@@ -79,6 +82,16 @@ export function parseDomainList(value: string) {
     seen.add(domain);
     return true;
   });
+}
+
+export function parseRunnableDomainList(value: string) {
+  const blocked = new Set(TEMPORARILY_BLOCKED_CATALOG_DOMAINS);
+  return parseDomainList(value).filter((domain) => !blocked.has(domain));
+}
+
+export function parseTemporarilyBlockedDomainList(value: string) {
+  const blocked = new Set(TEMPORARILY_BLOCKED_CATALOG_DOMAINS);
+  return parseDomainList(value).filter((domain) => blocked.has(domain));
 }
 
 /**
