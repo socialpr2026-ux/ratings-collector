@@ -51,6 +51,10 @@ export async function registerApi(server: FastifyInstance, runtime: Runtime) {
   server.post<{ Params: { runId: string }; Body: { acceptedKeys?: string[] } }>("/api/runs/:runId/review", async (request) =>
     runtime.service.approveObservations(request.params.runId, request.body?.acceptedKeys ?? [])
   );
+  server.get<{ Params: { domain: string } }>("/api/site-profiles/:domain", async (request, reply) => {
+    const profile = await runtime.repository.getProfile(decodeURIComponent(request.params.domain));
+    return profile ?? reply.code(404).send({ error: "Профиль площадки не найден" });
+  });
   server.post<{ Params: { runId: string } }>("/api/runs/:runId/publish", async (request, reply) => {
     const run = await runtime.service.getRun(request.params.runId);
     if (!run) return reply.code(404).send({ error: "Запуск не найден" });

@@ -361,6 +361,44 @@ describe("run orchestration and fail-closed QA", () => {
       .rejects.toThrow("Нельзя подтверждать карточки из статуса publishing");
   });
 
+  it("ignores a stale draft profile for a known adapter but guards versioned generic observations", async () => {
+    const makeService = async (versioned: boolean) => {
+      const repository = new MemoryRepository();
+      await repository.saveProfile({
+        domain: "example.com", version: 1, status: "draft",
+        sitemapUrls: [], ratingScale: 5, reviewCountMeaning: "unknown",
+        rateLimitMs: 0, canaryUrls: [], testExamples: [],
+        createdAt: "2026-07-13T00:00:00.000Z", updatedAt: "2026-07-13T00:00:00.000Z", notes: []
+      });
+      const service = new RatingsService(repository, async () => ({
+        id: versioned ? "generated-profile" : "known-adapter",
+        supportedDomains: ["example.com"],
+        async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+        async discover(brand: string) {
+          return [{ domain: "example.com", platform: "review-site", listingId: "1", brand, url: "https://example.com/p/1", metadata: {} }];
+        },
+        async collect(ref: ProductRef): Promise<Observation> {
+          return {
+            domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+            canonicalUrl: ref.url, product: `${ref.brand} таблетки 100 мг №10`, reviews: 5, rating: 4.8,
+            status: "needs_review", capturedAt: new Date().toISOString(),
+            ...(versioned ? { profileVersion: 1 } : {})
+          };
+        }
+      }));
+      return { service, run: await service.executeRun((await service.createRun(request)).id) };
+    };
+
+    const known = await makeService(false);
+    const acceptedKnown = await known.service.approveObservations(known.run.id, ["example.com:1"]);
+    expect(acceptedKnown.observations[0]).toMatchObject({ status: "ok" });
+    expect(acceptedKnown.observations[0].profileVersion).toBeUndefined();
+
+    const generated = await makeService(true);
+    await expect(generated.service.approveObservations(generated.run.id, ["example.com:1"]))
+      .rejects.toThrow("Сначала подтвердите профиль площадки example.com по трём контрольным карточкам");
+  });
+
   it("accepts a proven product or aggregate but never a bare pharmaceutical form", async () => {
     const makeService = (product: string, productEvidence?: Observation["productEvidence"]) => new RatingsService(
       new MemoryRepository(),

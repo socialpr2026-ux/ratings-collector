@@ -70,7 +70,35 @@ async function staticReviewFetch(request: Request, env: Record<string, string | 
   const body = await request.json() as { url?: string };
   const target = new URL(String(body.url ?? ""));
   const host = target.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
-  if (target.protocol !== "https:" || !new Set(["uteka.ru", "megapteka.ru", "irecommend.ru", "otzovik.com"]).has(host)) {
+  const reviewTarget = new Set([
+    "uteka.ru",
+    "megapteka.ru",
+    "irecommend.ru",
+    "otzovik.com",
+    "pravogolosa.net"
+  ]).has(host);
+  const wildberriesTarget = (
+    target.hostname === "search.wb.ru" && [
+      "/exactmatch/ru/common/v14/search",
+      "/exactmatch/ru/common/v18/search"
+    ].includes(target.pathname) ||
+    target.hostname === "card.wb.ru" && target.pathname === "/cards/v4/detail"
+  );
+  let ozonTarget = false;
+  if (target.hostname === "www.ozon.ru" && target.pathname === "/api/composer-api.bx/page/json/v2") {
+    const nested = target.searchParams.get("url") ?? "";
+    try {
+      const search = new URL(nested, "https://www.ozon.ru");
+      const page = search.searchParams.get("page") ?? "1";
+      ozonTarget = search.origin === "https://www.ozon.ru" &&
+        search.pathname === "/search/" &&
+        (search.searchParams.get("text")?.trim().length ?? 0) > 0 &&
+        (search.searchParams.get("text")?.trim().length ?? 0) <= 200 &&
+        [...search.searchParams.keys()].every((key) => ["text", "from_global", "page"].includes(key)) &&
+        /^\d+$/.test(page) && Number(page) >= 1 && Number(page) <= 100;
+    } catch { /* invalid nested Ozon search URL */ }
+  }
+  if (target.protocol !== "https:" || !(reviewTarget || wildberriesTarget || ozonTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
   }
   if (host === "megapteka.ru" || host === "irecommend.ru" || host === "otzovik.com") {
@@ -105,7 +133,14 @@ async function staticReviewFetch(request: Request, env: Record<string, string | 
   const upstream = await safeFetch(target.toString(), {
     method: "GET",
     redirect: "follow",
-    headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+    headers: {
+      accept: wildberriesTarget || ozonTarget ? "application/json, text/plain, */*" : "text/html,application/xhtml+xml",
+      "accept-language": "ru-RU,ru;q=0.9",
+      ...(wildberriesTarget ? {
+        origin: "https://www.wildberries.ru",
+        referer: "https://www.wildberries.ru/"
+      } : {})
+    }
   });
   const text = await readTextBounded(upstream, 12_000_000, 60_000);
   return new Response(text, {
@@ -151,6 +186,7 @@ export default async function onRequest(context: Context): Promise<Response> {
     const runMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
     const publishMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/publish$/);
     const reviewMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/review$/);
+    const profileGetMatch = url.pathname.match(/^\/api\/site-profiles\/([^/]+)$/);
     const profileMatch = url.pathname.match(/^\/api\/site-profiles\/([^/]+)\/approve$/);
     if (context.request.method === "GET" && runMatch) {
       let run = await service.getRun(decodeURIComponent(runMatch[1]));
@@ -172,6 +208,10 @@ export default async function onRequest(context: Context): Promise<Response> {
       assertOwner(run, user);
       const body = await context.request.json() as { acceptedKeys?: string[] };
       return json(pagedRun(await service.approveObservations(run.id, body.acceptedKeys ?? []), url));
+    }
+    if (context.request.method === "GET" && profileGetMatch) {
+      const profile = await repository.getProfile(decodeURIComponent(profileGetMatch[1]));
+      return profile ? json(profile) : json({ error: "Профиль площадки не найден" }, 404);
     }
     if (context.request.method === "POST" && profileMatch) {
       const body = await context.request.json() as {

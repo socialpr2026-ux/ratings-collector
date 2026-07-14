@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { MAX_RUN_PARTITIONS, type Observation, type RunState } from "../shared/types.js";
+import { MAX_RUN_PARTITIONS, type Observation, type RunState, type SiteProfile } from "../shared/types.js";
 import { analyzeProductIdentity } from "../server/utils/product-name.js";
 import {
   canConfirmObservation,
@@ -126,6 +126,20 @@ export function shouldShowReviewSelectionBar(visibleConfirmableCount: number, se
   return visibleConfirmableCount > 0 || selectedCount > 0;
 }
 
+type ReviewCountMeaning = SiteProfile["reviewCountMeaning"];
+
+export function canApproveSiteProfile(input: {
+  status?: SiteProfile["status"];
+  exampleCount: number;
+  confirmedExampleCount: number;
+  reviewCountMeaning: ReviewCountMeaning;
+}) {
+  return input.status !== undefined && !["approved", "blocked_free_mode"].includes(input.status)
+    && input.exampleCount === 3
+    && input.confirmedExampleCount === 3
+    && input.reviewCountMeaning !== "unknown";
+}
+
 function nextMonth(value: string) {
   const [year, month] = value.split("-").map(Number);
   if (!year || !month) return new Date().toISOString().slice(0, 7);
@@ -158,7 +172,9 @@ export function App() {
   const [brands, setBrands] = useState("");
   const [run, setRun] = useState<RunState>();
   const [selected, setSelected] = useState(new Set<string>());
-  const [profileMeanings, setProfileMeanings] = useState<Record<string, "reviews" | "ratings" | "feedback" | "unknown">>({});
+  const [profileMeanings, setProfileMeanings] = useState<Record<string, ReviewCountMeaning>>({});
+  const [siteProfiles, setSiteProfiles] = useState<Record<string, SiteProfile | null>>({});
+  const [confirmedProfileExamples, setConfirmedProfileExamples] = useState<Record<string, string[]>>({});
   const [reviewOnly, setReviewOnly] = useState(true);
   const [listQuery, setListQuery] = useState("");
   const [busyAction, setBusyAction] = useState<BusyAction>();
@@ -323,6 +339,9 @@ export function App() {
     setError("");
     setRun(undefined);
     setSelected(new Set());
+    setSiteProfiles({});
+    setConfirmedProfileExamples({});
+    setProfileMeanings({});
     setReviewOnly(true);
     setListQuery("");
     saveCurrentConfiguration();
@@ -408,19 +427,22 @@ export function App() {
     }
   }
 
-  async function approveProfile(domain: string) {
+  async function approveSelectedProfiles() {
+    if (selectedUnapprovedProfileDomains.length === 0 || !selectedProfilesReady) return;
     setBusyAction("profile");
     setError("");
     try {
-      const examples = (run?.observations ?? [])
-        .filter((item) => item.domain === domain && item.reviews !== null && (item.reviews === 0 || item.rating !== null))
-        .slice(0, 3)
-        .map((item) => ({ url: item.canonicalUrl, title: item.product }));
-      await api(`/api/site-profiles/${encodeURIComponent(domain)}/approve`, {
-        method: "POST",
-        body: JSON.stringify({ examples, reviewCountMeaning: profileMeanings[domain] ?? "unknown" })
-      });
-      if (run) setRun(await fetchRun(run.id));
+      for (const domain of selectedUnapprovedProfileDomains) {
+        const profile = siteProfiles[domain];
+        if (!profile) throw new Error(`Не удалось загрузить профиль площадки ${domain}`);
+        const confirmed = new Set(confirmedProfileExamples[domain] ?? []);
+        const examples = profile.testExamples.filter((example) => confirmed.has(example.url));
+        const approved = await api(`/api/site-profiles/${encodeURIComponent(domain)}/approve`, {
+          method: "POST",
+          body: JSON.stringify({ examples, reviewCountMeaning: profileMeanings[domain] ?? "unknown" })
+        }) as SiteProfile;
+        setSiteProfiles((current) => ({ ...current, [domain]: approved }));
+      }
     } catch (caught) {
       setError(friendlyErrorMessage(caught, "profile"));
     } finally {
@@ -464,6 +486,9 @@ export function App() {
     setBrands(savedConfiguration.brands);
     setRun(undefined);
     setSelected(new Set());
+    setSiteProfiles({});
+    setConfirmedProfileExamples({});
+    setProfileMeanings({});
     setListQuery("");
     requestAnimationFrame(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }
@@ -477,6 +502,9 @@ export function App() {
     setBrands(run.request.brands.join("\n"));
     setRun(undefined);
     setSelected(new Set());
+    setSiteProfiles({});
+    setConfirmedProfileExamples({});
+    setProfileMeanings({});
     setListQuery("");
     requestAnimationFrame(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }
@@ -513,6 +541,22 @@ export function App() {
   );
   const validSelectedKeys = [...selected].filter((key) => confirmableReviewKeys.has(key));
   const selectedCount = validSelectedKeys.length;
+  const validSelectedKeySet = new Set(validSelectedKeys);
+  const selectedProfileDomains = [...new Set(confirmableReviewItems
+    .filter((item) => item.profileVersion !== undefined && validSelectedKeySet.has(productKey(item)))
+    .map((item) => item.domain))];
+  const selectedUnapprovedProfileDomains = selectedProfileDomains
+    .filter((domain) => siteProfiles[domain]?.status !== "approved");
+  const selectedProfilesReady = selectedUnapprovedProfileDomains.length > 0 && selectedUnapprovedProfileDomains.every((domain) => {
+    const profile = siteProfiles[domain];
+    const confirmed = new Set(confirmedProfileExamples[domain] ?? []);
+    return canApproveSiteProfile({
+      status: profile?.status,
+      exampleCount: profile?.testExamples.length ?? 0,
+      confirmedExampleCount: profile?.testExamples.filter((example) => confirmed.has(example.url)).length ?? 0,
+      reviewCountMeaning: profileMeanings[domain] ?? "unknown"
+    });
+  });
   const allReviewSelected = visibleConfirmableReviewItems.length > 0 && visibleConfirmableReviewItems.every((item) => selected.has(productKey(item)));
   const partitionSummary = useMemo(() => run ? {
     complete: run.partitions.filter((item) => item.status === "complete").length,
@@ -537,6 +581,35 @@ export function App() {
     if (!run || pendingStatuses.has(run.status)) return;
     setSelected((current) => retainValidSelection(current, confirmableReviewKeys));
   }, [run?.id, run?.updatedAt, run?.status, confirmableReviewKeys]);
+
+  const profileDomainSignature = newDomains.slice().sort().join("\n");
+  useEffect(() => {
+    if (!run || pendingStatuses.has(run.status) || newDomains.length === 0) return;
+    let cancelled = false;
+    void Promise.all(newDomains.map(async (domain) => {
+      try {
+        return [domain, await api(`/api/site-profiles/${encodeURIComponent(domain)}`) as SiteProfile] as const;
+      } catch {
+        return [domain, null] as const;
+      }
+    })).then((entries) => {
+      if (!cancelled) setSiteProfiles((current) => ({ ...current, ...Object.fromEntries(entries) }));
+    });
+    return () => { cancelled = true; };
+  }, [run?.id, run?.status, profileDomainSignature]);
+
+  function profileApprovalHint(domain: string) {
+    const profile = siteProfiles[domain];
+    if (profile === undefined) return "Загружаем контрольные карточки…";
+    if (profile === null) return "Не удалось загрузить профиль площадки. Обновите страницу и повторите.";
+    if (profile.status === "blocked_free_mode") return "Площадка не допускает бесплатную автоматическую проверку профиля.";
+    if (profile.testExamples.length !== 3) return `Профиль подготовил ${profile.testExamples.length} из 3 контрольных карточек — подтверждение пока недоступно.`;
+    const confirmed = new Set(confirmedProfileExamples[domain] ?? []);
+    const confirmedCount = profile.testExamples.filter((example) => confirmed.has(example.url)).length;
+    if (confirmedCount !== 3) return `Откройте и отметьте все три контрольные карточки (${confirmedCount}/3).`;
+    if ((profileMeanings[domain] ?? "unknown") === "unknown") return "Укажите, что означает счётчик рядом с рейтингом.";
+    return "Контрольные карточки и смысл счётчика проверены.";
+  }
 
   function toggleAllReview() {
     setSelected((current) => {
@@ -674,20 +747,6 @@ export function App() {
           </div>
         </div>}
 
-        {newDomains.length > 0 && <div className="new-sites">
-          <div className="new-sites-title"><span aria-hidden="true">＋</span><div><strong>Добавлены новые площадки</strong><p>Проверьте примеры и укажите, что означает число рядом с рейтингом. Выбор сохранится для следующих запусков.</p></div></div>
-          {newDomains.map((domain) => <div className="site-rule" key={domain}>
-            <strong>{domain}</strong>
-            <label><span>Что показывает счётчик?</span><select value={profileMeanings[domain] ?? "unknown"} onChange={(event) => setProfileMeanings((current) => ({ ...current, [domain]: event.target.value as "reviews" | "ratings" | "feedback" | "unknown" }))}>
-              <option value="unknown">Выберите вариант</option>
-              <option value="reviews">Текстовые отзывы</option>
-              <option value="ratings">Все оценки</option>
-              <option value="feedback">Отзывы и оценки вместе</option>
-            </select></label>
-            <button className="button button-secondary" type="button" disabled={(profileMeanings[domain] ?? "unknown") === "unknown" || busy} onClick={() => approveProfile(domain)}>Сохранить правило</button>
-          </div>)}
-        </div>}
-
         {run.observations.length > 8 && <div className="list-filter" role="search" aria-label="Фильтр найденных карточек">
           <div className="list-filter-field">
             <span aria-hidden="true">⌕</span>
@@ -697,12 +756,47 @@ export function App() {
           <span>Показано {visibleItems.length} из {unfilteredItems.length}</span>
         </div>}
 
-        {shouldShowReviewSelectionBar(visibleConfirmableReviewItems.length, selectedCount) && <div className="selection-bar" role="region" aria-label="Подтверждение выбранных карточек">
-          <label><input type="checkbox" checked={allReviewSelected} onChange={toggleAllReview} disabled={visibleConfirmableReviewItems.length === 0} /> <span>Выбрать все показанные</span></label>
-          <div className="selection-actions">
-            <span aria-live="polite">Выбрано: {selectedCount}</span>
-            <button className="button button-secondary button-compact" type="button" onClick={acceptSelected} disabled={selectedCount === 0 || busy}>{busyAction === "review" ? "Сохраняем…" : `Подтвердить выбранные · ${selectedCount}`}</button>
+        {shouldShowReviewSelectionBar(visibleConfirmableReviewItems.length, selectedCount) && <div className={`selection-bar ${selectedUnapprovedProfileDomains.length > 0 ? "selection-bar-profile" : ""}`} role="region" aria-label="Подтверждение выбранных карточек">
+          <div className="selection-bar-top">
+            <label><input type="checkbox" checked={allReviewSelected} onChange={toggleAllReview} disabled={visibleConfirmableReviewItems.length === 0} /> <span>Выбрать все показанные</span></label>
+            <div className="selection-actions">
+              <span aria-live="polite">Выбрано: {selectedCount}</span>
+              {selectedUnapprovedProfileDomains.length === 0 && <button className="button button-secondary button-compact" type="button" onClick={acceptSelected} disabled={selectedCount === 0 || busy}>{busyAction === "review" ? "Сохраняем…" : `Подтвердить выбранные · ${selectedCount}`}</button>}
+            </div>
           </div>
+
+          {selectedUnapprovedProfileDomains.length > 0 && <div className="profile-gate">
+            <div className="profile-gate-intro"><strong>Сначала проверьте правила новых площадок</strong><p>Это обязательный одноразовый шаг: откройте три контрольные карточки каждой площадки, отметьте их и укажите смысл счётчика. Выбранные {selectedCount} карточек останутся отмеченными.</p></div>
+            {selectedUnapprovedProfileDomains.map((domain) => {
+              const profile = siteProfiles[domain];
+              const confirmed = new Set(confirmedProfileExamples[domain] ?? []);
+              return <div className="profile-gate-domain" key={domain}>
+                <div className="profile-gate-heading"><strong>{domain}</strong><span>{profileApprovalHint(domain)}</span></div>
+                {profile && <>
+                  <div className="control-examples" aria-label={`Контрольные карточки ${domain}`}>
+                    {profile.testExamples.map((example, index) => <label key={example.url}>
+                      <input type="checkbox" checked={confirmed.has(example.url)} onChange={(event) => setConfirmedProfileExamples((current) => {
+                        const next = new Set(current[domain] ?? []);
+                        event.target.checked ? next.add(example.url) : next.delete(example.url);
+                        return { ...current, [domain]: [...next] };
+                      })} />
+                      <a href={example.url} target="_blank" rel="noreferrer">Карточка {index + 1}<span aria-hidden="true">↗</span></a>
+                    </label>)}
+                  </div>
+                  <label className="profile-meaning"><span>Что показывает счётчик рядом с рейтингом?</span><select value={profileMeanings[domain] ?? "unknown"} onChange={(event) => setProfileMeanings((current) => ({ ...current, [domain]: event.target.value as ReviewCountMeaning }))}>
+                    <option value="unknown">Выберите вариант</option>
+                    <option value="reviews">Текстовые отзывы</option>
+                    <option value="ratings">Все оценки</option>
+                    <option value="feedback">Отзывы и оценки вместе</option>
+                  </select></label>
+                </>}
+              </div>;
+            })}
+            <div className="profile-gate-action">
+              <span>После сохранения останется подтвердить выбранные карточки.</span>
+              <button className="button button-secondary button-compact" type="button" onClick={approveSelectedProfiles} disabled={!selectedProfilesReady || busy}>{busyAction === "profile" ? "Сохраняем правила…" : `Сохранить правила · ${selectedUnapprovedProfileDomains.length}`}</button>
+            </div>
+          </div>}
         </div>}
 
         <div className="table-wrap" tabIndex={0} aria-label="Список найденных карточек">

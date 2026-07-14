@@ -112,7 +112,12 @@ export async function createCollectorRuntime(options: {
       token: env.APIFY_TOKEN,
       maxTotalChargeUsd: reservePerDiscovery
     })),
-    { isFallbackRef: isWildberriesApifyRef }
+    {
+      isFallbackRef: isWildberriesApifyRef,
+      // Buyer search throttling is transient. A failure for one brand must not
+      // route all remaining brands through the paid monthly allowance.
+      stickyPrimaryFailure: false
+    }
   );
   const yandex = new ResilientAdapter(
     new YandexAdapter({ fetch: options.fetch }),

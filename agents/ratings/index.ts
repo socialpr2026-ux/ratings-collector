@@ -92,6 +92,18 @@ export function browserFetch(
   const wildberriesResponseChecks: Promise<void>[] = [];
   let wildberriesNetworkViolation: Error | undefined;
   const hardenedContexts = new Map<string, Promise<BrowserContext>>();
+  const fetchViaStaticProxy = (url: URL, signal: AbortSignal) => {
+    if (!staticProxy) throw new Error("Static proxy is not configured");
+    return fetch(staticProxy.endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${staticProxy.token}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ url: url.toString() }),
+      signal
+    });
+  };
   const acquireSandbox = createLazySandboxAcquire(sandbox);
   const getBrowser = () => connected ??= acquireSandbox()
     .then(() => loadPlaywright())
@@ -200,16 +212,31 @@ export function browserFetch(
     const request = new Request(input, init);
     const url = new URL(request.url);
     const host = url.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
-    if (staticProxy && (host === "uteka.ru" || host === "megapteka.ru" || host === "irecommend.ru" || host === "otzovik.com")) {
-      return fetch(staticProxy.endpoint, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${staticProxy.token}`,
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({ url: url.toString() }),
-        signal: request.signal
-      });
+    const fixedWildberriesTarget = !shouldUseHardenedBrowser(request) && (
+      url.hostname === "search.wb.ru" && [
+        "/exactmatch/ru/common/v14/search",
+        "/exactmatch/ru/common/v18/search"
+      ].includes(url.pathname) ||
+      url.hostname === "card.wb.ru" && url.pathname === "/cards/v4/detail"
+    );
+    if (staticProxy && fixedWildberriesTarget) {
+      try {
+        const direct = await fetch(request);
+        if (direct.ok) return direct;
+        const proxied = await fetchViaStaticProxy(url, request.signal);
+        return proxied.ok ? proxied : direct;
+      } catch {
+        return fetchViaStaticProxy(url, request.signal);
+      }
+    }
+    if (staticProxy && (
+      host === "uteka.ru" ||
+      host === "megapteka.ru" ||
+      host === "irecommend.ru" ||
+      host === "otzovik.com" ||
+      host === "pravogolosa.net"
+    )) {
+      return fetchViaStaticProxy(url, request.signal);
     }
     if (!shouldUseHardenedBrowser(request)) {
       return fetch(request);
@@ -218,6 +245,18 @@ export function browserFetch(
     if (browserMode === "ozon-composer") {
       if (url.protocol !== "https:" || url.hostname !== "www.ozon.ru" || url.pathname !== "/api/composer-api.bx/page/json/v2") {
         throw new Error("Ozon browser mode is restricted to the fixed composer endpoint");
+      }
+      // First try a fixed, authenticated Cloud Function egress. It costs no
+      // Sandbox GB-s and preserves the browser path as a fallback when Ozon
+      // blocks that IP range too.
+      if (staticProxy) {
+        try {
+          const proxied = await fetchViaStaticProxy(url, request.signal);
+          const contentType = proxied.headers.get("content-type") ?? "";
+          if (proxied.ok && /json/i.test(contentType)) return proxied;
+        } catch {
+          // Continue to the hardened browser route below.
+        }
       }
       let response!: Response;
       queue = queue.catch(() => undefined).then(async () => {

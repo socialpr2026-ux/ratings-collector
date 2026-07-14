@@ -8,7 +8,11 @@ import type {
 import { matchesBrand } from "../utils/normalize.js";
 import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 
-const SEARCH_ENDPOINT = "https://search.wb.ru/exactmatch/ru/common/v18/search";
+// The buyer v18 route currently rate-limits ordinary cloud/static egress even
+// when the same bounded query succeeds through v14 with an identical product
+// schema. Keep the free JSON route first so a run does not need Sandbox or the
+// paid Apify fallback merely because one endpoint generation is throttled.
+const SEARCH_ENDPOINT = "https://search.wb.ru/exactmatch/ru/common/v14/search";
 const CARD_ENDPOINT = "https://card.wb.ru/cards/v4/detail";
 const MOSCOW_DESTINATION = "-1257786";
 const PLATFORM_ID = "wildberries";

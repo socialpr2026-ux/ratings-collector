@@ -42,6 +42,30 @@ describe("ResilientAdapter", () => {
     expect(fallbackDiscover).toHaveBeenCalledTimes(2);
   });
 
+  it("retries a transient free primary for the next brand instead of poisoning the whole run", async () => {
+    const directRef = ref("primary");
+    const primaryDiscover = vi.fn()
+      .mockRejectedValueOnce(new AdapterBlockedError("temporary 429"))
+      .mockResolvedValueOnce([directRef]);
+    const fallbackDiscover = vi.fn(async () => [ref("fallback")]);
+    const resilient = new ResilientAdapter(
+      adapter("primary", primaryDiscover),
+      adapter("fallback", fallbackDiscover),
+      {
+        isFallbackRef: (item) => item.metadata.collector === "fallback",
+        stickyPrimaryFailure: false
+      }
+    );
+
+    await expect(resilient.discover("First brand", context)).resolves.toMatchObject([
+      { metadata: { collector: "fallback" } }
+    ]);
+    await expect(resilient.discover("Second brand", context)).resolves.toEqual([directRef]);
+
+    expect(primaryDiscover).toHaveBeenCalledTimes(2);
+    expect(fallbackDiscover).toHaveBeenCalledTimes(1);
+  });
+
   it("preserves both causes and avoids paying repeatedly for deterministic fallback drift", async () => {
     const fallbackDiscover = vi.fn(async () => { throw new ParserChangedError("missing reviewCount"); });
     const resilient = new ResilientAdapter(

@@ -230,7 +230,7 @@ describe("WildberriesAdapter.discover", () => {
     const urls = vi.mocked(fetchMock).mock.calls.map(([input]) => new URL(String(input)));
     expect(urls.map((url) => url.searchParams.get("page"))).toEqual(["1", "2"]);
     expect(urls.every((url) => url.searchParams.get("query") === "Арбидол")).toBe(true);
-    expect(urls.every((url) => url.pathname.endsWith("/common/v18/search"))).toBe(true);
+    expect(urls.every((url) => url.pathname.endsWith("/common/v14/search"))).toBe(true);
   });
 
   it("fails closed at the configured maximum when every page remains non-empty", async () => {

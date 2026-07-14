@@ -59,6 +59,69 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("routes Pravogolosa through the static function egress without acquiring Sandbox", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL) => new Response("proved empty result"));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(
+      "https://pravogolosa.net/otzyvcategory?catid=0&page=search&text_search=Тикализис"
+    );
+
+    expect(await response.text()).toBe("proved empty result");
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(directFetch.mock.calls[0]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("falls back from direct Wildberries buyer JSON to fixed function egress without acquiring Sandbox", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn()
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+      .mockResolvedValueOnce(new Response('{"products":[]}'));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(
+      "https://search.wb.ru/exactmatch/ru/common/v14/search?appType=1&query=Тикализис"
+    );
+
+    expect(await response.text()).toBe('{"products":[]}');
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(directFetch.mock.calls[0]?.[0]).toBeInstanceOf(Request);
+    expect(directFetch.mock.calls[1]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("tries fixed function egress before acquiring the Ozon Sandbox", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL) => new Response('{"widgetStates":{}}', {
+      headers: { "content-type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const endpoint = new URL("https://www.ozon.ru/api/composer-api.bx/page/json/v2");
+    endpoint.searchParams.set("url", "/search/?text=Тикализис&from_global=true");
+    const response = await routedFetch(endpoint, {
+      headers: { "x-ratings-browser": "1", "x-ratings-browser-mode": "ozon-composer" }
+    });
+
+    expect(await response.text()).toBe('{"widgetStates":{}}');
+    expect(directFetch.mock.calls[0]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("maps a lazy Sandbox quota failure to AdapterBlockedError", async () => {
     const run = vi.fn(async () => {
       throw new Error("Sandbox quota exceeded");

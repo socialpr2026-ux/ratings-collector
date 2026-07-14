@@ -477,13 +477,15 @@ export class RatingsService {
     const profiles = new Map<string, SiteProfile | undefined>();
     for (const item of run.observations) {
       if (item.status !== "needs_review" || !accepted.has(productKey(item.domain, item.listingId))) continue;
-      if (!profiles.has(item.domain)) profiles.set(item.domain, await this.repository.getProfile(item.domain));
-      const profile = profiles.get(item.domain);
-      if (profile && profile.status !== "approved") {
-        throw new Error(`Сначала подтвердите профиль площадки ${item.domain} по трём контрольным карточкам`);
-      }
-      if (profile && item.profileVersion !== profile.version) {
-        throw new Error(`Карточка ${item.domain}:${item.listingId} собрана профилем другой версии; повторите запуск`);
+      if (item.profileVersion !== undefined) {
+        if (!profiles.has(item.domain)) profiles.set(item.domain, await this.repository.getProfile(item.domain));
+        const profile = profiles.get(item.domain);
+        if (!profile || profile.status !== "approved") {
+          throw new Error(`Сначала подтвердите профиль площадки ${item.domain} по трём контрольным карточкам`);
+        }
+        if (item.profileVersion !== profile.version) {
+          throw new Error(`Карточка ${item.domain}:${item.listingId} собрана профилем другой версии; повторите запуск`);
+        }
       }
       const identity = item.productIdentity;
       const exactVariant = identity?.granularity === "variant" && identity.confidence === "exact";
