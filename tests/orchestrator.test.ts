@@ -459,6 +459,40 @@ describe("run orchestration and fail-closed QA", () => {
       .resolves.toMatchObject({ observations: [{ status: "ok", productIdentity: { granularity: "family" } }] });
   });
 
+  it("does not gate a dedicated review-site observation on a stale generic profile", async () => {
+    const repository = new MemoryRepository();
+    await repository.saveProfile({
+      domain: "irecommend.ru", version: 7, status: "parser_changed",
+      sitemapUrls: [], ratingScale: 5, reviewCountMeaning: "unknown",
+      rateLimitMs: 0, canaryUrls: [], testExamples: [],
+      createdAt: "2026-07-13T00:00:00.000Z", updatedAt: "2026-07-13T00:00:00.000Z", notes: []
+    });
+    const dedicatedRequest = { ...request, domains: ["irecommend.ru"], brands: ["Тикализис"] };
+    const service = new RatingsService(repository, async () => ({
+      id: "dedicated-irecommend",
+      supportedDomains: ["irecommend.ru"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand: string) {
+        return [{ domain: "irecommend.ru", platform: "irecommend.ru", listingId: "live", brand, url: "https://irecommend.ru/content/tikalizis", metadata: {} }];
+      },
+      async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: `${ref.brand} отзывы`, reviews: 2, rating: 5,
+          status: "needs_review", capturedAt: new Date().toISOString(),
+          productEvidence: { scope: "product_family", signals: [{ source: "title", text: `${ref.brand} отзывы` }], variants: [], identifiers: [], imageUrls: [], instructionUrls: [] }
+        };
+      }
+    }));
+
+    const run = await service.executeRun((await service.createRun(dedicatedRequest)).id);
+    const approved = await service.approveObservations(run.id, ["irecommend.ru:live"]);
+
+    expect(approved.observations[0]).toMatchObject({ status: "ok" });
+    expect(approved.observations[0].profileVersion).toBeUndefined();
+    await expect(service.commitSuccessfulRun(approved)).resolves.toBeUndefined();
+  });
+
   it("keeps a disappeared registry card as a verified empty month without losing history", async () => {
     const repository = new MemoryRepository();
     await repository.saveProducts("test_sheet", [{

@@ -84,6 +84,81 @@ describe("first-party review-site adapters", () => {
     expect(result.productEvidence?.scope).toBe("product_family");
   });
 
+  it("follows review-search pagination without accepting a brand mention from another product's snippet", async () => {
+    const requested: URL[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      requested.push(url);
+      if (url.pathname === "/" && !url.searchParams.has("search_start")) return new Response(
+        `<article><h2>Тикализис</h2><a href="/category/lekarstvennyie-sredstva/823845-tikalizis.html">Тикализис - отзыв</a></article>` +
+        `<article><h2>Фенибут</h2><a href="/category/lekarstvennyie-sredstva/100-fenibut.html">Фенибут</a><p>В отзыве упомянут Тикализис</p></article>` +
+        `<div class="pagination"><a href="/?do=search&amp;subaction=search&amp;story=Тикализис&amp;search_start=2">2</a></div>`
+      );
+      if (url.searchParams.get("search_start") === "2") return new Response(
+        `<article><h2>Тикализис 90 мг</h2><a href="/category/lekarstvennyie-sredstva/823846-tikalizis-90.html">Тикализис 90 мг</a></article>`
+      );
+      throw new Error(`Unexpected URL ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("otzyv.pro", fetchMock);
+
+    const refs = await adapter.discover("Тикализис", context);
+
+    expect(requested).toHaveLength(2);
+    expect(refs.map((item) => item.listingId)).toEqual(["823845", "823846"]);
+  });
+
+  it.each(["Тикализис", "Даксабрис"])("requires visible no-results proof for empty iRecommend search: %s", async (brand) => {
+    const proved = adapterFor("irecommend.ru", (async () => new Response(
+      `<main><h1>${brand}</h1><p>Не нашли? Попробуйте поиск по сайту через Google или Яндекс</p></main>`
+    )) as typeof fetch);
+    await expect(proved.discover(brand, context)).resolves.toEqual([]);
+
+    const ambiguous = adapterFor("irecommend.ru", (async () => new Response(
+      `<main><h1>${brand}</h1><p>Популярные отзывы</p></main>`
+    )) as typeof fetch);
+    await expect(ambiguous.discover(brand, context)).rejects.toMatchObject({ code: "blocked" });
+  });
+
+  it("requires visible no-results proof for an empty first-party search", async () => {
+    const proved = adapterFor("otzyv.pro", (async () => new Response(
+      `<main><h1>Поиск по сайту</h1><div>Ничего не найдено!</div></main>`
+    )) as typeof fetch);
+    await expect(proved.discover("Даксабрис", context)).resolves.toEqual([]);
+
+    const ambiguous = adapterFor("otzyv.pro", (async () => new Response(
+      `<main><h1>Поиск по сайту</h1><div>Новые отзывы</div></main>`
+    )) as typeof fetch);
+    await expect(ambiguous.discover("Даксабрис", context)).rejects.toMatchObject({ code: "blocked" });
+  });
+
+  it.each([
+    { domain: "otzyv.pro", brand: "Тикализис", path: "/category/lekarstvennyie-sredstva/823845-tikalizis.html", reviews: 1, rating: 5 },
+    { domain: "vseotzyvy.ru", brand: "Тикализис", path: "/item/113727/reviews-tikalizis/", reviews: 1, rating: 5 },
+    { domain: "vseotzyvy.ru", brand: "Даксабрис", path: "/item/113736/reviews-daksabris/", reviews: 1, rating: 5 },
+    { domain: "otzyvru.com", brand: "Тикализис", path: "/tikalizis", reviews: 2, rating: 5 },
+    { domain: "otzyvru.com", brand: "Даксабрис", path: "/daksabris", reviews: 1, rating: 5 },
+    { domain: "ru.otzyv.com", brand: "Тикализис", path: "/tikalizis", reviews: 1, rating: 5 },
+    { domain: "ru.otzyv.com", brand: "Даксабрис", path: "/daksabris", reviews: 1, rating: 5 }
+  ])("keeps live-derived review counts separate from rating for $domain / $brand", async (fixture) => {
+    const origin = fixture.domain === "otzyvru.com" ? "https://www.otzyvru.com" : `https://${fixture.domain}`;
+    const productHtml = `<h1>${fixture.brand}</h1><script type="application/ld+json">` +
+      JSON.stringify({
+        "@type": "Product", name: fixture.brand, url: `${origin}${fixture.path}`,
+        aggregateRating: { "@type": "AggregateRating", ratingValue: fixture.rating, reviewCount: fixture.reviews, ratingCount: 9, bestRating: 5 }
+      }) + `</script>`;
+    const fetchMock = (async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === fixture.path) return new Response(productHtml);
+      return new Response(`<article><h2>${fixture.brand}</h2><a href="${fixture.path}">${fixture.brand}</a></article>`);
+    }) as typeof fetch;
+    const adapter = adapterFor(fixture.domain, fetchMock);
+
+    const refs = await adapter.discover(fixture.brand, context);
+    const result = await adapter.collect(refs[0], context);
+
+    expect(result).toMatchObject({ reviews: fixture.reviews, rating: fixture.rating, ratingCount: 9, status: "ok" });
+  });
+
   it("discovers only aggregate Uteka /reviews/ URLs from the official reviews sitemap", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = urlOf(input);
@@ -191,13 +266,13 @@ describe("first-party review-site adapters", () => {
     expect(results.every((item) => item.productEvidence?.scope === "product_family")).toBe(true);
   });
 
-  it("accepts an explicit external-search zero as proved no_results for Otzovik", async () => {
+  it.each(["Тикализис", "Даксабрис"])("accepts an explicit external-search zero as proved no_results for Otzovik: %s", async (brand) => {
     const fetchMock = (async () => new Response(
-      `<main><h1>No results found for <strong>site:otzovik.com/reviews/ &quot;Тикализис&quot;</strong></h1></main>`
+      `<main><h1>No results found for <strong>site:otzovik.com/reviews/ &quot;${brand}&quot;</strong></h1></main>`
     )) as typeof fetch;
     const adapter = adapterFor("otzovik.com", fetchMock);
 
-    await expect(adapter.discover("Тикализис", context)).resolves.toEqual([]);
+    await expect(adapter.discover(brand, context)).resolves.toEqual([]);
   });
 
   it("uses direct brand pages on both Otzyv domains and never replaces their slug identity", async () => {

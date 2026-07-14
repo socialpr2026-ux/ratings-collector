@@ -350,6 +350,19 @@ function paginationCandidates($: CheerioAPI, pageUrl: string, definition: Review
   return [...result];
 }
 
+function hasExplicitSearchNoResults($: CheerioAPI, brand: string, domain: string): boolean {
+  const text = $.root().text().replace(/\s+/g, " ").trim();
+  if (domain === "otzyv.pro") return /Ничего не найдено!/iu.test(text);
+  if (domain === "vseotzyvy.ru") {
+    return /(?:Ничего не найдено|По вашему запросу ничего не найдено)/iu.test(text);
+  }
+  if (domain === "irecommend.ru") {
+    const heading = $("h1").first().text().replace(/\s+/g, " ").trim();
+    return matchesBrand(heading, brand) && /Не нашли\?\s*Попробуйте поиск по сайту/iu.test(text);
+  }
+  return false;
+}
+
 async function readHtml(
   url: string,
   context: AdapterContext,
@@ -430,6 +443,7 @@ export class ReviewSiteAdapter implements SiteAdapter {
     const queued = new Set(queue);
     const visited = new Set<string>();
     const products = new Map<string, ProductRef>();
+    let provedNoResults = false;
 
     while (queue.length && visited.size < MAX_SEARCH_PAGES) {
       const pageUrl = queue.shift()!;
@@ -443,6 +457,7 @@ export class ReviewSiteAdapter implements SiteAdapter {
         throw new AdapterBlockedError(`Поиск ${this.definition.domain} вернул защитную страницу`);
       }
       const $ = load(html);
+      if (pageUrl === start) provedNoResults = hasExplicitSearchNoResults($, brand, this.definition.domain);
       $("a[href]").each((_index, node) => {
         const href = $(node).attr("href");
         if (!href) return;
@@ -450,8 +465,11 @@ export class ReviewSiteAdapter implements SiteAdapter {
           const url = new URL(href, pageUrl);
           if (!sameSite(url, this.definition.domain) || !this.definition.isProductUrl(url)) return;
           url.protocol = "https:";
-          const cardText = $(node).closest("article, li, [class*='item'], [class*='result'], [class*='product']").text();
-          const haystack = `${$(node).text()} ${cardText}`.replace(/\s+/g, " ");
+          const card = $(node).closest("article, li, [class*='item'], [class*='result'], [class*='product']");
+          const cardTitle = card.find("h1, h2, h3, h4, [class*='title'], [itemprop='name']").first().text();
+          // Match the product title, not a review snippet that merely mentions
+          // the requested brand while linking to a different product.
+          const haystack = `${$(node).text()} ${cardTitle}`.replace(/\s+/g, " ");
           if (!matchesBrand(haystack, brand)) return;
           const canonical = canonicalizeUrl(url.toString());
           const listingId = this.definition.idFromUrl(url) ?? hashId(canonical);
@@ -495,6 +513,9 @@ export class ReviewSiteAdapter implements SiteAdapter {
           metadata: { source: "historical-registry" }
         });
       } catch { /* malformed historical URL */ }
+    }
+    if (!products.size && !provedNoResults) {
+      throw new AdapterBlockedError(`${this.definition.domain}: поиск не подтвердил ни карточки бренда, ни их отсутствие`);
     }
     return [...products.values()];
   }
@@ -616,6 +637,9 @@ export class ReviewSiteAdapter implements SiteAdapter {
       } catch { /* malformed result link */ }
     });
     this.appendHistorical(refs, brand, context);
+    if (!refs.size && !hasExplicitSearchNoResults($, brand, this.definition.domain)) {
+      throw new AdapterBlockedError("irecommend.ru не подтвердил ни карточки бренда, ни их отсутствие");
+    }
     return [...refs.values()];
   }
 

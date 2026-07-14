@@ -477,6 +477,8 @@ export class RatingsService {
     const profiles = new Map<string, SiteProfile | undefined>();
     for (const item of run.observations) {
       if (item.status !== "needs_review" || !accepted.has(productKey(item.domain, item.listingId))) continue;
+      // Dedicated adapters do not carry a generated profile version. A stale
+      // generic profile left in the repository must not gate their evidence.
       if (item.profileVersion !== undefined) {
         if (!profiles.has(item.domain)) profiles.set(item.domain, await this.repository.getProfile(item.domain));
         const profile = profiles.get(item.domain);
