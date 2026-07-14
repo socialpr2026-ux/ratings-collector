@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
 import { MemoryEvidenceStore } from "../src/server/evidence.js";
 import {
   BLOCKED_FREE_MODE_DOMAINS,
@@ -24,7 +23,6 @@ function adapterFor(domain: string, fetchImpl: typeof fetch) {
 }
 
 const context = { region: "Москва" };
-const utekaCanaryFixture = readFileSync(new URL("./fixtures/uteka-tikalizis-reviews.html", import.meta.url), "utf8");
 
 describe("first-party review-site adapters", () => {
   it.each([
@@ -192,21 +190,46 @@ describe("first-party review-site adapters", () => {
     expect(result.listingId).toMatch(/^[a-f0-9]{20}$/);
   });
 
-  it("canaries Uteka against written reviewCount without substituting ratingCount", async () => {
+  it("does not block an exact Uteka target on an unrelated product canary", async () => {
     const requested: URL[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      requested.push(urlOf(input));
-      return new Response(utekaCanaryFixture, { status: 200 });
+      const url = urlOf(input);
+      requested.push(url);
+      if (url.pathname === "/sitemaps/sitemap-reviews.xml") return new Response(
+        `<urlset><url><loc>https://uteka.ru/lekarstvennye-sredstva/gomeopatiya/ocillokokcinum/reviews/</loc></url></urlset>`
+      );
+      if (url.pathname === "/lekarstvennye-sredstva/gomeopatiya/ocillokokcinum/reviews/") return new Response(
+        `<h1>Оциллококцинум отзывы</h1>` +
+        `<meta itemprop="reviewCount" content="96">` +
+        `<meta itemprop="ratingValue" content="4.4">` +
+        `<meta itemprop="bestRating" content="5">`
+      );
+      // This is the former unrelated canary. Its changed layout must not stop
+      // collection for Оциллококцинум.
+      if (url.pathname.endsWith("/tikalizis/reviews/")) return new Response(`<h1>Тикализис</h1>`);
+      throw new Error(`Unexpected URL ${url}`);
     }) as unknown as typeof fetch;
     const adapter = adapterFor("uteka.ru", fetchMock);
 
     const health = await adapter.healthCheck(context);
+    const refs = await adapter.discover("Оциллококцинум", context);
+    const observation = await adapter.collect(refs[0], context);
 
     expect(health).toMatchObject({ ok: true });
-    expect(health.message).toContain("reviewCount=5");
-    expect(health.message).not.toContain("91");
-    expect(requested).toHaveLength(1);
-    expect(requested[0].pathname).toMatch(/\/tikalizis\/reviews\/$/);
+    expect(health.message).toContain("official reviews sitemap is complete");
+    expect(refs).toMatchObject([{
+      url: "https://uteka.ru/lekarstvennye-sredstva/gomeopatiya/ocillokokcinum/reviews/"
+    }]);
+    expect(observation).toMatchObject({
+      brand: "Оциллококцинум",
+      reviews: 96,
+      rating: 4.4,
+      status: "ok"
+    });
+    expect(requested.map((url) => url.pathname)).toEqual([
+      "/sitemaps/sitemap-reviews.xml",
+      "/lekarstvennye-sredstva/gomeopatiya/ocillokokcinum/reviews/"
+    ]);
   });
 
   it("collects every Megapteka catalog card and proves zero reviews from transfer state", async () => {

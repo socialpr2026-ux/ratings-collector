@@ -538,6 +538,21 @@ export class ReviewSiteAdapter implements SiteAdapter {
           message: `irecommend.ru search canary reviewCount=${proved.metadata.reviewCount}, rating=${proved.metadata.rating ?? "n/a"}`
         };
       }
+      if (this.definition.domain === "uteka.ru") {
+        // Uteka discovery is backed by its first-party reviews sitemap. Do not
+        // block every requested brand because an unrelated hard-coded product
+        // canary was removed or temporarily rendered without its aggregate.
+        // Each discovered target page is still parsed strictly in collect().
+        const { html, status } = await this.request("https://uteka.ru/sitemaps/sitemap-reviews.xml", context);
+        if (status < 200 || status >= 300) return { ok: false, checkedAt, message: `HTTP ${status}` };
+        const completeReviewsSitemap = /<urlset\b/i.test(html) && /<\/urlset>/i.test(html) &&
+          /<loc>\s*https:\/\/uteka\.ru\/[^<]*\/reviews\/\s*<\/loc>/i.test(html);
+        if (!completeReviewsSitemap) {
+          return { ok: false, checkedAt, message: "parser_changed: Uteka reviews sitemap is incomplete" };
+        }
+        this.utekaSitemap = html;
+        return { ok: true, checkedAt, message: "uteka.ru: official reviews sitemap is complete" };
+      }
       const target = this.definition.healthCanary?.url ?? this.definition.origin;
       const { html, status } = await this.request(target, context);
       if (status < 200 || status >= 300) return { ok: false, checkedAt, message: `HTTP ${status}` };
