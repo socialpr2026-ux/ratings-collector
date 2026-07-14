@@ -27,6 +27,7 @@ const OZON_TRANSLATE_HOST = "www-ozon-ru.translate.goog";
 const OZON_SOURCE_HOST = "www.ozon.ru";
 const OZON_TRANSLATE_PARAMETERS = new Set(["_x_tr_sl", "_x_tr_tl", "_x_tr_hl"]);
 const OZON_SEARCH_PARAMETERS = new Set([
+  "brand_was_predicted",
   "category_was_predicted",
   "deny_category_prediction",
   "from_global",
@@ -70,7 +71,7 @@ function parseOzonTranslateTarget(target: URL): OzonTranslateTarget | undefined 
   }
 
   const isSearch = target.pathname === "/search/";
-  const isCategory = /^\/category\/[a-z0-9-]+\/$/i.test(target.pathname);
+  const isCategory = /^\/category\/[a-z0-9-]+(?:\/[a-z0-9-]+)?\/$/i.test(target.pathname);
   if (!isSearch && !isCategory) return undefined;
   if ([...target.searchParams.keys()].some((key) =>
     !OZON_TRANSLATE_PARAMETERS.has(key) && !OZON_SEARCH_PARAMETERS.has(key)
@@ -84,11 +85,13 @@ function parseOzonTranslateTarget(target: URL): OzonTranslateTarget | undefined 
     !/^\d+$/.test(page) || Number(page) < 1 || Number(page) > 100
   ) return undefined;
   if (isSearch && (
-    target.searchParams.has("category_was_predicted") || target.searchParams.has("deny_category_prediction")
+    target.searchParams.has("brand_was_predicted") || target.searchParams.has("category_was_predicted") ||
+    target.searchParams.has("deny_category_prediction")
   )) return undefined;
   if (isCategory && (
     singleSearchParameter(target, "category_was_predicted") !== "true" ||
-    singleSearchParameter(target, "deny_category_prediction") !== "true"
+    singleSearchParameter(target, "deny_category_prediction") !== "true" ||
+    target.searchParams.has("brand_was_predicted") && singleSearchParameter(target, "brand_was_predicted") !== "true"
   )) return undefined;
 
   const source = new URL(target.pathname, `https://${OZON_SOURCE_HOST}`);
@@ -115,7 +118,7 @@ function validOzonTranslateRedirect(html: string, requested: OzonTranslateTarget
     if (
       redirected.protocol !== "https:" || redirected.hostname !== OZON_SOURCE_HOST || redirected.port ||
       redirected.username || redirected.password || redirected.hash ||
-      !/^\/category\/[a-z0-9-]+\/$/i.test(redirected.pathname)
+      !/^\/category\/[a-z0-9-]+(?:\/[a-z0-9-]+)?\/$/i.test(redirected.pathname)
     ) return false;
     if ([...redirected.searchParams.keys()].some((key) => !OZON_SEARCH_PARAMETERS.has(key))) return false;
     if ([...redirected.searchParams.keys()].some((key) => redirected.searchParams.getAll(key).length !== 1)) return false;
@@ -123,7 +126,9 @@ function validOzonTranslateRedirect(html: string, requested: OzonTranslateTarget
       redirected.searchParams.get("from_global") === "true" &&
       (redirected.searchParams.get("page") ?? "1") === (requested.source.searchParams.get("page") ?? "1") &&
       redirected.searchParams.get("category_was_predicted") === "true" &&
-      redirected.searchParams.get("deny_category_prediction") === "true";
+      redirected.searchParams.get("deny_category_prediction") === "true" &&
+      (!redirected.searchParams.has("brand_was_predicted") ||
+        redirected.searchParams.get("brand_was_predicted") === "true");
   } catch {
     return false;
   }
@@ -189,6 +194,71 @@ function provesOzonTranslateHtml(html: string, requested: OzonTranslateTarget): 
       scoreReviews === Number(reviewsText) && scoreRating === ratingValue;
   }
   return /^нет отзывов$/iu.test(scoreText);
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+/**
+ * The EdgeOne Agent-to-Function hop has a much smaller practical response
+ * budget than a browser request. Return only the already-verified proof that
+ * the deterministic Ozon parser consumes, never the 0.5-2 MB storefront shell.
+ */
+function compactOzonTranslateHtml(html: string, requested: OzonTranslateTarget): string {
+  const encodedRedirect = html.match(/location\.replace\(("(?:\\.|[^"\\])*")\)/)?.[1];
+  if (encodedRedirect && validOzonTranslateRedirect(html, requested)) {
+    return `<html><body><script>location.replace(${encodedRedirect})</script></body></html>`;
+  }
+
+  const $ = load(html);
+  const baseValue = $("base[href]").first().attr("href")!;
+  if (requested.kind === "search" || requested.kind === "category") {
+    const state = $("script").toArray().map((script) => $(script).text())
+      .find((text) => text.includes("window.__NUXT__.state="))!;
+    const totalPages = Number(state.match(/"totalPages":(\d+)/)![1]);
+    const explicitEmpty = state.includes("catalog.searchEmptyState");
+    const tiles = $('[data-widget="tileGridDesktop"] .tile-root').toArray().map((root) => {
+      const tile = $(root);
+      const anchors = tile.find('a[href*="/product/"]').toArray().map((anchor) => {
+        const href = $(anchor).attr("href") ?? "";
+        const text = $(anchor).text().normalize("NFKC").replace(/\s+/g, " ").trim();
+        return `<a href="${escapeHtml(href)}"><span>${escapeHtml(text)}</span></a>`;
+      }).join("");
+      // At most one compact metric row is needed. Exact metrics are verified
+      // again on the dedicated product page before publication.
+      const ratingMarker = tile.find('svg[style*="graphicRating"]').first();
+      let metrics = "";
+      if (ratingMarker.length) {
+        const row = ratingMarker.parent();
+        const spans = row.find("span").toArray().map((span) =>
+          `<span>${escapeHtml($(span).text().normalize("NFKC").replace(/\s+/g, " ").trim())}</span>`
+        ).join("");
+        metrics = `<div><svg style="color:var(--graphicRating)"></svg>${spans}</div>`;
+      }
+      return `<div class="tile-root">${anchors}${metrics}</div>`;
+    }).join("");
+    const proof = explicitEmpty ? ",\"proof\":\"catalog.searchEmptyState\"" : "";
+    return `<html><head><base href="${escapeHtml(baseValue)}"></head><body>` +
+      `${tiles ? `<div data-widget="tileGridDesktop">${tiles}</div>` : ""}` +
+      `<script>window.__NUXT__={};window.__NUXT__.state={"totalPages":${totalPages}${proof}}</script>` +
+      `</body></html>`;
+  }
+
+  const products: Array<Record<string, unknown>> = [];
+  for (const script of $('script[type="application/ld+json"]').toArray()) {
+    products.push(...ozonJsonLdEntries(JSON.parse($(script).text()) as unknown));
+  }
+  const product = products.find((entry) => {
+    const types = Array.isArray(entry["@type"]) ? entry["@type"] : [entry["@type"]];
+    return types.includes("Product") && String(entry.sku ?? "") === requested.sku;
+  })!;
+  const scoreValue = $('[id^="state-webSingleProductScore"][data-state]').first().attr("data-state")!;
+  return `<html><head><base href="${escapeHtml(baseValue)}">` +
+    `<script type="application/ld+json">${JSON.stringify(product).replace(/</g, "\\u003c")}</script></head><body>` +
+    `<div id="state-webSingleProductScore-proof" data-state="${escapeHtml(scoreValue)}"></div>` +
+    `<script>window.__NUXT__={};window.__NUXT__.state={}</script></body></html>`;
 }
 
 function assertOwner(run: RunState, user: AuthUser): void {
@@ -291,12 +361,18 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       !provesOzonTranslateHtml(html, ozonTranslatedTarget)) {
       return json({ error: "Ozon translated page did not prove the requested source and product semantics" }, 502);
     }
-    return new Response(html, {
+    const compactHtml = compactOzonTranslateHtml(html, ozonTranslatedTarget);
+    if (compactHtml.length > 350_000) {
+      return json({ error: "Ozon translated proof exceeded the internal transfer safety limit" }, 502);
+    }
+    return new Response(compactHtml, {
       status: 200,
       headers: {
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
-        "x-ratings-source": "google-translate-ozon-ssr"
+        "x-ratings-source": "google-translate-ozon-ssr",
+        "x-ratings-original-bytes": String(new TextEncoder().encode(html).byteLength),
+        "x-ratings-proof-bytes": String(new TextEncoder().encode(compactHtml).byteLength)
       }
     });
   }

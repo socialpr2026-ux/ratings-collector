@@ -17,7 +17,9 @@ const SOURCE = "ozon:composer-api:edgeone-browser";
 const TRANSLATE_SOURCE = "ozon:search-html:google-translate";
 const DEFAULT_MAX_PAGES = 50;
 const DEFAULT_MAX_DOCUMENT_BYTES = 15_000_000;
+const DEFAULT_DETAIL_CONCURRENCY = 4;
 const MAX_TRANSLATE_REDIRECTS = 2;
+const EXACT_TRANSLATE_PROOF = "ozon:product-json-ld:google-translate";
 
 type JsonObject = Record<string, unknown>;
 
@@ -42,6 +44,7 @@ export type OzonBrowserAdapterOptions = {
   fetch?: typeof globalThis.fetch;
   maxPages?: number;
   maxDocumentBytes?: number;
+  detailConcurrency?: number;
   now?: () => Date;
   /** Test-only escape hatch for composer-specific fixtures. Production stays translate-first. */
   translateEnabled?: boolean;
@@ -283,6 +286,7 @@ function parseTranslatedTile($: ReturnType<typeof load>, element: Parameters<Ret
 }
 
 const ALLOWED_OZON_SEARCH_PARAMETERS = new Set([
+  "brand_was_predicted",
   "category_was_predicted",
   "deny_category_prediction",
   "from_global",
@@ -292,7 +296,7 @@ const ALLOWED_OZON_SEARCH_PARAMETERS = new Set([
 
 function validateTranslatedTarget(target: URL, brand: string, page: number): void {
   const isSearch = target.pathname === "/search/";
-  const isCategory = /^\/category\/[a-z0-9-]+\/$/i.test(target.pathname);
+  const isCategory = /^\/category\/[a-z0-9-]+(?:\/[a-z0-9-]+)?\/$/i.test(target.pathname);
   if (target.protocol !== "https:" || target.hostname !== "www.ozon.ru" || target.hash || (!isSearch && !isCategory)) {
     throw new ParserChangedError("Ozon translated search redirected outside the allowed search/category path");
   }
@@ -308,7 +312,8 @@ function validateTranslatedTarget(target: URL, brand: string, page: number): voi
   }
   if (isCategory && (
     target.searchParams.get("category_was_predicted") !== "true" ||
-    target.searchParams.get("deny_category_prediction") !== "true"
+    target.searchParams.get("deny_category_prediction") !== "true" ||
+    target.searchParams.has("brand_was_predicted") && target.searchParams.get("brand_was_predicted") !== "true"
   )) {
     throw new ParserChangedError("Ozon translated category redirect has no prediction proof");
   }
@@ -383,6 +388,31 @@ type ExactProductMetrics = {
   rating: number | null;
   rawRating: number | null;
 };
+
+async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  mapper: (value: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let cursor = 0;
+  let stopped = false;
+  let firstError: unknown;
+  const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (!stopped && cursor < values.length) {
+      const index = cursor++;
+      try {
+        results[index] = await mapper(values[index]!);
+      } catch (error) {
+        if (!stopped) firstError = error;
+        stopped = true;
+      }
+    }
+  });
+  await Promise.all(workers);
+  if (firstError !== undefined) throw firstError;
+  return results;
+}
 
 function exactNonNegativeInteger(value: unknown): number | null {
   if (typeof value === "number") return Number.isSafeInteger(value) && value >= 0 ? value : null;
@@ -469,7 +499,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
   private readonly maxDocumentBytes: number;
   private readonly now: () => Date;
   private readonly translateEnabled: boolean;
-  private detailSerial: Promise<void> = Promise.resolve();
+  private readonly detailConcurrency: number;
 
   constructor(options: OzonBrowserAdapterOptions = {}) {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
@@ -477,8 +507,12 @@ export class OzonBrowserAdapter implements SiteAdapter {
     this.maxDocumentBytes = options.maxDocumentBytes ?? DEFAULT_MAX_DOCUMENT_BYTES;
     this.now = options.now ?? (() => new Date());
     this.translateEnabled = options.translateEnabled ?? true;
+    this.detailConcurrency = options.detailConcurrency ?? DEFAULT_DETAIL_CONCURRENCY;
     if (!Number.isInteger(this.maxPages) || this.maxPages < 1 || this.maxPages > 100) {
       throw new RangeError("Ozon browser maxPages must be an integer from 1 to 100");
+    }
+    if (!Number.isInteger(this.detailConcurrency) || this.detailConcurrency < 1 || this.detailConcurrency > 8) {
+      throw new RangeError("Ozon detailConcurrency must be an integer from 1 to 8");
     }
   }
 
@@ -544,23 +578,54 @@ export class OzonBrowserAdapter implements SiteAdapter {
     }
 
     const capturedAt = this.now().toISOString();
-    return [...products.values()].map((product): ProductRef => ({
+    const matchedProducts = [...products.values()];
+    const exactMetrics = new Map<string, ExactProductMetrics>();
+    await mapWithConcurrency(
+      matchedProducts.filter((product) => product.source === TRANSLATE_SOURCE),
+      this.detailConcurrency,
+      async (product) => {
+        const ref: ProductRef = {
+          domain: PLATFORM_DOMAIN,
+          platform: PLATFORM_ID,
+          listingId: product.listingId,
+          brand: requestedBrand,
+          url: product.url,
+          title: product.title,
+          metadata: { source: product.source }
+        };
+        const exact = await this.fetchExactTranslatedProduct(ref, product.listingId, context);
+        if (!matchesBrand(exact.product, requestedBrand)) {
+          throw new ParserChangedError("Ozon translated product JSON-LD belongs to a different brand");
+        }
+        exactMetrics.set(product.listingId, exact);
+        return exact;
+      }
+    );
+    return matchedProducts.map((product): ProductRef => {
+      const exact = exactMetrics.get(product.listingId);
+      return {
       domain: PLATFORM_DOMAIN,
       platform: PLATFORM_ID,
       listingId: product.listingId,
       brand: requestedBrand,
       url: product.url,
-      title: product.title,
+      title: exact?.product ?? product.title,
       metadata: {
         collector: "ozon-composer",
-        rating: product.rating,
-        reviewCount: product.reviews,
-        rawRating: product.rawRating,
+        rating: exact ? exact.rawRating : product.rating,
+        reviewCount: exact ? exact.reviews : product.reviews,
+        rawRating: exact ? exact.rawRating : product.rawRating,
         rawReviewCount: product.rawReviewCount,
         capturedAt,
-        source: product.source
+        source: product.source,
+        ...(exact ? {
+          exactProductTitle: exact.product,
+          exactProductListingId: product.listingId,
+          exactProductProof: EXACT_TRANSLATE_PROOF
+        } : {})
       }
-    }));
+    };
+    });
   }
 
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
@@ -571,10 +636,17 @@ export class OzonBrowserAdapter implements SiteAdapter {
     let reviews = reviewCount(ref.metadata.reviewCount);
     let rawRating = rating(ref.metadata.rating);
     if (source === TRANSLATE_SOURCE) {
-      const exact = await this.serialProductDetail(() => this.fetchExactTranslatedProduct(ref, listingId, context));
+      const cachedTitle = asString(ref.metadata.exactProductTitle);
+      const hasExactProof = ref.metadata.exactProductProof === EXACT_TRANSLATE_PROOF &&
+        ref.metadata.exactProductListingId === listingId && cachedTitle !== undefined &&
+        reviews !== null && (reviews === 0 ? rawRating === null : rawRating !== null && rawRating > 0);
+      const exact = hasExactProof
+        ? { product: cachedTitle, reviews: reviews!, rating: rawRating === null ? null : normalizeRating(rawRating, 5), rawRating }
+        : await this.fetchExactTranslatedProduct(ref, listingId, context);
       if (!matchesBrand(exact.product, ref.brand)) {
         throw new ParserChangedError("Ozon translated product JSON-LD belongs to a different brand");
       }
+      product = exact.product;
       reviews = exact.reviews;
       rawRating = exact.rawRating;
     }
@@ -603,12 +675,6 @@ export class OzonBrowserAdapter implements SiteAdapter {
       capturedAt: Number.isNaN(captured) ? this.now().toISOString() : new Date(captured).toISOString(),
       source
     };
-  }
-
-  private serialProductDetail<T>(task: () => Promise<T>): Promise<T> {
-    const result = this.detailSerial.catch(() => undefined).then(task);
-    this.detailSerial = result.then(() => undefined, () => undefined);
-    return result;
   }
 
   private async fetchExactTranslatedProduct(

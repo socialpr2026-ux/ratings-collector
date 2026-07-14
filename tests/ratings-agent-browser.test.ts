@@ -124,9 +124,11 @@ describe("ratings Agent lazy Sandbox routing", () => {
 
   it("routes the exact Ozon Translate render host through fixed function egress", async () => {
     const run = vi.fn(async () => undefined);
-    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("translated Ozon html", {
-      headers: { "content-type": "text/html; charset=utf-8" }
-    }));
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      directFetch.mock.calls.length === 1
+        ? new Response("transient gateway failure", { status: 502 })
+        : new Response("translated Ozon html", { headers: { "content-type": "text/html; charset=utf-8" } })
+    );
     vi.stubGlobal("fetch", directFetch);
     const routedFetch = browserFetch(sandbox(run), {
       endpoint: "https://ratings.example/api/internal/static-review-fetch",
@@ -142,10 +144,11 @@ describe("ratings Agent lazy Sandbox routing", () => {
     const response = await routedFetch(target, { headers: { accept: "text/html" } });
 
     expect(await response.text()).toBe("translated Ozon html");
-    expect(directFetch).toHaveBeenCalledOnce();
+    expect(directFetch).toHaveBeenCalledTimes(2);
     expect(directFetch.mock.calls[0]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
     const init = directFetch.mock.calls[0]?.[1] as RequestInit;
     expect(JSON.parse(String(init.body))).toEqual({ url: target.toString() });
+    expect(directFetch.mock.calls[1]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
     expect(run).not.toHaveBeenCalled();
   });
 

@@ -220,6 +220,14 @@ export function browserFetch(
       url.hostname === "card.wb.ru" && url.pathname === "/cards/v4/detail"
     );
     if (staticProxy && url.hostname === "www-ozon-ru.translate.goog") {
+      const first = await fetchViaStaticProxy(url, request.signal);
+      if (![429, 502, 503, 504].includes(first.status)) return first;
+      await first.body?.cancel().catch(() => undefined);
+      request.signal.throwIfAborted();
+      // One bounded retry covers a transient Function/upstream hand-off. A
+      // second failure is returned unchanged and remains fail-closed.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      request.signal.throwIfAborted();
       return fetchViaStaticProxy(url, request.signal);
     }
     if (staticProxy && fixedWildberriesTarget) {

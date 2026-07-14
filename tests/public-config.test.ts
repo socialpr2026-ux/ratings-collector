@@ -133,8 +133,53 @@ describe("static Ozon Translate gateway", () => {
       const response = await callGateway(target.toString());
       expect(response.status).toBe(200);
       expect(response.headers.get("x-ratings-source")).toBe("google-translate-ozon-ssr");
+      const proof = await response.text();
+      expect(proof).toContain("window.__NUXT__.state=");
+      expect(Number(response.headers.get("x-ratings-proof-bytes"))).toBeLessThan(10_000);
     }
     expect(upstream).toHaveBeenCalledTimes(3);
+  });
+
+  it("compacts a storefront-sized Ozon response below the Agent transfer limit", async () => {
+    const target = translatedTarget("/search/", { text: "Кагоцел", from_global: "true" });
+    const source = sourceFromTarget(target).toString().replaceAll("&", "&amp;");
+    const noise = "x".repeat(700_000);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"></head><body>
+      <style>${noise}</style>
+      <div data-widget="tileGridDesktop"><div class="tile-root">
+        <a href="https://www-ozon-ru.translate.goog/product/kagotsel-1234567890/?_x_tr_sl=ru"><span>Кагоцел 12 мг №20</span></a>
+        <div><svg style="color:var(--graphicRating)"></svg><span>4.8</span><span>711 отзывов</span></div>
+      </div></div>
+      <script>window.__NUXT__.state={"catalog":{"totalPages":1}}</script></body></html>`, {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    })));
+
+    const response = await callGateway(target.toString());
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(Number(response.headers.get("x-ratings-original-bytes"))).toBeGreaterThan(700_000);
+    expect(Number(response.headers.get("x-ratings-proof-bytes"))).toBeLessThan(5_000);
+    expect(proof).toContain("Кагоцел 12 мг No20");
+    expect(proof).not.toContain(noise.slice(0, 100));
+  });
+
+  it("accepts Ozon's bounded two-segment brand-prediction redirect", async () => {
+    const target = translatedTarget("/search/", { text: "Арбидол", from_global: "true" });
+    const redirect = "https://www.ozon.ru/category/lekarstvennye-sredstva-30000/arbidol-87397189/" +
+      "?brand_was_predicted=true&category_was_predicted=true&deny_category_prediction=true&from_global=true&text=" +
+      encodeURIComponent("Арбидол");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      `<html><script>location.replace(${JSON.stringify(redirect)})</script></html>`,
+      { headers: { "content-type": "text/html; charset=utf-8" } }
+    )));
+
+    const response = await callGateway(target.toString());
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(proof).toContain("brand_was_predicted=true");
+    expect(proof.length).toBeLessThan(1_000);
   });
 
   it("rejects unbounded Ozon Translate queries before fetch and fails closed on wrong source HTML", async () => {

@@ -116,6 +116,7 @@ describe("Ozon browser collector", () => {
     const adapter = new OzonBrowserAdapter({ fetch, now: () => new Date("2026-07-14T10:00:00Z") });
 
     const refs = await adapter.discover("\u0422\u0438\u043a\u0430\u043b\u0438\u0437\u0438\u0441", context);
+    expect(fetch).toHaveBeenCalledTimes(4);
     const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context)));
 
     expect(fetch).toHaveBeenCalledTimes(4);
@@ -126,11 +127,12 @@ describe("Ozon browser collector", () => {
   });
 
   it("follows only Ozon's bounded category-prediction redirect", async () => {
-    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
       const proxy = new URL(String(input));
       const source = sourceUrlFromTranslate(proxy);
       if (source.pathname === "/search/") {
-        const redirected = new URL("https://www.ozon.ru/category/apteka-6000/");
+        const redirected = new URL("https://www.ozon.ru/category/lekarstvennye-sredstva-30000/arbidol-87397189/");
+        redirected.searchParams.set("brand_was_predicted", "true");
         redirected.searchParams.set("category_was_predicted", "true");
         redirected.searchParams.set("deny_category_prediction", "true");
         redirected.searchParams.set("from_global", "true");
@@ -139,16 +141,97 @@ describe("Ozon browser collector", () => {
           headers: { "content-type": "text/html" }
         });
       }
+      if (source.pathname.startsWith("/product/")) {
+        return new Response(translatedProductHtml(
+          source,
+          "303003",
+          "\u041a\u0430\u0433\u043e\u0446\u0435\u043b 12 \u043c\u0433 20 \u0448\u0442",
+          5,
+          25
+        ), { headers: { "content-type": "text/html" } });
+      }
       return new Response(translatedHtml(source, [
         translatedTile("303003", "\u041a\u0430\u0433\u043e\u0446\u0435\u043b 12 \u043c\u0433 20 \u0448\u0442", "5.0", 25)
       ], 1), { headers: { "content-type": "text/html" } });
     }) as unknown as typeof globalThis.fetch;
-    const adapter = new OzonBrowserAdapter({ fetch });
+    const adapter = new OzonBrowserAdapter({ fetch: fetchMock });
 
     const refs = await adapter.discover("\u041a\u0430\u0433\u043e\u0446\u0435\u043b", context);
 
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(refs).toMatchObject([{ listingId: "303003", metadata: { reviewCount: 25, rating: 5 } }]);
+  });
+
+  it("prefetches exact product proofs with bounded concurrency and collect does not refetch", async () => {
+    let activeDetails = 0;
+    let maximumActiveDetails = 0;
+    const detailCalls: string[] = [];
+    const items = Array.from({ length: 9 }, (_value, index) => {
+      const sku = String(700000 + index);
+      return translatedTile(sku, `\u041a\u0430\u0433\u043e\u0446\u0435\u043b 12 \u043c\u0433 ${index + 10} \u0448\u0442`, "5.0", index + 1);
+    });
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const endpoint = new URL(String(input));
+      const source = sourceUrlFromTranslate(endpoint);
+      if (!source.pathname.startsWith("/product/")) {
+        return new Response(translatedHtml(source, items, 1), { headers: { "content-type": "text/html" } });
+      }
+      const sku = source.pathname.match(/-(\d+)\/$/)![1]!;
+      activeDetails += 1;
+      maximumActiveDetails = Math.max(maximumActiveDetails, activeDetails);
+      detailCalls.push(sku);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      activeDetails -= 1;
+      return new Response(translatedProductHtml(
+        source,
+        sku,
+        `\u041a\u0430\u0433\u043e\u0446\u0435\u043b 12 \u043c\u0433 ${Number(sku) - 699990} \u0448\u0442`,
+        5,
+        Number(sku) - 699999
+      ), { headers: { "content-type": "text/html" } });
+    });
+    const adapter = new OzonBrowserAdapter({
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+      detailConcurrency: 4
+    });
+
+    const refs = await adapter.discover("\u041a\u0430\u0433\u043e\u0446\u0435\u043b", context);
+    const callsAfterDiscovery = fetchMock.mock.calls.length;
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context)));
+
+    expect(refs).toHaveLength(9);
+    expect(detailCalls).toHaveLength(9);
+    expect(maximumActiveDetails).toBe(4);
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterDiscovery);
+    expect(observations.every((item) => item.source === "ozon:search-html:google-translate")).toBe(true);
+  });
+
+  it("stops scheduling new detail proofs after the first failed product", async () => {
+    const items = Array.from({ length: 9 }, (_value, index) => {
+      const sku = String(710000 + index);
+      return translatedTile(sku, `Кагоцел 12 мг ${index + 10} шт`, "5.0", index + 1);
+    });
+    let detailCalls = 0;
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const source = sourceUrlFromTranslate(new URL(String(input)));
+      if (!source.pathname.startsWith("/product/")) {
+        return new Response(translatedHtml(source, items, 1), { headers: { "content-type": "text/html" } });
+      }
+      detailCalls += 1;
+      if (detailCalls === 1) return new Response("upstream failed", { status: 502, headers: { "content-type": "text/html" } });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const sku = source.pathname.match(/-(\d+)\/$/)![1]!;
+      return new Response(translatedProductHtml(source, sku, `Кагоцел ${sku}`, 5, 1), {
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const adapter = new OzonBrowserAdapter({
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+      detailConcurrency: 4
+    });
+
+    await expect(adapter.discover("Кагоцел", context)).rejects.toThrow(/HTTP 502/);
+    expect(detailCalls).toBeLessThanOrEqual(4);
   });
 
   it("accepts zero products only with an explicit Ozon empty-state proof", async () => {
