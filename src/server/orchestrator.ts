@@ -491,10 +491,12 @@ export class RatingsService {
       }
       const identity = item.productIdentity;
       const exactVariant = identity?.granularity === "variant" && identity.confidence === "exact";
+      const knownReviewAggregate = Boolean(identity && isKnownReviewAggregateDomain(item.domain) &&
+        identity.granularity !== "not_product" && identity.confidence !== "ambiguous");
       const provenAggregate = Boolean(identity && ["family", "line"].includes(identity.granularity) &&
         identity.confidence !== "ambiguous" &&
         (identity.confidence === "exact" || item.productEvidence?.scope === "product_family" || isKnownReviewAggregateDomain(item.domain)));
-      if (!exactVariant && !provenAggregate) {
+      if (!exactVariant && !provenAggregate && !knownReviewAggregate) {
         throw new Error(`Карточка ${item.domain}:${item.listingId} не содержит доказанного товарного варианта`);
       }
       item.status = item.reviews === 0 ? "no_reviews" : "ok";

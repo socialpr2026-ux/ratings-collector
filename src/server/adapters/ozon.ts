@@ -26,6 +26,7 @@ const DEFAULT_TIMEOUT_SECONDS = 300;
 const MAX_ACTOR_RESULTS = 10_000;
 const ABSOLUTE_MAX_TOTAL_CHARGE_USD = 4.5;
 const MAX_SYNC_TIMEOUT_SECONDS = 300;
+const ACTOR_RESULT_COST_USD = 0.5 / 1_000;
 
 // The tiles-only mode already exposes SKU, title, rating and reviewCount and is
 // materially faster/cheaper than opening every product page.
@@ -524,7 +525,8 @@ export class OzonAdapter implements SiteAdapter {
   }
 
   private async discoverBatch(brands: string[], context: AdapterContext): Promise<DiscoveryBatch> {
-    const batchResultLimit = Math.min(MAX_ACTOR_RESULTS, this.maxResults * brands.length);
+    const paidResultLimit = Math.max(1, Math.floor(this.maxTotalChargeUsd / ACTOR_RESULT_COST_USD));
+    const batchResultLimit = Math.min(MAX_ACTOR_RESULTS, this.maxResults * brands.length, paidResultLimit);
 
     const endpoint = new URL(
       `${this.apiBaseUrl}/v2/acts/${this.actorId}/run-sync-get-dataset-items`

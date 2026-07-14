@@ -172,10 +172,12 @@ export function observationIssueText(item: Pick<Observation, "reviews" | "rating
 export function canConfirmObservation(item: Pick<Observation, "reviews" | "rating" | "productIdentity" | "productEvidence"> & { domain?: string }) {
   const identity = item.productIdentity;
   const exactVariant = identity?.granularity === "variant" && identity.confidence === "exact";
+  const knownReviewAggregate = Boolean(identity && isKnownReviewAggregateDomain(item.domain) &&
+    identity.granularity !== "not_product" && identity.confidence !== "ambiguous");
   const provenAggregate = Boolean(identity && ["family", "line"].includes(identity.granularity) &&
     identity.confidence !== "ambiguous" &&
     (identity.confidence === "exact" || item.productEvidence?.scope === "product_family" || isKnownReviewAggregateDomain(item.domain)));
-  const identityCanBeConfirmed = exactVariant || provenAggregate;
+  const identityCanBeConfirmed = exactVariant || provenAggregate || knownReviewAggregate;
   return identityCanBeConfirmed && (item.reviews === 0
     ? item.rating === null
     : item.reviews !== null && item.reviews > 0 && item.rating !== null);

@@ -64,26 +64,35 @@ export async function createCollectorRuntime(options: {
   // override from making a call more expensive than the shared budget gate
   // accounted for.
   const reservePerDiscovery = Math.min(0.25, monthlyLimit);
-  // One run-wide batch covers all requested brands. At the current Actor's
-  // $0.50/1,000-result price, $0.75 safely covers up to 80 cards per brand for
-  // the full primary 17-brand set while the shared monthly gate remains hard.
-  const ozonReservePerDiscovery = Math.min(0.75, monthlyLimit);
+  // One Ozon Actor call covers every brand in the run. The adapter couples its
+  // maxItems safety cap to this $0.25 charge ceiling, so a capped response can
+  // never be mistaken for exhaustive discovery.
+  const ozonReservePerDiscovery = Math.min(0.25, monthlyLimit);
   const externalUsageUsd = () => apifyMonthlyUsageUsd(env.APIFY_TOKEN, fetchImpl);
   const usageMonth = new Date().toISOString().slice(0, 7);
   const reserveCapacityUsd = async (amount: number) => {
-    // v2 starts from the authoritative live account usage and intentionally
-    // drops conservative reservations left by completed/failed v1 Actor calls.
-    const usageKey = `apify:v2:${usageMonth}`;
-    const recordedFloor = await repository.reserveUsage(usageKey, 0, monthlyLimit);
     const actual = await externalUsageUsd();
     if (!Number.isFinite(actual) || actual < 0) {
       throw new Error("Apify returned an invalid current-usage value");
     }
-    // Bring the persistent floor up to live account usage, then reserve the
-    // maximum charge of the next Actor call. If the live endpoint is delayed,
-    // the already-reserved floor still prevents a later call overspending.
-    const increment = Math.max(0, actual - recordedFloor) + amount;
-    await repository.reserveUsage(usageKey, increment, monthlyLimit);
+    // v3 stores short-lived reservation amounts separately from authoritative
+    // account usage. The previous half-hour bucket overlaps the current one,
+    // protecting against delayed Apify usage without permanently leaking the
+    // maximum reservation of completed or failed Actor calls.
+    const windowMs = 30 * 60 * 1000;
+    const bucket = Math.floor(Date.now() / windowMs);
+    const currentKey = `apify:v3:${usageMonth}:${bucket}`;
+    const previousKey = `apify:v3:${usageMonth}:${bucket - 1}`;
+    const [currentReserved, previousReserved] = await Promise.all([
+      repository.reserveUsage(currentKey, 0, monthlyLimit),
+      repository.reserveUsage(previousKey, 0, monthlyLimit)
+    ]);
+    const available = monthlyLimit - actual;
+    const pending = currentReserved + previousReserved + amount;
+    if (available <= 0 || pending > available + Number.EPSILON) {
+      throw new Error(`Квота ${monthlyLimit.toFixed(2)} исчерпана: использовано ${actual.toFixed(2)}, временно зарезервировано ${(currentReserved + previousReserved).toFixed(2)}`);
+    }
+    await repository.reserveUsage(currentKey, amount, available - previousReserved);
   };
   const apifyExclusive = options.apifyExclusive ?? createSerialExecutor();
   const cappedFallback = (

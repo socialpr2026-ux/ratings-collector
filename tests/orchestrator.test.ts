@@ -457,6 +457,27 @@ describe("run orchestration and fail-closed QA", () => {
     const legacyReviewRun = await legacyReviewService.executeRun((await legacyReviewService.createRun(legacyReviewRequest)).id);
     await expect(legacyReviewService.approveObservations(legacyReviewRun.id, ["irecommend.ru:11557796"]))
       .resolves.toMatchObject({ observations: [{ status: "ok", productIdentity: { granularity: "family" } }] });
+
+    const yandexRequest = { ...request, domains: ["market.yandex.ru"], brands: ["Даксабрис"] };
+    const yandexService = new RatingsService(new MemoryRepository(), async () => ({
+      id: "yandex-review-aggregate",
+      supportedDomains: ["market.yandex.ru"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand: string) {
+        return [{ domain: "market.yandex.ru", platform: "yandex", listingId: "900082876", brand, url: "https://reviews.yandex.ru/product/daksabris--900082876", metadata: {} }];
+      },
+      async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: ref.brand, reviews: 3, rating: 4.9,
+          status: "needs_review", capturedAt: new Date().toISOString(),
+          productEvidence: { scope: "listing", signals: [{ source: "title", text: ref.brand }], variants: [], identifiers: [], imageUrls: [], instructionUrls: [] }
+        };
+      }
+    }));
+    const yandexRun = await yandexService.executeRun((await yandexService.createRun(yandexRequest)).id);
+    await expect(yandexService.approveObservations(yandexRun.id, ["market.yandex.ru:900082876"]))
+      .resolves.toMatchObject({ observations: [{ status: "ok", productIdentity: { granularity: "unresolved" } }] });
   });
 
   it("does not gate a dedicated review-site observation on a stale generic profile", async () => {

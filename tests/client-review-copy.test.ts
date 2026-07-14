@@ -121,6 +121,13 @@ describe("review confirmation eligibility", () => {
       productIdentity: { ...exact, label: "Общая карточка бренда", granularity: "family", confidence: "partial" },
       productEvidence: { scope: "listing", signals: [], variants: [], identifiers: [], imageUrls: [], instructionUrls: [] }
     })).toBe(true);
+    expect(canConfirmObservation({
+      domain: "market.yandex.ru",
+      reviews: 3,
+      rating: 4.9,
+      productIdentity: { ...exact, label: "Общая карточка бренда", granularity: "unresolved", confidence: "partial" },
+      productEvidence: { scope: "listing", signals: [], variants: [], identifiers: [], imageUrls: [], instructionUrls: [] }
+    })).toBe(true);
     expect(canConfirmObservation({ reviews: 12, rating: 4.8, productIdentity: { ...exact, label: "Не товарная карточка", granularity: "not_product", confidence: "ambiguous" } })).toBe(false);
   });
 });

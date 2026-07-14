@@ -100,7 +100,7 @@ function marketplaceFetch(usageUsd: number) {
 }
 
 describe("collector runtime fallback integration", () => {
-  it("uses one 0.75 USD Ozon batch reservation for every brand in the run", async () => {
+  it("uses one capped 0.25 USD Ozon batch reservation and ignores stale v2 reservations", async () => {
     let usageChecks = 0;
     const actorCalls: Array<{ url: URL; body: Record<string, unknown> }> = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -135,7 +135,9 @@ describe("collector runtime fallback integration", () => {
       throw new Error(`Unexpected test request: ${url}`);
     }) as unknown as typeof fetch;
     const runtime = await createCollectorRuntime({
-      repository: new MemoryRepository(),
+      repository: new MemoryRepository({
+        usage: { [`apify:v2:${new Date().toISOString().slice(0, 7)}`]: 4.48 }
+      }),
       evidence: new MemoryEvidenceStore(),
       fetch: fetchMock,
       env: { APIFY_TOKEN: "test-token", APIFY_MONTHLY_BUDGET_USD: "4.50" }
@@ -153,7 +155,7 @@ describe("collector runtime fallback integration", () => {
     ]);
     expect(actorCalls).toHaveLength(1);
     expect(usageChecks).toBe(1);
-    expect(actorCalls[0].url.searchParams.get("maxTotalChargeUsd")).toBe("0.75");
+    expect(actorCalls[0].url.searchParams.get("maxTotalChargeUsd")).toBe("0.25");
     expect(actorCalls[0].body.searchQueries).toEqual(["Brand A", "Brand B"]);
   });
 

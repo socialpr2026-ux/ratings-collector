@@ -199,6 +199,29 @@ describe("OzonAdapter discovery", () => {
     });
   });
 
+  it("couples maxItems to the paid charge cap so truncation remains detectable", async () => {
+    const fetchSpy = vi.fn(async () => jsonResponse([]));
+    const brands = Array.from({ length: 17 }, (_, index) => `Brand ${index + 1}`);
+    const adapter = new OzonAdapter(adapterOptions({
+      fetch: fetchSpy as unknown as typeof fetch,
+      maxResults: 80,
+      maxTotalChargeUsd: 0.25
+    }));
+
+    await adapter.discover(brands[0], {
+      runId: "run-charge-cap",
+      brands,
+      region: "Москва",
+      month: "2026-07"
+    });
+
+    const [request, init] = fetchSpy.mock.calls[0] as unknown as [URL, RequestInit];
+    const url = new URL(String(request));
+    expect(url.searchParams.get("maxItems")).toBe("500");
+    expect(url.searchParams.get("limit")).toBe("500");
+    expect(JSON.parse(String(init.body))).toMatchObject({ maxItems: 500 });
+  });
+
   it("accepts productId and the brand object when SKU and title brand are unavailable", async () => {
     const fetchSpy = vi.fn(async () =>
       jsonResponse([
