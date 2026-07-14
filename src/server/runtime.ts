@@ -12,6 +12,7 @@ import { createReviewSiteAdapters } from "./adapters/review-sites.js";
 import { EaptekaAdapter } from "./adapters/eapteka.js";
 import { AsnaAdapter, PolzaAdapter } from "./adapters/pharmacy-recovery.js";
 import { createPharmacyAdapters } from "./adapters/pharmacies.js";
+import { createAdditionalPharmacyAdapters } from "./adapters/additional-pharmacies.js";
 import { MedOtzyvAdapter } from "./adapters/med-otzyv.js";
 import { MegamarketAdapter } from "./adapters/megamarket.js";
 import { FileEvidenceStore, type EvidenceStore } from "./evidence.js";
@@ -167,6 +168,7 @@ export async function createCollectorRuntime(options: {
     new PolzaAdapter(evidence, options.fetch),
     new AsnaAdapter(evidence, options.fetch),
     ...createPharmacyAdapters(evidence, options.fetch),
+    ...createAdditionalPharmacyAdapters(evidence, options.fetch),
     ...createReviewSiteAdapters(evidence, options.fetch)
   ];
   const service = new RatingsService(repository, createAdapterResolver(known, repository, evidence, options.fetch));
