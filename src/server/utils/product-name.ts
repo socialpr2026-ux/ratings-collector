@@ -215,6 +215,28 @@ function extractDoses(brand: string, value: string, form: string | undefined, co
   return [...new Set(doses)];
 }
 
+function normalizeKnownProductEquivalence(
+  brand: string,
+  value: string,
+  parts: Pick<ProductParts, "form" | "doses" | "count">
+): Pick<ProductParts, "form" | "doses"> {
+  // Oscillococcinum's sellable tube dose is consistently catalogued as either
+  // "1 dose", "1 g" or "1000 mg".  Normalize only when one of those values is
+  // present on the current listing. A bare "granules No.12" remains bare: this
+  // rule must not manufacture a strength from the brand name alone.
+  if (normalizeText(brand) !== "оциллококцинум" || !parts.count) {
+    return { form: parts.form, doses: parts.doses };
+  }
+  const explicitDose = /(?<![\p{L}\p{N}])1\s*(?:доз(?:а|ы|у)?|dose)(?![\p{L}\p{N}])/iu.test(value);
+  const explicitOneGram = parts.doses.some((dose) => normalizeText(dose) === "1000 мг");
+  if (!explicitDose && !explicitOneGram) return { form: parts.form, doses: parts.doses };
+
+  return {
+    form: !parts.form || parts.form === "гранулы" ? "гранулы гомеопатические" : parts.form,
+    doses: ["1 г", ...parts.doses.filter((dose) => normalizeText(dose) !== "1000 мг")]
+  };
+}
+
 function cleanFallback(value: string): string {
   const cleaned = value
     .replace(/(?<![\p{L}\p{N}])(?:detail(?:\.aspx)?|index(?:\.html?))(?![\p{L}\p{N}])/giu, " ")
@@ -285,8 +307,15 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
     .replace(/^[-—–,.:;\s]+|[-—–,.:;\s]+$/g, "")
     .trim();
   const count = countFromText(withoutBrand);
-  const form = formFromText(withoutBrand);
-  const doses = extractDoses(brand, withoutBrand, form, count);
+  const extractedForm = formFromText(withoutBrand);
+  const extractedDoses = extractDoses(brand, withoutBrand, extractedForm, count);
+  const equivalence = normalizeKnownProductEquivalence(brand, withoutBrand, {
+    form: extractedForm,
+    doses: extractedDoses,
+    count
+  });
+  const form = equivalence.form;
+  const doses = equivalence.doses;
   const multipackMatch = withoutBrand.match(/(?:[xх×]\s*|(?<![\p{L}\p{N}]))(\d+)\s*(?:уп(?:аковк)?\.?|упаков(?:ки|ок|ка))(?![\p{L}\p{N}])/iu);
   const multipack = multipackMatch ? Number(multipackMatch[1]) : undefined;
   const modifiers = MODIFIERS.filter((item) => item.pattern.test(withoutBrand))

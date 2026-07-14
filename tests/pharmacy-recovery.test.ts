@@ -102,7 +102,7 @@ describe("recovered first-party pharmacy adapters", () => {
       product: result.product,
       url: result.canonicalUrl,
       evidence: result.productEvidence
-    })).toMatchObject({ label: "гранулы 1000 мг №6", granularity: "variant", confidence: "exact" });
+    })).toMatchObject({ label: "гранулы гомеопатические 1 г №6", granularity: "variant", confidence: "exact" });
   });
 
   it("does not let a transient unrelated Polza renderer canary block an exact requested family", async () => {
@@ -218,7 +218,7 @@ describe("recovered first-party pharmacy adapters", () => {
         url: result.canonicalUrl,
         evidence: result.productEvidence
       })).toMatchObject({
-        label: `гранулы гомеопатические №${ref.url.match(/_n(\d+)_/)?.[1]}`,
+        label: `гранулы гомеопатические 1 г №${ref.url.match(/_n(\d+)_/)?.[1]}`,
         granularity: "variant",
         confidence: "exact"
       });

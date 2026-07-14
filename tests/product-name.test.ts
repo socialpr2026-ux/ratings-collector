@@ -219,6 +219,46 @@ describe("canonical product descriptors", () => {
     });
   });
 
+  it("normalizes proven Oscillococcinum dose equivalents without filling missing evidence", () => {
+    const provenEquivalentTitles = [
+      "Оциллококцинум гранулы 1 г, 12 шт.",
+      "Оциллококцинум гранулы гомеопатические 1 доза №12",
+      "Оциллококцинум 1000 мг №12"
+    ];
+
+    for (const product of provenEquivalentTitles) {
+      expect(analyzeProductIdentity({ brand: "Оциллококцинум", product })).toMatchObject({
+        granularity: "variant",
+        confidence: "exact",
+        label: "гранулы гомеопатические 1 г №12"
+      });
+    }
+
+    expect(analyzeProductIdentity({
+      brand: "Оциллококцинум",
+      product: "Оциллококцинум гранулы №12"
+    })).toMatchObject({
+      granularity: "variant",
+      confidence: "exact",
+      label: "гранулы №12"
+    });
+    expect(analyzeProductIdentity({
+      brand: "Другой бренд",
+      product: "Другой бренд гранулы 1000 мг №12"
+    }).label).toBe("гранулы 1000 мг №12");
+  });
+
+  it("keeps Oscillococcinum package identities separate after dose normalization", () => {
+    expect([6, 12, 30].map((count) => analyzeProductIdentity({
+      brand: "Оциллококцинум",
+      product: `Оциллококцинум гранулы гомеопатические 1 доза №${count}`
+    }).label)).toEqual([
+      "гранулы гомеопатические 1 г №6",
+      "гранулы гомеопатические 1 г №12",
+      "гранулы гомеопатические 1 г №30"
+    ]);
+  });
+
   it("never exposes draft wording in product labels", () => {
     const labels = canonicalProductDescriptors([
       { brand: "Амиксин", product: "Модель 128489946 amiksin" },
