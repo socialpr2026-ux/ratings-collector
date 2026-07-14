@@ -602,7 +602,11 @@ function escapeHtml(value: string): string {
 
 function compactRuOtzyvTranslateHtml(html: string, requested: RuOtzyvTarget): string | undefined {
   if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
-  if (/(?:captcha|access denied|unusual traffic|проверка браузера|не робот)/iu.test(html.slice(0, 150_000))) {
+  const leadingHtml = html.slice(0, 150_000);
+  // A normal review form loads Google's reCAPTCHA script even on a healthy
+  // product page. Treat only an actual challenge container/page as blocking.
+  if (/<(?:form|div|section)\b[^>]*(?:id|class)=["'][^"']*(?:captcha|challenge)[^"']*["']/iu.test(leadingHtml) ||
+    /(?:access denied|unusual traffic|проверка браузера|подтвердите, что вы не робот)/iu.test(leadingHtml)) {
     return undefined;
   }
   const $ = load(html);

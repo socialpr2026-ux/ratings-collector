@@ -153,7 +153,7 @@ describe("static ru.otzyv.com product gateway", () => {
     { INTERNAL_AGENT_TOKEN: token }
   );
   const translated = (source = "https://ru.otzyv.com/kagotsel", title = "Кагоцел отзывы") => `
-    <html><head><base href="${source}">
+    <html><head><base href="${source}"><script src="https://www.google.com/recaptcha/api.js"></script>
     <script type="application/ld+json">${JSON.stringify({
       "@context": "http://schema.org",
       "@type": "Product",
