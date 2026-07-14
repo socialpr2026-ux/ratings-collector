@@ -538,7 +538,8 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
   if (requested.kind === "budzdorov-product") {
     const heading = $("h1").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
     const total = $("[allreviewsqty]").first().attr("allreviewsqty")?.trim();
-    const stateScript = $("script").toArray().map((node) => $(node).html() ?? "").find((value) => value.startsWith("window.__INITIAL_STATE__="));
+    const stateScript = $("script").toArray().map((node) => $(node).html() ?? "")
+      .find((value) => value.includes("window.__INITIAL_STATE__="));
     if (!heading || !total || !/^\d+$/.test(total) || !stateScript) return undefined;
     let state: { productView?: { reviews?: unknown } };
     const parsedState = parseAssignedJsonObject(stateScript, "window.__INITIAL_STATE__=");
@@ -553,7 +554,7 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
       const id = String(review.id ?? "");
       const ratings = Array.isArray(review.ratings) ? review.ratings : [];
       const scores = ratings.filter((item): item is { attribute_code?: unknown; value?: unknown } => Boolean(item && typeof item === "object"))
-        .filter((item) => String(item.attribute_code ?? "").toLocaleLowerCase("ru-RU") === "оценка");
+        .filter((item) => ["оценка", "rating"].includes(String(item.attribute_code ?? "").normalize("NFKC").trim().toLocaleLowerCase("ru-RU")));
       const score = scores.length === 1 ? Number(scores[0].value) : Number.NaN;
       if (!id || ids.has(id) || !Number.isInteger(score) || score < 1 || score > 5) return undefined;
       ids.add(id);

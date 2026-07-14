@@ -674,11 +674,11 @@ describe("static pharmacy Translate gateway", () => {
     const source = "https://www.budzdorov.ru/product/otsillokoktsinum-granuly-6doz-2511";
     const reviews = [
       { id: 1, ratings: [{ attribute_code: "Оценка", value: 5 }] },
-      { id: 2, ratings: [{ attribute_code: "Оценка", value: 4 }] }
+      { id: 2, ratings: [{ attribute_code: "Rating", value: 4 }] }
     ];
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"></head><body>
       <h1>Оциллококцинум гранулы 6 доз</h1><div allreviewsqty="2"></div>
-      <script>window.__INITIAL_STATE__=${JSON.stringify({ productView: { reviews } })};(function(){var s;s=document.currentScript;}())</script>
+      <script>  window.__INITIAL_STATE__=${JSON.stringify({ productView: { reviews } })};(function(){var s;s=document.currentScript;}())</script>
     </body></html>`, { headers: { "content-type": "text/html" } })));
 
     const response = await callGateway(translated("www-budzdorov-ru.translate.goog", "/product/otsillokoktsinum-granuly-6doz-2511").toString());
