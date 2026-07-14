@@ -260,6 +260,33 @@ describe("static pharmacy Translate gateway", () => {
     expect(proof).toContain("529012");
   });
 
+  it("accepts only an exact ASNA card and returns compact source-bound aggregate proof", async () => {
+    const source = "https://www.asna.ru/cards/kagotsel_12mg_n10_tab_niarmedik_plyus_ooo.html";
+    const noise = "x".repeat(500_000);
+    const upstream = vi.fn(async () => new Response(`<html><head><base href="${source}">
+      <link rel="canonical" href="${source}"><style>${noise}</style></head><body>
+      <div class="productPage__content product__item" itemscope itemtype="http://schema.org/Product">
+        <meta itemprop="sku" content="14666"><div itemprop="aggregateRating" itemscope>
+          <meta itemprop="ratingValue" content="5"><meta itemprop="reviewCount" content="29">
+        </div></div></body></html>`, { headers: { "content-type": "text/html; charset=utf-8" } }));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(translated("www-asna-ru.translate.goog", new URL(source).pathname).toString());
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-pharmacy-ssr");
+    expect(proof).toContain(`data-source-url="${source}"`);
+    expect(proof).toContain('itemprop="sku" content="14666"');
+    expect(proof).toContain('itemprop="reviewCount" content="29"');
+    expect(proof).not.toContain(noise.slice(0, 100));
+    expect(Number(response.headers.get("x-ratings-proof-bytes"))).toBeLessThan(2_000);
+
+    const invalid = translated("www-asna-ru.translate.goog", "/cards/not-a-card");
+    expect((await callGateway(invalid.toString())).status).toBe(400);
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
   it("rejects unbounded queries and a mismatched source before metrics can become zero", async () => {
     const upstream = vi.fn(async () => new Response(`<html><head>
       <base href="https://farmlend.ru/search?keyword=Другой"></head><body>ничего не найдено</body></html>`, {

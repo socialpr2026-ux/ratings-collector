@@ -165,7 +165,8 @@ describe("ratings Agent lazy Sandbox routing", () => {
 
     for (const target of [
       "https://farmlend-ru.translate.goog/search?keyword=Кагоцел&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
-      "https://okapteka-ru.translate.goog/pg/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
+      "https://okapteka-ru.translate.goog/pg/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
+      "https://www-asna-ru.translate.goog/cards/kagotsel_12mg_n10_tab_niarmedik_plyus_ooo.html?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
     ]) {
       const response = await routedFetch(target);
       expect(await response.text()).toBe("compact pharmacy proof");
@@ -173,6 +174,27 @@ describe("ratings Agent lazy Sandbox routing", () => {
       expect(call[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
       expect(JSON.parse(String((call[1] as RequestInit).body))).toEqual({ url: new URL(target).toString() });
     }
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("retries one transient ASNA function failure and remains fail-closed without Sandbox", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL) => directFetch.mock.calls.length === 1
+      ? new Response("temporary egress failure", { status: 502 })
+      : new Response("compact ASNA aggregate proof", { headers: { "content-type": "text/html; charset=utf-8" } }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(
+      "https://www-asna-ru.translate.goog/cards/kagotsel_12mg_n10_tab_niarmedik_plyus_ooo.html?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
+    );
+
+    expect(await response.text()).toBe("compact ASNA aggregate proof");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(directFetch.mock.calls.every(([input]) => input === "https://ratings.example/api/internal/static-review-fetch")).toBe(true);
     expect(run).not.toHaveBeenCalled();
   });
 

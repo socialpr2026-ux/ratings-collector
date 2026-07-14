@@ -38,9 +38,10 @@ const PHARMACY_TRANSLATE_PARAMETERS = new Set(["_x_tr_sl", "_x_tr_tl", "_x_tr_hl
 const FARMLEND_TRANSLATE_HOST = "farmlend-ru.translate.goog";
 const OKAPTEKA_TRANSLATE_HOST = "okapteka-ru.translate.goog";
 const ZDRAVCITY_TRANSLATE_HOST = "zdravcity-ru.translate.goog";
+const ASNA_TRANSLATE_HOST = "www-asna-ru.translate.goog";
 
 type PharmacyTranslateTarget = {
-  kind: "farmlend-search" | "farmlend-product" | "okapteka-group" | "okapteka-reviews";
+  kind: "farmlend-search" | "farmlend-product" | "okapteka-group" | "okapteka-reviews" | "asna-product";
   source: URL;
   productId?: string;
 };
@@ -78,7 +79,9 @@ function parsePharmacyTranslateTarget(target: URL): PharmacyTranslateTarget | un
 
   const sourceHost = target.hostname === FARMLEND_TRANSLATE_HOST
     ? "farmlend.ru"
-    : target.hostname === OKAPTEKA_TRANSLATE_HOST ? "okapteka.ru" : undefined;
+    : target.hostname === OKAPTEKA_TRANSLATE_HOST
+      ? "okapteka.ru"
+      : target.hostname === ASNA_TRANSLATE_HOST ? "www.asna.ru" : undefined;
   if (!sourceHost) return undefined;
   const source = new URL(target.pathname, `https://${sourceHost}`);
 
@@ -97,6 +100,12 @@ function parsePharmacyTranslateTarget(target: URL): PharmacyTranslateTarget | un
       return undefined;
     }
     return { kind: "farmlend-product", source, productId: product[1] };
+  }
+
+  if (target.hostname === ASNA_TRANSLATE_HOST) {
+    if ([...target.searchParams.keys()].some((key) => !PHARMACY_TRANSLATE_PARAMETERS.has(key)) ||
+      !/^\/cards\/[a-z0-9_.-]+\.html$/i.test(target.pathname)) return undefined;
+    return { kind: "asna-product", source };
   }
 
   const group = target.pathname.match(/^\/(pg|reviews)\/([^/]+)\/$/i);
@@ -235,6 +244,29 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
   const baseValue = $("base[href]").first().attr("href");
   if (!translatedSourceMatches(baseValue, requested.source)) return undefined;
   const base = `<base href="${escapeHtml(baseValue!)}">`;
+
+  if (requested.kind === "asna-product") {
+    const canonicalValue = $("link[rel='canonical'][href]").first().attr("href");
+    if (!translatedSourceMatches(canonicalValue, requested.source)) return undefined;
+    const roots = $(".productPage__content.product__item[itemscope]");
+    if (roots.length !== 1) return undefined;
+    const root = roots.first();
+    const sku = root.find("meta[itemprop='sku']").first().attr("content")?.trim();
+    const aggregate = root.find("[itemprop='aggregateRating']").first();
+    const reviews = aggregate.find("meta[itemprop='reviewCount']").first().attr("content")?.trim();
+    const rating = aggregate.find("meta[itemprop='ratingValue']").first().attr("content")?.trim();
+    const reviewCount = reviews && /^\d+$/.test(reviews) ? Number(reviews) : Number.NaN;
+    const ratingValue = rating && /^\d(?:[.,]\d+)?$/.test(rating) ? Number(rating.replace(",", ".")) : Number.NaN;
+    const validRating = Number.isFinite(ratingValue) && ratingValue > 0 && ratingValue <= 5;
+    if (!sku || sku.length > 80 || !/^[a-z0-9_.-]+$/i.test(sku) || !Number.isSafeInteger(reviewCount) || reviewCount < 0 ||
+      rating && !validRating || reviewCount > 0 && !validRating) return undefined;
+    return `<html><head>${base}<link rel="canonical" href="${escapeHtml(canonicalValue!)}"></head><body>` +
+      `<script data-source-url="${escapeHtml(requested.source.toString())}"></script>` +
+      `<div class="productPage__content product__item" itemscope itemtype="http://schema.org/Product">` +
+      `<meta itemprop="sku" content="${escapeHtml(sku)}"><div itemprop="aggregateRating" itemscope>` +
+      `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}` +
+      `<meta itemprop="reviewCount" content="${escapeHtml(reviews!)}"></div></div></body></html>`;
+  }
 
   if (requested.kind === "farmlend-search") {
     const anchors: string[] = [];

@@ -233,7 +233,8 @@ export function browserFetch(
     if (staticProxy && [
       "www-ozon-ru.translate.goog",
       "farmlend-ru.translate.goog",
-      "okapteka-ru.translate.goog"
+      "okapteka-ru.translate.goog",
+      "www-asna-ru.translate.goog"
     ].includes(url.hostname)) {
       const first = await fetchViaStaticProxy(url, request.signal);
       if (![429, 502, 503, 504].includes(first.status)) return first;
