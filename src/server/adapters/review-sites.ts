@@ -6,7 +6,7 @@ import { extractJsonLdProducts, type JsonLdProduct } from "../generic/jsonld.js"
 import { aliasesForBrand, matchesBrand, normalizeRating } from "../utils/normalize.js";
 import { readTextBounded, safeFetch } from "../utils/safe-fetch.js";
 import { canonicalizeUrl } from "../utils/urls.js";
-import { extractPageProductEvidence } from "../utils/product-evidence.js";
+import { extractPageProductEvidence, titleProductEvidence } from "../utils/product-evidence.js";
 import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 
 const MAX_SEARCH_PAGES = 20;
@@ -108,7 +108,10 @@ function absoluteProductUrl(value: string | undefined, base: string, definition:
 
 function jsonLdMetrics(html: string, pageUrl: string, brand: string): ParsedMetrics {
   const products = extractJsonLdProducts(html, pageUrl);
-  const product = products.find((item) => matchesBrand(item.name ?? "", brand)) ?? products[0];
+  const canonicalPageUrl = canonicalizeUrl(pageUrl);
+  const product = products.find((item) => item.url && canonicalizeUrl(item.url) === canonicalPageUrl)
+    ?? products.find((item) => matchesBrand(item.name ?? "", brand))
+    ?? products[0];
   return product ? metricsFromProduct(product) : { source: "visible-dom" };
 }
 
@@ -927,12 +930,15 @@ export class ReviewSiteAdapter implements SiteAdapter {
     );
     if (reviews === undefined) throw new ParserChangedError(`${this.definition.domain}: не найден подтверждённый счётчик отзывов`);
     if (reviews > 0 && parsed.rating === undefined) throw new ParserChangedError(`${this.definition.domain}: есть отзывы, но не найден рейтинг`);
-    // Every page handled here is an aggregate review page for a product/family,
-    // not a sellable SKU. This makes the evidence publishable as the correct
-    // aggregation unit without inventing a dosage/pack variant.
-    const productEvidence = extractPageProductEvidence(html, canonicalUrl, ref.brand, {
-      forceFamily: this.definition.domain !== "megapteka.ru"
-    });
+    // Dedicated Megapteka pages are sellable SKUs; the other definitions are
+    // aggregate review pages for a product/family.
+    const productEvidence = this.definition.domain === "megapteka.ru"
+      // Megapteka catalog pages contain same-brand recommendations for adjacent
+      // packs. Discovery already gave us a stable first-party SKU and the page
+      // parser resolved the canonical Product title, so only those listing-local
+      // facts may participate in product identity.
+      ? titleProductEvidence(title, { type: "product_id", value: listingId }, canonicalUrl)
+      : extractPageProductEvidence(html, canonicalUrl, ref.brand, { forceFamily: true });
     const evidenceRef = await this.evidence.put({
       capturedAt,
       url: ref.url,

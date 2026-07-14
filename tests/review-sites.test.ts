@@ -10,6 +10,8 @@ import {
   UnprovenAggregateAdapter,
   createReviewSiteAdapters
 } from "../src/server/adapters/review-sites.js";
+import { canConfirmObservation } from "../src/client/review-copy.js";
+import { analyzeProductIdentity } from "../src/server/utils/product-name.js";
 
 function urlOf(input: RequestInfo | URL): URL {
   return new URL(input instanceof Request ? input.url : input.toString());
@@ -223,7 +225,11 @@ describe("first-party review-site adapters", () => {
       }
       if (url.pathname === "/moskva/catalog/nevrologiya-62/anvifen-kaps-250-34662") return new Response(
         `<script>window.state={"feedback":{"avg":4.8,"count":44,"fill_count":44}}</script>` +
-        `<script type="application/ld+json">{"@type":"Product","name":"Анвифен капсулы 250 мг №20","url":"https://megapteka.ru/moskva/catalog/nevrologiya-62/anvifen-kaps-250-34662","aggregateRating":{"@type":"AggregateRating","ratingValue":4.8,"reviewCount":44,"bestRating":5}}</script>`
+        `<script type="application/ld+json">[
+          {"@type":"Product","name":"Анвифен капсулы 50 мг №20","url":"https://megapteka.ru/moskva/catalog/nevrologiya-62/anvifen-kaps-50-34663","aggregateRating":{"@type":"AggregateRating","ratingValue":5,"reviewCount":2,"bestRating":5}},
+          {"@type":"Product","name":"Анвифен капсулы 250 мг №20","productID":"34662","url":"https://megapteka.ru/moskva/catalog/nevrologiya-62/anvifen-kaps-250-34662","aggregateRating":{"@type":"AggregateRating","ratingValue":4.8,"reviewCount":44,"bestRating":5}}
+        ]</script>` +
+        `<aside data-testid="product-card"><img alt="Анвифен капсулы 100 мг №10" src="https://megapteka.ru/recommendation.jpg"></aside>`
       );
       if (url.pathname === "/moskva/catalog/nevrologiya-62/anvifen-kaps-50-34663") return new Response(
         `<h1>Анвифен капсулы 50 мг №20</h1><script>window.state={"feedback":{"count":0}}</script>`
@@ -242,6 +248,25 @@ describe("first-party review-site adapters", () => {
     expect(results[0]).toMatchObject({ listingId: "34662", reviews: 44, rating: 4.8, status: "ok" });
     expect(results[1]).toMatchObject({ listingId: "34663", reviews: 0, rating: null, status: "no_reviews" });
     expect(results[0].productEvidence?.scope).toBe("listing");
+    expect(results[0].productEvidence).toMatchObject({
+      variants: [],
+      identifiers: [{ type: "product_id", value: "34662" }]
+    });
+    expect(results[0].productEvidence?.signals.map((signal) => signal.text)).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("50 мг"), expect.stringContaining("100 мг")])
+    );
+    const productIdentity = analyzeProductIdentity({
+      brand: "Анвифен",
+      product: results[0].product,
+      url: results[0].canonicalUrl,
+      evidence: results[0].productEvidence
+    });
+    expect(productIdentity).toMatchObject({
+      label: "капсулы 250 мг №20",
+      granularity: "variant",
+      confidence: "exact"
+    });
+    expect(canConfirmObservation({ ...results[0], productIdentity })).toBe(true);
     expect(requested.some((url) => url.pathname === "/search")).toBe(false);
   });
 
