@@ -736,27 +736,26 @@ export class ReviewSiteAdapter implements SiteAdapter {
     if (/По запросу\s*[«"]?[^»"]+[»"]?\s*ничего не нашлось/iu.test(text)) return [];
     if (count !== undefined) {
       const refs = new Map<string, ProductRef>();
+      let provedNonMatchingCategory = false;
       $("a[href]").each((_index, node) => {
         const href = $(node).attr("href");
         if (!href) return;
         try {
           const target = new URL(href, searchUrl);
           if (!sameSite(target, "pravogolosa.net") || !this.definition.isProductUrl(target)) return;
+          const categoryReviews = integerFrom($(node).text().match(/(?:все|читать\s+все)\s+отзывы\s*\(?([\d\s\u00a0]+)\)?/iu)?.[1]);
+          if (categoryReviews === undefined || categoryReviews <= 0 || categoryReviews !== count) return;
           // The search page may surface a manufacturer/category aggregate
           // because an individual review mentions the requested brand. Bind
           // the category link to its own result heading, not to snippets.
           const resultRoot = $(node).closest(".module, article, .item, .search-result");
-          const resultTitle = resultRoot.find("h1 a, h2 a, h3 a, .title a").first().text()
+          const resultTitle = resultRoot.find("h1 a, h2 a, h3 a, .title a, h1, h2, h3, .title").first().text()
             .normalize("NFKC").replace(/\s+/g, " ").trim();
-          if (!resultTitle || !matchesBrand(resultTitle, brand)) return;
-          const categoryReviews = integerFrom($(node).text().match(/(?:все|читать\s+все)\s+отзывы\s*\(?([\d\s\u00a0]+)\)?/iu)?.[1]);
-          if (categoryReviews === undefined || categoryReviews <= 0 || categoryReviews !== count) return;
-          const resultBlock = $(node).closest(".module, article, li, [class*='item'], [class*='result']");
-          const resultText = resultBlock.length ? resultBlock.text().replace(/\s+/g, " ").trim() : "";
-          // Search can return a manufacturer-wide category (for example,
-          // "ООО Буарон") for a product query. Its aggregate belongs to many
-          // products and must never be attached to the requested brand.
-          if (!matchesBrand(resultText, brand)) return;
+          if (!resultTitle) return;
+          if (!matchesBrand(resultTitle, brand)) {
+            provedNonMatchingCategory = true;
+            return;
+          }
           target.protocol = "https:";
           target.search = "";
           target.searchParams.set("page", "show_category");
@@ -777,6 +776,7 @@ export class ReviewSiteAdapter implements SiteAdapter {
       });
       this.appendHistorical(refs, brand, context);
       if (refs.size) return [...refs.values()];
+      if (provedNonMatchingCategory) return [];
       throw new ParserChangedError("pravogolosa.net показывает отдельные отзывы, но не доказан агрегат бренда");
     }
     throw new AdapterBlockedError("pravogolosa.net не подтвердил ни результаты, ни их отсутствие");
