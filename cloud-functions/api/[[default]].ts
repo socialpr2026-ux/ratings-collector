@@ -37,6 +37,7 @@ const OZON_SEARCH_PARAMETERS = new Set([
 const PHARMACY_TRANSLATE_PARAMETERS = new Set(["_x_tr_sl", "_x_tr_tl", "_x_tr_hl"]);
 const FARMLEND_TRANSLATE_HOST = "farmlend-ru.translate.goog";
 const OKAPTEKA_TRANSLATE_HOST = "okapteka-ru.translate.goog";
+const ZDRAVCITY_TRANSLATE_HOST = "zdravcity-ru.translate.goog";
 
 type PharmacyTranslateTarget = {
   kind: "farmlend-search" | "farmlend-product" | "okapteka-group" | "okapteka-reviews";
@@ -125,6 +126,104 @@ function translatedSourceMatches(value: string | undefined, requested: URL): boo
   } catch {
     return false;
   }
+}
+
+function compactZdravcityTranslateHtml(html: string, requested: URL): string | undefined {
+  if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
+  const $ = load(html);
+  const title = $("title").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+  if (/(?:captcha|access denied|unusual traffic|Target URL returned error)/i.test(title) ||
+    /<(?:iframe|form|input)\b[^>]*(?:captcha|challenge)/i.test(html.slice(0, 150_000))) return undefined;
+  const baseValue = $("base[href]").first().attr("href");
+  if (!translatedSourceMatches(baseValue, requested)) return undefined;
+
+  const nextSource = $("#__NEXT_DATA__").first().text();
+  if (!nextSource) return undefined;
+  let next: { props?: { pageProps?: Record<string, unknown> } };
+  try { next = JSON.parse(nextSource) as typeof next; }
+  catch { return undefined; }
+  const pageProps = next.props?.pageProps;
+  if (!pageProps) return undefined;
+  let compactPageProps: Record<string, unknown>;
+
+  if (/^\/g_[a-z0-9-]+\/$/i.test(requested.pathname)) {
+    const products = pageProps.products;
+    if (!Array.isArray(products)) return undefined;
+    const compactProducts: Array<Record<string, unknown>> = [];
+    for (const value of products) {
+      if (!value || typeof value !== "object") continue;
+      const item = value as { id?: unknown; url?: unknown; name?: unknown; brand?: { name?: unknown }; sku?: unknown };
+      const id = typeof item.id === "string" ? item.id.trim() : "";
+      const name = typeof item.name === "string" ? item.name.normalize("NFKC").replace(/\s+/g, " ").trim() : "";
+      let productUrl: URL;
+      try { productUrl = new URL(String(item.url ?? ""), requested); }
+      catch { continue; }
+      if (!/^[0-9a-f-]{36}$/i.test(id) || !name || productUrl.protocol !== "https:" ||
+        productUrl.hostname !== "zdravcity.ru" || productUrl.search || productUrl.hash ||
+        !/^\/p_[a-z0-9][a-z0-9-]*-\d+\.html$/i.test(productUrl.pathname)) continue;
+      const brandName = typeof item.brand?.name === "string"
+        ? item.brand.name.normalize("NFKC").replace(/\s+/g, " ").trim()
+        : "";
+      compactProducts.push({
+        id,
+        url: productUrl.pathname,
+        name,
+        ...(brandName ? { brand: { name: brandName } } : {}),
+        ...(typeof item.sku === "string" || typeof item.sku === "number" ? { sku: item.sku } : {})
+      });
+    }
+    if (products.length > 0 && compactProducts.length === 0) return undefined;
+    compactPageProps = { products: compactProducts };
+  } else if (/^\/p_[a-z0-9][a-z0-9-]*-\d+\.html$/i.test(requested.pathname)) {
+    const rawProduct = pageProps.productV2;
+    if (!rawProduct || typeof rawProduct !== "object") return undefined;
+    const product = rawProduct as {
+      id?: unknown;
+      attributes?: { name?: unknown; url?: unknown; rating?: unknown; sku?: unknown };
+      reviews?: unknown;
+    };
+    const id = typeof product.id === "string" ? product.id.trim() : "";
+    const attributes = product.attributes;
+    const name = typeof attributes?.name === "string"
+      ? attributes.name.normalize("NFKC").replace(/\s+/g, " ").trim()
+      : "";
+    let canonical: URL;
+    try { canonical = new URL(String(attributes?.url ?? ""), requested); }
+    catch { return undefined; }
+    if (!/^[0-9a-f-]{36}$/i.test(id) || !name || !translatedSourceMatches(canonical.toString(), requested) ||
+      !Array.isArray(product.reviews)) return undefined;
+    const reviewIds = new Set<string>();
+    const reviews: Array<{ ID: string; rate: number }> = [];
+    for (const value of product.reviews) {
+      if (!value || typeof value !== "object") return undefined;
+      const review = value as { ID?: unknown; rate?: unknown };
+      const reviewId = String(review.ID ?? "").trim();
+      const rate = Number(review.rate);
+      if (!reviewId || reviewIds.has(reviewId) || !Number.isFinite(rate) || rate <= 0 || rate > 5) return undefined;
+      reviewIds.add(reviewId);
+      reviews.push({ ID: reviewId, rate });
+    }
+    const rating = Number(attributes?.rating);
+    if (reviews.length > 0 && (!Number.isFinite(rating) || rating <= 0 || rating > 5)) return undefined;
+    compactPageProps = {
+      productV2: {
+        id,
+        attributes: {
+          name,
+          url: requested.pathname,
+          ...(reviews.length > 0 ? { rating } : {}),
+          ...(typeof attributes?.sku === "string" || typeof attributes?.sku === "number" ? { sku: attributes.sku } : {})
+        },
+        reviews
+      }
+    };
+  } else {
+    return undefined;
+  }
+
+  const compactNext = JSON.stringify({ props: { pageProps: compactPageProps } }).replace(/</g, "\\u003c");
+  return `<html><head><base href="${escapeHtml(baseValue!)}"></head><body>` +
+    `<script id="__NEXT_DATA__" type="application/json">${compactNext}</script></body></html>`;
 }
 
 function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslateTarget): string | undefined {
@@ -555,6 +654,41 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
         "x-ratings-source": "google-translate-pharmacy-ssr",
+        "x-ratings-original-bytes": String(new TextEncoder().encode(html).byteLength),
+        "x-ratings-proof-bytes": String(new TextEncoder().encode(compactHtml).byteLength)
+      }
+    });
+  }
+  if (zdravcityTarget) {
+    const translated = new URL(target.pathname, `https://${ZDRAVCITY_TRANSLATE_HOST}`);
+    translated.searchParams.set("_x_tr_sl", "ru");
+    translated.searchParams.set("_x_tr_tl", "en");
+    translated.searchParams.set("_x_tr_hl", "en");
+    const upstream = await safeFetch(translated.toString(), {
+      method: "GET",
+      redirect: "manual",
+      headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+    }, fetch, 0, 60_000);
+    const html = await readTextBounded(upstream, 12_000_000, 60_000);
+    if (!upstream.ok) {
+      return new Response(html, {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "text/html; charset=utf-8" }
+      });
+    }
+    if (!/(?:text\/html|application\/xhtml\+xml)/i.test(upstream.headers.get("content-type") ?? "")) {
+      return json({ error: "Translated Zdravcity response is not HTML" }, 502);
+    }
+    const compactHtml = compactZdravcityTranslateHtml(html, target);
+    if (!compactHtml || compactHtml.length > 350_000) {
+      return json({ error: "Translated Zdravcity page did not prove the exact requested product data" }, 502);
+    }
+    return new Response(compactHtml, {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "google-translate-zdravcity-ssr",
         "x-ratings-original-bytes": String(new TextEncoder().encode(html).byteLength),
         "x-ratings-proof-bytes": String(new TextEncoder().encode(compactHtml).byteLength)
       }

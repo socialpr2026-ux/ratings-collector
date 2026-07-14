@@ -292,19 +292,69 @@ describe("fixed first-party collection egress", () => {
     { INTERNAL_AGENT_TOKEN: token }
   );
 
-  it("allows only bounded Yandex sitemap and Zdravcity product routes", async () => {
+  it("routes bounded Zdravcity paths through source-bound translated SSR", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(input.toString());
-      return new Response(url.hostname === "reviews.yandex.ru" ? "<urlset></urlset>" : "<html>product</html>", {
-        headers: { "content-type": url.hostname === "reviews.yandex.ru" ? "application/xml" : "text/html" }
-      });
+      if (url.hostname === "reviews.yandex.ru") {
+        return new Response("<urlset></urlset>", { headers: { "content-type": "application/xml" } });
+      }
+      expect(url.hostname).toBe("zdravcity-ru.translate.goog");
+      expect([...url.searchParams.entries()].sort()).toEqual([
+        ["_x_tr_hl", "en"], ["_x_tr_sl", "ru"], ["_x_tr_tl", "en"]
+      ]);
+      const source = `https://zdravcity.ru${url.pathname}`;
+      if (url.pathname.startsWith("/g_")) {
+        const products = [{
+          id: "D875DF4F-3A76-4BEB-89A1-DF358BD5538A",
+          url: "/p_kagocel-tab-12mg-n10-12345.html",
+          name: "Kagocel tablets 12 mg No. 10",
+          brand: { name: "Kagocel" },
+          sku: "33978"
+        }];
+        return new Response(`<html><head><base href="${source}"></head><body>
+          <script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { products } } })}</script>
+          </body></html>`, { headers: { "content-type": "text/html; charset=utf-8" } });
+      }
+      const product = {
+        id: "D875DF4F-3A76-4BEB-89A1-DF358BD5538A",
+        attributes: { name: "Kagocel tablets 12 mg No. 10", url: url.pathname, rating: 5, sku: "33978" },
+        reviews: [{ ID: "6548", rate: 5 }]
+      };
+      return new Response(`<html><head><base href="${source}"></head><body>
+        <div>${"x".repeat(500_000)}</div>
+        <script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { productV2: product } } })}</script>
+        </body></html>`, { headers: { "content-type": "text/html; charset=utf-8" } });
     });
     vi.stubGlobal("fetch", upstream);
 
     expect((await callGateway("https://reviews.yandex.ru/ugcpub/sitemap_model_590000000-599999999-0.xml")).status).toBe(200);
-    expect((await callGateway("https://zdravcity.ru/p_kagocel-tab-12mg-n10-12345.html")).status).toBe(200);
+    const group = await callGateway("https://zdravcity.ru/g_kagocel/");
+    expect(group.status).toBe(200);
+    expect(await group.text()).toContain('"products":[{"id":"D875DF4F-3A76-4BEB-89A1-DF358BD5538A"');
+    const response = await callGateway("https://zdravcity.ru/p_kagocel-tab-12mg-n10-12345.html");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-zdravcity-ssr");
+    expect(Number(response.headers.get("x-ratings-proof-bytes"))).toBeLessThan(2_000);
+    expect(await response.text()).toContain('"reviews":[{"ID":"6548","rate":5}]');
     expect((await callGateway("https://zdravcity.ru/g_kagocel/?redirect=https://evil.example")).status).toBe(400);
     expect((await callGateway("https://reviews.yandex.ru/ugcpub/private.xml")).status).toBe(400);
-    expect(upstream).toHaveBeenCalledTimes(2);
+    expect(upstream).toHaveBeenCalledTimes(3);
+  });
+
+  it("fails closed when translated Zdravcity HTML is not bound to the exact source", async () => {
+    const upstream = vi.fn(async () => new Response(`<html><head>
+      <base href="https://zdravcity.ru/p_another-product-999.html"></head><body>
+      <script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { productV2: {
+        id: "D875DF4F-3A76-4BEB-89A1-DF358BD5538A",
+        attributes: { name: "Another product", url: "/p_another-product-999.html", rating: 5 },
+        reviews: [{ ID: "1", rate: 5 }]
+      } } } })}</script></body></html>`, { headers: { "content-type": "text/html; charset=utf-8" } }));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway("https://zdravcity.ru/p_kagocel-tab-12mg-n10-12345.html");
+
+    expect(response.status).toBe(502);
+    expect(await response.text()).toContain("did not prove the exact requested product data");
+    expect(upstream).toHaveBeenCalledOnce();
   });
 });
