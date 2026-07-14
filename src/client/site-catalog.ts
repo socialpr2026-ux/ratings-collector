@@ -52,7 +52,17 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
       { domain: "farmlend.ru", label: "Фармленд" },
       { domain: "okapteka.ru", label: "ОК Аптека" },
       { domain: "rigla.ru", label: "Ригла" },
-      { domain: "zdravcity.ru", label: "Здравсити" }
+      { domain: "zdravcity.ru", label: "Здравсити" },
+      { domain: "apteka.ru", label: "Apteka.ru" },
+      { domain: "nfapteka.ru", label: "Надежда-Фарм" },
+      { domain: "budzdorov.ru", label: "Будь Здоров" },
+      { domain: "etabl.ru", label: "eTabl.ru" },
+      {
+        domain: "apteka-april.ru",
+        label: "Апрель",
+        availability: "temporarily_blocked",
+        note: "Защита площадки блокирует бесплатный облачный доступ"
+      }
     ]
   }
 ] as const;

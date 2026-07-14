@@ -28,12 +28,21 @@ describe("site picker catalog", () => {
       "pravogolosa.net",
       "ru.otzyv.com",
       "uteka.ru",
-      "megapteka.ru"
+      "megapteka.ru",
+      "apteka.ru",
+      "nfapteka.ru",
+      "budzdorov.ru",
+      "etabl.ru",
+      "apteka-april.ru"
     ]));
     expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("medum.ru");
     expect(SITE_CATALOG.flatMap((group) => group.sites).find((site) => site.domain === "medum.ru")).toMatchObject({
       availability: "temporarily_blocked"
     });
+    expect(SELECTABLE_CATALOG_DOMAINS).toEqual(expect.arrayContaining([
+      "apteka.ru", "nfapteka.ru", "budzdorov.ru", "etabl.ru"
+    ]));
+    expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("apteka-april.ru");
   });
 
   it("normalizes pasted URLs for the run without duplicating a site", () => {
