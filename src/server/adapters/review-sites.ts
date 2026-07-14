@@ -332,6 +332,7 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
 ];
 
 export const BLOCKED_FREE_MODE_DOMAINS = ["medum.ru"] as const;
+const PRAVOGOLOSA_HEALTH_CANARY = "ratingscollector-healthcheck-7f4c2a";
 
 function paginationCandidates($: CheerioAPI, pageUrl: string, definition: ReviewSiteDefinition): string[] {
   const result = new Set<string>();
@@ -391,6 +392,21 @@ export class ReviewSiteAdapter implements SiteAdapter {
   async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
     const checkedAt = new Date().toISOString();
     try {
+      if (this.definition.domain === "pravogolosa.net") {
+        const refs = await this.discoverPravogolosa(PRAVOGOLOSA_HEALTH_CANARY, context);
+        if (refs.length !== 0) {
+          return {
+            ok: false,
+            checkedAt,
+            message: "pravogolosa.net health canary unexpectedly returned review cards"
+          };
+        }
+        return {
+          ok: true,
+          checkedAt,
+          message: "pravogolosa.net search returned an explicit no-results proof"
+        };
+      }
       const { html, status } = await this.request(this.definition.origin, context);
       if (status < 200 || status >= 300) return { ok: false, checkedAt, message: `HTTP ${status}` };
       if (isBlockPage(html)) return { ok: false, checkedAt, message: "Защитная страница вместо площадки" };

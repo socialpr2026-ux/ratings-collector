@@ -248,6 +248,36 @@ describe("first-party review-site adapters", () => {
     await expect(individual.discover("Анвифен", context)).rejects.toMatchObject({ code: "parser_changed" });
   });
 
+  it("checks the Pravogolosa search contract instead of blocking on an unrelated origin canary", async () => {
+    const requested: URL[] = [];
+    const adapter = adapterFor("pravogolosa.net", (async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      requested.push(url);
+      if (url.pathname === "/") return new Response("origin blocked", { status: 403 });
+      return new Response(
+        `<h3>По вашему запросу &laquo;ratingscollector-healthcheck-7f4c2a&raquo; всего найдено отзывов: 0</h3>`
+      );
+    }) as typeof fetch);
+
+    await expect(adapter.healthCheck(context)).resolves.toMatchObject({
+      ok: true,
+      message: "pravogolosa.net search returned an explicit no-results proof"
+    });
+    expect(requested).toHaveLength(1);
+    expect(requested[0].pathname).toBe("/otzyvcategory");
+    expect(requested[0].searchParams.get("page")).toBe("search");
+  });
+
+  it("keeps an unproven Pravogolosa search canary fail-closed", async () => {
+    const adapter = adapterFor("pravogolosa.net", (async () =>
+      new Response("temporary protection page", { status: 403 })) as typeof fetch);
+
+    const health = await adapter.healthCheck(context);
+
+    expect(health.ok).toBe(false);
+    expect(health.message).toContain("HTTP 403");
+  });
+
   it("publishes a confirmed zero-review product with an empty rating", async () => {
     const fetchMock = (async (input: RequestInfo | URL) => {
       const url = urlOf(input);
