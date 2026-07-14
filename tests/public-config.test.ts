@@ -82,6 +82,38 @@ describe("static iRecommend gateway", () => {
     expect(proof).toContain("3.7");
   });
 
+  it("recovers a source-bound Otsillokoktsinum search and product from the inert new view", async () => {
+    const product = "https://irecommend.ru/content/protivoprostudnyi-gomeopaticheskii-preparat-laboratoriya-buaron-otsillokoktsinum";
+    const search = "https://irecommend.ru/srch?query=%D0%9E%D1%86%D0%B8%D0%BB%D0%BB%D0%BE%D0%BA%D0%BE%D0%BA%D1%86%D0%B8%D0%BD%D1%83%D0%BC";
+    const blockedReader = `Title: Irecommend\n\nURL Source: ${search}\n\nMarkdown Content:\nCAPTCHA`;
+    const searchProof = (source: string) => `Title: Оциллококцинум | отзывы\n\nURL Source: ${source}\n\nMarkdown Content:\n` +
+      `[Гомеопатия Лаборатория БУАРОН Оциллококцинум](${product}) [Читать все отзывы 258](${product})\n` +
+      `Среднее: 3.7(258 голосов)\n[258 отзывов](${product})\n` +
+      `![Фото](https://cdn-irec.r-99.com/sites/default/files/product-images/2473/item.jpg)`;
+    const productProof = (source: string) => `Title: Гомеопатия Лаборатория БУАРОН Оциллококцинум | отзывы\n\nURL Source: ${source}\n\nMarkdown Content:\n` +
+      `## Гомеопатия Лаборатория БУАРОН Оциллококцинум — отзывы\n` +
+      `[Среднее: Среднее: 3.7(258 голосов)](${product})`;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(input.toString());
+      if (url.hostname === "irecommend.ru") return new Response(captcha, { status: 521, headers: { "content-type": "text/html" } });
+      const source = new URL(url.pathname.slice(1) + url.search);
+      if (source.searchParams.get("new") !== "1") return new Response(blockedReader, { headers: { "content-type": "text/plain" } });
+      return new Response(source.pathname === "/srch" ? searchProof(source.toString()) : productProof(source.toString()), {
+        headers: { "content-type": "text/plain; charset=utf-8" }
+      });
+    }));
+
+    const searchResponse = await callGateway(search);
+    expect(searchResponse.status).toBe(200);
+    expect(searchResponse.headers.get("x-ratings-source")).toBe("irecommend-reader-refreshed");
+    expect(await searchResponse.text()).toContain('data-nid="2473"');
+
+    const productResponse = await callGateway(product);
+    expect(productResponse.status).toBe(200);
+    expect(productResponse.headers.get("x-ratings-source")).toBe("irecommend-reader-refreshed");
+    expect(await productResponse.text()).toContain("258 голосов");
+  });
+
   it("rejects reader search metrics when the written counters disagree", async () => {
     const product = "https://irecommend.ru/content/protivoprostudnyi-gomeopaticheskii-preparat-laboratoriya-buaron-otsillokoktsinum";
     const search = "https://irecommend.ru/srch?query=Оциллококцинум";

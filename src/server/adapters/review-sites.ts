@@ -521,7 +521,11 @@ export class ReviewSiteAdapter implements SiteAdapter {
         };
       }
       if (this.definition.domain === "irecommend.ru") {
-        const refs = await this.discoverIrecommend("Кагоцел", context);
+        // The canary must exercise the same reachable search that this run is
+        // about. A stale cached response for an unrelated hard-coded brand
+        // must not block an otherwise provable requested product.
+        const canaryBrand = context.brands?.find((brand) => brand.trim()) ?? "Кагоцел";
+        const refs = await this.discoverIrecommend(canaryBrand, context);
         const proved = refs.find((ref) => {
           const reviews = ref.metadata.reviewCount;
           const rating = ref.metadata.rating;

@@ -822,13 +822,22 @@ function validIrecommendProof(html: string, requested: URL, target: IrecommendTa
   }
 }
 
-function compactIrecommendReaderSearch(markdown: string, requested: URL, brand: string): string | undefined {
+function exactIrecommendReaderSource(markdown: string, expected: URL): boolean {
   const sourceValue = markdown.match(/^URL Source:\s*(https:\/\/[^\s]+)\s*$/mi)?.[1];
   try {
-    if (!sourceValue || exactUrlSignature(new URL(sourceValue)) !== exactUrlSignature(requested)) return undefined;
+    return Boolean(sourceValue) && exactUrlSignature(new URL(sourceValue!)) === exactUrlSignature(expected);
   } catch {
-    return undefined;
+    return false;
   }
+}
+
+function compactIrecommendReaderSearch(
+  markdown: string,
+  requested: URL,
+  brand: string,
+  readerSource: URL = requested
+): string | undefined {
+  if (!exactIrecommendReaderSource(markdown, readerSource)) return undefined;
 
   const cards = new Map<string, { id: string; title: string; url: string; reviews: number; rating: number }>();
   const cardPattern = /\[([^\]\n]+)\]\((https:\/\/irecommend\.ru\/content\/[a-z0-9][a-z0-9-]*)\)\s+\[Читать\s+все\s+отзывы\s+([\d\s\u00a0]+)\]\((https:\/\/irecommend\.ru\/content\/[a-z0-9][a-z0-9-]*)\)/giu;
@@ -1168,14 +1177,14 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       }
     } catch { /* fall back to the bounded cached reader */ }
 
+    const readerHeaders = { accept: "text/plain; charset=utf-8", "x-return-format": "html", dnt: "1" };
     const reader = await safeFetch(readerProxyUrl(target).toString(), {
       method: "GET",
       redirect: "follow",
-      headers: { accept: "text/plain; charset=utf-8", "x-return-format": "html", dnt: "1" }
+      headers: readerHeaders
     });
     const readerBody = await readTextBounded(reader, 12_000_000, 60_000);
-    if (!reader.ok) return new Response(readerBody, { status: reader.status, headers: { "content-type": "text/plain; charset=utf-8" } });
-    if (irecommendTarget.kind === "search") {
+    if (reader.ok && irecommendTarget.kind === "search") {
       const compact = compactIrecommendReaderSearch(readerBody, target, irecommendTarget.brand!);
       if (compact && validIrecommendProof(compact, target, irecommendTarget)) {
         return new Response(compact, {
@@ -1188,16 +1197,48 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         });
       }
     }
-    const html = /^\s*(?:<!doctype\s+html|<html\b)/i.test(readerBody)
+    const html = reader.ok && /^\s*(?:<!doctype\s+html|<html\b)/i.test(readerBody)
       ? readerBody
-      : readerMarkdownToHtml(readerBody, target.toString());
-    if (!validIrecommendProof(html, target, irecommendTarget)) {
-      return json({ error: "iRecommend response did not prove the requested product or search result" }, 502);
+      : reader.ok ? readerMarkdownToHtml(readerBody, target.toString()) : "";
+    if (html && validIrecommendProof(html, target, irecommendTarget)) {
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-ratings-source": "reader-fallback" }
+      });
     }
-    return new Response(html, {
-      status: 200,
-      headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-ratings-source": "reader-fallback" }
+
+    // Jina occasionally holds a CAPTCHA shell under the canonical cache key
+    // while the same first-party page is available under iRecommend's inert
+    // `new=1` view. Derive that key internally (never from user input), bind
+    // URL Source exactly, and still emit proof for the canonical requested URL.
+    const refreshedTarget = new URL(target.toString());
+    refreshedTarget.searchParams.set("new", "1");
+    const refreshed = await safeFetch(readerProxyUrl(refreshedTarget).toString(), {
+      method: "GET", redirect: "follow", headers: readerHeaders
     });
+    const refreshedBody = await readTextBounded(refreshed, 12_000_000, 60_000);
+    if (refreshed.ok && exactIrecommendReaderSource(refreshedBody, refreshedTarget)) {
+      if (irecommendTarget.kind === "search") {
+        const compact = compactIrecommendReaderSearch(
+          refreshedBody, target, irecommendTarget.brand!, refreshedTarget
+        );
+        if (compact && validIrecommendProof(compact, target, irecommendTarget)) {
+          return new Response(compact, { status: 200, headers: {
+            "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
+            "x-ratings-source": "irecommend-reader-refreshed"
+          } });
+        }
+      } else {
+        const refreshedHtml = readerMarkdownToHtml(refreshedBody, target.toString());
+        if (validIrecommendProof(refreshedHtml, target, irecommendTarget)) {
+          return new Response(refreshedHtml, { status: 200, headers: {
+            "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
+            "x-ratings-source": "irecommend-reader-refreshed"
+          } });
+        }
+      }
+    }
+    return json({ error: "iRecommend response did not prove the requested product or search result" }, 502);
   }
   if (host === "otzovik.com" && /^\/reviews\/[a-z0-9_]+\/?$/i.test(target.pathname)) {
     if (target.search || target.hash || target.hostname !== "otzovik.com") {
