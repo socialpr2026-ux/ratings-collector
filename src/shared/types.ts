@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { OzonCompanionSessionState } from "./companion.js";
 
 export const MAX_RUN_PARTITIONS = 600;
 
@@ -220,4 +221,6 @@ export type RunState = {
   payloadHash?: string;
   qa?: { ok: boolean; blockers: string[]; warnings: string[] };
   publication?: PublicationRecord;
+  /** One-time browser-companion sessions. Existing stored runs omit this field. */
+  companionSessions?: { ozon?: OzonCompanionSessionState };
 };

@@ -1,4 +1,4 @@
-import type { Observation } from "../shared/types.js";
+import type { Observation, RunState } from "../shared/types.js";
 import { isKnownReviewAggregateDomain } from "../shared/review-aggregates.js";
 
 export type SetupReadiness = {
@@ -193,6 +193,19 @@ export function finalProductLabel(identityLabel: string, sourceTitle: string) {
 
 export function canRetryFailedPartitions(status: "queued" | "running" | "review" | "publishing" | "published" | "failed", failedPartitionCount: number) {
   return failedPartitionCount > 0 && (status === "review" || status === "failed");
+}
+
+/** Local Chrome is a reserve route, never a first choice or a parser workaround. */
+export function ozonCompanionEligibleBrands(
+  run: Pick<RunState, "status" | "request" | "partitions">
+): string[] {
+  if (!["review", "failed"].includes(run.status) || !run.request.domains.includes("ozon.ru")) return [];
+  return run.request.brands.filter((brand) => run.partitions.some((partition) =>
+    partition.domain === "ozon.ru" &&
+    partition.brand === brand &&
+    !["complete", "no_results"].includes(partition.status) &&
+    /^(?:blocked|quota_exceeded)\s*:/i.test(partition.message?.trim() ?? "")
+  ));
 }
 
 export function reviewIntroText(reviewCount: number, failedPartitionCount: number) {

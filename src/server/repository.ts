@@ -33,6 +33,9 @@ export interface Repository {
   savePublication(key: string, publication: PublicationRecord): Promise<void>;
   reserveUsage(key: string, amount: number, limit: number): Promise<number>;
   releaseUsage(key: string, amount: number): Promise<number>;
+  /** Optional cross-instance lock used by short atomic workflows. */
+  acquireLease?(scope: string, leaseMs: number): Promise<{ token: string; keys: string[] }>;
+  releaseLease?(lease: { token: string; keys: string[] }): Promise<void>;
 }
 
 const emptyDatabase = (): Database => ({

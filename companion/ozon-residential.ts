@@ -28,8 +28,8 @@ type BrowserFetchResult = {
 
 export type CompanionOzonResult = Pick<
   Observation,
-  "listingId" | "brand" | "canonicalUrl" | "product" | "reviews" | "rating" | "status" | "capturedAt"
->;
+  "listingId" | "brand" | "canonicalUrl" | "product" | "reviews" | "rating" | "capturedAt"
+> & { status: "ok" | "no_reviews" | "needs_review" };
 
 export type ResidentialOzonCollectorOptions = {
   profileDirectory?: string;
@@ -187,6 +187,9 @@ export class ResidentialOzonCollector {
       const refs = await adapter.discover(brand, context);
       for (const ref of refs) {
         const observation = await adapter.collect(ref, context);
+        if (!["ok", "no_reviews", "needs_review"].includes(observation.status)) {
+          throw new Error(`Ozon local collector returned unsupported status ${observation.status}`);
+        }
         results.push({
           listingId: observation.listingId,
           brand: observation.brand,
@@ -194,7 +197,7 @@ export class ResidentialOzonCollector {
           product: observation.product,
           reviews: observation.reviews,
           rating: observation.rating,
-          status: observation.status,
+          status: observation.status as CompanionOzonResult["status"],
           capturedAt: observation.capturedAt
         });
       }

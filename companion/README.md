@@ -26,6 +26,6 @@ Chrome запускается как обычное пользовательск
 
 - Проверка доступности: `GET http://127.0.0.1:8765/health`.
 - Сбор: `POST http://127.0.0.1:8765/v1/ozon/discover` с JSON `{ "brands": ["Кагоцел"], "region": "Москва" }`.
-- Ответ: `{ "observations": [{ "listingId", "brand", "canonicalUrl", "product", "reviews", "rating", "status", "capturedAt" }] }`.
+- Ответ: `{ "version": 1, "observations": [{ "listingId", "brand", "canonicalUrl", "product", "reviews", "rating", "status", "capturedAt" }], "partitions": [{ "brand", "status", "discovered", "collected" }] }`.
 
-До включения в production нужно добавить в текущий UI явный шаг «Подключить сборщик на этом компьютере» и серверный одноразовый import результата в существующий run. Companion сам не получает Google-доступ и не публикует таблицу.
+Основной UI проверяет companion только после честной блокировки облачного Ozon, получает короткую одноразовую сессию и импортирует результат в существующий запуск. Companion сам не получает Google-доступ и не публикует таблицу.

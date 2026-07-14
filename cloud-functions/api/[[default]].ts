@@ -9,6 +9,7 @@ import { prepareBrowserPublication, reconcileBrowserPublication } from "../../sr
 import { safeErrorMessage } from "../../src/server/utils/error-message.js";
 import { readTextBounded, safeFetch } from "../../src/server/utils/safe-fetch.js";
 import { readerMarkdownToHtml, readerProxyUrl } from "../../src/server/utils/reader-proxy.js";
+import { importOzonCompanionResult, issueOzonCompanionSession } from "../../src/server/companion-import.js";
 
 type Context = { request: Request; env: Record<string, string | undefined> };
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), {
@@ -186,6 +187,8 @@ export default async function onRequest(context: Context): Promise<Response> {
     const runMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
     const publishMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/publish$/);
     const reviewMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/review$/);
+    const companionSessionMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/companion\/ozon\/session$/);
+    const companionImportMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/companion\/ozon$/);
     const profileGetMatch = url.pathname.match(/^\/api\/site-profiles\/([^/]+)$/);
     const profileMatch = url.pathname.match(/^\/api\/site-profiles\/([^/]+)\/approve$/);
     if (context.request.method === "GET" && runMatch) {
@@ -208,6 +211,21 @@ export default async function onRequest(context: Context): Promise<Response> {
       assertOwner(run, user);
       const body = await context.request.json() as { acceptedKeys?: string[] };
       return json(pagedRun(await service.approveObservations(run.id, body.acceptedKeys ?? []), url));
+    }
+    if (context.request.method === "POST" && companionSessionMatch) {
+      const runId = decodeURIComponent(companionSessionMatch[1]);
+      const run = await service.getRun(runId);
+      if (!run) return json({ error: "Запуск не найден" }, 404);
+      assertOwner(run, user);
+      return json(await issueOzonCompanionSession(repository, runId, user.email));
+    }
+    if (context.request.method === "POST" && companionImportMatch) {
+      const runId = decodeURIComponent(companionImportMatch[1]);
+      const run = await service.getRun(runId);
+      if (!run) return json({ error: "Запуск не найден" }, 404);
+      assertOwner(run, user);
+      const body = await context.request.json();
+      return json(pagedRun(await importOzonCompanionResult(repository, runId, user.email, body), url));
     }
     if (context.request.method === "GET" && profileGetMatch) {
       const profile = await repository.getProfile(decodeURIComponent(profileGetMatch[1]));

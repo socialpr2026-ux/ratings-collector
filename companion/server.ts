@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { z } from "zod";
 import { ResidentialOzonCollector, type CompanionOzonResult } from "./ozon-residential.js";
 import { AdapterBlockedError } from "../src/server/adapters/errors.js";
+import type { OzonCompanionResult } from "../src/shared/companion.js";
 
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://ratings-collector.edgeone.cool",
@@ -63,7 +64,16 @@ export function createCompanionServer(options: CompanionServerOptions = {}): Fas
       return reply.code(400).send({ error: "Проверьте список брендов и регион" });
     }
     const observations = await collector.collect(parsed.data.brands, parsed.data.region);
-    return { observations };
+    const partitions: OzonCompanionResult["partitions"] = parsed.data.brands.map((brand) => {
+      const count = observations.filter((item) => item.brand === brand).length;
+      return {
+        brand,
+        status: count > 0 ? "complete" : "no_results",
+        discovered: count,
+        collected: count
+      };
+    });
+    return { version: 1 as const, observations, partitions };
   });
 
   server.setErrorHandler((error, _request, reply) => {

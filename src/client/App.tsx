@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MAX_RUN_PARTITIONS, type Observation, type RunState, type SiteProfile } from "../shared/types.js";
+import type { OzonCompanionResult, OzonCompanionSession } from "../shared/companion.js";
 import { analyzeProductIdentity } from "../server/utils/product-name.js";
 import {
   canConfirmObservation,
@@ -8,6 +9,7 @@ import {
   friendlyErrorMessage,
   observationIssueText,
   observationMatchesQuery,
+  ozonCompanionEligibleBrands,
   reviewIntroText,
   setupReadinessText,
   summarizeIssues
@@ -37,7 +39,39 @@ const FORM_STORAGE_KEY = "ratings-last-configuration";
 const CONVERSATION_STORAGE_KEY = "ratings-conversation-id";
 const LAST_RUN_STORAGE_KEY = "ratings-last-run-id";
 const pendingStatuses = new Set<RunState["status"]>(["queued", "running", "publishing"]);
-type BusyAction = "resume" | "start" | "retry" | "review" | "profile" | "publish";
+type BusyAction = "resume" | "start" | "retry" | "review" | "profile" | "publish" | "companion";
+
+type CompanionState = {
+  status: "idle" | "checking" | "collecting" | "importing" | "unavailable" | "captcha" | "error";
+  message?: string;
+};
+
+class LocalCompanionError extends Error {
+  constructor(readonly code: string, message: string) { super(message); }
+}
+
+const LOCAL_COMPANION_ORIGIN = "http://127.0.0.1:8765";
+
+async function localCompanion<T>(path: string, options: RequestInit = {}, timeoutMs = 4_000): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${LOCAL_COMPANION_ORIGIN}${path}`, {
+      ...options,
+      cache: "no-store",
+      signal: controller.signal,
+      headers: options.body ? { "content-type": "application/json", ...(options.headers ?? {}) } : options.headers
+    });
+    const payload = await response.json().catch(() => ({})) as { code?: string; error?: string };
+    if (!response.ok) throw new LocalCompanionError(payload.code ?? "local_error", payload.error ?? "Локальный сборщик не завершил запрос");
+    return payload as T;
+  } catch (error) {
+    if (error instanceof LocalCompanionError) throw error;
+    throw new LocalCompanionError("unavailable", "Локальный сборщик не запущен на этом компьютере");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 const runStatusLabels: Record<RunState["status"], string> = {
   queued: "Готовим запуск",
@@ -179,6 +213,7 @@ export function App() {
   const [listQuery, setListQuery] = useState("");
   const [busyAction, setBusyAction] = useState<BusyAction>();
   const [error, setError] = useState("");
+  const [companionState, setCompanionState] = useState<CompanionState>({ status: "idle" });
   const formRef = useRef<HTMLFormElement>(null);
 
   useEffect(() => {
@@ -344,6 +379,7 @@ export function App() {
     setProfileMeanings({});
     setReviewOnly(true);
     setListQuery("");
+    setCompanionState({ status: "idle" });
     saveCurrentConfiguration();
     try {
       const created = await api("/api/runs", {
@@ -427,6 +463,50 @@ export function App() {
     }
   }
 
+  async function collectOzonOnThisComputer() {
+    if (!run) return;
+    setBusyAction("companion");
+    setError("");
+    setCompanionState({ status: "checking" });
+    try {
+      const health = await localCompanion<{ ok?: boolean; capabilities?: string[] }>("/health");
+      if (!health.ok || !health.capabilities?.includes("ozon")) {
+        throw new LocalCompanionError("unavailable", "Запущенный локальный помощник не поддерживает Ozon");
+      }
+      const session = await api(`/api/runs/${encodeURIComponent(run.id)}/companion/ozon/session`, {
+        method: "POST", body: "{}"
+      }) as OzonCompanionSession;
+      setCompanionState({ status: "collecting" });
+      const localResult = await localCompanion<OzonCompanionResult>("/v1/ozon/discover", {
+        method: "POST",
+        body: JSON.stringify({ brands: session.brands, region: run.request.region })
+      }, 30 * 60 * 1000);
+      setCompanionState({ status: "importing" });
+      await api(`/api/runs/${encodeURIComponent(run.id)}/companion/ozon`, {
+        method: "POST",
+        body: JSON.stringify({ ...localResult, nonce: session.nonce })
+      });
+      setRun(await fetchRun(run.id));
+      setCompanionState({ status: "idle" });
+    } catch (caught) {
+      if (caught instanceof LocalCompanionError && caught.code === "ozon_challenge") {
+        setCompanionState({
+          status: "captcha",
+          message: "Chrome открыт. Пройдите проверку Ozon вручную, затем нажмите кнопку повторения."
+        });
+      } else if (caught instanceof LocalCompanionError && caught.code === "unavailable") {
+        setCompanionState({
+          status: "unavailable",
+          message: "Запустите файл «Установить и запустить» на этом компьютере и оставьте окно помощника открытым."
+        });
+      } else {
+        setCompanionState({ status: "error", message: caught instanceof Error ? caught.message : "Локальный сбор Ozon не завершён" });
+      }
+    } finally {
+      setBusyAction(undefined);
+    }
+  }
+
   async function approveSelectedProfiles() {
     if (selectedUnapprovedProfileDomains.length === 0 || !selectedProfilesReady) return;
     setBusyAction("profile");
@@ -490,6 +570,7 @@ export function App() {
     setConfirmedProfileExamples({});
     setProfileMeanings({});
     setListQuery("");
+    setCompanionState({ status: "idle" });
     requestAnimationFrame(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }
 
@@ -506,6 +587,7 @@ export function App() {
     setConfirmedProfileExamples({});
     setProfileMeanings({});
     setListQuery("");
+    setCompanionState({ status: "idle" });
     requestAnimationFrame(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }
 
@@ -564,6 +646,7 @@ export function App() {
     failed: run.partitions.filter((item) => !["complete", "no_results"].includes(item.status)).length
   } : undefined, [run]);
   const canRetry = Boolean(run && canRetryFailedPartitions(run.status, partitionSummary?.failed ?? 0));
+  const companionBrands = useMemo(() => run ? ozonCompanionEligibleBrands(run) : [], [run]);
   const visibleBlockers = summarizeIssues(run?.qa?.blockers ?? []);
   const visibleWarnings = summarizeIssues(run?.qa?.warnings ?? []);
   const progress = run
@@ -745,6 +828,21 @@ export function App() {
             <a className="button button-quiet" href="#publish-status">Посмотреть причины</a>
             {canRetry && <button className="button button-secondary" type="button" onClick={retryFailedPartitions} disabled={busy}>{busyAction === "retry" ? "Повторяем…" : "Повторить неуспешные площадки"}</button>}
           </div>
+        </div>}
+
+        {companionBrands.length > 0 && <div className="companion-card" role="region" aria-label="Резервный сбор Ozon через Chrome">
+          <span className="companion-icon" aria-hidden="true">◉</span>
+          <div className="companion-copy">
+            <strong>Ozon можно собрать через Chrome на этом компьютере</strong>
+            <p>{companionState.message ?? `Облачный сбор не завершился для ${companionBrands.length} ${plural(companionBrands.length, "бренда", "брендов", "брендов")}. Локальный помощник использует обычное подключение этого компьютера и вернёт только карточки, отзывы и рейтинг.`}</p>
+            {companionState.status === "unavailable" && <small>Установка нужна один раз; Google‑ключ и Apify не используются.</small>}
+          </div>
+          <button className="button button-secondary" type="button" onClick={collectOzonOnThisComputer} disabled={busy}>
+            {busyAction === "companion"
+              ? companionState.status === "importing" ? "Добавляем в запуск…" : companionState.status === "collecting" ? "Собираем Ozon…" : "Проверяем помощник…"
+              : companionState.status === "captcha" ? "Я прошёл проверку — повторить"
+                : companionState.status === "unavailable" ? "Проверить снова" : "Собрать через Chrome"}
+          </button>
         </div>}
 
         {run.observations.length > 8 && <div className="list-filter" role="search" aria-label="Фильтр найденных карточек">

@@ -8,9 +8,9 @@ const allowedOrigin = "https://ratings-collector.edgeone.cool";
 function collector(): CompanionCollector {
   return {
     collect: vi.fn(async (brands: readonly string[]) => brands.map((brand: string, index: number) => ({
-      listingId: String(100 + index),
+      listingId: String(100000 + index),
       brand,
-      canonicalUrl: `https://www.ozon.ru/product/${100 + index}/`,
+      canonicalUrl: `https://www.ozon.ru/product/${100000 + index}/`,
       product: `${brand} таблетки №20`,
       reviews: 5,
       rating: 4.9,
@@ -71,16 +71,20 @@ describe("local Ozon companion", () => {
       payload: { brands: ["Кагоцел", "Кагоцел"], region: "Москва" }
     });
     expect(good.statusCode).toBe(200);
-    expect(good.json()).toEqual({ observations: [{
-      listingId: "100",
-      brand: "Кагоцел",
-      canonicalUrl: "https://www.ozon.ru/product/100/",
-      product: "Кагоцел таблетки №20",
-      reviews: 5,
-      rating: 4.9,
-      status: "ok",
-      capturedAt: "2026-07-14T12:00:00.000Z"
-    }] });
+    expect(good.json()).toEqual({
+      version: 1,
+      observations: [{
+        listingId: "100000",
+        brand: "Кагоцел",
+        canonicalUrl: "https://www.ozon.ru/product/100000/",
+        product: "Кагоцел таблетки №20",
+        reviews: 5,
+        rating: 4.9,
+        status: "ok",
+        capturedAt: "2026-07-14T12:00:00.000Z"
+      }],
+      partitions: [{ brand: "Кагоцел", status: "complete", discovered: 1, collected: 1 }]
+    });
     expect(fake.collect).toHaveBeenCalledWith(["Кагоцел"], "Москва");
 
     const unsafe = await server.inject({
