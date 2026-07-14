@@ -21,6 +21,7 @@ import { normalizeText } from "./utils/normalize.js";
 import { assertSafePublicUrl, extractSpreadsheetId } from "./utils/urls.js";
 import { analyzeProductIdentity } from "./utils/product-name.js";
 import { titleProductEvidence } from "./utils/product-evidence.js";
+import { normalizeObservationFeedback } from "./feedback-count.js";
 
 const RUN_SOFT_DEADLINE_MS = 26 * 60 * 1000;
 
@@ -145,19 +146,6 @@ function brandConcurrency(domain: string): number {
   // browser-backed cache. A generated SiteProfile carries one domain-wide rate
   // limit, so unknown domains must not run several brand partitions at once.
   return domain === "wildberries.ru" || domain === "market.yandex.ru" ? 4 : 1;
-}
-
-/**
- * Keep the sheet-facing metric contract independent from marketplace quirks.
- * Some product pages expose a default AggregateRating even when there are no
- * written reviews. The raw value remains available for technical evidence,
- * but a zero-review card must publish an empty rating.
- */
-function normalizeCollectedObservation(observation: Observation): void {
-  if (observation.reviews !== 0) return;
-  observation.rating = null;
-  delete observation.ratingUnavailable;
-  if (observation.status === "ok") observation.status = "no_reviews";
 }
 
 const SUCCESSFUL_PARTITION_STATUSES = new Set(["complete", "no_results"]);
@@ -377,7 +365,7 @@ export class RatingsService {
                 previousRefs,
                 signal: deadline.signal
               }), ref, domain, brand);
-              normalizeCollectedObservation(observation);
+              normalizeObservationFeedback(observation);
               if (observation.status === "not_found") {
                 const historical = previousById.get(observation.listingId);
                 if (historical && observation.reviews === null && observation.rating === null) {

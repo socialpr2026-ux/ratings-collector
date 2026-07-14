@@ -125,10 +125,10 @@ export class GenericSiteAdapter implements SiteAdapter {
         const html = await readTextBounded(response, 10_000_000);
         const jsonLd = extractJsonLdProducts(html, target);
         const visible = visibleMetrics(html, this.profile);
-        const hasReviews = jsonLd.some((item) => item.reviewCount !== undefined) || visible.reviewCount !== undefined;
+        const hasFeedback = jsonLd.some((item) => item.reviewCount !== undefined || item.ratingCount !== undefined) || visible.reviewCount !== undefined;
         const hasRating = jsonLd.some((item) => item.rating !== undefined) || visible.rating !== undefined;
-        const confirmedNoReviews = jsonLd.some((item) => item.reviewCount === 0) || visible.reviewCount === 0;
-        if (!hasReviews || !hasRating && !confirmedNoReviews) {
+        const confirmedNoFeedback = jsonLd.some((item) => item.reviewCount === 0 || item.ratingCount === 0) || visible.reviewCount === 0;
+        if (!hasFeedback || !hasRating && !confirmedNoFeedback) {
           return { ok: false, checkedAt: new Date().toISOString(), message: "Canary больше не содержит ожидаемые отзыв/рейтинг" };
         }
       }
@@ -270,8 +270,11 @@ export class GenericSiteAdapter implements SiteAdapter {
     const rawReviewCount = product?.reviewCount ?? visible.reviewCount;
     const rating = product?.rating ?? visible.rating;
     const reviews = rawReviewCount === undefined ? null : Math.max(0, Math.trunc(rawReviewCount));
+    const ratingCount = product?.ratingCount === undefined ? null : Math.max(0, Math.trunc(product.ratingCount));
+    const feedbackCount = Math.max(...[reviews, ratingCount].filter((value): value is number => value !== null));
     const resolvedName = product?.name ?? visible.name ?? ref.title ?? ref.brand;
-    const metricsComplete = matchesBrand(resolvedName, ref.brand) && reviews !== null && (reviews === 0 || rating !== undefined) && this.profile.reviewCountMeaning !== "unknown";
+    const metricsComplete = matchesBrand(resolvedName, ref.brand) && Number.isFinite(feedbackCount) &&
+      (feedbackCount === 0 || rating !== undefined) && this.profile.reviewCountMeaning !== "unknown";
     return {
       domain: ref.domain,
       platform: ref.platform,
@@ -280,11 +283,11 @@ export class GenericSiteAdapter implements SiteAdapter {
       canonicalUrl: canonicalizeUrl(product?.url ?? ref.url),
       product: resolvedName,
       reviews,
-      rating: reviews === 0 ? null : rating ?? null,
+      rating: feedbackCount === 0 ? null : rating ?? null,
       rawRating: product?.rating ?? visible.rawRating,
       rawRatingScale: product?.ratingScale ?? this.profile.ratingScale,
-      ratingCount: product?.ratingCount === undefined ? null : Math.trunc(product.ratingCount),
-      status: this.profile.status === "approved" && metricsComplete ? (reviews === 0 ? "no_reviews" : "ok") : "needs_review",
+      ratingCount,
+      status: this.profile.status === "approved" && metricsComplete ? (feedbackCount === 0 ? "no_reviews" : "ok") : "needs_review",
       capturedAt: new Date().toISOString(),
       evidenceRef,
       productEvidence,

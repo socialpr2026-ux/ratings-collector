@@ -47,6 +47,12 @@ const fixtures = {
     "@type": ["Product", "Drug"],
     name: "Кагоцел таблетки 12мг 20шт",
     aggregateRating: { "@type": "AggregateRating", ratingValue: 5, reviewCount: 21 }
+  })}</script><script type="application/ld+json">${JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: "Другой препарат 30 шт",
+    sku: "other-sku",
+    aggregateRating: { "@type": "AggregateRating", ratingValue: 5, reviewCount: 999 }
   })}</script></head><body><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
     props: { pageProps: { productV2: {
       id: "6CE96B93-3DAD-39C8-EE05-3E30A030A486",

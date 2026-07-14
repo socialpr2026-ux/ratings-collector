@@ -554,7 +554,7 @@ describe("YandexAdapter collection", () => {
     });
   });
 
-  it("never substitutes ratingCount when reviewCount disappears", async () => {
+  it("accepts a confirmed ratingCount when reviewCount is absent", async () => {
     const adapter = new YandexAdapter({
       fetch: productFetch({
         "@type": "Product",
@@ -563,8 +563,12 @@ describe("YandexAdapter collection", () => {
       })
     });
 
-    await expect(adapter.collect(ref(), context())).rejects.toThrow(/ratingCount is not a substitute/);
-    await expect(adapter.collect(ref(), context())).rejects.toBeInstanceOf(ParserChangedError);
+    await expect(adapter.collect(ref(), context())).resolves.toMatchObject({
+      reviews: null,
+      ratingCount: 1827,
+      rating: 4.7,
+      status: "ok"
+    });
   });
 
   it("detects missing JSON-LD and invalid rating shapes as parser drift", async () => {

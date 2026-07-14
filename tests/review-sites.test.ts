@@ -356,7 +356,7 @@ describe("first-party review-site adapters", () => {
     expect(requested[0].searchParams.get("query")).toBe("Кагоцел");
   });
 
-  it("never substitutes iRecommend votes for an unproved review count", async () => {
+  it("accepts a confirmed iRecommend vote count as feedback", async () => {
     const adapter = adapterFor("irecommend.ru", (async () => new Response(
       `<h1>Противовирусные средства Кагоцел — отзывы</h1>` +
       `<div class="fivestar-summary"><span class="average-rating"><span>3.9</span></span> (430 голосов)</div>`
@@ -365,7 +365,7 @@ describe("first-party review-site adapters", () => {
     await expect(adapter.collect({
       domain: "irecommend.ru", platform: "irecommend.ru", listingId: "135637", brand: "Кагоцел",
       url: "https://irecommend.ru/content/protivovirusnye-sredstva-kagotsel", metadata: {}
-    }, context)).rejects.toMatchObject({ code: "parser_changed" });
+    }, context)).resolves.toMatchObject({ reviews: null, ratingCount: 430, rating: 3.9, status: "ok" });
   });
 
   it("does not let discovery metrics rescue an iRecommend CAPTCHA product page", async () => {

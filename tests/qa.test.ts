@@ -99,11 +99,11 @@ describe("partition completeness QA", () => {
     expect(validateRun(run)).toMatchObject({ ok: true, warnings: [] });
   });
 
-  it("warns when a reported rating count is lower than the written-review count", () => {
+  it("does not warn when confirmed feedback counters differ", () => {
     const run = runWithCounts(1, 1);
     run.observations[0].ratingCount = 1;
 
-    expect(validateRun(run).warnings.join(" ")).toContain("оценок 1, текстовых отзывов 2");
+    expect(validateRun(run).warnings).toEqual([]);
   });
 
   it("shows one concise blocker for a failed partition instead of repeating its technical error", () => {

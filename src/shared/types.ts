@@ -75,6 +75,8 @@ export const observationSchema = z.object({
   canonicalUrl: httpsUrlSchema,
   product: z.string().trim().min(1).max(2000),
   reviews: z.number().int().nonnegative().nullable(),
+  /** Raw written-review counter when `reviews` is promoted to unified feedback. */
+  writtenReviewCount: z.number().int().nonnegative().nullable().optional(),
   rating: z.number().min(0).max(5).nullable(),
   rawRating: z.number().nonnegative().nullable().optional(),
   rawRatingScale: z.number().positive().optional(),

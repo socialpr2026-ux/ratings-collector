@@ -28,6 +28,22 @@ describe("generic site onboarding", () => {
     expect(result).toMatchObject({ product: "Анвифен капсулы 250 мг", reviews: 1234, rating: 4.3, status: "ok", source: "visible-dom" });
   });
 
+  it("accepts a confirmed JSON-LD ratingCount-only profile", async () => {
+    const adapter = new GenericSiteAdapter(profile({ reviewCountMeaning: "ratings" }), new MemoryEvidenceStore());
+    const html = `<script type="application/ld+json">${JSON.stringify({
+      "@type": "Product",
+      name: ref.brand,
+      aggregateRating: { "@type": "AggregateRating", ratingValue: 4.8, ratingCount: 55 }
+    })}</script>`;
+
+    const result = await adapter.collect(ref, {
+      region: "Москва",
+      fetch: (async () => new Response(html)) as typeof fetch
+    });
+
+    expect(result).toMatchObject({ reviews: null, ratingCount: 55, rating: 4.8, status: "ok" });
+  });
+
   it("keeps an unapproved generated profile in needs_review", async () => {
     const adapter = new GenericSiteAdapter(profile({ status: "draft", reviewCountMeaning: "unknown" }), new MemoryEvidenceStore());
     const result = await adapter.collect(ref, { region: "Москва", fetch: (async () => new Response(`<h1>Анвифен</h1><span class="reviews">5</span><span class="score">9</span>`)) as typeof fetch });

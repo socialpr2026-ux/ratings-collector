@@ -351,17 +351,18 @@ export class YandexAdapter implements SiteAdapter {
     }
 
     const reviews = parseNonNegativeInteger(aggregate.reviewCount);
-    if (reviews === undefined) {
+    const ratingCount = optionalNonNegativeInteger(aggregate.ratingCount, listingId, "ratingCount");
+    const feedbackCount = Math.max(...[reviews, ratingCount].filter((value): value is number => value !== undefined));
+    if (!Number.isFinite(feedbackCount)) {
       throw new ParserChangedError(
-        `Yandex model ${listingId} AggregateRating has no valid reviewCount; ratingCount is not a substitute`
+        `Yandex model ${listingId} AggregateRating has no valid reviewCount or ratingCount`
       );
     }
-    const ratingCount = optionalNonNegativeInteger(aggregate.ratingCount, listingId, "ratingCount");
     const rawRating = optionalFiniteNumber(aggregate.ratingValue, listingId, "ratingValue");
     const rawScale = optionalFiniteNumber(aggregate.bestRating, listingId, "bestRating") ?? 5;
     if (rawScale <= 0) throw new ParserChangedError(`Yandex model ${listingId} has an invalid bestRating`);
-    if (reviews > 0 && rawRating === undefined) {
-      throw new ParserChangedError(`Yandex model ${listingId} has reviews but no valid ratingValue`);
+    if (feedbackCount > 0 && rawRating === undefined) {
+      throw new ParserChangedError(`Yandex model ${listingId} has feedback but no valid ratingValue`);
     }
     if (rawRating !== undefined && (rawRating < 0 || rawRating > rawScale)) {
       throw new ParserChangedError(`Yandex model ${listingId} ratingValue is outside its declared scale`);
@@ -374,15 +375,12 @@ export class YandexAdapter implements SiteAdapter {
       brand: ref.brand,
       canonicalUrl,
       product: title,
-      reviews,
-      // Yandex may expose a default ratingValue on a card with no written
-      // reviews. It is useful as raw evidence, but is not a product rating and
-      // must remain empty in the sheet-facing metric contract.
-      rating: reviews === 0 || rawRating === undefined ? null : normalizeRating(rawRating, rawScale),
+      reviews: reviews ?? null,
+      rating: feedbackCount === 0 || rawRating === undefined ? null : normalizeRating(rawRating, rawScale),
       rawRating: rawRating ?? null,
       rawRatingScale: rawScale,
       ratingCount,
-      status: brandMatches ? (reviews === 0 ? "no_reviews" : "ok") : "needs_review",
+      status: brandMatches ? (feedbackCount === 0 ? "no_reviews" : "ok") : "needs_review",
       capturedAt: this.now().toISOString(),
       evidenceRef: `${canonicalUrl}#json-ld`,
       productEvidence,

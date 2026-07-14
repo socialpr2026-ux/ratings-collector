@@ -968,8 +968,12 @@ export class ReviewSiteAdapter implements SiteAdapter {
         ? discoveredRating
         : undefined
     );
-    if (reviews === undefined) throw new ParserChangedError(`${this.definition.domain}: не найден подтверждённый счётчик отзывов`);
-    if (reviews > 0 && rating === undefined) throw new ParserChangedError(`${this.definition.domain}: есть отзывы, но не найден рейтинг`);
+    const ratingCount = parsed.ratingCount;
+    const feedbackCount = Math.max(...[reviews, ratingCount].filter((value): value is number => value !== undefined));
+    if (!Number.isFinite(feedbackCount)) {
+      throw new ParserChangedError(`${this.definition.domain}: не найден подтверждённый счётчик отзывов, оценок или голосов`);
+    }
+    if (feedbackCount > 0 && rating === undefined) throw new ParserChangedError(`${this.definition.domain}: есть обратная связь, но не найден рейтинг`);
     // Dedicated Megapteka pages are sellable SKUs; the other definitions are
     // aggregate review pages for a product/family.
     const productEvidence = this.definition.domain === "megapteka.ru"
@@ -995,12 +999,12 @@ export class ReviewSiteAdapter implements SiteAdapter {
       brand: ref.brand,
       canonicalUrl,
       product: title,
-      reviews,
-      rating: reviews === 0 ? null : rating ?? null,
+      reviews: reviews ?? null,
+      rating: feedbackCount === 0 ? null : rating ?? null,
       rawRating: parsed.rawRating ?? rating,
       rawRatingScale: parsed.rawRatingScale ?? 5,
-      ratingCount: parsed.ratingCount ?? null,
-      status: !brandMatches ? "needs_review" : reviews === 0 ? "no_reviews" : "ok",
+      ratingCount: ratingCount ?? null,
+      status: !brandMatches ? "needs_review" : feedbackCount === 0 ? "no_reviews" : "ok",
       capturedAt,
       evidenceRef,
       productEvidence,

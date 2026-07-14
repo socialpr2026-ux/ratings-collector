@@ -759,6 +759,40 @@ describe("run orchestration and fail-closed QA", () => {
     expect(run.qa?.ok).toBe(true);
   });
 
+  it("normalizes ratings and reviews into one feedback count before QA", async () => {
+    class SplitFeedbackAdapter extends FakeAdapter {
+      override async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain: ref.domain,
+          platform: ref.platform,
+          listingId: ref.listingId,
+          brand: ref.brand,
+          canonicalUrl: ref.url,
+          product: `${ref.brand} таблетки 100 мг №10`,
+          reviews: 0,
+          ratingCount: 1,
+          rating: 5,
+          status: "no_reviews",
+          capturedAt: new Date().toISOString(),
+          evidenceRef: "blob://split-feedback"
+        };
+      }
+    }
+    const service = new RatingsService(new MemoryRepository(), async () => new SplitFeedbackAdapter());
+
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    expect(run.observations[0]).toMatchObject({
+      reviews: 1,
+      writtenReviewCount: 0,
+      ratingCount: 1,
+      rating: 5,
+      status: "ok",
+      evidenceRef: "blob://split-feedback"
+    });
+    expect(run.qa).toMatchObject({ ok: true, blockers: [] });
+  });
+
   it("serializes brand partitions for a generated generic domain", async () => {
     let active = 0;
     let maximumActive = 0;

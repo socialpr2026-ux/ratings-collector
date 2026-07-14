@@ -326,7 +326,8 @@ describe("collector runtime fallback integration", () => {
     });
     expect(run.observations.find((item) => item.domain === "market.yandex.ru")).toMatchObject({
       listingId: "265149860",
-      reviews: 711,
+      reviews: 1827,
+      writtenReviewCount: 711,
       rating: 4.7,
       status: "ok",
       source: "yandex_reviews_json_ld"
@@ -430,7 +431,8 @@ describe("collector runtime fallback integration", () => {
     expect(retried.observations).toMatchObject([{
       domain: "market.yandex.ru",
       listingId: "265149860",
-      reviews: 711,
+      reviews: 1827,
+      writtenReviewCount: 711,
       rating: 4.7,
       status: "ok",
       source: "yandex_reviews_json_ld"

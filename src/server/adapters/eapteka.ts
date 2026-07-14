@@ -116,14 +116,15 @@ function readerMetrics(markdown: string, source: URL): { title: string; reviews:
   const reviews = parseNonNegativeInteger(metric?.[1]);
   const rating = parseRating(metric?.[2]);
   const ratingCount = parseNonNegativeInteger(metric?.[3]);
-  if (reviews === undefined || ratingCount === undefined || reviews !== ratingCount) {
-    throw new ParserChangedError(`${DOMAIN}: reader did not prove equal written-review and rating totals`);
+  if (reviews === undefined || ratingCount === undefined) {
+    throw new ParserChangedError(`${DOMAIN}: reader did not prove a written-review and rating total`);
   }
-  if (reviews > 0 && (rating === undefined || rating <= 0 || rating > 5)) {
-    throw new ParserChangedError(`${DOMAIN}: reader returned reviews without a valid rating`);
+  const feedbackCount = Math.max(reviews, ratingCount);
+  if (feedbackCount > 0 && (rating === undefined || rating <= 0 || rating > 5)) {
+    throw new ParserChangedError(`${DOMAIN}: reader returned feedback without a valid rating`);
   }
   const title = titleLine.replace(/\s+-\s+(?:купить|цена|отзывы).*$/iu, "").trim();
-  return { title, reviews, rating: reviews === 0 ? null : rating!, ratingCount };
+  return { title, reviews, rating: feedbackCount === 0 ? null : rating!, ratingCount };
 }
 
 function hasExactListingCanary(html: string): boolean {

@@ -421,8 +421,22 @@ describe("fixed first-party collection egress", () => {
         attributes: { name: "Kagocel tablets 12 mg No. 10", url: url.pathname, rating: 5, sku: "33978" },
         reviews: [{ ID: "6548", rate: 5 }, { ID: "6549", rate: 0 }]
       };
+      const structuredProducts = [{
+        "@type": "Product",
+        name: "Other product No. 30",
+        sku: "other-sku",
+        url: "/p_other-product-n30-99999.html",
+        aggregateRating: { "@type": "AggregateRating", reviewCount: 999 }
+      }, {
+        "@type": "Product",
+        name: product.attributes.name,
+        sku: product.attributes.sku,
+        url: url.pathname,
+        aggregateRating: { "@type": "AggregateRating", reviewCount: 21 }
+      }];
       return new Response(`<html><head><base href="${source}"></head><body>
         <div>${"x".repeat(500_000)}</div>
+        <script type="application/ld+json">${JSON.stringify(structuredProducts)}</script>
         <script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { productV2: product } } })}</script>
         </body></html>`, { headers: { "content-type": "text/html; charset=utf-8" } });
     });
@@ -436,7 +450,10 @@ describe("fixed first-party collection egress", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("x-ratings-source")).toBe("google-translate-zdravcity-ssr");
     expect(Number(response.headers.get("x-ratings-proof-bytes"))).toBeLessThan(2_000);
-    expect(await response.text()).toContain('"reviews":[{"ID":"6548","rate":5},{"ID":"6549","rate":0}]');
+    const compactProduct = await response.text();
+    expect(compactProduct).toContain('"reviews":[{"ID":"6548","rate":5},{"ID":"6549","rate":0}]');
+    expect(compactProduct).toContain('"reviewCount":21');
+    expect(compactProduct).not.toContain('"reviewCount":999');
     expect((await callGateway("https://zdravcity.ru/g_kagocel/?redirect=https://evil.example")).status).toBe(400);
     expect((await callGateway("https://reviews.yandex.ru/ugcpub/private.xml")).status).toBe(400);
     expect(upstream).toHaveBeenCalledTimes(3);

@@ -236,6 +236,48 @@ function compactZdravcityTranslateHtml(html: string, requested: URL): string | u
     }
     const rating = Number(attributes?.rating);
     if (reviews.length > 0 && (!Number.isFinite(rating) || rating <= 0 || rating > 5)) return undefined;
+    const structuredCounts: number[] = [];
+    const currentSku = typeof attributes?.sku === "string" || typeof attributes?.sku === "number"
+      ? String(attributes.sku).trim()
+      : "";
+    const visitStructuredProduct = (value: unknown): void => {
+      if (Array.isArray(value)) { value.forEach(visitStructuredProduct); return; }
+      if (!value || typeof value !== "object") return;
+      const item = value as {
+        "@type"?: unknown;
+        "@graph"?: unknown;
+        name?: unknown;
+        sku?: unknown;
+        url?: unknown;
+        aggregateRating?: { reviewCount?: unknown; ratingCount?: unknown };
+      };
+      visitStructuredProduct(item["@graph"]);
+      const types = Array.isArray(item["@type"]) ? item["@type"] : [item["@type"]];
+      if (!types.includes("Product")) return;
+      const structuredName = typeof item.name === "string"
+        ? item.name.normalize("NFKC").replace(/\s+/g, " ").trim()
+        : "";
+      const structuredSku = typeof item.sku === "string" || typeof item.sku === "number"
+        ? String(item.sku).trim()
+        : "";
+      let structuredPath = "";
+      try { structuredPath = item.url ? new URL(String(item.url), requested).pathname : ""; }
+      catch { return; }
+      const nameMatches = Boolean(structuredName) && structuredName.toLocaleLowerCase("ru-RU") === name.toLocaleLowerCase("ru-RU");
+      const skuMatches = Boolean(structuredSku && currentSku) && structuredSku === currentSku;
+      const pathMatches = structuredPath === requested.pathname;
+      if (structuredSku && currentSku && !skuMatches || structuredPath && !pathMatches) return;
+      if (!nameMatches && !skuMatches && !pathMatches) return;
+      for (const raw of [item.aggregateRating?.reviewCount, item.aggregateRating?.ratingCount]) {
+        const count = Number(raw);
+        if (Number.isSafeInteger(count) && count >= 0) structuredCounts.push(count);
+      }
+    };
+    for (const script of $("script[type='application/ld+json']").toArray()) {
+      try { visitStructuredProduct(JSON.parse($(script).text())); }
+      catch { /* unrelated or malformed optional JSON-LD */ }
+    }
+    const structuredCount = structuredCounts.length ? Math.max(...structuredCounts) : undefined;
     compactPageProps = {
       productV2: {
         id,
@@ -248,12 +290,24 @@ function compactZdravcityTranslateHtml(html: string, requested: URL): string | u
         reviews
       }
     };
+    if (structuredCount !== undefined) {
+      compactPageProps.structuredProduct = {
+        "@type": "Product",
+        name,
+        ...(currentSku ? { sku: currentSku } : {}),
+        url: requested.pathname,
+        aggregateRating: { "@type": "AggregateRating", reviewCount: structuredCount }
+      };
+    }
   } else {
     return undefined;
   }
 
   const compactNext = JSON.stringify({ props: { pageProps: compactPageProps } }).replace(/</g, "\\u003c");
-  return `<html><head><base href="${escapeHtml(baseValue!)}"></head><body>` +
+  const structuredScript = compactPageProps.structuredProduct
+    ? `<script type="application/ld+json">${JSON.stringify(compactPageProps.structuredProduct).replace(/</g, "\\u003c")}</script>`
+    : "";
+  return `<html><head><base href="${escapeHtml(baseValue!)}">${structuredScript}</head><body>` +
     `<script id="__NEXT_DATA__" type="application/json">${compactNext}</script></body></html>`;
 }
 

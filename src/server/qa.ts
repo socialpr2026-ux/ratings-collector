@@ -77,12 +77,6 @@ export function validateRun(run: RunState): QaResult {
         blockers.push(`${key}: исчезнувшая историческая карточка должна иметь пустые метрики`);
       }
     }
-    // A rating/vote count greater than the written-review count is normal on
-    // marketplaces and review aggregators (notably Megapteka and Yandex).
-    // Warn only for the impossible-looking inverse relationship.
-    if (item.ratingCount != null && item.reviews != null && item.ratingCount < item.reviews) {
-      warnings.push(`${key}: оценок ${item.ratingCount}, текстовых отзывов ${item.reviews}`);
-    }
   }
   for (const partition of run.partitions) {
     const key = `${partition.domain}\u0000${partition.brand}`;

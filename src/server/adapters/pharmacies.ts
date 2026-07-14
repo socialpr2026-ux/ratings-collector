@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { load, type CheerioAPI } from "cheerio";
 import type { AdapterContext, AdapterHealth, Observation, ProductRef, SiteAdapter } from "../../shared/types.js";
 import type { EvidenceStore } from "../evidence.js";
-import { aliasesForBrand, matchesBrand } from "../utils/normalize.js";
+import { aliasesForBrand, matchesBrand, normalizeText } from "../utils/normalize.js";
 import { titleProductEvidence } from "../utils/product-evidence.js";
 import { readTextBounded, safeFetch } from "../utils/safe-fetch.js";
 import { canonicalizeUrl } from "../utils/urls.js";
@@ -480,6 +480,47 @@ function zdravProduct(value: string): { pathId: string; url: string } | undefine
   } catch { return undefined; }
 }
 
+function zdravStructuredFeedback(
+  html: string,
+  binding: { canonicalUrl: string; title: string; sku?: string }
+): number | null {
+  const $ = load(html);
+  const counts = new Set<number>();
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) { value.forEach(visit); return; }
+    if (!value || typeof value !== "object") return;
+    const item = value as {
+      "@type"?: unknown;
+      "@graph"?: unknown;
+      name?: unknown;
+      sku?: unknown;
+      url?: unknown;
+      aggregateRating?: { reviewCount?: unknown; ratingCount?: unknown };
+    };
+    visit(item["@graph"]);
+    const types = Array.isArray(item["@type"]) ? item["@type"] : [item["@type"]];
+    if (!types.includes("Product")) return;
+
+    const candidateName = typeof item.name === "string" ? item.name : "";
+    const candidateSku = typeof item.sku === "string" || typeof item.sku === "number" ? String(item.sku).trim() : "";
+    const candidateUrl = typeof item.url === "string" ? zdravProduct(item.url)?.url : undefined;
+    const nameMatches = Boolean(candidateName) && normalizeText(candidateName) === normalizeText(binding.title);
+    const skuMatches = Boolean(candidateSku && binding.sku) && candidateSku === binding.sku;
+    const urlMatches = candidateUrl === binding.canonicalUrl;
+    if (candidateSku && binding.sku && !skuMatches || candidateUrl && !urlMatches) return;
+    if (!nameMatches && !skuMatches && !urlMatches) return;
+
+    const reviewCount = integer(item.aggregateRating?.reviewCount);
+    const ratingCount = integer(item.aggregateRating?.ratingCount);
+    for (const count of [reviewCount, ratingCount]) if (count !== undefined) counts.add(count);
+  };
+  for (const script of $("script[type='application/ld+json']").toArray()) {
+    try { visit(JSON.parse($(script).text())); }
+    catch { /* optional structured counter */ }
+  }
+  return counts.size ? Math.max(...counts) : null;
+}
+
 function nextData(html: string, domain: string): Record<string, unknown> {
   const source = load(html)("#__NEXT_DATA__").first().text();
   if (!source) throw new ParserChangedError(`${domain}: __NEXT_DATA__ не найден`);
@@ -559,16 +600,13 @@ export class ZdravcityAdapter extends PharmacyAdapter {
     const reviews = reviewItems.length;
     const rawRating = rating(product.attributes?.rating);
     if (reviews > 0 && rawRating === undefined) throw new ParserChangedError(`${ZDRAV_DOMAIN}:${ref.listingId}: отзывы есть, но общий рейтинг отсутствует`);
-    const $ = load(result.html);
-    let structuredCount: number | null = null;
-    for (const script of $("script[type='application/ld+json']").toArray()) {
-      try {
-        const value = JSON.parse($(script).text()) as { "@type"?: unknown; aggregateRating?: { reviewCount?: unknown } };
-        const types = Array.isArray(value["@type"]) ? value["@type"] : [value["@type"]];
-        if (!types.includes("Product")) continue;
-        structuredCount = integer(value.aggregateRating?.reviewCount) ?? null;
-      } catch { /* optional technical counter */ }
-    }
+    const structuredCount = zdravStructuredFeedback(result.html, {
+      canonicalUrl: canonical.url,
+      title,
+      sku: typeof product.attributes?.sku === "string" || typeof product.attributes?.sku === "number"
+        ? String(product.attributes.sku).trim()
+        : undefined
+    });
     return evidenceObservation(this.evidence, {
       domain: ZDRAV_DOMAIN,
       listingId: ref.listingId,
