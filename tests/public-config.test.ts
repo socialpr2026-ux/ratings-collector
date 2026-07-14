@@ -688,6 +688,20 @@ describe("static pharmacy Translate gateway", () => {
     expect(proof).toContain('"attribute_code":"Оценка","value":4');
   });
 
+  it("preserves the exact slugged Bud Zdorov product path from family discovery", async () => {
+    const source = "https://www.budzdorov.ru/forms/ocillokokcinum";
+    const productPath = "/product/otsillokoktsinum-granuly-6doz-2511";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"></head><body>
+      <a href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en" title="Оциллококцинум гранулы 6 доз">Оциллококцинум гранулы 6 доз</a>
+    </body></html>`, { headers: { "content-type": "text/html" } })));
+
+    const response = await callGateway(translated("www-budzdorov-ru.translate.goog", "/forms/ocillokokcinum").toString());
+    const proof = await response.text();
+    expect(response.status).toBe(200);
+    expect(proof).toContain(`href="https://www.budzdorov.ru${productPath}"`);
+    expect(proof).not.toContain('href="https://www.budzdorov.ru/product/2511"');
+  });
+
   it("allows only exact Apteka.ru product paths and compacts their Product aggregate", async () => {
     const source = "https://apteka.ru/product/oczillokokczinum-30-sht-granuly-5e3268eaca7bdc000192d316/";
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"><link rel="canonical" href="${source}">

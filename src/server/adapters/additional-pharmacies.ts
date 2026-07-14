@@ -502,7 +502,7 @@ function budRef(value: string, expectedId?: string): { id: string; url: string }
   if (!url || host(url.hostname) !== BUD_DOMAIN) return undefined;
   const id = url.pathname.match(BUD_PRODUCT)?.[1];
   if (!id || expectedId && id !== expectedId) return undefined;
-  return { id, url: `https://www.${BUD_DOMAIN}/product/${id}` };
+  return { id, url: `https://www.${BUD_DOMAIN}${url.pathname}` };
 }
 
 type BudReview = { id?: unknown; ratings?: Array<{ attribute_code?: unknown; value?: unknown }> };

@@ -83,8 +83,9 @@ describe("additional pharmacy adapters", () => {
 
   it("uses complete Bud Zdorov reviews and their scores instead of a partial visible list", async () => {
     const formSource = "https://www.budzdorov.ru/forms/ocillokokcinum";
-    const productSource = "https://www.budzdorov.ru/product/2511";
-    const form = translated(formSource, `<main><a href="https://www-budzdorov-ru.translate.goog/product/2511?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en" title="Оциллококцинум гранулы 6 доз">Оциллококцинум гранулы 6 доз</a></main>`);
+    const productPath = "/product/otsillokoktsinum-granuly-6doz-2511";
+    const productSource = `https://www.budzdorov.ru${productPath}`;
+    const form = translated(formSource, `<main><a href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en" title="Оциллококцинум гранулы 6 доз">Оциллококцинум гранулы 6 доз</a></main>`);
     const reviews = [
       { id: 1, ratings: [{ attribute_code: "Оценка", value: 5 }] },
       { id: 2, ratings: [{ attribute_code: "Оценка", value: 4 }] },
@@ -100,8 +101,10 @@ describe("additional pharmacy adapters", () => {
 
     const refs = await adapter.discover("Оциллококцинум", context);
     expect(refs).toHaveLength(1);
+    expect(refs[0]).toMatchObject({ listingId: "2511", url: productSource });
     expect(new URL(String(fetchSpy.mock.calls[0][0])).pathname).toBe("/forms/ocillokokcinum");
     await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({ reviews: 3, rating: 4.7, status: "ok" });
+    expect(new URL(String(fetchSpy.mock.calls[1][0])).pathname).toBe(productPath);
   });
 
   it("collects eTabl product state and drops its default rating when there are no reviews", async () => {
