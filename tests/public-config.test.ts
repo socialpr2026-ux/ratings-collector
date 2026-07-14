@@ -693,12 +693,15 @@ describe("static pharmacy Translate gateway", () => {
     const productPath = "/product/otsillokoktsinum-granuly-6doz-2511";
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"></head><body>
       <a href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en" title="Оциллококцинум гранулы 6 доз">Оциллококцинум гранулы 6 доз</a>
+      <a href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en#cheapest">Специальное предложение!</a>
     </body></html>`, { headers: { "content-type": "text/html" } })));
 
     const response = await callGateway(translated("www-budzdorov-ru.translate.goog", "/forms/ocillokokcinum").toString());
     const proof = await response.text();
     expect(response.status).toBe(200);
     expect(proof).toContain(`href="https://www.budzdorov.ru${productPath}"`);
+    expect(proof).toContain('title="Оциллококцинум гранулы 6 доз"');
+    expect(proof).not.toContain("Специальное предложение!");
     expect(proof).not.toContain('href="https://www.budzdorov.ru/product/2511"');
   });
 

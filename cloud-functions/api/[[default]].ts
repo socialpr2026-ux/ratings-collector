@@ -525,7 +525,7 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
       catch { return; }
       const productId = product.pathname.match(/^\/product\/(?:[a-z0-9-]+-)?(\d+)\/?$/i)?.[1];
       if (!productId || ![BUDZDOROV_TRANSLATE_HOST, "www.budzdorov.ru"].includes(product.hostname) || !titleText) return;
-      products.set(productId, { pathname: product.pathname, title: titleText });
+      if (!products.has(productId)) products.set(productId, { pathname: product.pathname, title: titleText });
     });
     const pageText = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();
     const empty = pageText.match(/(?:ничего не найдено|товары не найдены|нет препаратов)/i)?.[0];
