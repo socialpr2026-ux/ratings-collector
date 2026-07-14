@@ -283,6 +283,47 @@ describe("first-party review-site adapters", () => {
     expect(headers.every((value) => value.get("x-ratings-browser") === "1" && value.get("x-ratings-scroll") === "1")).toBe(true);
   });
 
+  it("keeps the pharmaceutical iRecommend result, rejects the same-name cosmetic and carries the search review count", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/srch") return new Response(`
+        <ul class="srch-result-nodes">
+          <li><div class="ProductTizer" data-type="2" data-nid="135637"><div class="title"><a href="/content/protivovirusnye-sredstva-kagotsel">Противовирусные средства Кагоцел</a></div><span>430 отзывов</span></div></li>
+          <li><div class="ProductTizer" data-type="2" data-nid="6599826"><div class="title"><a href="/content/maslo-dlya-gub-kagotsel-pryanoe-kakao-i-sladkii-mindal">Масло для губ Кагоцел Пряное какао и сладкий миндаль</a></div><span>2 отзыва</span></div></li>
+        </ul>
+      `);
+      if (url.pathname === "/content/protivovirusnye-sredstva-kagotsel") return new Response(
+        `<h1>Противовирусные средства Кагоцел — отзывы</h1>` +
+        `<div class="fivestar-summary"><span class="average-rating"><span>3.9</span></span> (417 голосов)</div>` +
+        `<a href="/anonreview?noderef=135637">Написать отзыв</a>`
+      );
+      throw new Error(`Unexpected URL ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("irecommend.ru", fetchMock);
+
+    const refs = await adapter.discover("Кагоцел", context);
+    const result = await adapter.collect(refs[0], context);
+
+    expect(refs).toMatchObject([{
+      listingId: "135637",
+      title: "Противовирусные средства Кагоцел",
+      metadata: { source: "irecommend-search", reviewCount: 430 }
+    }]);
+    expect(result).toMatchObject({ reviews: 430, rating: 3.9, ratingCount: 417, status: "ok" });
+  });
+
+  it("never substitutes iRecommend votes for an unproved review count", async () => {
+    const adapter = adapterFor("irecommend.ru", (async () => new Response(
+      `<h1>Противовирусные средства Кагоцел — отзывы</h1>` +
+      `<div class="fivestar-summary"><span class="average-rating"><span>3.9</span></span> (430 голосов)</div>`
+    )) as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "irecommend.ru", platform: "irecommend.ru", listingId: "135637", brand: "Кагоцел",
+      url: "https://irecommend.ru/content/protivovirusnye-sredstva-kagotsel", metadata: {}
+    }, context)).rejects.toMatchObject({ code: "parser_changed" });
+  });
+
   it("discovers Otzovik through external results, rejects a false candidate and keeps discovery ids stable", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = urlOf(input);
@@ -314,6 +355,35 @@ describe("first-party review-site adapters", () => {
     const adapter = adapterFor("otzovik.com", fetchMock);
 
     await expect(adapter.discover(brand, context)).resolves.toEqual([]);
+  });
+
+  it("classifies the live Otzovik captcha form as blocked instead of parser_changed", async () => {
+    const adapter = adapterFor("otzovik.com", (async () => new Response(
+      `<html><head><title>Кагоцел — не робот</title></head><body>` +
+      `<form class="captcha-form popup-box"><input type="hidden" name="captcha_url" value="/reviews/protivovirusniy_preparat_kagocel/">` +
+      `<h1>Не робот?</h1><div class="captcha"><img id="captcha-img" src="/scripts/captcha/index.php"></div></form>` +
+      `</body></html>`
+    )) as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "otzovik.com", platform: "otzovik.com", listingId: "kagocel", brand: "Кагоцел",
+      url: "https://otzovik.com/reviews/protivovirusniy_preparat_kagocel/", metadata: {}
+    }, context)).rejects.toMatchObject({ code: "blocked", message: expect.stringContaining("защитную страницу") });
+  });
+
+  it("does not mistake an optional captcha widget for a block when aggregate metrics are present", async () => {
+    const adapter = adapterFor("otzovik.com", (async () => new Response(
+      `<html><head><title>Отзывы о Кагоцел</title></head><body>` +
+      `<h1 itemprop="name">Противовирусный препарат Кагоцел</h1>` +
+      `<meta itemprop="ratingValue" content="4.86"><meta itemprop="reviewCount" content="37">` +
+      `<form class="captcha-form"><img id="captcha-img" src="/scripts/captcha/index.php"></form>` +
+      `</body></html>`
+    )) as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "otzovik.com", platform: "otzovik.com", listingId: "kagocel", brand: "Кагоцел",
+      url: "https://otzovik.com/reviews/protivovirusniy_preparat_kagocel/", metadata: {}
+    }, context)).resolves.toMatchObject({ reviews: 37, rating: 4.9, status: "ok" });
   });
 
   it("uses direct brand pages on both Otzyv domains and never replaces their slug identity", async () => {
@@ -362,6 +432,45 @@ describe("first-party review-site adapters", () => {
       `<h3>По вашему запросу &laquo;Анвифен&raquo; всего найдено отзывов: 1</h3>`
     )) as typeof fetch);
     await expect(individual.discover("Анвифен", context)).rejects.toMatchObject({ code: "parser_changed" });
+  });
+
+  it("collects the live Pravogolosa category summary instead of counting individual search hits", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.searchParams.get("page") === "search") return new Response(`
+        <h3>По вашему запросу &laquo;Кагоцел&raquo; всего найдено отзывов: 23</h3>
+        <div class="module">
+          <h2><a href="/otzyvcategory?page=show_ad&amp;adid=289924&amp;catid=76968">Противовирусный препарат Кагоцел отзывы</a></h2>
+          <a href="/otzyvcategory?page=show_category&amp;catid=76968&amp;order=0&amp;expand=0">Читать все отзывы (23)</a>
+        </div>
+      `);
+      if (url.searchParams.get("page") === "show_category") return new Response(`
+        <h1 class="contentheading">Противовирусный препарат Кагоцел отзывы</h1>
+        <span title="Рейтинг::Оценка объекта отзыва 5 из 5."></span>
+        <a href="/otzyvcategory?page=show_category&amp;catid=76968&amp;order=0&amp;expand=0">все отзывы 23</a>
+        <a href="/otzyvcategory?page=show_category&amp;catid=76968&amp;order=0&amp;expand=0&amp;ad_tipre=Положительный">положительных 22</a>
+        нейтральных 0
+        <a href="/otzyvcategory?page=show_category&amp;catid=76968&amp;order=0&amp;expand=0&amp;ad_tipre=Негативный">негативных 1</a>
+      `);
+      throw new Error(`Unexpected URL ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("pravogolosa.net", fetchMock);
+
+    const refs = await adapter.discover("Кагоцел", context);
+    const result = await adapter.collect(refs[0], context);
+
+    expect(refs).toMatchObject([{
+      listingId: "76968",
+      metadata: { source: "pravogolosa-search-category", reviewCount: 23 }
+    }]);
+    expect(result).toMatchObject({
+      listingId: "76968",
+      product: "Противовирусный препарат Кагоцел отзывы",
+      reviews: 23,
+      rating: 5,
+      ratingCount: 23,
+      status: "ok"
+    });
   });
 
   it("checks the Pravogolosa search contract instead of blocking on an unrelated origin canary", async () => {

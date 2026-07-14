@@ -65,7 +65,7 @@ async function repositoryRpc(request: Request, env: Record<string, string | unde
   return json({ result });
 }
 
-async function staticReviewFetch(request: Request, env: Record<string, string | undefined>): Promise<Response> {
+export async function staticReviewFetch(request: Request, env: Record<string, string | undefined>): Promise<Response> {
   const configured = env.INTERNAL_AGENT_TOKEN?.trim() ?? "";
   const supplied = (request.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
   if (configured.length < 32 || !secureEqual(configured, supplied)) return json({ error: "Internal authorization failed" }, 401);
@@ -102,6 +102,51 @@ async function staticReviewFetch(request: Request, env: Record<string, string | 
   }
   if (target.protocol !== "https:" || !(reviewTarget || wildberriesTarget || ozonTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
+  }
+  if (host === "otzovik.com" && /^\/reviews\/[a-z0-9_]+\/?$/i.test(target.pathname)) {
+    if (target.search || target.hash || target.hostname !== "otzovik.com") {
+      return json({ error: "Invalid Otzovik product source URL" }, 400);
+    }
+    const translated = new URL(`https://otzovik-com.translate.goog${target.pathname}`);
+    translated.searchParams.set("_x_tr_sl", "ru");
+    translated.searchParams.set("_x_tr_tl", "en");
+    translated.searchParams.set("_x_tr_hl", "en");
+    const upstream = await safeFetch(translated.toString(), {
+      method: "GET",
+      redirect: "follow",
+      headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+    });
+    const html = await readTextBounded(upstream, 12_000_000, 60_000);
+    if (!upstream.ok) return new Response(html, { status: upstream.status, headers: { "content-type": "text/html; charset=utf-8" } });
+    const sourceMatches = (value: string | undefined): boolean => {
+      if (!value) return false;
+      try {
+        const source = new URL(value);
+        return source.protocol === "https:" && source.hostname === "otzovik.com" &&
+          source.pathname === target.pathname && !source.search && !source.hash;
+      } catch { return false; }
+    };
+    const attribute = (tag: string, name: string): string | undefined =>
+      tag.match(new RegExp(`\\b${name}=["']([^"']+)["']`, "i"))?.[1];
+    const baseTag = html.match(/<base\b[^>]*>/i)?.[0];
+    const canonicalTag = [...html.matchAll(/<link\b[^>]*>/gi)]
+      .find((match) => /\brel=["'][^"']*\bcanonical\b[^"']*["']/i.test(match[0]))?.[0];
+    const productAggregate = /itemtype=["']https?:\/\/schema\.org\/Product["']/i.test(html) &&
+      /itemprop=["']aggregateRating["']/i.test(html) &&
+      /itemprop=["']ratingValue["'][^>]*content=["'][\d.,]+["']/i.test(html) &&
+      /itemprop=["']reviewCount["'][^>]*content=["'][\d\s\u00a0]+["']/i.test(html);
+    if (!sourceMatches(baseTag ? attribute(baseTag, "href") : undefined) ||
+      !sourceMatches(canonicalTag ? attribute(canonicalTag, "href") : undefined) || !productAggregate) {
+      return json({ error: "Otzovik translated page did not prove the requested product aggregate" }, 502);
+    }
+    return new Response(html, {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "google-translate-ssr"
+      }
+    });
   }
   if (host === "megapteka.ru" || host === "irecommend.ru" || host === "otzovik.com") {
     let readerTarget = target;

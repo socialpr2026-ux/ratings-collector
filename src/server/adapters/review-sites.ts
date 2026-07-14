@@ -12,7 +12,8 @@ import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 const MAX_SEARCH_PAGES = 20;
 const MAX_PRODUCTS = 500;
 const MEGAPTEKA_SEARCH_PAGE_SIZE = 40;
-const BLOCK_MARKERS = /captcha|access denied|temporarily unavailable|доступ (?:ограничен|запрещен)|проверка браузера/i;
+const BLOCK_MARKERS = /captcha|access denied|temporarily unavailable|доступ (?:ограничен|запрещен)|проверка браузера|не робот/i;
+const PHARMACEUTICAL_REVIEW_TITLE = /(?:лекарственн|противовирусн|препарат|медицинск|ноотропн|средств|таблет|капсул|сироп|суспенз|раствор|спрей|мазь)/iu;
 const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 type ParsedMetrics = {
@@ -51,7 +52,10 @@ type ReviewSiteDefinition = {
 
 function isBlockPage(html: string): boolean {
   const title = html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/<[^>]+>/g, " ") ?? "";
-  return BLOCK_MARKERS.test(title) || /<(?:input|iframe)\b[^>]*(?:id|class|src)=["'][^"']*captcha/i.test(html.slice(0, 100_000));
+  const sample = html.slice(0, 100_000);
+  const captcha = /<(?:input|iframe|form|img)\b[^>]*(?:id|class|name|src)=["'][^"']*captcha/i.test(sample);
+  const aggregateMetrics = /itemprop=["']reviewCount["']/i.test(sample) || /"reviewCount"\s*:/i.test(sample);
+  return BLOCK_MARKERS.test(title) || captcha && !aggregateMetrics;
 }
 
 function numberFrom(value: string | undefined): number | undefined {
@@ -227,7 +231,7 @@ function parseIrecommend(html: string, pageUrl: string, brand: string): ParsedMe
     title: json.title ?? firstText($, ["[itemprop='itemReviewed'] [itemprop='name']", "h1", ".product-header"]),
     canonicalUrl: canonicalUrl ?? json.canonicalUrl,
     listingId: noderef,
-    reviews: explicitReviews ?? json.reviews ?? (confirmedZero ? 0 : ratingCount),
+    reviews: explicitReviews ?? json.reviews ?? (confirmedZero ? 0 : undefined),
     rating: rawRating ?? json.rating,
     ratingCount: ratingCount ?? json.ratingCount,
     rawRating: rawRating ?? json.rawRating,
@@ -242,6 +246,28 @@ function parseOtzovik(html: string, pageUrl: string, brand: string): ParsedMetri
   const $ = load(html);
   const listingId = $("[data-pid]").first().attr("data-pid")?.trim();
   return { ...parsed, listingId: listingId && /^\d+$/.test(listingId) ? listingId : parsed.listingId };
+}
+
+function parsePravogolosa(html: string, pageUrl: string, brand: string): ParsedMetrics {
+  const $ = load(html);
+  const text = $.root().text().replace(/\s+/g, " ").trim();
+  const title = firstText($, ["h1.contentheading", "h1"]);
+  const reviews = integerFrom(text.match(/все\s+отзывы\s+([\d\s\u00a0]+)/iu)?.[1]);
+  const rawRating = numberFrom(
+    $("[title*='Рейтинг::Оценка объекта отзыва']").first().attr("title")
+      ?.match(/([\d.,]+)\s+из\s+5/iu)?.[1]
+  );
+  return {
+    title,
+    canonicalUrl: pageUrl,
+    listingId: new URL(pageUrl).searchParams.get("catid") ?? undefined,
+    reviews,
+    rating: rawRating,
+    ratingCount: reviews,
+    rawRating,
+    rawRatingScale: 5,
+    source: "pravogolosa-category-summary"
+  };
 }
 
 function pageId(pattern: RegExp, url: URL): string | undefined {
@@ -343,9 +369,9 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
       url.searchParams.set("text_search", brand);
       return url.toString();
     },
-    isProductUrl: (url) => url.pathname === "/otzyvcategory" && url.searchParams.get("page") === "show_ad" && /^\d+$/.test(url.searchParams.get("adid") ?? ""),
-    idFromUrl: (url) => url.searchParams.get("adid") ?? undefined,
-    parse: (html, pageUrl, brand) => microdataMetrics(html, pageUrl, brand, REVIEW_SITE_DEFINITIONS[7])
+    isProductUrl: (url) => url.pathname === "/otzyvcategory" && url.searchParams.get("page") === "show_category" && /^\d+$/.test(url.searchParams.get("catid") ?? ""),
+    idFromUrl: (url) => url.searchParams.get("catid") ?? undefined,
+    parse: parsePravogolosa
   },
   {
     domain: "ru.otzyv.com",
@@ -654,13 +680,43 @@ export class ReviewSiteAdapter implements SiteAdapter {
     if (status < 200 || status >= 300 || isBlockPage(html)) {
       throw new AdapterBlockedError(`Поиск pravogolosa.net недоступен: HTTP ${status}`);
     }
-    const text = load(html).root().text().replace(/\s+/g, " ");
+    const $ = load(html);
+    const text = $.root().text().replace(/\s+/g, " ");
     const count = integerFrom(text.match(/По вашему запросу\s*[«"]?[^»"]+[»"]?\s*всего найдено отзывов\s*:\s*([\d\s\u00a0]+)/iu)?.[1]);
     if (count === 0) return [];
     // The live site uses this second, equally conclusive empty-result copy for
     // some queries. It is a proved no_results, not an access block.
     if (/По запросу\s*[«"]?[^»"]+[»"]?\s*ничего не нашлось/iu.test(text)) return [];
     if (count !== undefined) {
+      const refs = new Map<string, ProductRef>();
+      $("a[href]").each((_index, node) => {
+        const href = $(node).attr("href");
+        if (!href) return;
+        try {
+          const target = new URL(href, searchUrl);
+          if (!sameSite(target, "pravogolosa.net") || !this.definition.isProductUrl(target)) return;
+          const categoryReviews = integerFrom($(node).text().match(/(?:все|читать\s+все)\s+отзывы\s*\(?([\d\s\u00a0]+)\)?/iu)?.[1]);
+          if (categoryReviews === undefined || categoryReviews <= 0 || categoryReviews !== count) return;
+          target.protocol = "https:";
+          target.search = "";
+          target.searchParams.set("page", "show_category");
+          target.searchParams.set("catid", new URL(href, searchUrl).searchParams.get("catid")!);
+          target.searchParams.set("order", "0");
+          target.searchParams.set("expand", "0");
+          const canonical = canonicalizeUrl(target.toString());
+          refs.set(canonical, {
+            domain: this.definition.domain,
+            platform: this.definition.domain,
+            listingId: this.definition.idFromUrl(new URL(canonical))!,
+            brand,
+            url: canonical,
+            title: brand,
+            metadata: { source: "pravogolosa-search-category", reviewCount: categoryReviews }
+          });
+        } catch { /* malformed category link */ }
+      });
+      this.appendHistorical(refs, brand, context);
+      if (refs.size) return [...refs.values()];
       throw new ParserChangedError("pravogolosa.net показывает отдельные отзывы, но не доказан агрегат бренда");
     }
     throw new AdapterBlockedError("pravogolosa.net не подтвердил ни результаты, ни их отсутствие");
@@ -674,6 +730,7 @@ export class ReviewSiteAdapter implements SiteAdapter {
     }
     const $ = load(html);
     const refs = new Map<string, ProductRef>();
+    const candidates: ProductRef[] = [];
     $("ul.srch-result-nodes > li .ProductTizer[data-type='2'][data-nid]").each((_index, node) => {
       const card = $(node);
       const nid = card.attr("data-nid")?.trim();
@@ -686,17 +743,29 @@ export class ReviewSiteAdapter implements SiteAdapter {
         if (!sameSite(target, "irecommend.ru") || !this.definition.isProductUrl(target)) return;
         target.protocol = "https:";
         const canonical = canonicalizeUrl(target.toString());
-        refs.set(canonical, {
+        const cardText = card.text().replace(/\s+/g, " ");
+        const reviewCount = integerFrom(
+          cardText.match(/([\d\s\u00a0]+)\s+отзыв/iu)?.[1] ??
+          cardText.match(/читать\s+все\s+отзывы\s*([\d\s\u00a0]+)/iu)?.[1]
+        );
+        candidates.push({
           domain: this.definition.domain,
           platform: this.definition.domain,
           listingId: nid,
           brand,
           url: canonical,
           title,
-          metadata: { source: "irecommend-search" }
+          metadata: {
+            source: "irecommend-search",
+            ...(reviewCount === undefined ? {} : { reviewCount })
+          }
         });
       } catch { /* malformed result link */ }
     });
+    const pharmaceutical = candidates.filter((item) => PHARMACEUTICAL_REVIEW_TITLE.test(item.title ?? ""));
+    for (const item of candidates.length > 1 && pharmaceutical.length ? pharmaceutical : candidates) {
+      refs.set(item.url, item);
+    }
     this.appendHistorical(refs, brand, context);
     if (!refs.size && !hasExplicitSearchNoResults($, brand, this.definition.domain)) {
       throw new AdapterBlockedError("irecommend.ru не подтвердил ни карточки бренда, ни их отсутствие");
@@ -835,8 +904,11 @@ export class ReviewSiteAdapter implements SiteAdapter {
         source: "review-site-missing"
       };
     }
-    if (status < 200 || status >= 300 || isBlockPage(html)) {
+    if (status < 200 || status >= 300) {
       throw new AdapterBlockedError(`${this.definition.domain} не отдал карточку ${ref.listingId}: HTTP ${status}`);
+    }
+    if (isBlockPage(html)) {
+      throw new AdapterBlockedError(`${this.definition.domain} вернул защитную страницу для карточки ${ref.listingId}`);
     }
     const parsed = this.definition.parse(html, ref.url, ref.brand);
     const canonicalUrl = absoluteProductUrl(parsed.canonicalUrl, ref.url, this.definition) ?? canonicalizeUrl(ref.url);
@@ -844,7 +916,15 @@ export class ReviewSiteAdapter implements SiteAdapter {
     // describe a review or another nested entity and must never replace it.
     const listingId = ref.listingId;
     const title = parsed.title?.replace(/\s+/g, " ").trim() || ref.title || ref.brand;
-    const reviews = parsed.reviews;
+    const discoveredReviewCount = ref.metadata.reviewCount;
+    const reviews = parsed.reviews ?? (
+      this.definition.domain === "irecommend.ru" &&
+      typeof discoveredReviewCount === "number" &&
+      Number.isInteger(discoveredReviewCount) &&
+      discoveredReviewCount >= 0
+        ? discoveredReviewCount
+        : undefined
+    );
     if (reviews === undefined) throw new ParserChangedError(`${this.definition.domain}: не найден подтверждённый счётчик отзывов`);
     if (reviews > 0 && parsed.rating === undefined) throw new ParserChangedError(`${this.definition.domain}: есть отзывы, но не найден рейтинг`);
     // Every page handled here is an aggregate review page for a product/family,
