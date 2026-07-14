@@ -356,6 +356,10 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
     domain: "otzovik.com",
     origin: "https://otzovik.com/",
     rateLimitMs: 3200,
+    healthCanary: {
+      url: "https://otzovik.com/reviews/protivovirusniy_preparat_kagocel/",
+      brand: "Кагоцел"
+    },
     searchUrl: (brand) => `https://otzovik.com/__external_search__?brand=${encodeURIComponent(brand)}`,
     isProductUrl: (url) => /^\/reviews\/[a-z0-9_]+\/?$/i.test(url.pathname),
     idFromUrl: (url) => hashId(`${url.hostname.replace(/^www\./, "")}${url.pathname.replace(/\/$/, "")}`),
@@ -751,6 +755,10 @@ export class ReviewSiteAdapter implements SiteAdapter {
           cardText.match(/([\d\s\u00a0]+)\s+отзыв/iu)?.[1] ??
           cardText.match(/читать\s+все\s+отзывы\s*([\d\s\u00a0]+)/iu)?.[1]
         );
+        const rating = numberFrom(
+          card.find(".fivestar-summary .average-rating span, .average-rating span").first().text().trim() ||
+          cardText.match(/Среднее\s*:\s*(\d+(?:[.,]\d+)?)/iu)?.[1]
+        );
         candidates.push({
           domain: this.definition.domain,
           platform: this.definition.domain,
@@ -760,7 +768,8 @@ export class ReviewSiteAdapter implements SiteAdapter {
           title,
           metadata: {
             source: "irecommend-search",
-            ...(reviewCount === undefined ? {} : { reviewCount })
+            ...(reviewCount === undefined ? {} : { reviewCount }),
+            ...(rating === undefined ? {} : { rating })
           }
         });
       } catch { /* malformed result link */ }
@@ -920,6 +929,7 @@ export class ReviewSiteAdapter implements SiteAdapter {
     const listingId = ref.listingId;
     const title = parsed.title?.replace(/\s+/g, " ").trim() || ref.title || ref.brand;
     const discoveredReviewCount = ref.metadata.reviewCount;
+    const discoveredRating = ref.metadata.rating;
     const reviews = parsed.reviews ?? (
       this.definition.domain === "irecommend.ru" &&
       typeof discoveredReviewCount === "number" &&
@@ -928,8 +938,17 @@ export class ReviewSiteAdapter implements SiteAdapter {
         ? discoveredReviewCount
         : undefined
     );
+    const rating = parsed.rating ?? (
+      this.definition.domain === "irecommend.ru" &&
+      typeof discoveredRating === "number" &&
+      Number.isFinite(discoveredRating) &&
+      discoveredRating > 0 &&
+      discoveredRating <= 5
+        ? discoveredRating
+        : undefined
+    );
     if (reviews === undefined) throw new ParserChangedError(`${this.definition.domain}: не найден подтверждённый счётчик отзывов`);
-    if (reviews > 0 && parsed.rating === undefined) throw new ParserChangedError(`${this.definition.domain}: есть отзывы, но не найден рейтинг`);
+    if (reviews > 0 && rating === undefined) throw new ParserChangedError(`${this.definition.domain}: есть отзывы, но не найден рейтинг`);
     // Dedicated Megapteka pages are sellable SKUs; the other definitions are
     // aggregate review pages for a product/family.
     const productEvidence = this.definition.domain === "megapteka.ru"
@@ -956,8 +975,8 @@ export class ReviewSiteAdapter implements SiteAdapter {
       canonicalUrl,
       product: title,
       reviews,
-      rating: reviews === 0 ? null : parsed.rating ?? null,
-      rawRating: parsed.rawRating ?? parsed.rating,
+      rating: reviews === 0 ? null : rating ?? null,
+      rawRating: parsed.rawRating ?? rating,
       rawRatingScale: parsed.rawRatingScale ?? 5,
       ratingCount: parsed.ratingCount ?? null,
       status: !brandMatches ? "needs_review" : reviews === 0 ? "no_reviews" : "ok",

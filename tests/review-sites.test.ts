@@ -313,13 +313,13 @@ describe("first-party review-site adapters", () => {
       const url = urlOf(input);
       if (url.pathname === "/srch") return new Response(`
         <ul class="srch-result-nodes">
-          <li><div class="ProductTizer" data-type="2" data-nid="135637"><div class="title"><a href="/content/protivovirusnye-sredstva-kagotsel">Противовирусные средства Кагоцел</a></div><span>430 отзывов</span></div></li>
+          <li><div class="ProductTizer" data-type="2" data-nid="135637"><div class="title"><a href="/content/protivovirusnye-sredstva-kagotsel">Противовирусные средства Кагоцел</a></div><span>430 отзывов</span><div class="fivestar-summary"><span class="average-rating">Среднее: <span>3.9</span></span></div></div></li>
           <li><div class="ProductTizer" data-type="2" data-nid="6599826"><div class="title"><a href="/content/maslo-dlya-gub-kagotsel-pryanoe-kakao-i-sladkii-mindal">Масло для губ Кагоцел Пряное какао и сладкий миндаль</a></div><span>2 отзыва</span></div></li>
         </ul>
       `);
       if (url.pathname === "/content/protivovirusnye-sredstva-kagotsel") return new Response(
         `<h1>Противовирусные средства Кагоцел — отзывы</h1>` +
-        `<div class="fivestar-summary"><span class="average-rating"><span>3.9</span></span> (417 голосов)</div>` +
+        `<div class="fivestar-summary"><span class="total-votes">(417 голосов)</span></div>` +
         `<a href="/anonreview?noderef=135637">Написать отзыв</a>`
       );
       throw new Error(`Unexpected URL ${url}`);
@@ -332,7 +332,7 @@ describe("first-party review-site adapters", () => {
     expect(refs).toMatchObject([{
       listingId: "135637",
       title: "Противовирусные средства Кагоцел",
-      metadata: { source: "irecommend-search", reviewCount: 430 }
+      metadata: { source: "irecommend-search", reviewCount: 430, rating: 3.9 }
     }]);
     expect(result).toMatchObject({ reviews: 430, rating: 3.9, ratingCount: 417, status: "ok" });
   });
@@ -409,6 +409,22 @@ describe("first-party review-site adapters", () => {
       domain: "otzovik.com", platform: "otzovik.com", listingId: "kagocel", brand: "Кагоцел",
       url: "https://otzovik.com/reviews/protivovirusniy_preparat_kagocel/", metadata: {}
     }, context)).resolves.toMatchObject({ reviews: 37, rating: 4.9, status: "ok" });
+  });
+
+  it("health-checks Otzovik on a proven aggregate card instead of the protected homepage", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      expect(url.pathname).toBe("/reviews/protivovirusniy_preparat_kagocel/");
+      return new Response(
+        `<h1 itemprop="name">Противовирусный препарат Кагоцел</h1>` +
+        `<span itemprop="aggregateRating"><meta itemprop="ratingValue" content="3.91">` +
+        `<meta itemprop="reviewCount" content="578"><meta itemprop="bestRating" content="5"></span>`
+      );
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("otzovik.com", fetchMock);
+
+    await expect(adapter.healthCheck(context)).resolves.toMatchObject({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("uses direct brand pages on both Otzyv domains and never replaces their slug identity", async () => {
