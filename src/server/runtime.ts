@@ -136,7 +136,13 @@ export async function createCollectorRuntime(options: {
       token: env.APIFY_TOKEN,
       maxTotalChargeUsd: reservePerDiscovery
     })),
-    { isFallbackRef: isYandexApifyRef }
+    {
+      isFallbackRef: isYandexApifyRef,
+      // Reviews sitemap throttling and large-map timeouts are transient. A
+      // selective retry must return to the free first-party path instead of
+      // permanently consuming the shared paid fallback budget.
+      stickyPrimaryFailure: false
+    }
   );
   const known = [ozon, wildberries, yandex, new EaptekaAdapter(evidence, options.fetch), ...createReviewSiteAdapters(evidence, options.fetch)];
   const service = new RatingsService(repository, createAdapterResolver(known, repository, evidence, options.fetch));
