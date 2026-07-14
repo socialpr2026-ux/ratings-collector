@@ -19,8 +19,8 @@ if errorlevel 1 (
 )
 
 for /f "tokens=1 delims=." %%v in ('node -p "process.versions.node"') do set "NODE_MAJOR=%%v"
-if %NODE_MAJOR% LSS 20 (
-  echo Node.js 20 or newer is required. Installed major version: %NODE_MAJOR%.
+if not "%NODE_MAJOR%"=="20" (
+  echo Node.js 20 LTS is required. Installed major version: %NODE_MAJOR%.
   pause
   exit /b 1
 )
@@ -28,7 +28,7 @@ if %NODE_MAJOR% LSS 20 (
 set "APP=%LOCALAPPDATA%\RatingsCollector\app"
 set "STAGE=%TEMP%\RatingsCollectorInstall-%RANDOM%-%RANDOM%"
 set "ARCHIVE=%STAGE%\ratings-collector.zip"
-set "DOWNLOAD_URL=https://codeload.github.com/socialpr2026-ux/ratings-collector/zip/refs/heads/codex/collection-recovery"
+set "DOWNLOAD_URL=https://codeload.github.com/socialpr2026-ux/ratings-collector/zip/9ae4a05a6a87e15c5069ea0d0ae7012ff79edbfa"
 
 echo Downloading the current Ozon helper...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $null=New-Item -ItemType Directory -Force -Path '%STAGE%'; Invoke-WebRequest -UseBasicParsing -Uri '%DOWNLOAD_URL%' -OutFile '%ARCHIVE%'; Expand-Archive -LiteralPath '%ARCHIVE%' -DestinationPath '%STAGE%' -Force"

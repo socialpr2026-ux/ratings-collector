@@ -12,6 +12,8 @@ describe("employee Ozon companion launcher", () => {
     expect(app).toContain('href="/ratings-ozon-helper.cmd"');
     expect(app).toContain("Скачать помощник");
     expect(launcher).toContain("codeload.github.com/socialpr2026-ux/ratings-collector");
+    expect(launcher).toContain("zip/9ae4a05a6a87e15c5069ea0d0ae7012ff79edbfa");
+    expect(launcher).toContain('if not "%NODE_MAJOR%"=="20"');
     expect(launcher).toContain("%LOCALAPPDATA%\\RatingsCollector\\app");
     expect(launcher).toContain("corepack pnpm exec tsx companion/start.ts");
     expect(launcher).not.toContain('cd /d "%~dp0.."');
