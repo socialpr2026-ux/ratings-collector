@@ -156,6 +156,24 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("keeps the bounded Wildberries v14 buyer endpoint eligible for the Sandbox fallback", async () => {
+    const run = vi.fn(async () => {
+      throw new Error("Sandbox quota exceeded");
+    });
+    const routedFetch = browserFetch(sandbox(run));
+
+    await expect(routedFetch(
+      "https://search.wb.ru/exactmatch/ru/common/v14/search?appType=32&query=Тикализис&page=1",
+      {
+        headers: {
+          "x-ratings-browser": "1",
+          "x-ratings-browser-mode": "wildberries-api"
+        }
+      }
+    )).rejects.toBeInstanceOf(AdapterBlockedError);
+    expect(run).toHaveBeenCalledOnce();
+  });
+
   it("matches only the visible Wildberries no-results statement for the requested query", () => {
     expect(hasExplicitWildberriesNoResults(
       "По запросу «Бактоблис» ничего не нашлось. Попробуйте изменить запрос.",

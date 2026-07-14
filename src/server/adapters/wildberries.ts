@@ -318,6 +318,11 @@ export class WildberriesAdapter implements SiteAdapter {
     for (let page = 1; page <= this.maxPages; page += 1) {
       const result = await this.fetchSearchPage(brand, page, context);
       if (result.products.length === 0) {
+        if (rawProductsSeen === 0 && result.total === undefined) {
+          throw new AdapterBlockedError(
+            `Wildberries returned an empty first page without an explicit total for ${brand}; zero results are not proven`
+          );
+        }
         if (result.total !== undefined && rawProductsSeen < result.total) {
           throw new AdapterBlockedError(
             `Wildberries returned an empty page after ${rawProductsSeen} of ${result.total} advertised products for ${brand}`

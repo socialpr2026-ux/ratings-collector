@@ -285,7 +285,10 @@ export function browserFetch(
       return response;
     }
     if (browserMode === "wildberries-api") {
-      const fixedSearch = url.hostname === "search.wb.ru" && url.pathname === "/exactmatch/ru/common/v18/search";
+      const fixedSearch = url.hostname === "search.wb.ru" && [
+        "/exactmatch/ru/common/v14/search",
+        "/exactmatch/ru/common/v18/search"
+      ].includes(url.pathname);
       const fixedCard = url.hostname === "card.wb.ru" && url.pathname === "/cards/v4/detail";
       if (url.protocol !== "https:" || (!fixedSearch && !fixedCard)) {
         throw new Error("Wildberries browser mode is restricted to the fixed search and card endpoints");
@@ -311,7 +314,7 @@ export function browserFetch(
         if (wildberriesNetworkViolation) throw wildberriesNetworkViolation;
         const final = await assertSafePublicDestination(result.finalUrl || url.toString());
         const isExpectedFinal =
-          fixedSearch && final.hostname === "search.wb.ru" && final.pathname === "/exactmatch/ru/common/v18/search" ||
+          fixedSearch && final.hostname === "search.wb.ru" && final.pathname === url.pathname ||
           fixedCard && final.hostname === "card.wb.ru" && final.pathname === "/cards/v4/detail";
         if (!isExpectedFinal) throw new Error(`Wildberries API redirected to ${final.hostname}`);
         response = new Response(result.text, {

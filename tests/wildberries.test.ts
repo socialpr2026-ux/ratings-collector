@@ -166,6 +166,15 @@ describe("WildberriesAdapter.discover", () => {
     );
   });
 
+  it("fails closed on an empty first JSON page without explicit total zero", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ products: [] })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock, { browserFallbackAppType: false });
+
+    await expect(adapter.discover("Тикализис", context())).rejects.toThrow(
+      /empty first page without an explicit total/
+    );
+  });
+
   it("paginates sequentially, applies strict trade-name matching, deduplicates nmId and adds registry IDs", async () => {
     const responses = [
       jsonResponse({
