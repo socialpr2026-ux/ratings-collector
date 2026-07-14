@@ -201,6 +201,7 @@ abstract class AdditionalPharmacyAdapter implements SiteAdapter {
 }
 
 const APTEKA_DOMAIN = "apteka.ru";
+const APTEKA_TRANSLATE_HOST = "apteka-ru.translate.goog";
 const APTEKA_PRODUCT = /^\/product\/([a-z0-9-]+-([a-f0-9]{24}))\/?$/i;
 
 function aptekaRef(value: string, expectedId?: string): { id: string; url: string } | undefined {
@@ -243,7 +244,7 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = historicalRefs(APTEKA_DOMAIN, brand, context, aptekaRef);
     const source = new URL(`https://${APTEKA_DOMAIN}/preparation/${transliterate(brand, true)}/`);
-    const page = await requestPage(source, context, this.fetchImpl);
+    const page = await requestPage(source, context, this.fetchImpl, APTEKA_TRANSLATE_HOST);
     const heading = compactText(page.$("h1").first().text());
     page.$("a[href*='/product/']").each((_index, node) => {
       const parsed = aptekaRef(page.$(node).attr("href") ?? "");
@@ -267,7 +268,7 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
     const parsedRef = aptekaRef(ref.url, ref.listingId);
     if (!parsedRef) throw new ParserChangedError(`${APTEKA_DOMAIN}:${ref.listingId}: invalid product URL or ID`);
-    const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl);
+    const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl, APTEKA_TRANSLATE_HOST);
     const products = jsonLdProducts(page.$).filter((item) => String(item.sku ?? "") === ref.listingId);
     if (products.length !== 1) throw new ParserChangedError(`${APTEKA_DOMAIN}:${ref.listingId}: exact Product JSON-LD is missing or ambiguous`);
     const product = products[0];

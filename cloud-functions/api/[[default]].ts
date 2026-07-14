@@ -42,10 +42,22 @@ const OKAPTEKA_TRANSLATE_HOST = "okapteka-ru.translate.goog";
 const ZDRAVCITY_TRANSLATE_HOST = "zdravcity-ru.translate.goog";
 const ASNA_TRANSLATE_HOST = "www-asna-ru.translate.goog";
 const POLZA_TRANSLATE_HOST = "polza-ru.translate.goog";
+const APTEKA_TRANSLATE_HOST = "apteka-ru.translate.goog";
+const NFAPTEKA_TRANSLATE_HOST = "nfapteka-ru.translate.goog";
+const BUDZDOROV_TRANSLATE_HOST = "www-budzdorov-ru.translate.goog";
+const ETABL_TRANSLATE_HOST = "etabl-ru.translate.goog";
 
 type PharmacyTranslateTarget = {
   kind: "farmlend-search" | "farmlend-product" | "okapteka-group" | "okapteka-reviews" | "asna-product" |
-    "polza-family" | "polza-product";
+    "polza-family" | "polza-product" | "nfapteka-search" | "nfapteka-product" |
+    "budzdorov-family" | "budzdorov-product" | "etabl-search" | "etabl-product" |
+    "apteka-preparation" | "apteka-product";
+  source: URL;
+  productId?: string;
+};
+
+type AptekaRuTarget = {
+  kind: "preparation" | "product";
   source: URL;
   productId?: string;
 };
@@ -125,7 +137,15 @@ function parsePharmacyTranslateTarget(target: URL): PharmacyTranslateTarget | un
       ? "okapteka.ru"
       : target.hostname === ASNA_TRANSLATE_HOST
         ? "www.asna.ru"
-        : target.hostname === POLZA_TRANSLATE_HOST ? "polza.ru" : undefined;
+        : target.hostname === POLZA_TRANSLATE_HOST
+          ? "polza.ru"
+          : target.hostname === APTEKA_TRANSLATE_HOST
+            ? "apteka.ru"
+            : target.hostname === NFAPTEKA_TRANSLATE_HOST
+            ? "nfapteka.ru"
+            : target.hostname === BUDZDOROV_TRANSLATE_HOST
+              ? "www.budzdorov.ru"
+              : target.hostname === ETABL_TRANSLATE_HOST ? "etabl.ru" : undefined;
   if (!sourceHost) return undefined;
   const source = new URL(target.pathname, `https://${sourceHost}`);
 
@@ -161,6 +181,51 @@ function parsePharmacyTranslateTarget(target: URL): PharmacyTranslateTarget | un
     return product ? { kind: "polza-product", source, productId: product[1] } : undefined;
   }
 
+  if (target.hostname === NFAPTEKA_TRANSLATE_HOST) {
+    if (target.pathname === "/catalog/") {
+      if ([...target.searchParams.keys()].some((key) => !PHARMACY_TRANSLATE_PARAMETERS.has(key) && key !== "q")) return undefined;
+      const brand = singleSearchParameter(target, "q")?.normalize("NFKC").trim() ?? "";
+      if (brand.length < 2 || brand.length > 160) return undefined;
+      source.searchParams.set("q", brand);
+      return { kind: "nfapteka-search", source };
+    }
+    if ([...target.searchParams.keys()].some((key) => !PHARMACY_TRANSLATE_PARAMETERS.has(key)) ||
+      !/^\/(?:[a-z0-9-]+\/)*catalog\/(?:[a-z0-9-]+\/)*[a-z0-9-]+\.html$/i.test(target.pathname)) return undefined;
+    return { kind: "nfapteka-product", source };
+  }
+
+  if (target.hostname === APTEKA_TRANSLATE_HOST) {
+    if ([...target.searchParams.keys()].some((key) => !PHARMACY_TRANSLATE_PARAMETERS.has(key))) return undefined;
+    if (/^\/preparation\/[a-z0-9][a-z0-9-]*\/$/i.test(target.pathname)) {
+      return { kind: "apteka-preparation", source };
+    }
+    const product = target.pathname.match(/^\/product\/[a-z0-9-]+-([a-f0-9]{24})\/$/i);
+    return product ? { kind: "apteka-product", source, productId: product[1] } : undefined;
+  }
+
+  if (target.hostname === BUDZDOROV_TRANSLATE_HOST) {
+    if ([...target.searchParams.keys()].some((key) => !PHARMACY_TRANSLATE_PARAMETERS.has(key))) return undefined;
+    if (/^\/forms\/[a-z0-9][a-z0-9-]*$/i.test(target.pathname)) return { kind: "budzdorov-family", source };
+    const product = target.pathname.match(/^\/product\/(\d+)$/i);
+    return product ? { kind: "budzdorov-product", source, productId: product[1] } : undefined;
+  }
+
+  if (target.hostname === ETABL_TRANSLATE_HOST) {
+    if (target.pathname === "/search") {
+      if ([...target.searchParams.keys()].some((key) =>
+        !PHARMACY_TRANSLATE_PARAMETERS.has(key) && !["query", "limit"].includes(key)
+      )) return undefined;
+      const brand = singleSearchParameter(target, "query")?.normalize("NFKC").trim() ?? "";
+      if (brand.length < 2 || brand.length > 160 || singleSearchParameter(target, "limit") !== "100") return undefined;
+      source.searchParams.set("query", brand);
+      source.searchParams.set("limit", "100");
+      return { kind: "etabl-search", source };
+    }
+    const product = target.pathname.match(/^\/product\/[a-z0-9-]+=(\d+)$/i);
+    if (!product || [...target.searchParams.keys()].some((key) => !PHARMACY_TRANSLATE_PARAMETERS.has(key))) return undefined;
+    return { kind: "etabl-product", source, productId: product[1] };
+  }
+
   const group = target.pathname.match(/^\/(pg|reviews)\/([^/]+)\/$/i);
   if (!group) return undefined;
   let brand: string;
@@ -179,6 +244,16 @@ function parsePharmacyTranslateTarget(target: URL): PharmacyTranslateTarget | un
     source.searchParams.set(key, value);
   }
   return { kind: "okapteka-reviews", source };
+}
+
+function parseAptekaRuTarget(target: URL): AptekaRuTarget | undefined {
+  if (target.protocol !== "https:" || target.hostname !== "apteka.ru" || target.port || target.username ||
+    target.password || target.search || target.hash) return undefined;
+  if (/^\/preparation\/[a-z0-9][a-z0-9-]*\/$/i.test(target.pathname)) {
+    return { kind: "preparation", source: new URL(target.toString()) };
+  }
+  const product = target.pathname.match(/^\/product\/[a-z0-9-]+-([a-f0-9]{24})\/$/i);
+  return product ? { kind: "product", source: new URL(target.toString()), productId: product[1] } : undefined;
 }
 
 function translatedSourceMatches(value: string | undefined, requested: URL): boolean {
@@ -351,8 +426,145 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
   if (/(?:captcha|access denied|unusual traffic|подозрительн\w*\s+активност|проверка\s+браузера|Target URL returned error)/i.test(title) ||
     /<(?:iframe|form|input)\b[^>]*(?:captcha|challenge)/i.test(html.slice(0, 150_000))) return undefined;
   const baseValue = $("base[href]").first().attr("href");
-  if (!translatedSourceMatches(baseValue, requested.source)) return undefined;
-  const base = `<base href="${escapeHtml(baseValue!)}">`;
+  const dataSource = $("[data-source-url]").first().attr("data-source-url");
+  if (!translatedSourceMatches(baseValue, requested.source) && !translatedSourceMatches(dataSource, requested.source)) return undefined;
+  const base = `<base href="${escapeHtml(requested.source.toString())}">`;
+
+  if (requested.kind === "apteka-preparation" || requested.kind === "apteka-product") {
+    return compactAptekaRuHtml(html, {
+      kind: requested.kind === "apteka-preparation" ? "preparation" : "product",
+      source: requested.source,
+      productId: requested.productId
+    });
+  }
+
+  if (requested.kind === "nfapteka-search") {
+    const cards: string[] = [];
+    $(".productOuter, [class*='productOuter']").each((_index, node) => {
+      const root = $(node);
+      const link = root.find(".productName a[href], a[href$='.html'], a[href*='.html?']").first();
+      const productId = root.find("[data-id]").first().attr("data-id")?.trim();
+      const titleText = (link.text() || root.find("img[alt]").first().attr("alt") || "").normalize("NFKC").replace(/\s+/g, " ").trim();
+      if (!productId || !/^\d+$/.test(productId) || !titleText) return;
+      let product: URL;
+      try { product = new URL(link.attr("href") ?? "", requested.source); }
+      catch { return; }
+      if (![NFAPTEKA_TRANSLATE_HOST, "nfapteka.ru"].includes(product.hostname) ||
+        !/^\/(?:[a-z0-9-]+\/)*catalog\/(?:[a-z0-9-]+\/)*[a-z0-9-]+\.html$/i.test(product.pathname)) return;
+      cards.push(`<div class="productOuter"><div class="productName"><a href="https://nfapteka.ru${escapeHtml(product.pathname)}">${escapeHtml(titleText)}</a></div>` +
+        `<a data-id="${escapeHtml(productId)}"></a></div>`);
+    });
+    const pageText = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    const empty = pageText.match(/(?:ничего не найдено|товары не найдены|по вашему запросу.{0,80}не найдено)/i)?.[0];
+    if (!cards.length && !empty) return undefined;
+    return `<html><head>${base}</head><body><main>${cards.join("")}${empty ? `<p>${escapeHtml(empty)}</p>` : ""}</main></body></html>`;
+  }
+
+  if (requested.kind === "nfapteka-product") {
+    const canonicalValue = $("link[rel='canonical'][href]").first().attr("href");
+    const productId = $("input[name='productId']").first().attr("value")?.trim() ?? $("[data-id]").first().attr("data-id")?.trim();
+    const heading = $("h1").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    const aggregate = $("[itemprop='aggregateRating']").first();
+    const reviews = aggregate.find("[itemprop='reviewCount']").first().attr("content")?.trim() ??
+      aggregate.find("[itemprop='reviewCount']").first().text().replace(/[\s\u00a0]+/g, "");
+    const rating = aggregate.find("[itemprop='ratingValue']").first().attr("content")?.trim() ??
+      aggregate.find("[itemprop='ratingValue']").first().text().trim();
+    if (!translatedSourceMatches(canonicalValue, requested.source) || !productId || !/^\d+$/.test(productId) || !heading ||
+      !/^\d+$/.test(reviews) || Number(reviews) > 0 && !/^\d(?:[.,]\d+)?$/.test(rating)) return undefined;
+    return `<html><head>${base}<link rel="canonical" href="${escapeHtml(requested.source.toString())}"></head><body>` +
+      `<h1>${escapeHtml(heading)}</h1><input name="productId" value="${escapeHtml(productId)}">` +
+      `<div itemprop="aggregateRating"><meta itemprop="reviewCount" content="${escapeHtml(reviews)}">` +
+      `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</div></body></html>`;
+  }
+
+  if (requested.kind === "budzdorov-family") {
+    const products = new Map<string, string>();
+    $("a[href*='/product/']").each((_index, node) => {
+      const titleText = ($(node).attr("title") || $(node).text()).normalize("NFKC").replace(/\s+/g, " ").trim();
+      let product: URL;
+      try { product = new URL($(node).attr("href") ?? "", requested.source); }
+      catch { return; }
+      const productId = product.pathname.match(/^\/product\/(?:[a-z0-9-]+-)?(\d+)\/?$/i)?.[1];
+      if (!productId || ![BUDZDOROV_TRANSLATE_HOST, "www.budzdorov.ru"].includes(product.hostname) || !titleText) return;
+      products.set(productId, titleText);
+    });
+    const pageText = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    const empty = pageText.match(/(?:ничего не найдено|товары не найдены|нет препаратов)/i)?.[0];
+    if (!products.size && !empty) return undefined;
+    return `<html><head>${base}</head><body><main>${[...products].map(([id, titleText]) =>
+      `<a href="https://www.budzdorov.ru/product/${escapeHtml(id)}" title="${escapeHtml(titleText)}">${escapeHtml(titleText)}</a>`
+    ).join("")}${empty ? `<p>${escapeHtml(empty)}</p>` : ""}</main></body></html>`;
+  }
+
+  if (requested.kind === "budzdorov-product") {
+    const heading = $("h1").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    const total = $("[allreviewsqty]").first().attr("allreviewsqty")?.trim();
+    const stateScript = $("script").toArray().map((node) => $(node).html() ?? "").find((value) => value.startsWith("window.__INITIAL_STATE__="));
+    if (!heading || !total || !/^\d+$/.test(total) || !stateScript) return undefined;
+    const raw = stateScript.slice("window.__INITIAL_STATE__=".length);
+    const marker = raw.indexOf(";document.currentScript.remove()");
+    let state: { productView?: { reviews?: unknown } };
+    try { state = JSON.parse(marker >= 0 ? raw.slice(0, marker) : raw.replace(/;\s*$/, "")) as typeof state; }
+    catch { return undefined; }
+    if (!Array.isArray(state.productView?.reviews) || state.productView.reviews.length !== Number(total)) return undefined;
+    const reviews: Array<{ id: string; ratings: Array<{ attribute_code: string; value: number }> }> = [];
+    const ids = new Set<string>();
+    for (const value of state.productView.reviews) {
+      if (!value || typeof value !== "object") return undefined;
+      const review = value as { id?: unknown; ratings?: unknown };
+      const id = String(review.id ?? "");
+      const ratings = Array.isArray(review.ratings) ? review.ratings : [];
+      const scores = ratings.filter((item): item is { attribute_code?: unknown; value?: unknown } => Boolean(item && typeof item === "object"))
+        .filter((item) => String(item.attribute_code ?? "").toLocaleLowerCase("ru-RU") === "оценка");
+      const score = scores.length === 1 ? Number(scores[0].value) : Number.NaN;
+      if (!id || ids.has(id) || !Number.isInteger(score) || score < 1 || score > 5) return undefined;
+      ids.add(id);
+      reviews.push({ id, ratings: [{ attribute_code: "Оценка", value: score }] });
+    }
+    const compactState = JSON.stringify({ productView: { reviews } }).replace(/</g, "\\u003c");
+    return `<html><head>${base}</head><body><h1>${escapeHtml(heading)}</h1><div allreviewsqty="${escapeHtml(total)}"></div>` +
+      `<script>window.__INITIAL_STATE__=${compactState};document.currentScript.remove()</script></body></html>`;
+  }
+
+  if (requested.kind === "etabl-search" || requested.kind === "etabl-product") {
+    const stateScript = $("script").toArray().map((node) => $(node).html() ?? "").find((value) => value.startsWith("window.__INITIAL_STATE__="));
+    if (!stateScript) return undefined;
+    const raw = stateScript.slice("window.__INITIAL_STATE__=".length);
+    const marker = raw.indexOf(";document.currentScript.remove()");
+    let state: { search?: { searchResultNew?: unknown; searchResultCount?: unknown }; products?: { product?: unknown } };
+    try { state = JSON.parse(marker >= 0 ? raw.slice(0, marker) : raw.replace(/;\s*$/, "")) as typeof state; }
+    catch { return undefined; }
+    const validateProduct = (value: unknown): Record<string, unknown> | undefined => {
+      if (!value || typeof value !== "object") return undefined;
+      const item = value as Record<string, unknown>;
+      const id = String(item.id ?? "");
+      const slug = String(item.url ?? "");
+      const name = String(item.name ?? "").normalize("NFKC").replace(/\s+/g, " ").trim();
+      const subtitleFull = String(item.subtitleFull ?? "").normalize("NFKC").replace(/\s+/g, " ").trim();
+      const reviewsStats = item.reviewsStats;
+      if (!/^\d+$/.test(id) || !new RegExp(`^[a-z0-9-]+=${id}$`, "i").test(slug) || !name || !subtitleFull ||
+        !reviewsStats || typeof reviewsStats !== "object") return undefined;
+      const stats = reviewsStats as Record<string, unknown>;
+      const reviewsCount = Number(stats.reviewsCount);
+      const rating = Number(stats.rating);
+      if (!Number.isSafeInteger(reviewsCount) || reviewsCount < 0 || reviewsCount > 0 && (!Number.isFinite(rating) || rating <= 0 || rating > 5)) return undefined;
+      return { id, name, url: slug, subtitleFull, reviewsStats: { reviewsCount, rating } };
+    };
+    let compactState: Record<string, unknown>;
+    if (requested.kind === "etabl-search") {
+      if (!Array.isArray(state.search?.searchResultNew)) return undefined;
+      const products = state.search.searchResultNew.map(validateProduct);
+      const count = Number(state.search.searchResultCount);
+      if (products.some((item) => !item) || !Number.isSafeInteger(count) || count < 0 || count !== products.length) return undefined;
+      compactState = { search: { searchResultNew: products, searchResultCount: count } };
+    } else {
+      const product = validateProduct(state.products?.product);
+      if (!product || product.id !== requested.productId) return undefined;
+      compactState = { products: { product } };
+    }
+    return `<html><head>${base}<script data-source-url="${escapeHtml(requested.source.toString())}"></script></head><body>` +
+      `<script>window.__INITIAL_STATE__=${JSON.stringify(compactState).replace(/</g, "\\u003c")};document.currentScript.remove()</script></body></html>`;
+  }
 
   if (requested.kind === "polza-family") {
     const cards: string[] = [];
@@ -1006,6 +1218,70 @@ function compactOzonTranslateHtml(html: string, requested: OzonTranslateTarget):
     `<script>window.__NUXT__={};window.__NUXT__.state={}</script></body></html>`;
 }
 
+function compactAptekaRuHtml(html: string, requested: AptekaRuTarget): string | undefined {
+  if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
+  const $ = load(html);
+  const title = $("title").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+  if (/(?:captcha|access denied|unusual traffic|проверка браузера|Target URL returned error)/i.test(title) ||
+    /<(?:iframe|form|input)\b[^>]*(?:captcha|challenge)/i.test(html.slice(0, 150_000))) return undefined;
+  const canonicalValue = $("link[rel='canonical'][href]").first().attr("href");
+  if (!translatedSourceMatches(canonicalValue, requested.source)) return undefined;
+  const base = `<base href="${escapeHtml(requested.source.toString())}">`;
+
+  if (requested.kind === "preparation") {
+    const heading = $("h1").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    const products = new Map<string, { url: string; title: string }>();
+    $("a[href*='/product/']").each((_index, node) => {
+      let product: URL;
+      try { product = new URL($(node).attr("href") ?? "", requested.source); }
+      catch { return; }
+      const id = product.pathname.match(/^\/product\/[a-z0-9-]+-([a-f0-9]{24})\/$/i)?.[1];
+      const productTitle = ($(node).attr("aria-label") || $(node).text()).normalize("NFKC").replace(/\s+/g, " ").trim();
+      if (product.protocol !== "https:" || product.hostname !== "apteka.ru" || !id || !productTitle) return;
+      products.set(id, { url: `https://apteka.ru${product.pathname}`, title: productTitle });
+    });
+    const pageText = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    const empty = pageText.match(/(?:ничего не найдено|товары не найдены|нет в наличии)/i)?.[0];
+    if (!heading || !products.size && !empty) return undefined;
+    return `<html><head>${base}<link rel="canonical" href="${escapeHtml(requested.source.toString())}"></head><body><main>` +
+      `<h1>${escapeHtml(heading)}</h1>${[...products.values()].map((product) =>
+        `<article class="product"><a href="${escapeHtml(product.url)}" aria-label="${escapeHtml(product.title)}">${escapeHtml(product.title)}</a></article>`
+      ).join("")}${empty ? `<p>${escapeHtml(empty)}</p>` : ""}</main></body></html>`;
+  }
+
+  const products: Array<Record<string, unknown>> = [];
+  for (const script of $("script[type='application/ld+json']").toArray()) {
+    try { products.push(...ozonJsonLdEntries(JSON.parse($(script).text()) as unknown)); }
+    catch { /* unrelated malformed JSON-LD is not product proof */ }
+  }
+  const product = products.find((item) => {
+    const types = Array.isArray(item["@type"]) ? item["@type"] : [item["@type"]];
+    return types.includes("Product") && String(item.sku ?? "") === requested.productId &&
+      typeof item.name === "string" && item.name.trim().length > 0;
+  });
+  if (!product) return undefined;
+  const aggregate = product.aggregateRating;
+  if (!aggregate || typeof aggregate !== "object") return undefined;
+  const metrics = aggregate as Record<string, unknown>;
+  const reviewCount = String(metrics.reviewCount ?? "").replace(/[\s\u00a0\u202f]+/g, "");
+  const ratingCount = String(metrics.ratingCount ?? "").replace(/[\s\u00a0\u202f]+/g, "");
+  const counts = [reviewCount, ratingCount].filter((value) => /^\d+$/.test(value)).map(Number);
+  const ratingValue = Number(String(metrics.ratingValue ?? "").replace(",", "."));
+  if (!counts.length || Math.max(...counts) > 0 && (!Number.isFinite(ratingValue) || ratingValue <= 0 || ratingValue > 5)) return undefined;
+  const compactProduct = {
+    "@context": "https://schema.org", "@type": "Product", sku: requested.productId, name: product.name,
+    aggregateRating: {
+      "@type": "AggregateRating",
+      ...(reviewCount ? { reviewCount: Number(reviewCount) } : {}),
+      ...(ratingCount ? { ratingCount: Number(ratingCount) } : {}),
+      ...(Math.max(...counts) > 0 ? { ratingValue } : {})
+    }
+  };
+  return `<html><head>${base}<link rel="canonical" href="${escapeHtml(requested.source.toString())}">` +
+    `<script type="application/ld+json">${JSON.stringify(compactProduct).replace(/</g, "\\u003c")}</script>` +
+    `</head><body><h1>${escapeHtml(String(product.name))}</h1></body></html>`;
+}
+
 function assertOwner(run: RunState, user: AuthUser): void {
   if (run.ownerEmail && run.ownerEmail !== user.email) throw new Error("Этот запуск принадлежит другому сотруднику");
 }
@@ -1101,6 +1377,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     );
   const ozonTranslatedTarget = parseOzonTranslateTarget(target);
   const pharmacyTranslatedTarget = parsePharmacyTranslateTarget(target);
+  const aptekaRuTarget = parseAptekaRuTarget(target);
   let ozonTarget = false;
   if (target.hostname === "www.ozon.ru" && target.pathname === "/api/composer-api.bx/page/json/v2") {
     const nested = target.searchParams.get("url") ?? "";
@@ -1115,7 +1392,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         /^\d+$/.test(page) && Number(page) >= 1 && Number(page) <= 100;
     } catch { /* invalid nested Ozon search URL */ }
   }
-  if (target.protocol !== "https:" || !(reviewTarget || medOtzyvSearchTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || pharmacyTranslatedTarget)) {
+  if (target.protocol !== "https:" || !(reviewTarget || medOtzyvSearchTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || pharmacyTranslatedTarget || aptekaRuTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
   }
   if (medOtzyvSearchTarget) {
@@ -1134,6 +1411,37 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
         "x-ratings-source": "duckduckgo-exact-med-otzyv-index"
+      }
+    });
+  }
+  if (aptekaRuTarget) {
+    const upstream = await safeFetch(target.toString(), {
+      method: "GET",
+      redirect: "manual",
+      headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+    }, fetch, 0, 60_000);
+    const html = await readTextBounded(upstream, 12_000_000, 60_000);
+    if (!upstream.ok) {
+      return new Response(html, {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "text/html; charset=utf-8" }
+      });
+    }
+    if (!/(?:text\/html|application\/xhtml\+xml)/i.test(upstream.headers.get("content-type") ?? "")) {
+      return json({ error: "Apteka.ru response is not HTML" }, 502);
+    }
+    const compactHtml = compactAptekaRuHtml(html, aptekaRuTarget);
+    if (!compactHtml || compactHtml.length > 350_000) {
+      return json({ error: "Apteka.ru page did not prove the requested source and metrics" }, 502);
+    }
+    return new Response(compactHtml, {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "apteka-first-party-ssr",
+        "x-ratings-original-bytes": String(new TextEncoder().encode(html).byteLength),
+        "x-ratings-proof-bytes": String(new TextEncoder().encode(compactHtml).byteLength)
       }
     });
   }

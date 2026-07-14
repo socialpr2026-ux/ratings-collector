@@ -187,7 +187,10 @@ describe("ratings Agent lazy Sandbox routing", () => {
       "https://farmlend-ru.translate.goog/search?keyword=Кагоцел&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
       "https://okapteka-ru.translate.goog/pg/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
       "https://www-asna-ru.translate.goog/cards/kagotsel_12mg_n10_tab_niarmedik_plyus_ooo.html?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
-      "https://polza-ru.translate.goog/product/otsillokoktsinum/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
+      "https://polza-ru.translate.goog/product/otsillokoktsinum/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
+      "https://apteka-ru.translate.goog/preparation/otsillokoktsinum/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
+      "https://nfapteka-ru.translate.goog/catalog/?q=Оциллококцинум&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
+      "https://www-budzdorov-ru.translate.goog/forms/ocillokokcinum?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
     ]) {
       const response = await routedFetch(target);
       expect(await response.text()).toBe("compact pharmacy proof");
@@ -196,6 +199,25 @@ describe("ratings Agent lazy Sandbox routing", () => {
       expect(JSON.parse(String((call[1] as RequestInit).body))).toEqual({ url: new URL(target).toString() });
     }
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("routes only exact Apteka.ru preparation and product paths through fixed function egress", async () => {
+    const directFetch = vi.fn(async (_input: RequestInfo | URL) => new Response("apteka proof", { headers: { "content-type": "text/html" } }));
+    vi.stubGlobal("fetch", directFetch);
+    const run = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "t".repeat(32)
+    });
+
+    for (const target of [
+      "https://apteka.ru/preparation/otsillokoktsinum/",
+      "https://apteka.ru/product/oczillokokczinum-30-sht-granuly-5e3268eaca7bdc000192d316/"
+    ]) {
+      expect(await (await routedFetch(target)).text()).toBe("apteka proof");
+    }
+    expect(run).not.toHaveBeenCalled();
+    expect(directFetch.mock.calls.every(([input]) => input === "https://ratings.example/api/internal/static-review-fetch")).toBe(true);
   });
 
   it("retries one transient ASNA function failure and remains fail-closed without Sandbox", async () => {

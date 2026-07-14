@@ -19,18 +19,20 @@ describe("additional pharmacy adapters", () => {
   it("collects exact Apteka.ru variants from Product JSON-LD and keeps ratingCount separate", async () => {
     const id = "5e3268eaca7bdc000192d316";
     const productUrl = `https://apteka.ru/product/oczillokokczinum-30-sht-granuly-${id}/`;
-    const preparation = `<!doctype html><html><body><main><h1>Оциллококцинум</h1><article class="product"><a href="${productUrl}" aria-label="Оциллококцинум 30 шт. гранулы">Оциллококцинум 30 шт. гранулы</a></article></main></body></html>`;
-    const product = `<!doctype html><html><head><script type="application/ld+json">${JSON.stringify({
+    const preparationUrl = "https://apteka.ru/preparation/otsillokoktsinum/";
+    const preparation = `<!doctype html><html><head><base href="${preparationUrl}"></head><body><main><h1>Оциллококцинум</h1><article class="product"><a href="${productUrl}" aria-label="Оциллококцинум 30 шт. гранулы">Оциллококцинум 30 шт. гранулы</a></article></main></body></html>`;
+    const product = `<!doctype html><html><head><base href="${productUrl}"><script type="application/ld+json">${JSON.stringify({
       "@context": "https://schema.org", "@type": "Product", sku: id,
       name: "Оциллококцинум 30 шт. гранулы",
       aggregateRating: { "@type": "AggregateRating", reviewCount: 44, ratingCount: 57, ratingValue: 4.9 }
     })}</script></head><body><h1>Оциллококцинум 30 шт. гранулы</h1></body></html>`;
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
       return new Response(url.pathname.startsWith("/preparation/") ? preparation : product, {
         status: 200, headers: { "content-type": "text/html" }
       });
-    }) as unknown as typeof fetch;
+    });
+    const fetchMock = fetchSpy as unknown as typeof fetch;
     const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), fetchMock);
 
     const refs = await adapter.discover("Оциллококцинум", context);
@@ -43,11 +45,13 @@ describe("additional pharmacy adapters", () => {
       rating: 4.9,
       status: "ok"
     });
+    expect(fetchSpy.mock.calls.every(([input]) => new URL(String(input)).hostname === "apteka-ru.translate.goog")).toBe(true);
   });
 
   it("fails closed when Apteka.ru Product JSON-LD loses its feedback aggregate", async () => {
     const id = "5e3268eaca7bdc000192d316";
-    const html = `<!doctype html><script type="application/ld+json">${JSON.stringify({
+    const productUrl = `https://apteka.ru/product/oczillokokczinum-30-sht-granuly-${id}/`;
+    const html = `<!doctype html><head><base href="${productUrl}"></head><script type="application/ld+json">${JSON.stringify({
       "@type": "Product", sku: id, name: "Оциллококцинум 30 шт. гранулы"
     })}</script><h1>Оциллококцинум</h1>`;
     const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(html, {
@@ -55,7 +59,7 @@ describe("additional pharmacy adapters", () => {
     })) as unknown as typeof fetch);
     await expect(adapter.collect({
       domain: "apteka.ru", platform: "apteka.ru", listingId: id, brand: "Оциллококцинум",
-      url: `https://apteka.ru/product/oczillokokczinum-30-sht-granuly-${id}/`, metadata: {}
+      url: productUrl, metadata: {}
     }, context)).rejects.toBeInstanceOf(ParserChangedError);
   });
 

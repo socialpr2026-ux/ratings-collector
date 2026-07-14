@@ -240,12 +240,20 @@ export function browserFetch(
         /^\/g_[a-z0-9-]+\/$/i.test(url.pathname) ||
         /^\/p_[a-z0-9][a-z0-9-]*-\d+\.html$/i.test(url.pathname)
       );
+    const fixedAptekaTarget = url.protocol === "https:" && url.hostname === "apteka.ru" &&
+      !url.port && !url.username && !url.password && !url.hash && !url.search && (
+        /^\/preparation\/[a-z0-9][a-z0-9-]*\/$/i.test(url.pathname) ||
+        /^\/product\/[a-z0-9-]+-[a-f0-9]{24}\/$/i.test(url.pathname)
+      );
     if (staticProxy && [
       "www-ozon-ru.translate.goog",
       "farmlend-ru.translate.goog",
       "okapteka-ru.translate.goog",
       "www-asna-ru.translate.goog",
       "polza-ru.translate.goog",
+      "apteka-ru.translate.goog",
+      "nfapteka-ru.translate.goog",
+      "www-budzdorov-ru.translate.goog",
       "megamarket-ru.translate.goog"
     ].includes(url.hostname)) {
       const first = await fetchViaStaticProxy(url, request.signal);
@@ -256,6 +264,9 @@ export function browserFetch(
       // second failure is returned unchanged and remains fail-closed.
       await new Promise((resolve) => setTimeout(resolve, 200));
       request.signal.throwIfAborted();
+      return fetchViaStaticProxy(url, request.signal);
+    }
+    if (staticProxy && fixedAptekaTarget) {
       return fetchViaStaticProxy(url, request.signal);
     }
     if (staticProxy && fixedWildberriesTarget) {

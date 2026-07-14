@@ -641,6 +641,72 @@ describe("static pharmacy Translate gateway", () => {
     expect(upstream).toHaveBeenCalledTimes(2);
   });
 
+  it("compacts exact NFapteka search and product microdata", async () => {
+    const searchTarget = translated("nfapteka-ru.translate.goog", "/catalog/", { q: "Оциллококцинум" });
+    const searchSource = new URL("https://nfapteka.ru/catalog/");
+    searchSource.searchParams.set("q", "Оциллококцинум");
+    const productPath = "/tambov/catalog/prostuda/otsillokoktsinum-gran-gomeopat-1-doza-1-g-12.html";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/catalog/") return new Response(`<html><head><base href="${searchSource}"></head><body>
+        <div class="productOuter"><div class="productName"><a href="https://nfapteka-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">Оциллококцинум гранулы №12</a></div><a data-id="97307"></a></div>
+      </body></html>`, { headers: { "content-type": "text/html" } });
+      const source = `https://nfapteka.ru${productPath}`;
+      return new Response(`<html><head><base href="${source}"><link rel="canonical" href="${source}"></head><body>
+        <h1>Оциллококцинум гранулы №12</h1><input name="productId" value="97307"><div itemprop="aggregateRating">
+        <meta itemprop="ratingValue" content="4.3"><span itemprop="reviewCount">3</span></div></body></html>`, {
+        headers: { "content-type": "text/html" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const search = await callGateway(searchTarget.toString());
+    expect(search.status).toBe(200);
+    expect(await search.text()).toContain('data-id="97307"');
+    const product = await callGateway(translated("nfapteka-ru.translate.goog", productPath).toString());
+    const proof = await product.text();
+    expect(product.status).toBe(200);
+    expect(proof).toContain('itemprop="reviewCount" content="3"');
+    expect(proof).toContain('itemprop="ratingValue" content="4.3"');
+  });
+
+  it("compacts the complete Bud Zdorov review state", async () => {
+    const source = "https://www.budzdorov.ru/product/2511";
+    const reviews = [
+      { id: 1, ratings: [{ attribute_code: "Оценка", value: 5 }] },
+      { id: 2, ratings: [{ attribute_code: "Оценка", value: 4 }] }
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"></head><body>
+      <h1>Оциллококцинум гранулы 6 доз</h1><div allreviewsqty="2"></div>
+      <script>window.__INITIAL_STATE__=${JSON.stringify({ productView: { reviews } })};document.currentScript.remove()</script>
+    </body></html>`, { headers: { "content-type": "text/html" } })));
+
+    const response = await callGateway(translated("www-budzdorov-ru.translate.goog", "/product/2511").toString());
+    const proof = await response.text();
+    expect(response.status).toBe(200);
+    expect(proof).toContain('allreviewsqty="2"');
+    expect(proof).toContain('"attribute_code":"Оценка","value":4');
+  });
+
+  it("allows only exact Apteka.ru product paths and compacts their Product aggregate", async () => {
+    const source = "https://apteka.ru/product/oczillokokczinum-30-sht-granuly-5e3268eaca7bdc000192d316/";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"><link rel="canonical" href="${source}">
+      <script type="application/ld+json">${JSON.stringify({
+        "@type": "Product", sku: "5e3268eaca7bdc000192d316", name: "Оциллококцинум 30 шт. гранулы",
+        aggregateRating: { ratingValue: 4.9, reviewCount: 44, ratingCount: 57 }
+      })}</script></head><body><h1>Оциллококцинум 30 шт. гранулы</h1></body></html>`, {
+      headers: { "content-type": "text/html" }
+    })));
+
+    const response = await callGateway(translated("apteka-ru.translate.goog", new URL(source).pathname).toString());
+    const proof = await response.text();
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-pharmacy-ssr");
+    expect(proof).toContain('"reviewCount":44');
+    expect(proof).toContain('"ratingCount":57');
+    expect((await callGateway("https://apteka.ru/search?q=Оциллококцинум")).status).toBe(400);
+  });
+
   it("rejects unbounded queries and a mismatched source before metrics can become zero", async () => {
     const upstream = vi.fn(async () => new Response(`<html><head>
       <base href="https://farmlend.ru/search?keyword=Другой"></head><body>ничего не найдено</body></html>`, {
