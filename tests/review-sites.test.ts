@@ -357,11 +357,11 @@ describe("first-party review-site adapters", () => {
       title: "Противовирусные средства Кагоцел",
       metadata: { source: "irecommend-search", reviewCount: 430, rating: 3.9 }
     }]);
-    expect(result).toMatchObject({ reviews: 430, rating: 3.9, ratingCount: 417, status: "ok" });
+    expect(result).toMatchObject({ reviews: 430, rating: 3.9, ratingCount: null, status: "ok" });
   });
 
   it("does not mistake iRecommend's dormant captcha script for an active challenge", async () => {
-    const adapter = adapterFor("irecommend.ru", (async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = urlOf(input);
       if (url.pathname === "/srch") return new Response(`<html><head><script src="/captcha-checker/assets/script.js"></script></head><body>
         <ul class="srch-result-nodes"><li><div class="ProductTizer" data-type="2" data-nid="2473">
@@ -369,16 +369,16 @@ describe("first-party review-site adapters", () => {
           <a class="read-all-reviews-link"><span class="counter">258</span></a><span class="reviewsLink">258 отзывов</span>
           <div class="fivestar-summary"><span class="average-rating"><span>3.7</span></span></div>
         </div></li></ul></body></html>`);
-      return new Response(`<html><head><script src="/captcha-checker/assets/script.js"></script>` +
-        `<link rel="canonical" href="${url}"></head><body><h1>Гомеопатия Лаборатория БУАРОН Оциллококцинум</h1>` +
-        `<div>Среднее: 3.7 (258 голосов)</div><a href="${url}">Читать все отзывы 258</a></body></html>`);
-    }) as typeof fetch);
+      throw new Error("a proved iRecommend ProductTizer must not require a second CAPTCHA-prone product request");
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("irecommend.ru", fetchMock);
 
     const refs = await adapter.discover("Оциллококцинум", { ...context, brands: ["Оциллококцинум"] });
     const observation = await adapter.collect(refs[0]!, context);
 
     expect(refs).toMatchObject([{ listingId: "2473", metadata: { reviewCount: 258, rating: 3.7 } }]);
     expect(observation).toMatchObject({ listingId: "2473", reviews: 258, rating: 3.7, status: "ok" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("checks iRecommend through its strict search route instead of the now-disallowed origin", async () => {

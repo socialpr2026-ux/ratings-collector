@@ -13,7 +13,7 @@ const MAX_SEARCH_PAGES = 20;
 const MAX_PRODUCTS = 500;
 const MEGAPTEKA_SEARCH_PAGE_SIZE = 40;
 const BLOCK_MARKERS = /captcha|access denied|temporarily unavailable|доступ (?:ограничен|запрещен)|проверка браузера|не робот/i;
-const PHARMACEUTICAL_REVIEW_TITLE = /(?:лекарственн|противовирусн|препарат|медицинск|ноотропн|средств|таблет|капсул|сироп|суспенз|раствор|спрей|мазь)/iu;
+const PHARMACEUTICAL_REVIEW_TITLE = /(?:лекарственн|противовирусн|препарат|медицинск|ноотропн|гомеопат|средств|таблет|капсул|сироп|суспенз|раствор|спрей|мазь)/iu;
 const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 type ParsedMetrics = {
@@ -985,6 +985,63 @@ export class ReviewSiteAdapter implements SiteAdapter {
 
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
     const capturedAt = new Date().toISOString();
+    // iRecommend's ProductTizer is itself the platform's aggregate product
+    // record: numeric node id, canonical product URL, title, written-review
+    // count and rating are present together. Once discovery has proved that
+    // complete tuple, a second request to the same product page adds no data
+    // and is substantially less reliable behind the site's CAPTCHA cache.
+    if (
+      this.definition.domain === "irecommend.ru" &&
+      ref.metadata.source === "irecommend-search" &&
+      /^\d+$/.test(ref.listingId) &&
+      Boolean(ref.title) &&
+      matchesBrand(ref.title!, ref.brand) &&
+      PHARMACEUTICAL_REVIEW_TITLE.test(ref.title!) &&
+      typeof ref.metadata.reviewCount === "number" &&
+      Number.isInteger(ref.metadata.reviewCount) &&
+      ref.metadata.reviewCount >= 0 &&
+      (ref.metadata.reviewCount === 0 ||
+        typeof ref.metadata.rating === "number" && Number.isFinite(ref.metadata.rating) &&
+        ref.metadata.rating > 0 && ref.metadata.rating <= 5)
+    ) {
+      const canonicalUrl = canonicalizeUrl(ref.url);
+      const reviews = ref.metadata.reviewCount;
+      const rating: number | null = reviews === 0 ? null : ref.metadata.rating as number;
+      const productEvidence = {
+        ...titleProductEvidence(ref.title!, { type: "product_id" as const, value: ref.listingId }, canonicalUrl),
+        scope: "product_family" as const
+      };
+      const proof = JSON.stringify({
+        listingId: ref.listingId, canonicalUrl, title: ref.title, reviews, rating,
+        source: ref.metadata.source
+      });
+      const evidenceRef = await this.evidence.put({
+        capturedAt,
+        url: canonicalUrl,
+        status: 200,
+        bodyDigest: createHash("sha256").update(proof).digest("hex"),
+        parsed: { listingId: ref.listingId, title: ref.title, reviews, rating, source: ref.metadata.source },
+        productEvidence
+      });
+      return {
+        domain: this.definition.domain,
+        platform: this.definition.domain,
+        listingId: ref.listingId,
+        brand: ref.brand,
+        canonicalUrl,
+        product: ref.title!,
+        reviews,
+        rating,
+        rawRating: rating,
+        rawRatingScale: 5,
+        ratingCount: null,
+        status: reviews === 0 ? "no_reviews" : "ok",
+        capturedAt,
+        evidenceRef,
+        productEvidence,
+        source: "irecommend-search"
+      };
+    }
     const { html, status } = await this.request(ref.url, context);
     if (status === 404 || status === 410) {
       return {
