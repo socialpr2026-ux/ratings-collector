@@ -410,10 +410,10 @@ function uniqueParsedCandidates(item: ProductNameInput): ProductParts[] {
   const strongTexts = [
     item.product,
     ...(item.evidence?.variants ?? []),
-    ...(item.evidence?.signals.filter((signal) => !["url", "instruction", "image_alt"].includes(signal.source)).map((signal) => signal.text) ?? [])
+    ...(item.evidence?.signals.filter((signal) => ["title", "json_ld", "variant"].includes(signal.source)).map((signal) => signal.text) ?? [])
   ];
   const fallbackTexts = item.evidence?.signals
-    .filter((signal) => signal.source === "instruction" || signal.source === "image_alt")
+    .filter((signal) => signal.source === "description" || signal.source === "instruction" || signal.source === "image_alt")
     .map((signal) => signal.text) ?? [];
   const byKey = new Map<string, ProductParts>();
   for (const [index, text] of strongTexts.entries()) {

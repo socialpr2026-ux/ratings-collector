@@ -175,6 +175,26 @@ describe("canonical product descriptors", () => {
     })).toMatchObject({ granularity: "variant", confidence: "exact", label: "капсулы 50 мг №20" });
   });
 
+  it("does not mix neighbouring packs or administration counts into an exact listing", () => {
+    expect(analyzeProductIdentity({
+      brand: "Кагоцел",
+      product: "Кагоцел таблетки 12 мг 10 шт",
+      evidence: {
+        scope: "listing",
+        signals: [
+          { source: "title", text: "Кагоцел таблетки 12 мг 10 шт" },
+          { source: "json_ld", text: "Кагоцел таблетки 12 мг 10 шт" },
+          { source: "description", text: "1 таблетка содержит 12 мг кагоцела, масса таблетки 100 мг" },
+          { source: "instruction", text: "Всего на курс 18 таблеток. Другие формы: Кагоцел таблетки 12 мг 20 шт и 30 шт" },
+          { source: "image_alt", text: "Купить Кагоцел таблетки 12 мг 30 шт" }
+        ],
+        variants: ["Кагоцел таблетки 12 мг 10 шт"],
+        identifiers: [{ type: "product_id", value: "208826" }],
+        imageUrls: [], instructionUrls: []
+      }
+    })).toMatchObject({ granularity: "variant", confidence: "exact", label: "таблетки 12 мг №10" });
+  });
+
   it("never exposes draft wording in product labels", () => {
     const labels = canonicalProductDescriptors([
       { brand: "Амиксин", product: "Модель 128489946 amiksin" },

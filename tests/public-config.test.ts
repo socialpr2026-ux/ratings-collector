@@ -280,3 +280,31 @@ describe("static pharmacy Translate gateway", () => {
     expect(await mismatch.text()).toContain("did not prove the requested source and metrics");
   });
 });
+
+describe("fixed first-party collection egress", () => {
+  const token = "x".repeat(32);
+  const callGateway = (url: string) => staticReviewFetch(
+    new Request("https://ratings.example/api/internal/static-review-fetch", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ url })
+    }),
+    { INTERNAL_AGENT_TOKEN: token }
+  );
+
+  it("allows only bounded Yandex sitemap and Zdravcity product routes", async () => {
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(input.toString());
+      return new Response(url.hostname === "reviews.yandex.ru" ? "<urlset></urlset>" : "<html>product</html>", {
+        headers: { "content-type": url.hostname === "reviews.yandex.ru" ? "application/xml" : "text/html" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    expect((await callGateway("https://reviews.yandex.ru/ugcpub/sitemap_model_590000000-599999999-0.xml")).status).toBe(200);
+    expect((await callGateway("https://zdravcity.ru/p_kagocel-tab-12mg-n10-12345.html")).status).toBe(200);
+    expect((await callGateway("https://zdravcity.ru/g_kagocel/?redirect=https://evil.example")).status).toBe(400);
+    expect((await callGateway("https://reviews.yandex.ru/ugcpub/private.xml")).status).toBe(400);
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+});

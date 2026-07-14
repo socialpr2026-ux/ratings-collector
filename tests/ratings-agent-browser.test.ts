@@ -176,6 +176,32 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("falls back to fixed function egress for exact Yandex sitemap and Zdravcity routes", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (typeof input !== "string") throw new TypeError("direct egress failed");
+      const requested = JSON.parse(String(init?.body)) as { url: string };
+      return new Response(requested.url.includes("sitemap") ? "<urlset></urlset>" : "<html>zdravcity proof</html>");
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    for (const target of [
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_590000000-599999999-0.xml",
+      "https://zdravcity.ru/g_kagocel/"
+    ]) {
+      const response = await routedFetch(target);
+      expect(response.ok).toBe(true);
+      const proxyCall = directFetch.mock.calls.at(-1)!;
+      expect(proxyCall[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+      expect(JSON.parse(String((proxyCall[1] as RequestInit).body))).toEqual({ url: target });
+    }
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("maps a lazy Sandbox quota failure to AdapterBlockedError", async () => {
     const run = vi.fn(async () => {
       throw new Error("Sandbox quota exceeded");

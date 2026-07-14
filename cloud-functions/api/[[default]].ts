@@ -499,6 +499,17 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     ].includes(target.pathname) ||
     target.hostname === "card.wb.ru" && target.pathname === "/cards/v4/detail"
   );
+  const yandexTarget = target.protocol === "https:" && target.hostname === "reviews.yandex.ru" &&
+    !target.port && !target.username && !target.password && !target.hash && !target.search && (
+      target.pathname === "/ugcpub/sitemap.xml" ||
+      /^\/ugcpub\/sitemap_model_\d+-\d+-\d+\.xml$/i.test(target.pathname) ||
+      /^\/product\/(?:[a-z0-9_-]+--)?\d+$/i.test(target.pathname)
+    );
+  const zdravcityTarget = target.protocol === "https:" && target.hostname === "zdravcity.ru" &&
+    !target.port && !target.username && !target.password && !target.hash && !target.search && (
+      /^\/g_[a-z0-9-]+\/$/i.test(target.pathname) ||
+      /^\/p_[a-z0-9][a-z0-9-]*-\d+\.html$/i.test(target.pathname)
+    );
   const ozonTranslatedTarget = parseOzonTranslateTarget(target);
   const pharmacyTranslatedTarget = parsePharmacyTranslateTarget(target);
   let ozonTarget = false;
@@ -515,7 +526,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         /^\d+$/.test(page) && Number(page) >= 1 && Number(page) <= 100;
     } catch { /* invalid nested Ozon search URL */ }
   }
-  if (target.protocol !== "https:" || !(reviewTarget || wildberriesTarget || ozonTarget || ozonTranslatedTarget || pharmacyTranslatedTarget)) {
+  if (target.protocol !== "https:" || !(reviewTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || pharmacyTranslatedTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
   }
   if (pharmacyTranslatedTarget) {
@@ -660,7 +671,11 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     method: "GET",
     redirect: "follow",
     headers: {
-      accept: wildberriesTarget || ozonTarget ? "application/json, text/plain, */*" : "text/html,application/xhtml+xml",
+      accept: wildberriesTarget || ozonTarget
+        ? "application/json, text/plain, */*"
+        : yandexTarget && target.pathname.startsWith("/ugcpub/")
+          ? "application/xml,text/xml"
+          : "text/html,application/xhtml+xml",
       "accept-language": "ru-RU,ru;q=0.9",
       ...(wildberriesTarget ? {
         origin: "https://www.wildberries.ru",

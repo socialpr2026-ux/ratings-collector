@@ -219,6 +219,17 @@ export function browserFetch(
       ].includes(url.pathname) ||
       url.hostname === "card.wb.ru" && url.pathname === "/cards/v4/detail"
     );
+    const fixedYandexTarget = url.protocol === "https:" && url.hostname === "reviews.yandex.ru" &&
+      !url.port && !url.username && !url.password && !url.hash && !url.search && (
+        url.pathname === "/ugcpub/sitemap.xml" ||
+        /^\/ugcpub\/sitemap_model_\d+-\d+-\d+\.xml$/i.test(url.pathname) ||
+        /^\/product\/(?:[a-z0-9_-]+--)?\d+$/i.test(url.pathname)
+      );
+    const fixedZdravcityTarget = url.protocol === "https:" && url.hostname === "zdravcity.ru" &&
+      !url.port && !url.username && !url.password && !url.hash && !url.search && (
+        /^\/g_[a-z0-9-]+\/$/i.test(url.pathname) ||
+        /^\/p_[a-z0-9][a-z0-9-]*-\d+\.html$/i.test(url.pathname)
+      );
     if (staticProxy && [
       "www-ozon-ru.translate.goog",
       "farmlend-ru.translate.goog",
@@ -240,6 +251,22 @@ export function browserFetch(
         if (direct.ok) return direct;
         const proxied = await fetchViaStaticProxy(url, request.signal);
         return proxied.ok ? proxied : direct;
+      } catch {
+        return fetchViaStaticProxy(url, request.signal);
+      }
+    }
+    if (staticProxy && (fixedYandexTarget || fixedZdravcityTarget)) {
+      try {
+        const direct = await fetch(request);
+        const shouldFallback = [403, 408, 425, 429].includes(direct.status) || direct.status >= 500;
+        if (!shouldFallback) return direct;
+        const proxied = await fetchViaStaticProxy(url, request.signal);
+        if (proxied.ok) {
+          await direct.body?.cancel().catch(() => undefined);
+          return proxied;
+        }
+        await proxied.body?.cancel().catch(() => undefined);
+        return direct;
       } catch {
         return fetchViaStaticProxy(url, request.signal);
       }
