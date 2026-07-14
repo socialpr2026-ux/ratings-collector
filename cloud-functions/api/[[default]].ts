@@ -8,6 +8,7 @@ import { RatingsService } from "../../src/server/orchestrator.js";
 import type { RepositoryRpc } from "../../src/server/remote-repository.js";
 import { prepareBrowserPublication, reconcileBrowserPublication } from "../../src/server/sheets/publication-state.js";
 import { safeErrorMessage } from "../../src/server/utils/error-message.js";
+import { matchesBrand } from "../../src/server/utils/normalize.js";
 import { readTextBounded, safeFetch } from "../../src/server/utils/safe-fetch.js";
 import { readerMarkdownToHtml, readerProxyUrl } from "../../src/server/utils/reader-proxy.js";
 import { importOzonCompanionResult, issueOzonCompanionSession } from "../../src/server/companion-import.js";
@@ -27,6 +28,7 @@ const OZON_TRANSLATE_HOST = "www-ozon-ru.translate.goog";
 const OZON_SOURCE_HOST = "www.ozon.ru";
 const OZON_TRANSLATE_PARAMETERS = new Set(["_x_tr_sl", "_x_tr_tl", "_x_tr_hl"]);
 const OZON_SEARCH_PARAMETERS = new Set([
+  "brand",
   "brand_was_predicted",
   "category_was_predicted",
   "deny_category_prediction",
@@ -544,7 +546,14 @@ function parseOzonTranslateTarget(target: URL): OzonTranslateTarget | undefined 
     text.length < 1 || text.length > 200 || singleSearchParameter(target, "from_global") !== "true" ||
     !/^\d+$/.test(page) || Number(page) < 1 || Number(page) > 100
   ) return undefined;
-  if (isSearch && (
+  if (isSearch && target.searchParams.has("brand")) {
+    if (
+      !/^\d{1,18}$/.test(singleSearchParameter(target, "brand") ?? "") ||
+      singleSearchParameter(target, "brand_was_predicted") !== "true" ||
+      singleSearchParameter(target, "deny_category_prediction") !== "true" ||
+      target.searchParams.has("category_was_predicted")
+    ) return undefined;
+  } else if (isSearch && (
     target.searchParams.has("brand_was_predicted") || target.searchParams.has("category_was_predicted") ||
     target.searchParams.has("deny_category_prediction")
   )) return undefined;
@@ -575,20 +584,29 @@ function validOzonTranslateRedirect(html: string, requested: OzonTranslateTarget
   if (!encoded) return false;
   try {
     const redirected = new URL(JSON.parse(encoded) as string);
+    const isCategory = /^\/category\/[a-z0-9-]+(?:\/[a-z0-9-]+)?\/$/i.test(redirected.pathname);
+    const isBrandSearch = redirected.pathname === "/search/";
     if (
       redirected.protocol !== "https:" || redirected.hostname !== OZON_SOURCE_HOST || redirected.port ||
       redirected.username || redirected.password || redirected.hash ||
-      !/^\/category\/[a-z0-9-]+(?:\/[a-z0-9-]+)?\/$/i.test(redirected.pathname)
+      (!isCategory && !isBrandSearch)
     ) return false;
     if ([...redirected.searchParams.keys()].some((key) => !OZON_SEARCH_PARAMETERS.has(key))) return false;
     if ([...redirected.searchParams.keys()].some((key) => redirected.searchParams.getAll(key).length !== 1)) return false;
-    return redirected.searchParams.get("text") === requested.source.searchParams.get("text") &&
+    const commonProof = redirected.searchParams.get("text") === requested.source.searchParams.get("text") &&
       redirected.searchParams.get("from_global") === "true" &&
-      (redirected.searchParams.get("page") ?? "1") === (requested.source.searchParams.get("page") ?? "1") &&
-      redirected.searchParams.get("category_was_predicted") === "true" &&
+      (redirected.searchParams.get("page") ?? "1") === (requested.source.searchParams.get("page") ?? "1");
+    if (!commonProof) return false;
+    if (isCategory) {
+      return redirected.searchParams.get("category_was_predicted") === "true" &&
+        redirected.searchParams.get("deny_category_prediction") === "true" &&
+        (!redirected.searchParams.has("brand_was_predicted") ||
+          redirected.searchParams.get("brand_was_predicted") === "true");
+    }
+    return /^\d{1,18}$/.test(redirected.searchParams.get("brand") ?? "") &&
+      redirected.searchParams.get("brand_was_predicted") === "true" &&
       redirected.searchParams.get("deny_category_prediction") === "true" &&
-      (!redirected.searchParams.has("brand_was_predicted") ||
-        redirected.searchParams.get("brand_was_predicted") === "true");
+      !redirected.searchParams.has("category_was_predicted");
   } catch {
     return false;
   }
@@ -787,6 +805,52 @@ function validIrecommendProof(html: string, requested: URL, target: IrecommendTa
   } catch {
     return false;
   }
+}
+
+function compactIrecommendReaderSearch(markdown: string, requested: URL, brand: string): string | undefined {
+  const sourceValue = markdown.match(/^URL Source:\s*(https:\/\/[^\s]+)\s*$/mi)?.[1];
+  try {
+    if (!sourceValue || exactUrlSignature(new URL(sourceValue)) !== exactUrlSignature(requested)) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  const cards = new Map<string, { id: string; title: string; url: string; reviews: number; rating: number }>();
+  const cardPattern = /\[([^\]\n]+)\]\((https:\/\/irecommend\.ru\/content\/[a-z0-9][a-z0-9-]*)\)\s+\[Читать\s+все\s+отзывы\s+([\d\s\u00a0]+)\]\((https:\/\/irecommend\.ru\/content\/[a-z0-9][a-z0-9-]*)\)/giu;
+  for (const match of markdown.matchAll(cardPattern)) {
+    const title = match[1]!.normalize("NFKC").replace(/\s+/g, " ").trim();
+    if (!matchesBrand(title, brand) || match[2] !== match[4]) continue;
+    const start = match.index ?? 0;
+    const cardText = markdown.slice(start, start + 2_500);
+    const metric = cardText.match(/Среднее\s*:\s*(?:Среднее\s*:\s*)?([0-5](?:[.,]\d+)?)\s*\(\s*([\d\s\u00a0]+)\s+голос/iu);
+    const written = cardText.match(/\[([\d\s\u00a0]+)\s+отзыв(?:а|ов)?\]\((https:\/\/irecommend\.ru\/content\/[a-z0-9][a-z0-9-]*)\)/iu);
+    const productId = cardText.match(/\/product-images\/(\d{1,18})\//i)?.[1];
+    const readAllCount = Number(match[3]!.replace(/[\s\u00a0]+/g, ""));
+    const writtenCount = Number(written?.[1]?.replace(/[\s\u00a0]+/g, ""));
+    const voteCount = Number(metric?.[2]?.replace(/[\s\u00a0]+/g, ""));
+    const rating = Number(metric?.[1]?.replace(",", "."));
+    if (
+      !productId || !Number.isSafeInteger(readAllCount) || readAllCount < 0 ||
+      !Number.isSafeInteger(writtenCount) || writtenCount !== readAllCount || written?.[2] !== match[2] ||
+      !Number.isSafeInteger(voteCount) || voteCount < 0 ||
+      !Number.isFinite(rating) || rating <= 0 || rating > 5 ||
+      readAllCount > 0 && voteCount === 0
+    ) continue;
+    const existing = cards.get(match[2]!);
+    const candidate = { id: productId, title, url: match[2]!, reviews: readAllCount, rating };
+    if (existing && JSON.stringify(existing) !== JSON.stringify(candidate)) return undefined;
+    cards.set(candidate.url, candidate);
+  }
+  if (!cards.size) return undefined;
+
+  const rendered = [...cards.values()].map((card) => `<li><div class="ProductTizer" data-type="2" data-nid="${card.id}">` +
+    `<div class="title"><a href="${escapeHtml(card.url)}">${escapeHtml(card.title)}</a></div>` +
+    `<a class="read-all-reviews-link" href="${escapeHtml(card.url)}"><span class="counter">${card.reviews}</span></a>` +
+    `<div class="reviewsLink">${card.reviews} отзывов</div>` +
+    `<div class="fivestar-summary"><span class="average-rating"><span>${card.rating}</span></span></div>` +
+    `</div></li>`).join("");
+  return `<html><head><link rel="canonical" href="${escapeHtml(requested.toString())}"></head>` +
+    `<body><h1>${escapeHtml(brand)}</h1><ul class="srch-result-nodes">${rendered}</ul></body></html>`;
 }
 
 /**
@@ -1096,6 +1160,19 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     });
     const readerBody = await readTextBounded(reader, 12_000_000, 60_000);
     if (!reader.ok) return new Response(readerBody, { status: reader.status, headers: { "content-type": "text/plain; charset=utf-8" } });
+    if (irecommendTarget.kind === "search") {
+      const compact = compactIrecommendReaderSearch(readerBody, target, irecommendTarget.brand!);
+      if (compact && validIrecommendProof(compact, target, irecommendTarget)) {
+        return new Response(compact, {
+          status: 200,
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store",
+            "x-ratings-source": "irecommend-reader-compact"
+          }
+        });
+      }
+    }
     const html = /^\s*(?:<!doctype\s+html|<html\b)/i.test(readerBody)
       ? readerBody
       : readerMarkdownToHtml(readerBody, target.toString());

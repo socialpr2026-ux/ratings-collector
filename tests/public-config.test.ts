@@ -57,6 +57,49 @@ describe("static iRecommend gateway", () => {
     expect(upstream).toHaveBeenCalledTimes(2);
   });
 
+  it("compacts a verified Otsillokoktsinum reader search when first-party access is blocked", async () => {
+    const product = "https://irecommend.ru/content/protivoprostudnyi-gomeopaticheskii-preparat-laboratoriya-buaron-otsillokoktsinum";
+    const search = "https://irecommend.ru/srch?query=%D0%9E%D1%86%D0%B8%D0%BB%D0%BB%D0%BE%D0%BA%D0%BE%D0%BA%D1%86%D0%B8%D0%BD%D1%83%D0%BC";
+    const reader = `Title: Оциллококцинум | отзывы\n\nURL Source: ${search}\n\nMarkdown Content:\n` +
+      `* [Гомеопатия Лаборатория БУАРОН Оциллококцинум](${product}) ` +
+      `[Читать все отзывы 258](${product})\n\nСреднее:\n\n Среднее: 3.7(258 голосов)\n` +
+      `[258 отзывов](${product})\n\n` +
+      `[![Image 1](https://cdn-irec.r-99.com/sites/default/files/imagecache/150o/product-images/2473/oscillococcinum.jpg)](${product})`;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(input.toString());
+      return url.hostname === "irecommend.ru"
+        ? new Response(captcha, { status: 521, headers: { "content-type": "text/html" } })
+        : new Response(reader, { headers: { "content-type": "text/plain; charset=utf-8" } });
+    }));
+
+    const response = await callGateway(search);
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("irecommend-reader-compact");
+    expect(proof).toContain('data-nid="2473"');
+    expect(proof).toContain("258 отзывов");
+    expect(proof).toContain("3.7");
+  });
+
+  it("rejects reader search metrics when the written counters disagree", async () => {
+    const product = "https://irecommend.ru/content/protivoprostudnyi-gomeopaticheskii-preparat-laboratoriya-buaron-otsillokoktsinum";
+    const search = "https://irecommend.ru/srch?query=Оциллококцинум";
+    const reader = `URL Source: ${search}\n` +
+      `[Гомеопатия БУАРОН Оциллококцинум](${product}) [Читать все отзывы 258](${product})\n` +
+      `Среднее: 3.7(258 голосов)\n[257 отзывов](${product})\n` +
+      `![Фото](https://cdn-irec.r-99.com/sites/default/files/product-images/2473/item.jpg)`;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(input.toString());
+      return url.hostname === "irecommend.ru"
+        ? new Response(captcha, { status: 521, headers: { "content-type": "text/html" } })
+        : new Response(reader, { headers: { "content-type": "text/plain" } });
+    }));
+
+    const response = await callGateway(search);
+    expect(response.status).toBe(502);
+  });
+
   it("rejects a successful CAPTCHA response instead of exposing it as product evidence", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(captcha, {
       headers: { "content-type": "text/html; charset=utf-8" }

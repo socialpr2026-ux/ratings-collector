@@ -337,6 +337,27 @@ describe("first-party review-site adapters", () => {
     expect(result).toMatchObject({ reviews: 430, rating: 3.9, ratingCount: 417, status: "ok" });
   });
 
+  it("does not mistake iRecommend's dormant captcha script for an active challenge", async () => {
+    const adapter = adapterFor("irecommend.ru", (async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/srch") return new Response(`<html><head><script src="/captcha-checker/assets/script.js"></script></head><body>
+        <ul class="srch-result-nodes"><li><div class="ProductTizer" data-type="2" data-nid="2473">
+          <div class="title"><a href="/content/protivoprostudnyi-gomeopaticheskii-preparat-laboratoriya-buaron-otsillokoktsinum">Гомеопатия Лаборатория БУАРОН Оциллококцинум</a></div>
+          <a class="read-all-reviews-link"><span class="counter">258</span></a><span class="reviewsLink">258 отзывов</span>
+          <div class="fivestar-summary"><span class="average-rating"><span>3.7</span></span></div>
+        </div></li></ul></body></html>`);
+      return new Response(`<html><head><script src="/captcha-checker/assets/script.js"></script>` +
+        `<link rel="canonical" href="${url}"></head><body><h1>Гомеопатия Лаборатория БУАРОН Оциллококцинум</h1>` +
+        `<div>Среднее: 3.7 (258 голосов)</div><a href="${url}">Читать все отзывы 258</a></body></html>`);
+    }) as typeof fetch);
+
+    const refs = await adapter.discover("Оциллококцинум", { ...context, brands: ["Оциллококцинум"] });
+    const observation = await adapter.collect(refs[0]!, context);
+
+    expect(refs).toMatchObject([{ listingId: "2473", metadata: { reviewCount: 258, rating: 3.7 } }]);
+    expect(observation).toMatchObject({ listingId: "2473", reviews: 258, rating: 3.7, status: "ok" });
+  });
+
   it("checks iRecommend through its strict search route instead of the now-disallowed origin", async () => {
     const requested: URL[] = [];
     const adapter = adapterFor("irecommend.ru", (async (input: RequestInfo | URL) => {

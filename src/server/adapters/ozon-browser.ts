@@ -286,6 +286,7 @@ function parseTranslatedTile($: ReturnType<typeof load>, element: Parameters<Ret
 }
 
 const ALLOWED_OZON_SEARCH_PARAMETERS = new Set([
+  "brand",
   "brand_was_predicted",
   "category_was_predicted",
   "deny_category_prediction",
@@ -316,6 +317,23 @@ function validateTranslatedTarget(target: URL, brand: string, page: number): voi
     target.searchParams.has("brand_was_predicted") && target.searchParams.get("brand_was_predicted") !== "true"
   )) {
     throw new ParserChangedError("Ozon translated category redirect has no prediction proof");
+  }
+  if (isSearch && target.searchParams.has("brand")) {
+    const predictedBrandId = target.searchParams.get("brand") ?? "";
+    if (
+      !/^\d{1,18}$/.test(predictedBrandId) ||
+      target.searchParams.get("brand_was_predicted") !== "true" ||
+      target.searchParams.get("deny_category_prediction") !== "true" ||
+      target.searchParams.has("category_was_predicted")
+    ) {
+      throw new ParserChangedError("Ozon translated brand redirect has no exact prediction proof");
+    }
+  } else if (isSearch && (
+    target.searchParams.has("brand_was_predicted") ||
+    target.searchParams.has("deny_category_prediction") ||
+    target.searchParams.has("category_was_predicted")
+  )) {
+    throw new ParserChangedError("Ozon translated search has incomplete prediction parameters");
   }
 }
 

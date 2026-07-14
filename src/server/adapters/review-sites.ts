@@ -53,10 +53,14 @@ type ReviewSiteDefinition = {
 function isBlockPage(html: string): boolean {
   const title = html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/<[^>]+>/g, " ") ?? "";
   const sample = html.slice(0, 100_000);
-  const captcha = /<(?:input|iframe|form|img|div|script)\b[^>]*(?:id|class|name|src)=["'][^"']*(?:captcha|db-offline|in-maintenance)/i.test(sample) ||
-    /(?:captcha-checker|captcha-container|\bdb-offline\b|\bin-maintenance\b)/i.test(sample);
+  // A healthy iRecommend page preloads captcha-checker JavaScript. Only an
+  // actual challenge element/page is blocking; a dormant script asset is not.
+  const captcha = /<(?:input|iframe|form|img|div|section|body)\b[^>]*(?:id|class|name|src)=["'][^"']*(?:captcha|db-offline|in-maintenance)/i.test(sample) ||
+    /(?:подтвердите,?\s+что\s+вы\s+не\s+робот|проверка\s+браузера|verify\s+you\s+are\s+human)/iu.test(sample);
   const aggregateMetrics = /itemprop=["']reviewCount["']/i.test(sample) || /"reviewCount"\s*:/i.test(sample);
-  return BLOCK_MARKERS.test(title) || captcha && !aggregateMetrics;
+  const searchMetrics = /ProductTizer/i.test(sample) && /read-all-reviews-link/i.test(sample) &&
+    /average-rating/i.test(sample);
+  return BLOCK_MARKERS.test(title) || captcha && !aggregateMetrics && !searchMetrics;
 }
 
 function numberFrom(value: string | undefined): number | undefined {
@@ -801,8 +805,10 @@ export class ReviewSiteAdapter implements SiteAdapter {
         const canonical = canonicalizeUrl(target.toString());
         const cardText = card.text().replace(/\s+/g, " ");
         const reviewCount = integerFrom(
-          cardText.match(/([\d\s\u00a0]+)\s+отзыв/iu)?.[1] ??
-          cardText.match(/читать\s+все\s+отзывы\s*([\d\s\u00a0]+)/iu)?.[1]
+          card.find(".read-all-reviews-link .counter").first().text() || (
+            cardText.match(/([\d\s\u00a0]+)\s+отзыв/iu)?.[1] ??
+            cardText.match(/читать\s+все\s+отзывы\s*([\d\s\u00a0]+)/iu)?.[1]
+          )
         );
         const rating = numberFrom(
           card.find(".fivestar-summary .average-rating span, .average-rating span").first().text().trim() ||

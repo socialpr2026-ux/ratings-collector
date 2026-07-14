@@ -162,6 +162,57 @@ describe("Ozon browser collector", () => {
     expect(refs).toMatchObject([{ listingId: "303003", metadata: { reviewCount: 25, rating: 5 } }]);
   });
 
+  it("follows an exact numeric brand-prediction redirect without using the browser fallback", async () => {
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const source = sourceUrlFromTranslate(new URL(String(input)));
+      if (source.pathname === "/search/" && !source.searchParams.has("brand")) {
+        const redirected = new URL("https://www.ozon.ru/search/");
+        redirected.searchParams.set("brand", "138827816");
+        redirected.searchParams.set("brand_was_predicted", "true");
+        redirected.searchParams.set("deny_category_prediction", "true");
+        redirected.searchParams.set("from_global", "true");
+        redirected.searchParams.set("text", "Оциллококцинум");
+        return new Response(`<html><script>location.replace(${JSON.stringify(redirected.toString())})</script></html>`, {
+          headers: { "content-type": "text/html" }
+        });
+      }
+      if (source.pathname.startsWith("/product/")) {
+        return new Response(translatedProductHtml(source, "148170210", "Оциллококцинум гранулы 1 г, 12 шт.", 4.9, 2454), {
+          headers: { "content-type": "text/html" }
+        });
+      }
+      return new Response(translatedHtml(source, [
+        translatedTile("148170210", "Оциллококцинум гранулы 1 г, 12 шт.", "4.9", 2454)
+      ], 1), { headers: { "content-type": "text/html" } });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({ fetch: fetchMock });
+
+    const refs = await adapter.discover("Оциллококцинум", { ...context, brands: ["Оциллококцинум"] });
+    const observation = await adapter.collect(refs[0]!, context);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(observation).toMatchObject({ listingId: "148170210", reviews: 2454, rating: 4.9, status: "ok" });
+  });
+
+  it("rejects a brand-prediction redirect without a bounded numeric brand id", async () => {
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const source = sourceUrlFromTranslate(new URL(String(input)));
+      if (source.hostname !== "www.ozon.ru") throw new Error("unexpected host");
+      const redirected = new URL("https://www.ozon.ru/search/");
+      redirected.searchParams.set("brand", "not-a-number");
+      redirected.searchParams.set("brand_was_predicted", "true");
+      redirected.searchParams.set("deny_category_prediction", "true");
+      redirected.searchParams.set("from_global", "true");
+      redirected.searchParams.set("text", "Оциллококцинум");
+      return new Response(`<html><script>location.replace(${JSON.stringify(redirected.toString())})</script></html>`, {
+        headers: { "content-type": "text/html" }
+      });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({ fetch: fetchMock });
+
+    await expect(adapter.discover("Оциллококцинум", context)).rejects.toThrow(/brand redirect|prediction parameters/i);
+  });
+
   it("prefetches exact product proofs with bounded concurrency and collect does not refetch", async () => {
     let activeDetails = 0;
     let maximumActiveDetails = 0;
