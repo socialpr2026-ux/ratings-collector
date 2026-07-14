@@ -738,6 +738,13 @@ export class ReviewSiteAdapter implements SiteAdapter {
         try {
           const target = new URL(href, searchUrl);
           if (!sameSite(target, "pravogolosa.net") || !this.definition.isProductUrl(target)) return;
+          // The search page may surface a manufacturer/category aggregate
+          // because an individual review mentions the requested brand. Bind
+          // the category link to its own result heading, not to snippets.
+          const resultRoot = $(node).closest(".module, article, .item, .search-result");
+          const resultTitle = resultRoot.find("h1 a, h2 a, h3 a, .title a").first().text()
+            .normalize("NFKC").replace(/\s+/g, " ").trim();
+          if (!resultTitle || !matchesBrand(resultTitle, brand)) return;
           const categoryReviews = integerFrom($(node).text().match(/(?:все|читать\s+все)\s+отзывы\s*\(?([\d\s\u00a0]+)\)?/iu)?.[1]);
           if (categoryReviews === undefined || categoryReviews <= 0 || categoryReviews !== count) return;
           target.protocol = "https:";

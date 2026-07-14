@@ -570,6 +570,19 @@ describe("first-party review-site adapters", () => {
     });
   });
 
+  it("rejects a Pravogolosa manufacturer aggregate surfaced by a brand mention", async () => {
+    const adapter = adapterFor("pravogolosa.net", (async () => new Response(`
+      <h3>По вашему запросу «Оциллококцинум» всего найдено отзывов: 4</h3>
+      <div class="module">
+        <h2><a href="/otzyvcategory?page=show_ad&amp;adid=1&amp;catid=41247">ООО «Буарон» отзывы</a></h2>
+        <p>Покупатель упоминает Оциллококцинум в отзыве о производителе.</p>
+        <a href="/otzyvcategory?page=show_category&amp;catid=41247&amp;order=0&amp;expand=0">Читать все отзывы (4)</a>
+      </div>
+    `)) as typeof fetch);
+
+    await expect(adapter.discover("Оциллококцинум", context)).rejects.toMatchObject({ code: "parser_changed" });
+  });
+
   it("checks the Pravogolosa search contract instead of blocking on an unrelated origin canary", async () => {
     const requested: URL[] = [];
     const adapter = adapterFor("pravogolosa.net", (async (input: RequestInfo | URL) => {
