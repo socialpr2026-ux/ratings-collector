@@ -1064,6 +1064,23 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     "otzovik.com",
     "pravogolosa.net"
   ]).has(host) || Boolean(irecommendTarget) || Boolean(ruOtzyvTarget);
+  const medOtzyvSearchTarget = target.protocol === "https:" && host === "med-otzyv.ru" &&
+    target.pathname === "/__external_search__" && !target.port && !target.username && !target.password && !target.hash &&
+    [...target.searchParams.keys()].every((key) => key === "brand") && target.searchParams.getAll("brand").length === 1 &&
+    (target.searchParams.get("brand")?.trim().length ?? 0) >= 2 && (target.searchParams.get("brand")?.trim().length ?? 0) <= 160;
+  const megamarketTranslatedTarget = target.protocol === "https:" && target.hostname === "megamarket-ru.translate.goog" &&
+    !target.port && !target.username && !target.password && !target.hash && (
+      target.pathname === "/catalog/" || /^\/catalog\/details\/[a-z0-9-]+-\d{6,18}\/?$/i.test(target.pathname)
+    ) && [...target.searchParams.keys()].every((key) => ["q", "page", "_x_tr_sl", "_x_tr_tl", "_x_tr_hl"].includes(key)) &&
+    target.searchParams.getAll("_x_tr_sl").length === 1 && target.searchParams.get("_x_tr_sl") === "ru" &&
+    target.searchParams.getAll("_x_tr_tl").length === 1 && target.searchParams.get("_x_tr_tl") === "en" &&
+    target.searchParams.getAll("_x_tr_hl").length === 1 && target.searchParams.get("_x_tr_hl") === "en" &&
+    (target.pathname !== "/catalog/" || (
+      target.searchParams.getAll("q").length === 1 && (target.searchParams.get("q")?.trim().length ?? 0) >= 2 &&
+      (target.searchParams.get("q")?.trim().length ?? 0) <= 160 &&
+      (!target.searchParams.has("page") || target.searchParams.getAll("page").length === 1 &&
+        /^\d+$/.test(target.searchParams.get("page") ?? "") && Number(target.searchParams.get("page")) >= 2 && Number(target.searchParams.get("page")) <= 20)
+    ));
   const wildberriesTarget = (
     target.hostname === "search.wb.ru" && [
       "/exactmatch/ru/common/v14/search",
@@ -1098,8 +1115,27 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         /^\d+$/.test(page) && Number(page) >= 1 && Number(page) <= 100;
     } catch { /* invalid nested Ozon search URL */ }
   }
-  if (target.protocol !== "https:" || !(reviewTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || pharmacyTranslatedTarget)) {
+  if (target.protocol !== "https:" || !(reviewTarget || medOtzyvSearchTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || pharmacyTranslatedTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
+  }
+  if (medOtzyvSearchTarget) {
+    const brand = target.searchParams.get("brand")!.trim();
+    const discovery = new URL("https://html.duckduckgo.com/html/");
+    discovery.searchParams.set("q", `site:med-otzyv.ru/lekarstva/ "${brand}"`);
+    const upstream = await safeFetch(discovery.toString(), {
+      method: "GET",
+      redirect: "follow",
+      headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+    }, fetch, 4, 45_000);
+    const html = await readTextBounded(upstream, 2_000_000, 45_000);
+    return new Response(html, {
+      status: upstream.status,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "duckduckgo-exact-med-otzyv-index"
+      }
+    });
   }
   if (pharmacyTranslatedTarget) {
     const upstream = await safeFetch(target.toString(), {

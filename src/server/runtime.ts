@@ -12,6 +12,8 @@ import { createReviewSiteAdapters } from "./adapters/review-sites.js";
 import { EaptekaAdapter } from "./adapters/eapteka.js";
 import { AsnaAdapter, PolzaAdapter } from "./adapters/pharmacy-recovery.js";
 import { createPharmacyAdapters } from "./adapters/pharmacies.js";
+import { MedOtzyvAdapter } from "./adapters/med-otzyv.js";
+import { MegamarketAdapter } from "./adapters/megamarket.js";
 import { FileEvidenceStore, type EvidenceStore } from "./evidence.js";
 import { createAdapterResolver, RatingsService } from "./orchestrator.js";
 import { FileRepository, type Repository } from "./repository.js";
@@ -159,6 +161,8 @@ export async function createCollectorRuntime(options: {
     ozon,
     wildberries,
     yandex,
+    new MegamarketAdapter(evidence, options.fetch),
+    new MedOtzyvAdapter(evidence, options.fetch),
     new EaptekaAdapter(evidence, options.fetch),
     new PolzaAdapter(evidence, options.fetch),
     new AsnaAdapter(evidence, options.fetch),

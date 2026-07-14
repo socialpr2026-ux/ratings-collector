@@ -10,6 +10,7 @@ const REVIEW_AGGREGATE_DOMAINS = new Set([
   "ru.otzyv.com",
   "uteka.ru",
   "megapteka.ru",
+  "med-otzyv.ru",
   // The Yandex Reviews adapter publishes one stable modelId aggregate and
   // already de-duplicates seller offers. Some model pages are brand-level
   // rather than a dosage/pack SKU, so they need the same explicit operator

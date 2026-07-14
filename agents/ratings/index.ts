@@ -245,7 +245,8 @@ export function browserFetch(
       "farmlend-ru.translate.goog",
       "okapteka-ru.translate.goog",
       "www-asna-ru.translate.goog",
-      "polza-ru.translate.goog"
+      "polza-ru.translate.goog",
+      "megamarket-ru.translate.goog"
     ].includes(url.hostname)) {
       const first = await fetchViaStaticProxy(url, request.signal);
       if (![429, 502, 503, 504].includes(first.status)) return first;
@@ -293,7 +294,8 @@ export function browserFetch(
       host === "irecommend.ru" ||
       host === "otzovik.com" ||
       host === "pravogolosa.net" ||
-      host === "ru.otzyv.com"
+      host === "ru.otzyv.com" ||
+      host === "med-otzyv.ru"
     )) {
       return fetchViaStaticProxy(url, request.signal);
     }

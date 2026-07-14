@@ -18,6 +18,46 @@ describe("public configuration", () => {
 
 });
 
+describe("new static collector gateways", () => {
+  const token = "n".repeat(32);
+  const callGateway = (url: string) => staticReviewFetch(
+    new Request("https://ratings.example/api/internal/static-review-fetch", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ url })
+    }),
+    { INTERNAL_AGENT_TOKEN: token }
+  );
+
+  it("uses a bounded exact-site index query for med-otzyv discovery", async () => {
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      expect(url.hostname).toBe("html.duckduckgo.com");
+      expect(url.searchParams.get("q")).toBe('site:med-otzyv.ru/lekarstva/ "Оциллококцинум"');
+      return new Response('<a class="result__a" href="https://med-otzyv.ru/lekarstva/157-o/34740-otsillokoktsinum">Оциллококцинум - 42 отзыва врачей и пациентов</a>');
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(`https://med-otzyv.ru/__external_search__?brand=${encodeURIComponent("Оциллококцинум")}`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("duckduckgo-exact-med-otzyv-index");
+    expect(await response.text()).toContain("34740-otsillokoktsinum");
+  });
+
+  it("allows only fixed Megamarket translated search/product routes", async () => {
+    const source = "https://megamarket.ru/catalog/?q=Оциллококцинум";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"></head><body>proof</body></html>`, {
+      headers: { "content-type": "text/html" }
+    })));
+    const allowed = await callGateway("https://megamarket-ru.translate.goog/catalog/?q=%D0%9E%D1%86%D0%B8%D0%BB%D0%BB%D0%BE%D0%BA%D0%BE%D0%BA%D1%86%D0%B8%D0%BD%D1%83%D0%BC&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en");
+    expect(allowed.status).toBe(200);
+
+    const escaped = await callGateway("https://megamarket-ru.translate.goog/personal/orders/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en");
+    expect(escaped.status).toBe(400);
+  });
+});
+
 describe("static iRecommend gateway", () => {
   const token = "i".repeat(32);
   const callGateway = (url: string) => staticReviewFetch(

@@ -18,7 +18,8 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
     sites: [
       { domain: "ozon.ru", label: "Ozon" },
       { domain: "wildberries.ru", label: "Wildberries" },
-      { domain: "market.yandex.ru", label: "Яндекс Маркет" }
+      { domain: "market.yandex.ru", label: "Яндекс Маркет" },
+      { domain: "megamarket.ru", label: "Мегамаркет" }
     ]
   },
   {
@@ -27,6 +28,8 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
     description: "Площадки с отзывами и оценками брендов и товаров",
     sites: [
       { domain: "irecommend.ru", label: "iRecommend" },
+      { domain: "reviews.yandex.ru", label: "Яндекс Отзывы", note: "Использует те же модели товаров, что и Яндекс Маркет; дубли объединяются" },
+      { domain: "med-otzyv.ru", label: "Мед-отзыв" },
       { domain: "otzovik.com", label: "Отзовик" },
       { domain: "otzyv.pro", label: "Отзыв.pro" },
       { domain: "vseotzyvy.ru", label: "Все отзывы" },

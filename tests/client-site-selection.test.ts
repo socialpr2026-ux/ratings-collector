@@ -17,6 +17,9 @@ describe("site picker catalog", () => {
       "ozon.ru",
       "wildberries.ru",
       "market.yandex.ru",
+      "megamarket.ru",
+      "reviews.yandex.ru",
+      "med-otzyv.ru",
       "irecommend.ru",
       "otzovik.com",
       "otzyv.pro",
@@ -65,7 +68,7 @@ describe("site picker catalog", () => {
     const twice = updateDomainSelection(once, marketplaceDomains, true);
 
     expect(twice).toBe(once);
-    expect(parseDomainList(twice)).toEqual(["custom.example", "ozon.ru", "wildberries.ru", "market.yandex.ru"]);
+    expect(parseDomainList(twice)).toEqual(["custom.example", "ozon.ru", "wildberries.ru", "market.yandex.ru", "megamarket.ru"]);
     expect(countCustomDomains(twice)).toBe(1);
   });
 });
