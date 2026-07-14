@@ -592,15 +592,28 @@ describe("first-party review-site adapters", () => {
   });
 
   it("treats a Pravogolosa manufacturer aggregate surfaced by a brand mention as no results", async () => {
-    const adapter = adapterFor("pravogolosa.net", (async () => new Response(`
-      <h3>По вашему запросу «Оциллококцинум» всего найдено отзывов: 4</h3>
-      <div class="module">
-        <h2><a href="/otzyvcategory?page=show_ad&amp;adid=1&amp;catid=41247">ООО «Буарон» отзывы</a></h2>
-        <p>Покупатель упоминает Оциллококцинум в отзыве о производителе.</p>
-        <a href="/otzyvcategory?page=show_category&amp;catid=41247&amp;order=0&amp;expand=0">Читать все отзывы (4)</a>
-      </div>
-    `)) as typeof fetch);
+    const requested: URL[] = [];
+    const adapter = adapterFor("pravogolosa.net", (async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      requested.push(url);
+      if (url.searchParams.get("page") === "search") return new Response(`
+        <h3>По вашему запросу «Оциллококцинум» всего найдено отзывов: 4</h3>
+        <div class="module">
+          <h2><a href="/otzyvcategory?page=show_ad&amp;adid=1&amp;catid=41247">Отзыв об ООО «Буарон»</a></h2>
+          <p>Покупатель упоминает Оциллококцинум в отзыве о производителе.</p>
+          <a href="/otzyvcategory?page=show_category&amp;catid=41247&amp;order=0&amp;expand=0">Читать все отзывы (4)</a>
+        </div>
+      `);
+      if (url.searchParams.get("page") === "show_category") return new Response(`
+        <h1 class="contentheading">ООО «Буарон» отзывы</h1>
+        <span title="Рейтинг::Оценка объекта отзыва 4.5 из 5."></span>
+        <a href="/otzyvcategory?page=show_category&amp;catid=41247&amp;order=0&amp;expand=0">все отзывы 4</a>
+      `);
+      throw new Error(`Unexpected URL ${url}`);
+    }) as typeof fetch);
     await expect(adapter.discover("Оциллококцинум", context)).resolves.toEqual([]);
+    expect(requested.map((url) => url.searchParams.get("page"))).toEqual(["search", "show_category"]);
+    expect(requested[1].searchParams.get("catid")).toBe("41247");
   });
 
   it("checks the Pravogolosa search contract instead of blocking on an unrelated origin canary", async () => {

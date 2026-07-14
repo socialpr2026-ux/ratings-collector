@@ -736,7 +736,7 @@ export class ReviewSiteAdapter implements SiteAdapter {
     if (/По запросу\s*[«"]?[^»"]+[»"]?\s*ничего не нашлось/iu.test(text)) return [];
     if (count !== undefined) {
       const refs = new Map<string, ProductRef>();
-      let provedNonMatchingCategory = false;
+      const candidates = new Map<string, { listingId: string; reviewCount: number }>();
       $("a[href]").each((_index, node) => {
         const href = $(node).attr("href");
         if (!href) return;
@@ -745,17 +745,6 @@ export class ReviewSiteAdapter implements SiteAdapter {
           if (!sameSite(target, "pravogolosa.net") || !this.definition.isProductUrl(target)) return;
           const categoryReviews = integerFrom($(node).text().match(/(?:все|читать\s+все)\s+отзывы\s*\(?([\d\s\u00a0]+)\)?/iu)?.[1]);
           if (categoryReviews === undefined || categoryReviews <= 0 || categoryReviews !== count) return;
-          // The search page may surface a manufacturer/category aggregate
-          // because an individual review mentions the requested brand. Bind
-          // the category link to its own result heading, not to snippets.
-          const resultRoot = $(node).closest(".module, article, .item, .search-result");
-          const resultTitle = resultRoot.find("h1 a, h2 a, h3 a, .title a, h1, h2, h3, .title").first().text()
-            .normalize("NFKC").replace(/\s+/g, " ").trim();
-          if (!resultTitle) return;
-          if (!matchesBrand(resultTitle, brand)) {
-            provedNonMatchingCategory = true;
-            return;
-          }
           target.protocol = "https:";
           target.search = "";
           target.searchParams.set("page", "show_category");
@@ -763,20 +752,42 @@ export class ReviewSiteAdapter implements SiteAdapter {
           target.searchParams.set("order", "0");
           target.searchParams.set("expand", "0");
           const canonical = canonicalizeUrl(target.toString());
-          refs.set(canonical, {
-            domain: this.definition.domain,
-            platform: this.definition.domain,
-            listingId: this.definition.idFromUrl(new URL(canonical))!,
-            brand,
-            url: canonical,
-            title: brand,
-            metadata: { source: "pravogolosa-search-category", reviewCount: categoryReviews }
-          });
+          const listingId = this.definition.idFromUrl(new URL(canonical));
+          if (listingId) candidates.set(canonical, { listingId, reviewCount: categoryReviews });
         } catch { /* malformed category link */ }
       });
+
+      let provedNonMatchingCategories = 0;
+      for (const [canonical, candidate] of candidates) {
+        const category = await this.request(canonical, context);
+        if (category.status < 200 || category.status >= 300 || isBlockPage(category.html)) {
+          throw new AdapterBlockedError(`Категория pravogolosa.net недоступна: HTTP ${category.status}`);
+        }
+        const parsed = this.definition.parse(category.html, canonical, brand);
+        const categoryTitle = parsed.title?.normalize("NFKC").replace(/\s+/g, " ").trim() ?? "";
+        if (!categoryTitle || parsed.reviews === undefined || parsed.reviews !== candidate.reviewCount) {
+          throw new ParserChangedError("pravogolosa.net не подтвердил заголовок и агрегат категории");
+        }
+        // Search snippets may mention the requested medicine under a
+        // manufacturer-wide category. Bind identity to the category page H1;
+        // review bodies and snippets never prove product identity.
+        if (!matchesBrand(categoryTitle, brand)) {
+          provedNonMatchingCategories += 1;
+          continue;
+        }
+        refs.set(canonical, {
+          domain: this.definition.domain,
+          platform: this.definition.domain,
+          listingId: candidate.listingId,
+          brand,
+          url: canonical,
+          title: categoryTitle,
+          metadata: { source: "pravogolosa-search-category", reviewCount: candidate.reviewCount }
+        });
+      }
       this.appendHistorical(refs, brand, context);
       if (refs.size) return [...refs.values()];
-      if (provedNonMatchingCategory) return [];
+      if (candidates.size > 0 && provedNonMatchingCategories === candidates.size) return [];
       throw new ParserChangedError("pravogolosa.net показывает отдельные отзывы, но не доказан агрегат бренда");
     }
     throw new AdapterBlockedError("pravogolosa.net не подтвердил ни результаты, ни их отсутствие");
