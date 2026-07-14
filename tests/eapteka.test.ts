@@ -124,4 +124,38 @@ describe("EaptekaAdapter", () => {
     expect(health).toMatchObject({ ok: false });
     expect(health.message).toContain("blocked_free_mode");
   });
+
+  it("recovers a cloud-blocked search and product through fixed source-bound routes", async () => {
+    const productUrl = "https://www.eapteka.ru/goods/id208826/";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestedUrl(input);
+      if (url.hostname === "www.eapteka.ru") return new Response("Forbidden", { status: 403 });
+      if (url.hostname === "www-eapteka-ru.translate.goog") {
+        const source = "https://www.eapteka.ru/search/?q=%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB";
+        return new Response(`<html><base href="${source}"><script data-source-url="${source}"></script>
+          <div class="listing-card" itemscope><link itemprop="url" content="${productUrl}"></div></html>`, {
+          headers: { "content-type": "text/html" }
+        });
+      }
+      if (url.hostname === "r.jina.ai") {
+        return new Response(`Title: Кагоцел таблетки 12 мг 10 шт - купить, цена и отзывы
+
+URL Source: ${productUrl}
+
+Markdown Content:
+#### Кагоцел таблетки 12 мг 10 шт: 125 отзывов покупателей и фармацевтов
+
+4.93
+
+на основе 125 оценок`, { headers: { "content-type": "text/plain" } });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new EaptekaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const refs = await adapter.discover("Кагоцел", context);
+    expect(refs).toHaveLength(1);
+    const result = await adapter.collect(refs[0], context);
+    expect(result).toMatchObject({ listingId: "208826", product: "Кагоцел таблетки 12 мг 10 шт", reviews: 125, rating: 4.93, ratingCount: 125, status: "ok", source: "eapteka-reader-product" });
+  });
 });

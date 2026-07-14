@@ -391,8 +391,10 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
   }
 ];
 
-export const BLOCKED_FREE_MODE_DOMAINS = ["medum.ru", "polza.ru"] as const;
-export const UNPROVEN_AGGREGATE_DOMAINS = ["asna.ru"] as const;
+// Medum still blocks both direct, translated, and fixed-reader access. Polza
+// and ASNA have strict first-party sitemap + fixed translated-page adapters.
+export const BLOCKED_FREE_MODE_DOMAINS = ["medum.ru"] as const;
+export const UNPROVEN_AGGREGATE_DOMAINS = [] as const;
 const PRAVOGOLOSA_HEALTH_CANARY = "ratingscollector-healthcheck-7f4c2a";
 
 function paginationCandidates($: CheerioAPI, pageUrl: string, definition: ReviewSiteDefinition): string[] {
