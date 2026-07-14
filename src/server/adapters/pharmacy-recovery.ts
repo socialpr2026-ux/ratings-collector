@@ -275,6 +275,35 @@ export class PolzaAdapter implements SiteAdapter {
       if (!polzaProduct($)) throw new ParserChangedError("polza.ru canary has no exact aggregate card");
       return { ok: true, checkedAt, message: "polza.ru: fixed translated family canary is healthy" };
     } catch (error) {
+      // A transient renderer 5xx on the unrelated Kagocel canary must not
+      // prevent collection of another requested family. Keep parser changes
+      // fail-closed, but allow discovery to proceed when the current official
+      // sitemap still proves the exact canary family route. discover() and
+      // collect() then source-bind and validate every requested page/metric.
+      if (error instanceof AdapterBlockedError) {
+        try {
+          const xml = await sitemap("https://polza.ru/sitemap-iblock-33.xml", context, this.fetchImpl);
+          const hasCanary = [...xml.matchAll(/<loc>([^<]+)<\/loc>/gi)].some((match) => {
+            try {
+              const url = new URL(match[1].replace(/&amp;/gi, "&"));
+              return url.protocol === "https:" && normalizeHost(url.hostname) === "polza.ru" &&
+                url.pathname === "/product/kagocel/" && !url.search && !url.hash;
+            } catch {
+              return false;
+            }
+          });
+          if (hasCanary) {
+            return {
+              ok: true,
+              checkedAt,
+              message: "polza.ru: current sitemap canary is healthy; requested family metrics remain strictly verified"
+            };
+          }
+        } catch {
+          // Preserve the original renderer failure below. Neither an invalid
+          // nor an unavailable sitemap is sufficient proof of health.
+        }
+      }
       return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
     }
   }

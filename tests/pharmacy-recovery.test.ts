@@ -105,6 +105,56 @@ describe("recovered first-party pharmacy adapters", () => {
     })).toMatchObject({ label: "гранулы 1000 мг №6", granularity: "variant", confidence: "exact" });
   });
 
+  it("does not let a transient unrelated Polza renderer canary block an exact requested family", async () => {
+    const kagocel = "https://polza.ru/product/kagocel/";
+    const family = "https://polza.ru/product/otsillokoktsinum/";
+    const card = "https://polza.ru/catalog/otsillokoktsinum-granuly-1-g-6-doz_20630/";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "polza.ru" && url.pathname === "/sitemap-iblock-33.xml") {
+        return new Response(`<urlset><url><loc>${kagocel}</loc></url><url><loc>${family}</loc></url></urlset>`);
+      }
+      if (url.hostname === "polza-ru.translate.goog" && url.pathname === "/product/kagocel/") {
+        return new Response("temporary renderer failure", { status: 502, headers: { "content-type": "text/html" } });
+      }
+      if (url.hostname === "polza-ru.translate.goog" && url.pathname === "/product/otsillokoktsinum/") {
+        return new Response(translated(family, `
+          <div class="catalog__block--cards"><div class="catalog-block__items"><div class="catalog-card" itemscope>
+            <link itemprop="url" href="${card}"><meta itemprop="sku" content="20630">
+            <meta itemprop="name" content="Оциллококцинум, гранулы 1 г, 6 доз">
+            <span itemprop="aggregateRating"><meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5"></span>
+          </div></div></div>`), { headers: { "content-type": "text/html" } });
+      }
+      if (url.hostname === "polza-ru.translate.goog" && url.pathname.includes("_20630")) {
+        return new Response(translated(card, `
+          <main itemscope><meta itemprop="sku" content="20630"><div itemprop="aggregateRating">
+            <meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5">
+          </div></main>`), { headers: { "content-type": "text/html" } });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new PolzaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    await expect(adapter.healthCheck({ region: "Москва" })).resolves.toMatchObject({ ok: true });
+    const refs = await adapter.discover("Оциллококцинум", { region: "Москва" });
+    expect(refs).toMatchObject([{ listingId: "20630", url: card }]);
+    await expect(adapter.collect(refs[0], { region: "Москва" })).resolves.toMatchObject({
+      listingId: "20630", reviews: 1, rating: 5, status: "ok"
+    });
+  });
+
+  it("keeps Polza health fail-closed when a parser change is not a transient access block", async () => {
+    const fetchMock = vi.fn(async () => new Response(translated("https://polza.ru/product/kagocel/", "<main></main>"), {
+      headers: { "content-type": "text/html" }
+    })) as unknown as typeof fetch;
+    const adapter = new PolzaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const health = await adapter.healthCheck({ region: "Москва" });
+
+    expect(health).toMatchObject({ ok: false, message: "polza.ru canary has no exact aggregate card" });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("discovers current ASNA card URLs from both bounded card sitemaps and verifies every aggregate", async () => {
     const card10 = "https://www.asna.ru/cards/kagotsel_12mg_n10_tab_niarmedik_plyus_ooo.html";
     const card20 = "https://www.asna.ru/cards/kagotsel_12mg_n20_tab_niarmedik_plyus_ooo.html";
