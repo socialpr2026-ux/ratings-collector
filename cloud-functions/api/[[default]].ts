@@ -57,6 +57,24 @@ type IrecommendTarget = {
   brand?: string;
 };
 
+type RuOtzyvTarget = {
+  source: URL;
+  translated: URL;
+};
+
+function parseRuOtzyvTarget(target: URL): RuOtzyvTarget | undefined {
+  if (
+    target.protocol !== "https:" || target.hostname !== "ru.otzyv.com" || target.port ||
+    target.username || target.password || target.search || target.hash ||
+    !/^\/[a-z0-9][a-z0-9-]*$/i.test(target.pathname)
+  ) return undefined;
+  const translated = new URL(target.pathname, "https://ru-otzyv-com.translate.goog");
+  translated.searchParams.set("_x_tr_sl", "ru");
+  translated.searchParams.set("_x_tr_tl", "en");
+  translated.searchParams.set("_x_tr_hl", "en");
+  return { source: new URL(target.toString()), translated };
+}
+
 function parseIrecommendTarget(target: URL): IrecommendTarget | undefined {
   if (target.protocol !== "https:" || target.hostname !== "irecommend.ru" || target.port ||
     target.username || target.password || target.hash) return undefined;
@@ -582,6 +600,61 @@ function escapeHtml(value: string): string {
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
+function compactRuOtzyvTranslateHtml(html: string, requested: RuOtzyvTarget): string | undefined {
+  if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
+  if (/(?:captcha|access denied|unusual traffic|проверка браузера|не робот)/iu.test(html.slice(0, 150_000))) {
+    return undefined;
+  }
+  const $ = load(html);
+  const baseValue = $("base[href]").first().attr("href");
+  try {
+    if (!baseValue || exactUrlSignature(new URL(baseValue)) !== exactUrlSignature(requested.source)) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  const products: Array<Record<string, unknown>> = [];
+  for (const script of $('script[type="application/ld+json"]').toArray()) {
+    try { products.push(...ozonJsonLdEntries(JSON.parse($(script).text()) as unknown)); }
+    catch { /* unrelated malformed JSON-LD is not product proof */ }
+  }
+  const pageTitle = $("h1").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+  const product = products.find((entry) => {
+    const types = Array.isArray(entry["@type"]) ? entry["@type"] : [entry["@type"]];
+    if (!types.includes("Product") || typeof entry.name !== "string" || !entry.name.trim()) return false;
+    const name = entry.name.normalize("NFKC").replace(/\s+/g, " ").trim();
+    if (!pageTitle.toLocaleLowerCase("ru-RU").startsWith(name.toLocaleLowerCase("ru-RU"))) return false;
+    const aggregate = entry.aggregateRating;
+    if (!aggregate || typeof aggregate !== "object") return false;
+    const rating = aggregate as Record<string, unknown>;
+    const reviewCount = String(rating.reviewCount ?? "").replace(/[\s\u00a0]+/g, "");
+    const ratingCount = String(rating.ratingCount ?? "").replace(/[\s\u00a0]+/g, "");
+    const counts = [reviewCount, ratingCount].filter((value) => /^\d+$/.test(value)).map(Number);
+    const ratingValue = Number(String(rating.ratingValue ?? "").replace(",", "."));
+    const bestRating = Number(String(rating.bestRating ?? "5").replace(",", "."));
+    return counts.length > 0 && Math.max(...counts) > 0 && Number.isFinite(ratingValue) &&
+      Number.isFinite(bestRating) && bestRating > 0 && bestRating <= 5 && ratingValue > 0 && ratingValue <= bestRating;
+  });
+  if (!product) return undefined;
+  const aggregate = product.aggregateRating as Record<string, unknown>;
+  const compactProduct = {
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: product.name,
+    aggregateRating: {
+      "@type": "AggregateRating",
+      ratingValue: aggregate.ratingValue,
+      reviewCount: aggregate.reviewCount,
+      ratingCount: aggregate.ratingCount,
+      bestRating: aggregate.bestRating ?? 5,
+      worstRating: aggregate.worstRating ?? 1
+    }
+  };
+  return `<html><head><base href="${escapeHtml(requested.source.toString())}">` +
+    `<script type="application/ld+json">${JSON.stringify(compactProduct).replace(/</g, "\\u003c")}</script>` +
+    `</head><body><h1>${escapeHtml(pageTitle)}</h1></body></html>`;
+}
+
 function validIrecommendProof(html: string, requested: URL, target: IrecommendTarget): boolean {
   if (/(?:captcha-checker|captcha-container|\bdb-offline\b|\bin-maintenance\b)/i.test(html.slice(0, 150_000))) {
     return false;
@@ -762,12 +835,13 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
   const target = new URL(String(body.url ?? ""));
   const host = target.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
   const irecommendTarget = parseIrecommendTarget(target);
+  const ruOtzyvTarget = parseRuOtzyvTarget(target);
   const reviewTarget = new Set([
     "uteka.ru",
     "megapteka.ru",
     "otzovik.com",
     "pravogolosa.net"
-  ]).has(host) || Boolean(irecommendTarget);
+  ]).has(host) || Boolean(irecommendTarget) || Boolean(ruOtzyvTarget);
   const wildberriesTarget = (
     target.hostname === "search.wb.ru" && [
       "/exactmatch/ru/common/v14/search",
@@ -901,6 +975,35 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         "x-ratings-source": "google-translate-ozon-ssr",
         "x-ratings-original-bytes": String(new TextEncoder().encode(html).byteLength),
         "x-ratings-proof-bytes": String(new TextEncoder().encode(compactHtml).byteLength)
+      }
+    });
+  }
+  if (ruOtzyvTarget) {
+    const upstream = await safeFetch(ruOtzyvTarget.translated.toString(), {
+      method: "GET",
+      redirect: "manual",
+      headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+    }, fetch, 0, 60_000);
+    const html = await readTextBounded(upstream, 12_000_000, 60_000);
+    if (!upstream.ok) {
+      return new Response(html, {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "text/html; charset=utf-8" }
+      });
+    }
+    if (!/(?:text\/html|application\/xhtml\+xml)/i.test(upstream.headers.get("content-type") ?? "")) {
+      return json({ error: "Translated ru.otzyv.com response is not HTML" }, 502);
+    }
+    const compactHtml = compactRuOtzyvTranslateHtml(html, ruOtzyvTarget);
+    if (!compactHtml || compactHtml.length > 100_000) {
+      return json({ error: "Translated ru.otzyv.com page did not prove the exact product aggregate" }, 502);
+    }
+    return new Response(compactHtml, {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "google-translate-ru-otzyv-ssr"
       }
     });
   }

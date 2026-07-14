@@ -78,6 +78,26 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("routes an exact ru.otzyv.com product through fixed function egress without Sandbox", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response("compact product aggregate"));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch("https://ru.otzyv.com/kagotsel");
+
+    expect(await response.text()).toBe("compact product aggregate");
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(directFetch.mock.calls[0]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+    expect(JSON.parse(String((directFetch.mock.calls[0]?.[1] as RequestInit).body)))
+      .toEqual({ url: "https://ru.otzyv.com/kagotsel" });
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("falls back from direct Wildberries buyer JSON to fixed function egress without acquiring Sandbox", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn()

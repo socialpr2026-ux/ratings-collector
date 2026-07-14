@@ -142,6 +142,66 @@ describe("static Otzovik product gateway", () => {
   });
 });
 
+describe("static ru.otzyv.com product gateway", () => {
+  const token = "r".repeat(32);
+  const callGateway = (url: string) => staticReviewFetch(
+    new Request("https://ratings.example/api/internal/static-review-fetch", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ url })
+    }),
+    { INTERNAL_AGENT_TOKEN: token }
+  );
+  const translated = (source = "https://ru.otzyv.com/kagotsel", title = "Кагоцел отзывы") => `
+    <html><head><base href="${source}">
+    <script type="application/ld+json">${JSON.stringify({
+      "@context": "http://schema.org",
+      "@type": "Product",
+      name: "Кагоцел",
+      aggregateRating: {
+        "@type": "AggregateRating", ratingValue: "5", reviewCount: "390", ratingCount: "390", bestRating: "5"
+      },
+      review: [{ "@type": "Review", reviewBody: "must not cross the internal boundary" }]
+    })}</script></head><body><h1>${title}</h1></body></html>`;
+
+  it("returns only a source-bound Product aggregate from the fixed translated route", async () => {
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      expect(new URL(input.toString())).toMatchObject({
+        hostname: "ru-otzyv-com.translate.goog",
+        pathname: "/kagotsel"
+      });
+      return new Response(translated(), { headers: { "content-type": "text/html; charset=utf-8" } });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway("https://ru.otzyv.com/kagotsel");
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-ru-otzyv-ssr");
+    expect(proof).toContain('"reviewCount":"390"');
+    expect(proof).not.toContain("must not cross the internal boundary");
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it("rejects query parameters, source mismatches and protection pages fail-closed", async () => {
+    const upstream = vi.fn()
+      .mockResolvedValueOnce(new Response(translated("https://ru.otzyv.com/another-product"), {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      }))
+      .mockResolvedValueOnce(new Response(`<html><head><base href="https://ru.otzyv.com/kagotsel"></head>` +
+        `<body><form class="captcha"><h1>Кагоцел отзывы</h1></form></body></html>`, {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      }));
+    vi.stubGlobal("fetch", upstream);
+
+    expect((await callGateway("https://ru.otzyv.com/kagotsel?next=https://evil.example")).status).toBe(400);
+    expect((await callGateway("https://ru.otzyv.com/kagotsel")).status).toBe(502);
+    expect((await callGateway("https://ru.otzyv.com/kagotsel")).status).toBe(502);
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("static Ozon Translate gateway", () => {
   const token = "z".repeat(32);
   const callGateway = (url: string) => staticReviewFetch(

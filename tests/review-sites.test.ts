@@ -481,6 +481,30 @@ describe("first-party review-site adapters", () => {
     }
   });
 
+  it("health-checks and discovers the live ru.otzyv.com ts slug without touching its protected homepage", async () => {
+    const requested: string[] = [];
+    const productHtml = `<h1>Кагоцел отзывы</h1><script type="application/ld+json">` +
+      `{"@type":"Product","name":"Кагоцел","aggregateRating":{"@type":"AggregateRating",` +
+      `"ratingValue":5,"reviewCount":390,"ratingCount":390,"bestRating":5}}</script>`;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      requested.push(url.pathname);
+      if (url.pathname === "/kagocel") return new Response("missing", { status: 404 });
+      if (url.pathname === "/kagotsel") return new Response(productHtml);
+      return new Response("protected homepage", { status: 403 });
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("ru.otzyv.com", fetchMock);
+
+    await expect(adapter.healthCheck(context)).resolves.toMatchObject({ ok: true });
+    const refs = await adapter.discover("Кагоцел", context);
+    const result = await adapter.collect(refs[0], context);
+
+    expect(requested).toEqual(["/kagotsel", "/kagocel", "/kagotsel", "/kagotsel"]);
+    expect(refs).toMatchObject([{ listingId: "kagotsel", url: "https://ru.otzyv.com/kagotsel" }]);
+    expect(result).toMatchObject({ listingId: "kagotsel", reviews: 390, rating: 5, status: "ok" });
+    expect(requested).not.toContain("/");
+  });
+
   it("fails closed when a direct Otzyv slug serves another brand", async () => {
     const fetchMock = (async () => new Response(
       `<h1>Фенибут отзывы</h1><meta itemprop="reviewCount" content="12"><meta itemprop="ratingValue" content="4.5">`

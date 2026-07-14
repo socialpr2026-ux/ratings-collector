@@ -91,6 +91,16 @@ function brandSlugs(brand: string): string[] {
   return [...new Set(aliasesForBrand(brand).map(latinSlug).filter(Boolean))];
 }
 
+function ruOtzyvBrandSlugs(brand: string): string[] {
+  const aliases = aliasesForBrand(brand);
+  return [...new Set([
+    ...aliases.map(latinSlug),
+    // ru.otzyv.com conventionally writes Cyrillic "ц" as "ts" (Кагоцел ->
+    // kagotsel), while the other reviewed sites use the shorter "c" form.
+    ...aliases.map((alias) => latinSlug(alias.replace(/ц/giu, "тс")))
+  ].filter(Boolean))];
+}
+
 function sameSite(url: URL, domain: string): boolean {
   const host = url.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
   return host === domain || host.endsWith(`.${domain}`);
@@ -385,6 +395,10 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
     domain: "ru.otzyv.com",
     origin: "https://ru.otzyv.com/",
     rateLimitMs: 700,
+    healthCanary: {
+      url: "https://ru.otzyv.com/kagotsel",
+      brand: "Кагоцел"
+    },
     searchUrl: (brand) => `https://ru.otzyv.com/${brandSlugs(brand)[0] ?? ""}`,
     isProductUrl: (url) => /^\/[a-z0-9][a-z0-9-]*\/?$/i.test(url.pathname) && !/^\/(?:login|register|meditsina|search)\/?$/i.test(url.pathname),
     idFromUrl: (url) => pageId(/^\/([a-z0-9][a-z0-9-]*)\/?$/i, url),
@@ -679,7 +693,8 @@ export class ReviewSiteAdapter implements SiteAdapter {
   private async discoverDirectBrandPage(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = new Map<string, ProductRef>();
     let provedMissing = 0;
-    for (const slug of brandSlugs(brand)) {
+    const slugs = this.definition.domain === "ru.otzyv.com" ? ruOtzyvBrandSlugs(brand) : brandSlugs(brand);
+    for (const slug of slugs) {
       const url = canonicalizeUrl(new URL(slug, this.definition.origin).toString());
       const { html, status } = await this.request(url, context);
       if (status === 404 || status === 410) {
@@ -697,7 +712,7 @@ export class ReviewSiteAdapter implements SiteAdapter {
       refs.set(url, this.refFor(url, brand, title));
     }
     this.appendHistorical(refs, brand, context);
-    if (!refs.size && provedMissing === brandSlugs(brand).length) return [];
+    if (!refs.size && provedMissing === slugs.length) return [];
     if (!refs.size) throw new AdapterBlockedError(`${this.definition.domain}: отсутствие карточки бренда не доказано`);
     return [...refs.values()];
   }

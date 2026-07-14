@@ -277,7 +277,8 @@ export function browserFetch(
       host === "megapteka.ru" ||
       host === "irecommend.ru" ||
       host === "otzovik.com" ||
-      host === "pravogolosa.net"
+      host === "pravogolosa.net" ||
+      host === "ru.otzyv.com"
     )) {
       return fetchViaStaticProxy(url, request.signal);
     }
