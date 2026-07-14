@@ -11,6 +11,7 @@ import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 
 const MAX_SEARCH_PAGES = 20;
 const MAX_PRODUCTS = 500;
+const MEGAPTEKA_SEARCH_PAGE_SIZE = 40;
 const BLOCK_MARKERS = /captcha|access denied|temporarily unavailable|доступ (?:ограничен|запрещен)|проверка браузера/i;
 const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -24,6 +25,16 @@ type ParsedMetrics = {
   rawRating?: number;
   rawRatingScale?: number;
   source: string;
+};
+
+type MegaptekaSearchPayload = {
+  items?: Array<{
+    id?: number;
+    code?: string;
+    group_code?: string;
+    name?: string;
+  }>;
+  search?: { empty_info?: unknown };
 };
 
 type ReviewSiteDefinition = {
@@ -237,6 +248,13 @@ function pageId(pattern: RegExp, url: URL): string | undefined {
   return url.pathname.match(pattern)?.[1];
 }
 
+function megaptekaCity(html: string): { id: number; code: string } | undefined {
+  const match = html.match(/"city"\s*:\s*\{\s*"id"\s*:\s*(\d+)\s*,\s*"code"\s*:\s*"([a-z0-9-]+)"/i);
+  if (!match) return undefined;
+  const id = Number(match[1]);
+  return Number.isSafeInteger(id) && id > 0 ? { id, code: match[2] } : undefined;
+}
+
 export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
   {
     domain: "irecommend.ru",
@@ -296,6 +314,10 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
     domain: "megapteka.ru",
     origin: "https://megapteka.ru/",
     rateLimitMs: 700,
+    healthCanary: {
+      url: "https://megapteka.ru/tomsk/catalog/protivovirusnoe-dejstvie-70/kagocel-tab-12mg-901309",
+      brand: "Кагоцел"
+    },
     searchUrl: (brand) => `https://megapteka.ru/search?q=${encodeURIComponent(brand)}`,
     isProductUrl: (url) => /^\/(?:[a-z0-9-]+\/)?catalog\/.+-\d+\/?$/i.test(url.pathname),
     idFromUrl: (url) => pageId(/-(\d+)\/?$/i, url),
@@ -390,6 +412,7 @@ export class ReviewSiteAdapter implements SiteAdapter {
   readonly supportedDomains: readonly string[];
   private nextRequestAt = 0;
   private utekaSitemap?: string;
+  private megaptekaCity?: { id: number; code: string };
 
   constructor(
     private readonly definition: ReviewSiteDefinition,
@@ -401,11 +424,28 @@ export class ReviewSiteAdapter implements SiteAdapter {
     this.supportedDomains = [definition.domain, `www.${definition.domain}`];
   }
 
-  private async request(url: string, context: AdapterContext) {
+  private async throttle(): Promise<void> {
     const wait = Math.max(0, this.nextRequestAt - Date.now());
     if (wait) await delay(wait);
     this.nextRequestAt = Date.now() + this.rateLimitMs;
+  }
+
+  private async request(url: string, context: AdapterContext) {
+    await this.throttle();
     return readHtml(url, context, this.fallbackFetch, this.definition.dynamicBrowser);
+  }
+
+  private async requestJson(url: string, context: AdapterContext): Promise<{ payload: unknown; status: number }> {
+    await this.throttle();
+    const response = await safeFetch(url, {
+      signal: context.signal,
+      headers: { accept: "application/json", origin: "https://megapteka.ru", referer: "https://megapteka.ru/" }
+    }, context.fetch ?? this.fallbackFetch, 4, 45_000);
+    const text = await readTextBounded(response, 2_000_000, 45_000);
+    let payload: unknown;
+    try { payload = JSON.parse(text); }
+    catch { throw new ParserChangedError("megapteka.ru search API вернул невалидный JSON"); }
+    return { payload, status: response.status };
   }
 
   async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
@@ -689,28 +729,59 @@ export class ReviewSiteAdapter implements SiteAdapter {
   }
 
   private async discoverMegapteka(brand: string, context: AdapterContext): Promise<ProductRef[]> {
-    const searchUrl = canonicalizeUrl(this.definition.searchUrl(brand, context));
-    const { html, status } = await this.request(searchUrl, context);
-    if (status < 200 || status >= 300 || isBlockPage(html)) {
-      throw new AdapterBlockedError(`Поиск megapteka.ru недоступен: HTTP ${status}`);
+    if (!this.megaptekaCity) {
+      const home = await this.request(this.definition.origin, context);
+      if (home.status < 200 || home.status >= 300 || isBlockPage(home.html)) {
+        throw new AdapterBlockedError(`Главная megapteka.ru недоступна: HTTP ${home.status}`);
+      }
+      this.megaptekaCity = megaptekaCity(home.html);
+      if (!this.megaptekaCity) throw new ParserChangedError("megapteka.ru не отдал city id/code для catalog API");
     }
-    const $ = load(html);
     const refs = new Map<string, ProductRef>();
-    $("a[href]").each((_index, node) => {
-      const href = $(node).attr("href");
-      if (!href) return;
-      try {
-        const url = new URL(href, searchUrl);
-        if (!sameSite(url, "megapteka.ru") || !/^\/(?:[a-z0-9-]+\/)?catalog\/.+-\d+\/?$/i.test(url.pathname)) return;
-        const cardText = $(node).closest("article, li, [class*='item'], [class*='result'], [class*='product']").text();
-        const title = `${$(node).text()} ${cardText}`.replace(/\s+/g, " ").trim();
-        if (!matchesBrand(title, brand)) return;
-        url.protocol = "https:";
-        const canonical = canonicalizeUrl(url.toString());
-        refs.set(canonical, this.refFor(canonical, brand, title || undefined));
-      } catch { /* malformed link */ }
-    });
+    let explicitEmpty = false;
+    for (let page = 1; page <= MAX_SEARCH_PAGES; page += 1) {
+      const data = JSON.stringify({
+        query: brand,
+        count: MEGAPTEKA_SEARCH_PAGE_SIZE,
+        page,
+        city_id: this.megaptekaCity.id,
+        sorting: [{ by: "popularity", direction: "desc", sort: 0 }]
+      });
+      const searchUrl = `https://api.megapteka.ru/ma/site/v4/search/items?data=${encodeURIComponent(data)}`;
+      const response = await this.requestJson(searchUrl, context);
+      if (response.status < 200 || response.status >= 300) {
+        throw new AdapterBlockedError(`Catalog API megapteka.ru недоступен: HTTP ${response.status}`);
+      }
+      const payload = response.payload as MegaptekaSearchPayload;
+      if (!Array.isArray(payload.items)) throw new ParserChangedError("megapteka.ru search API не содержит items");
+      explicitEmpty = page === 1 && payload.items.length === 0 && Boolean(payload.search?.empty_info);
+      for (const item of payload.items) {
+        if (!item.code || !item.group_code || !item.name || !Number.isSafeInteger(item.id) || !matchesBrand(item.name, brand)) continue;
+        const url = canonicalizeUrl(
+          `https://megapteka.ru/${this.megaptekaCity.code}/catalog/${item.group_code}/${item.code}`
+        );
+        refs.set(url, {
+          domain: this.definition.domain,
+          platform: this.definition.domain,
+          listingId: String(item.id),
+          brand,
+          url,
+          title: item.name,
+          metadata: { source: "megapteka-search-json" }
+        });
+        if (refs.size > MAX_PRODUCTS) {
+          throw new AdapterBlockedError(`megapteka.ru вернул более ${MAX_PRODUCTS} карточек для одного бренда`);
+        }
+      }
+      if (payload.items.length < MEGAPTEKA_SEARCH_PAGE_SIZE) break;
+      if (page === MAX_SEARCH_PAGES) {
+        throw new AdapterBlockedError(`Catalog API megapteka.ru достиг лимита ${MAX_SEARCH_PAGES} страниц`);
+      }
+    }
     this.appendHistorical(refs, brand, context);
+    if (!refs.size && !explicitEmpty) {
+      throw new AdapterBlockedError("Catalog API megapteka.ru не доказал ни карточки, ни их отсутствие");
+    }
     return [...refs.values()];
   }
 

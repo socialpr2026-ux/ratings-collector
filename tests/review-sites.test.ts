@@ -208,12 +208,19 @@ describe("first-party review-site adapters", () => {
   });
 
   it("collects every Megapteka catalog card and proves zero reviews from transfer state", async () => {
+    const requested: URL[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = urlOf(input);
-      if (url.pathname === "/search") return new Response(
-        `<article><a href="/moskva/catalog/nevrologiya-62/anvifen-kaps-250-34662">Анвифен капсулы 250 мг</a></article>` +
-        `<article><a href="/moskva/catalog/nevrologiya-62/anvifen-kaps-50-34663">Анвифен капсулы 50 мг</a></article>`
-      );
+      requested.push(url);
+      if (url.pathname === "/") return new Response(`<script>window.state={"city":{"id":77,"code":"moskva","name":"Москва"}}</script>`);
+      if (url.hostname === "api.megapteka.ru" && url.pathname === "/ma/site/v4/search/items") {
+        const data = JSON.parse(url.searchParams.get("data") ?? "{}") as { query?: string; city_id?: number; page?: number };
+        expect(data).toMatchObject({ query: "Анвифен", city_id: 77, page: 1 });
+        return Response.json({ items: [
+          { id: 34662, code: "anvifen-kaps-250-34662", group_code: "nevrologiya-62", name: "Анвифен капсулы 250 мг" },
+          { id: 34663, code: "anvifen-kaps-50-34663", group_code: "nevrologiya-62", name: "Анвифен капсулы 50 мг" }
+        ], search: { empty_info: null } });
+      }
       if (url.pathname === "/moskva/catalog/nevrologiya-62/anvifen-kaps-250-34662") return new Response(
         `<script>window.state={"feedback":{"avg":4.8,"count":44,"fill_count":44}}</script>` +
         `<script type="application/ld+json">{"@type":"Product","name":"Анвифен капсулы 250 мг №20","url":"https://megapteka.ru/moskva/catalog/nevrologiya-62/anvifen-kaps-250-34662","aggregateRating":{"@type":"AggregateRating","ratingValue":4.8,"reviewCount":44,"bestRating":5}}</script>`
@@ -235,6 +242,19 @@ describe("first-party review-site adapters", () => {
     expect(results[0]).toMatchObject({ listingId: "34662", reviews: 44, rating: 4.8, status: "ok" });
     expect(results[1]).toMatchObject({ listingId: "34663", reviews: 0, rating: null, status: "no_reviews" });
     expect(results[0].productEvidence?.scope).toBe("listing");
+    expect(requested.some((url) => url.pathname === "/search")).toBe(false);
+  });
+
+  it("does not turn an ambiguous empty Megapteka API response into no_results", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/") return new Response(`<script>window.state={"city":{"id":77,"code":"moskva"}}</script>`);
+      if (url.hostname === "api.megapteka.ru") return Response.json({ items: [], search: {} });
+      throw new Error(`Unexpected URL ${url}`);
+    }) as unknown as typeof fetch;
+
+    await expect(adapterFor("megapteka.ru", fetchMock).discover("Кагоцел", context))
+      .rejects.toMatchObject({ code: "blocked" });
   });
 
   it("uses the trusted dynamic browser route for iRecommend and keeps reviews separate from votes", async () => {
