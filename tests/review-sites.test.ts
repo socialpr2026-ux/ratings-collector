@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { MemoryEvidenceStore } from "../src/server/evidence.js";
 import {
   BLOCKED_FREE_MODE_DOMAINS,
   BlockedFreeModeAdapter,
   REVIEW_SITE_DEFINITIONS,
   ReviewSiteAdapter,
+  UNPROVEN_AGGREGATE_DOMAINS,
+  UnprovenAggregateAdapter,
   createReviewSiteAdapters
 } from "../src/server/adapters/review-sites.js";
 
@@ -19,6 +22,7 @@ function adapterFor(domain: string, fetchImpl: typeof fetch) {
 }
 
 const context = { region: "Москва" };
+const utekaCanaryFixture = readFileSync(new URL("./fixtures/uteka-tikalizis-reviews.html", import.meta.url), "utf8");
 
 describe("first-party review-site adapters", () => {
   it.each([
@@ -184,6 +188,23 @@ describe("first-party review-site adapters", () => {
     ]);
     expect(result).toMatchObject({ reviews: 33, rating: 4.6, status: "ok", source: "microdata" });
     expect(result.listingId).toMatch(/^[a-f0-9]{20}$/);
+  });
+
+  it("canaries Uteka against written reviewCount without substituting ratingCount", async () => {
+    const requested: URL[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      requested.push(urlOf(input));
+      return new Response(utekaCanaryFixture, { status: 200 });
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("uteka.ru", fetchMock);
+
+    const health = await adapter.healthCheck(context);
+
+    expect(health).toMatchObject({ ok: true });
+    expect(health.message).toContain("reviewCount=5");
+    expect(health.message).not.toContain("91");
+    expect(requested).toHaveLength(1);
+    expect(requested[0].pathname).toMatch(/\/tikalizis\/reviews\/$/);
   });
 
   it("collects every Megapteka catalog card and proves zero reviews from transfer state", async () => {
@@ -388,7 +409,17 @@ describe("blocked free-mode review sites", () => {
     expect(health.message).toContain("платный резерв не используется");
   });
 
-  it("registers nine direct adapters plus one explicit blocker", () => {
+  it.each(UNPROVEN_AGGREGATE_DOMAINS)("keeps %s separate from access blocks and no_results", async (domain) => {
+    const adapter = new UnprovenAggregateAdapter(domain);
+    const health = await adapter.healthCheck(context);
+    expect(health).toMatchObject({ ok: false });
+    expect(health.message).toContain("unsupported_aggregate");
+    expect(health.message).toContain("no_results не выводится");
+    expect(health.message).not.toContain("blocked_free_mode");
+    await expect(adapter.discover()).rejects.toMatchObject({ code: "parser_changed" });
+  });
+
+  it("registers direct adapters plus explicit pharmacy guardrails", () => {
     const adapters = createReviewSiteAdapters(new MemoryEvidenceStore());
     expect(adapters.map((item) => item.supportedDomains[0])).toEqual([
       "irecommend.ru",
@@ -400,7 +431,9 @@ describe("blocked free-mode review sites", () => {
       "otzovik.com",
       "pravogolosa.net",
       "ru.otzyv.com",
-      "medum.ru"
+      "medum.ru",
+      "polza.ru",
+      "asna.ru"
     ]);
   });
 });

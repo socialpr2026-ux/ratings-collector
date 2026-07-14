@@ -31,6 +31,7 @@ type ReviewSiteDefinition = {
   origin: string;
   dynamicBrowser?: boolean;
   rateLimitMs?: number;
+  healthCanary?: { url: string; brand: string };
   searchUrl(brand: string, context: AdapterContext): string;
   isProductUrl(url: URL): boolean;
   idFromUrl(url: URL): string | undefined;
@@ -282,6 +283,10 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
     domain: "uteka.ru",
     origin: "https://uteka.ru/",
     rateLimitMs: 700,
+    healthCanary: {
+      url: "https://uteka.ru/lekarstvennye-sredstva/krov-i-krovoobrashhenie/tikalizis/reviews/",
+      brand: "Тикализис"
+    },
     searchUrl: () => "https://uteka.ru/sitemaps/sitemap-reviews.xml",
     isProductUrl: (url) => /\/reviews\/$/i.test(url.pathname),
     idFromUrl: (url) => hashId(`${url.hostname.replace(/^www\./, "")}${url.pathname}`),
@@ -331,7 +336,8 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
   }
 ];
 
-export const BLOCKED_FREE_MODE_DOMAINS = ["medum.ru"] as const;
+export const BLOCKED_FREE_MODE_DOMAINS = ["medum.ru", "polza.ru"] as const;
+export const UNPROVEN_AGGREGATE_DOMAINS = ["asna.ru"] as const;
 const PRAVOGOLOSA_HEALTH_CANARY = "ratingscollector-healthcheck-7f4c2a";
 
 function paginationCandidates($: CheerioAPI, pageUrl: string, definition: ReviewSiteDefinition): string[] {
@@ -420,9 +426,24 @@ export class ReviewSiteAdapter implements SiteAdapter {
           message: "pravogolosa.net search returned an explicit no-results proof"
         };
       }
-      const { html, status } = await this.request(this.definition.origin, context);
+      const target = this.definition.healthCanary?.url ?? this.definition.origin;
+      const { html, status } = await this.request(target, context);
       if (status < 200 || status >= 300) return { ok: false, checkedAt, message: `HTTP ${status}` };
       if (isBlockPage(html)) return { ok: false, checkedAt, message: "Защитная страница вместо площадки" };
+      if (this.definition.healthCanary) {
+        const parsed = this.definition.parse(html, target, this.definition.healthCanary.brand);
+        if (parsed.reviews === undefined) {
+          return { ok: false, checkedAt, message: "parser_changed: canary не содержит reviewCount письменных отзывов" };
+        }
+        if (parsed.reviews > 0 && (parsed.rating === undefined || parsed.rating <= 0 || parsed.rating > 5)) {
+          return { ok: false, checkedAt, message: "parser_changed: canary содержит отзывы без корректного рейтинга" };
+        }
+        return {
+          ok: true,
+          checkedAt,
+          message: `${this.definition.domain}: canary reviewCount=${parsed.reviews}, rating=${parsed.rating ?? "n/a"}`
+        };
+      }
       return { ok: true, checkedAt, message: `HTTP ${status}` };
     } catch (error) {
       return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
@@ -817,9 +838,36 @@ export class BlockedFreeModeAdapter implements SiteAdapter {
   }
 }
 
+export class UnprovenAggregateAdapter implements SiteAdapter {
+  readonly id: string;
+  readonly supportedDomains: readonly string[];
+
+  constructor(private readonly domain: typeof UNPROVEN_AGGREGATE_DOMAINS[number]) {
+    this.id = `unproven-aggregate:${domain}`;
+    this.supportedDomains = [domain, `www.${domain}`];
+  }
+
+  private message(): string {
+    return `unsupported_aggregate: ${this.domain} показывает отдельные тексты отзывов, но не доказан полный reviewCount и рейтинг; no_results не выводится`;
+  }
+
+  async healthCheck(_context: AdapterContext): Promise<AdapterHealth> {
+    return { ok: false, checkedAt: new Date().toISOString(), message: this.message() };
+  }
+
+  async discover(): Promise<ProductRef[]> {
+    throw new ParserChangedError(this.message());
+  }
+
+  async collect(): Promise<Observation> {
+    throw new ParserChangedError(this.message());
+  }
+}
+
 export function createReviewSiteAdapters(evidence: EvidenceStore, fetchImpl?: typeof fetch): SiteAdapter[] {
   return [
     ...REVIEW_SITE_DEFINITIONS.map((definition) => new ReviewSiteAdapter(definition, evidence, fetchImpl)),
-    ...BLOCKED_FREE_MODE_DOMAINS.map((domain) => new BlockedFreeModeAdapter(domain))
+    ...BLOCKED_FREE_MODE_DOMAINS.map((domain) => new BlockedFreeModeAdapter(domain)),
+    ...UNPROVEN_AGGREGATE_DOMAINS.map((domain) => new UnprovenAggregateAdapter(domain))
   ];
 }
