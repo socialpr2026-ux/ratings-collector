@@ -16,6 +16,7 @@ import {
 } from "./review-copy.js";
 import {
   CATALOG_DOMAINS,
+  SELECTABLE_CATALOG_DOMAINS,
   SITE_CATALOG,
   countCustomDomains,
   parseDomainList,
@@ -788,14 +789,14 @@ export function App() {
             <div className="picker-heading">
               <div><span className="label-row"><span id="sites-title">Площадки</span><small>{normalizedDomains.length}</small></span><p>Выберите готовые варианты или добавьте свои.</p></div>
               <div className="picker-actions">
-                <button type="button" onClick={() => setPresetSites(CATALOG_DOMAINS, true)} disabled={CATALOG_DOMAINS.every((domain) => selectedDomainSet.has(domain))}>Выбрать все</button>
+                <button type="button" onClick={() => setPresetSites(SELECTABLE_CATALOG_DOMAINS, true)} disabled={SELECTABLE_CATALOG_DOMAINS.every((domain) => selectedDomainSet.has(domain))}>Выбрать все доступные</button>
                 <button type="button" onClick={() => setDomains("")} disabled={normalizedDomains.length === 0}>Очистить</button>
               </div>
             </div>
 
             <div className="site-groups">
               {SITE_CATALOG.map((group) => {
-                const groupDomains = group.sites.map((site) => site.domain);
+                const groupDomains = group.sites.filter((site) => site.availability !== "temporarily_blocked").map((site) => site.domain);
                 const selectedCount = groupDomains.filter((domain) => selectedDomainSet.has(domain)).length;
                 const allSelected = selectedCount === groupDomains.length;
                 return <div className="site-group" key={group.id}>
@@ -806,9 +807,10 @@ export function App() {
                   <div className="site-options">
                     {group.sites.map((site) => {
                       const checked = selectedDomainSet.has(site.domain);
-                      return <label className={`site-option ${checked ? "selected" : ""}`} key={site.domain}>
-                        <input type="checkbox" checked={checked} onChange={(event) => setPresetSites([site.domain], event.target.checked)} />
-                        <span><strong>{site.label}</strong><small>{site.domain}</small></span>
+                      const blocked = site.availability === "temporarily_blocked";
+                      return <label className={`site-option ${checked ? "selected" : ""} ${blocked ? "unavailable" : ""}`} key={site.domain} title={site.note}>
+                        <input type="checkbox" checked={checked} disabled={blocked} onChange={(event) => setPresetSites([site.domain], event.target.checked)} />
+                        <span><strong>{site.label}</strong><small>{blocked ? "Временно недоступно" : site.domain}</small></span>
                       </label>;
                     })}
                   </div>

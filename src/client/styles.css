@@ -113,6 +113,8 @@ input::placeholder, textarea::placeholder { color: #9aa09d; }
 .site-option { min-width: 0; display: flex; gap: 8px; align-items: center; min-height: 46px; padding: 7px 9px; border: 1px solid #dde4df; border-radius: 10px; background: #fff; cursor: pointer; transition: border-color .15s, background-color .15s, box-shadow .15s; }
 .site-option:hover { border-color: #b7c9bf; }
 .site-option.selected { border-color: #a7c7b5; background: #f0f7f3; box-shadow: inset 0 0 0 1px rgba(55, 122, 88, .04); }
+.site-option.unavailable { cursor: not-allowed; opacity: .62; background: #f6f7f6; }
+.site-option.unavailable small { color: #9a6e48; }
 .site-option input { width: 16px; min-height: 16px; height: 16px; flex: 0 0 16px; }
 .site-option > span { min-width: 0; }
 .site-option strong, .site-option small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

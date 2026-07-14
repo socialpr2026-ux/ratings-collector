@@ -2,7 +2,12 @@ export type SiteCatalogGroup = {
   id: "marketplaces" | "review-sites" | "pharmacies";
   label: string;
   description: string;
-  sites: readonly { domain: string; label: string }[];
+  sites: readonly {
+    domain: string;
+    label: string;
+    availability?: "ready" | "temporarily_blocked";
+    note?: string;
+  }[];
 };
 
 export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
@@ -37,7 +42,7 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
     sites: [
       { domain: "uteka.ru", label: "Ютека" },
       { domain: "megapteka.ru", label: "Мегаптека" },
-      { domain: "medum.ru", label: "Medum" },
+      { domain: "medum.ru", label: "Medum", availability: "temporarily_blocked", note: "Сайт сейчас блокирует автоматический доступ" },
       { domain: "eapteka.ru", label: "ЕАПТЕКА" },
       { domain: "polza.ru", label: "POLZAru" },
       { domain: "asna.ru", label: "АСНА" },
@@ -50,6 +55,9 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
 ] as const;
 
 export const CATALOG_DOMAINS = SITE_CATALOG.flatMap((group) => group.sites.map((site) => site.domain));
+export const SELECTABLE_CATALOG_DOMAINS = SITE_CATALOG.flatMap((group) =>
+  group.sites.filter((site) => site.availability !== "temporarily_blocked").map((site) => site.domain)
+);
 
 function rawDomainLines(value: string) {
   return value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);

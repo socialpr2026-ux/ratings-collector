@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CATALOG_DOMAINS,
+  SELECTABLE_CATALOG_DOMAINS,
   SITE_CATALOG,
   countCustomDomains,
   parseDomainList,
@@ -24,6 +25,10 @@ describe("site picker catalog", () => {
       "uteka.ru",
       "megapteka.ru"
     ]));
+    expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("medum.ru");
+    expect(SITE_CATALOG.flatMap((group) => group.sites).find((site) => site.domain === "medum.ru")).toMatchObject({
+      availability: "temporarily_blocked"
+    });
   });
 
   it("normalizes pasted URLs for the run without duplicating a site", () => {
