@@ -387,18 +387,33 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
 
   if (requested.kind === "polza-product") {
     const roots = $(`meta[itemprop='sku'][content='${requested.productId}']`).closest("[itemscope]");
-    if (roots.length !== 1) return undefined;
-    const root = roots.first();
-    const aggregate = root.find("[itemprop='aggregateRating']").first();
-    const reviews = aggregate.find("meta[itemprop='reviewCount']").first().attr("content")?.trim();
-    const rating = aggregate.find("meta[itemprop='ratingValue']").first().attr("content")?.trim();
-    const reviewCount = reviews && /^\d+$/.test(reviews) ? Number(reviews) : Number.NaN;
-    const ratingValue = rating && /^\d(?:[.,]\d+)?$/.test(rating) ? Number(rating.replace(",", ".")) : Number.NaN;
-    if (!Number.isSafeInteger(reviewCount) || reviewCount < 0 ||
-      reviewCount > 0 && (!Number.isFinite(ratingValue) || ratingValue <= 0 || ratingValue > 5)) return undefined;
+    if (roots.length === 0) return undefined;
+    const candidates: Array<{ reviews: string; rating?: string; reviewCount: number; ratingValue: number }> = [];
+    for (const node of roots.toArray()) {
+      const root = $(node);
+      const aggregate = root.find("[itemprop='aggregateRating']").first();
+      // Polza repeats the current SKU in a recommendation carousel. Those
+      // duplicate cards have no aggregate and must not invalidate the single
+      // source-bound product aggregate above them.
+      if (!aggregate.length) continue;
+      const href = root.find("link[itemprop='url']").first().attr("href");
+      const reviews = aggregate.find("meta[itemprop='reviewCount']").first().attr("content")?.trim();
+      const rating = aggregate.find("meta[itemprop='ratingValue']").first().attr("content")?.trim();
+      const reviewCount = reviews && /^\d+$/.test(reviews) ? Number(reviews) : Number.NaN;
+      const ratingValue = rating && /^\d(?:[.,]\d+)?$/.test(rating) ? Number(rating.replace(",", ".")) : Number.NaN;
+      if (!href || !translatedSourceMatches(new URL(href, requested.source).toString(), requested.source) ||
+        !Number.isSafeInteger(reviewCount) || reviewCount < 0 ||
+        reviewCount > 0 && (!Number.isFinite(ratingValue) || ratingValue <= 0 || ratingValue > 5)) return undefined;
+      candidates.push({ reviews: reviews!, ...(rating ? { rating } : {}), reviewCount, ratingValue });
+    }
+    if (candidates.length === 0 || new Set(candidates.map((item) => `${item.reviewCount}:${item.ratingValue}`)).size !== 1) {
+      return undefined;
+    }
+    const [{ reviews, rating }] = candidates;
     return `<html><head>${base}</head><body><script data-source-url="${escapeHtml(requested.source.toString())}"></script>` +
       `<main itemscope itemtype="https://schema.org/Product"><meta itemprop="sku" content="${escapeHtml(requested.productId!)}">` +
-      `<div itemprop="aggregateRating" itemscope><meta itemprop="reviewCount" content="${escapeHtml(reviews!)}">` +
+      `<link itemprop="url" href="${escapeHtml(requested.source.pathname)}">` +
+      `<div itemprop="aggregateRating" itemscope><meta itemprop="reviewCount" content="${escapeHtml(reviews)}">` +
       `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</div></main></body></html>`;
   }
 

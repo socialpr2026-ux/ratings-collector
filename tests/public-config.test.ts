@@ -478,7 +478,10 @@ describe("static pharmacy Translate gateway", () => {
       return new Response(`<html><head><base href="${source}"></head><body>` +
         (url.pathname.startsWith("/product/")
           ? `<div class="catalog__block--cards"><div class="catalog-block__items">${card}</div></div>`
-          : `<main itemscope>${card}</main>`) + `</body></html>`, { headers: { "content-type": "text/html" } });
+          : `<main itemscope>${card}</main><aside><div itemscope itemtype="https://schema.org/Product">
+              <link itemprop="url" href="/catalog/otsillokoktsinum-granuly-1-g-6-doz_20630/">
+              <meta itemprop="sku" content="20630"><meta itemprop="name" content="duplicate recommendation without metrics">
+            </div></aside>`) + `</body></html>`, { headers: { "content-type": "text/html" } });
     });
     vi.stubGlobal("fetch", upstream);
 
