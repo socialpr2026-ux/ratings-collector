@@ -213,6 +213,7 @@ export class WildberriesAdapter implements SiteAdapter {
   private blockedMessage?: string;
   private requestTail: Promise<void> = Promise.resolve();
   private hasMadeRequest = false;
+  private readonly discoveryCache = new Map<string, Promise<ProductRef[]>>();
 
   constructor(options: WildberriesAdapterOptions = {}) {
     const maxPages = options.maxPages ?? DEFAULT_MAX_PAGES;
@@ -278,6 +279,33 @@ export class WildberriesAdapter implements SiteAdapter {
   }
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
+    const cacheKey = this.discoveryCacheKey(brand, context);
+    const cached = cacheKey ? this.discoveryCache.get(cacheKey) : undefined;
+    if (cached) return cached;
+
+    const discovery = this.discoverUncached(brand, context);
+    if (cacheKey) {
+      this.discoveryCache.set(cacheKey, discovery);
+      while (this.discoveryCache.size > 64) {
+        const oldest = this.discoveryCache.keys().next().value as string | undefined;
+        if (!oldest) break;
+        this.discoveryCache.delete(oldest);
+      }
+    }
+
+    try {
+      return await discovery;
+    } catch (error) {
+      // A blocked or malformed response must remain retryable. Only a proven,
+      // successful discovery is reusable within the same run.
+      if (cacheKey && this.discoveryCache.get(cacheKey) === discovery) {
+        this.discoveryCache.delete(cacheKey);
+      }
+      throw error;
+    }
+  }
+
+  private async discoverUncached(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const byListingId = new Map<string, ProductRef>();
     let rawProductsSeen = 0;
     let previousPageIds: string | undefined;
@@ -364,6 +392,14 @@ export class WildberriesAdapter implements SiteAdapter {
     }
 
     return [...byListingId.values()];
+  }
+
+  private discoveryCacheKey(brand: string, context: AdapterContext): string | undefined {
+    const runId = context.runId?.trim();
+    if (!runId) return undefined;
+    const normalizedBrand = brand.normalize("NFKC").trim().toLocaleLowerCase("ru-RU");
+    const previousIds = [...(context.previousIds ?? [])].sort().join("\u001f");
+    return `${runId}\u001e${normalizedBrand}\u001e${previousIds}`;
   }
 
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {

@@ -45,6 +45,41 @@ function createAdapter(
 }
 
 describe("WildberriesAdapter.discover", () => {
+  it("reuses a successful discovery within one run without repeating public HTTP requests", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      total: 1,
+      products: [{ id: 701, name: "BrandX capsules", nmReviewRating: 4.8, nmFeedbacks: 10 }]
+    })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const runContext = context({ runId: "run-1", previousIds: ["wildberries:702"] });
+
+    const first = await adapter.discover("BrandX", runContext);
+    const second = await adapter.discover("BrandX", runContext);
+
+    expect(second).toEqual(first);
+    expect(first.map(({ listingId }) => listingId)).toEqual(["701", "702"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not cache a blocked discovery as a successful empty result", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+      .mockResolvedValueOnce(jsonResponse({
+        total: 1,
+        products: [{ id: 701, name: "BrandX capsules", nmReviewRating: 4.8, nmFeedbacks: 10 }]
+      })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock, { blockedCooldownMs: 0 });
+    const runContext = context({ runId: "run-1" });
+
+    await expect(adapter.discover("BrandX", runContext)).rejects.toBeInstanceOf(AdapterBlockedError);
+    await expect(adapter.discover("BrandX", runContext)).resolves.toMatchObject([{ listingId: "701" }]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
   it("recovers a blocked desktop route through appType 32 and keeps that free route for pagination", async () => {
     const sleeps: number[] = [];
     const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
