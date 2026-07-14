@@ -34,7 +34,144 @@ function page(items: unknown[], totalPages?: number) {
   };
 }
 
+function sourceUrlFromTranslate(input: URL): URL {
+  const source = new URL(input.toString());
+  source.hostname = "www.ozon.ru";
+  source.searchParams.delete("_x_tr_sl");
+  source.searchParams.delete("_x_tr_tl");
+  source.searchParams.delete("_x_tr_hl");
+  return source;
+}
+
+function translatedTile(sku: string, title: string, ratingValue?: string, reviews?: number): string {
+  const slug = `product-${sku}`;
+  const metrics = ratingValue === undefined || reviews === undefined
+    ? ""
+    : `<div><svg style="color:var(--graphicRating)"></svg><span>${ratingValue}</span><svg></svg><span>${reviews} \u043e\u0442\u0437\u044b\u0432\u043e\u0432</span></div>`;
+  return `<div class="tile-root">
+    <a href="https://www-ozon-ru.translate.goog/product/${slug}/?_x_tr_sl=ru"></a>
+    <a href="https://www-ozon-ru.translate.goog/product/${slug}/?_x_tr_sl=ru"><span>${title}</span></a>
+    ${metrics}
+  </div>`;
+}
+
+function translatedTileWithRawMetric(sku: string, title: string, ratingValue: string, rawCount: string): string {
+  const slug = `product-${sku}`;
+  return `<div class="tile-root">
+    <a href="https://www-ozon-ru.translate.goog/product/${slug}/?_x_tr_sl=ru"></a>
+    <a href="https://www-ozon-ru.translate.goog/product/${slug}/?_x_tr_sl=ru"><span>${title}</span></a>
+    <div><svg style="color:var(--graphicRating)"></svg><span>${ratingValue}</span><span>${rawCount}</span></div>
+  </div>`;
+}
+
+function translatedHtml(sourceUrl: URL, tiles: string[], totalPages: number, empty = false): string {
+  const escapedSource = sourceUrl.toString().replaceAll("&", "&amp;");
+  const state = empty ? `catalog.searchEmptyState \"totalPages\":${totalPages}` : `\"totalPages\":${totalPages}`;
+  return `<html><head><base href="${escapedSource}"></head><body>
+    ${tiles.length ? `<div data-widget="tileGridDesktop">${tiles.join("")}</div>` : ""}
+    <script>window.__NUXT__={};window.__NUXT__.state='{"proof":"${state}"}';window.__NUXT__.__CONFIG__='{}';</script>
+  </body></html>`;
+}
+
+function translatedProductHtml(sourceUrl: URL, sku: string, title: string, ratingValue: number, reviews: number): string {
+  const escapedSource = sourceUrl.toString().replaceAll("&", "&amp;");
+  const scoreText = `${ratingValue} \u2022 ${reviews} \u043e\u0442\u0437\u044b\u0432\u043e\u0432`;
+  const product = {
+    "@context": "http://schema.org",
+    "@type": "Product",
+    sku,
+    name: title,
+    aggregateRating: { "@type": "AggregateRating", ratingValue: String(ratingValue), reviewCount: String(reviews) }
+  };
+  return `<html><head><base href="${escapedSource}"><script type="application/ld+json">${JSON.stringify(product)}</script></head><body>
+    <div id="state-webSingleProductScore-1" data-state='${JSON.stringify({ text: scoreText })}'></div>
+    <script>window.__NUXT__={};window.__NUXT__.state='{}';</script>
+  </body></html>`;
+}
+
 describe("Ozon browser collector", () => {
+  it("uses the fixed translate render path, exhausts pages and deduplicates SKU", async () => {
+    const fetch = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const proxy = new URL(String(input));
+      expect(proxy.hostname).toBe("www-ozon-ru.translate.goog");
+      expect(new Headers(init?.headers).has("x-ratings-browser")).toBe(false);
+      const source = sourceUrlFromTranslate(proxy);
+      if (source.pathname.startsWith("/product/")) {
+        const sku = source.pathname.match(/-(\d+)\/$/)![1]!;
+        const fixture = sku === "101001"
+          ? translatedProductHtml(source, sku, "\u0422\u0438\u043a\u0430\u043b\u0438\u0437\u0438\u0441 90 \u043c\u0433 60 \u0448\u0442", 4.9, 1234)
+          : translatedProductHtml(source, sku, "\u0422\u0438\u043a\u0430\u043b\u0438\u0437\u0438\u0441 60 \u043c\u0433 60 \u0448\u0442", 5, 1);
+        return new Response(fixture, { headers: { "content-type": "text/html; charset=utf-8" } });
+      }
+      const html = source.searchParams.get("page") === "2"
+        ? translatedHtml(source, [
+            translatedTile("202002", "\u0422\u0438\u043a\u0430\u043b\u0438\u0437\u0438\u0441 60 \u043c\u0433 60 \u0448\u0442", "5.0", 1)
+          ], 2)
+        : translatedHtml(source, [
+            translatedTileWithRawMetric("101001", "\u0422\u0438\u043a\u0430\u043b\u0438\u0437\u0438\u0441 90 \u043c\u0433 60 \u0448\u0442", "4,9", "1,2 \u0442\u044b\u0441."),
+            translatedTileWithRawMetric("101001", "\u0422\u0438\u043a\u0430\u043b\u0438\u0437\u0438\u0441 90 \u043c\u0433 60 \u0448\u0442", "4,9", "1,2 \u0442\u044b\u0441.")
+          ], 2);
+      return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({ fetch, now: () => new Date("2026-07-14T10:00:00Z") });
+
+    const refs = await adapter.discover("\u0422\u0438\u043a\u0430\u043b\u0438\u0437\u0438\u0441", context);
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context)));
+
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(observations).toMatchObject([
+      { listingId: "101001", reviews: 1234, rating: 4.9, source: "ozon:search-html:google-translate" },
+      { listingId: "202002", reviews: 1, rating: 5, source: "ozon:search-html:google-translate" }
+    ]);
+  });
+
+  it("follows only Ozon's bounded category-prediction redirect", async () => {
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      const proxy = new URL(String(input));
+      const source = sourceUrlFromTranslate(proxy);
+      if (source.pathname === "/search/") {
+        const redirected = new URL("https://www.ozon.ru/category/apteka-6000/");
+        redirected.searchParams.set("category_was_predicted", "true");
+        redirected.searchParams.set("deny_category_prediction", "true");
+        redirected.searchParams.set("from_global", "true");
+        redirected.searchParams.set("text", source.searchParams.get("text")!);
+        return new Response(`<html><script>location.replace(${JSON.stringify(redirected.toString())})</script></html>`, {
+          headers: { "content-type": "text/html" }
+        });
+      }
+      return new Response(translatedHtml(source, [
+        translatedTile("303003", "\u041a\u0430\u0433\u043e\u0446\u0435\u043b 12 \u043c\u0433 20 \u0448\u0442", "5.0", 25)
+      ], 1), { headers: { "content-type": "text/html" } });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({ fetch });
+
+    const refs = await adapter.discover("\u041a\u0430\u0433\u043e\u0446\u0435\u043b", context);
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(refs).toMatchObject([{ listingId: "303003", metadata: { reviewCount: 25, rating: 5 } }]);
+  });
+
+  it("accepts zero products only with an explicit Ozon empty-state proof", async () => {
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www.ozon.ru") return new Response("captcha", { status: 403 });
+      const source = sourceUrlFromTranslate(url);
+      return new Response(translatedHtml(source, [], 1, true), { headers: { "content-type": "text/html" } });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({ fetch });
+
+    await expect(adapter.discover("\u041d\u0435\u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0439", context)).resolves.toEqual([]);
+
+    const ambiguousFetch = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www.ozon.ru") return new Response("captcha", { status: 403 });
+      const source = sourceUrlFromTranslate(url);
+      return new Response(translatedHtml(source, [], 1, false), { headers: { "content-type": "text/html" } });
+    }) as unknown as typeof globalThis.fetch;
+    const ambiguous = new OzonBrowserAdapter({ fetch: ambiguousFetch });
+    await expect(ambiguous.discover("\u041d\u0435\u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0439", context)).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
   it("exhausts composer pagination and returns exact tile metrics", async () => {
     const fetch = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
       const composerUrl = new URL(String(input));
@@ -45,7 +182,7 @@ describe("Ozon browser collector", () => {
       expect(new Headers(init?.headers).get("x-ratings-browser-mode")).toBe("ozon-composer");
       return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
     }) as unknown as typeof globalThis.fetch;
-    const adapter = new OzonBrowserAdapter({ fetch, now: () => new Date("2026-07-13T10:00:00Z") });
+    const adapter = new OzonBrowserAdapter({ fetch, now: () => new Date("2026-07-13T10:00:00Z"), translateEnabled: false });
 
     const refs = await adapter.discover("Кагоцел", context);
     const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context)));
@@ -59,7 +196,7 @@ describe("Ozon browser collector", () => {
 
   it("uses the capped fallback only when browser discovery is blocked", async () => {
     const browserFetch = vi.fn(async () => new Response("captcha", { status: 403 })) as unknown as typeof fetch;
-    const browser = new OzonBrowserAdapter({ fetch: browserFetch });
+    const browser = new OzonBrowserAdapter({ fetch: browserFetch, translateEnabled: false });
     const fallbackRef: ProductRef = {
       domain: "ozon.ru", platform: "ozon", listingId: "7", brand: "Кагоцел",
       url: "https://www.ozon.ru/product/7/", title: "Кагоцел", metadata: { source: "apify" }
@@ -84,7 +221,7 @@ describe("Ozon browser collector", () => {
       status: 200,
       headers: { "content-type": "application/json" }
     })) as unknown as typeof globalThis.fetch;
-    const adapter = new OzonBrowserAdapter({ fetch, maxPages: 2 });
+    const adapter = new OzonBrowserAdapter({ fetch, maxPages: 2, translateEnabled: false });
 
     await expect(adapter.discover("Кагоцел", context)).rejects.toBeInstanceOf(AdapterBlockedError);
     expect(fetch).toHaveBeenCalledTimes(2);
@@ -92,7 +229,8 @@ describe("Ozon browser collector", () => {
 
   it("does not pay for the same broken fallback schema on every brand", async () => {
     const browser = new OzonBrowserAdapter({
-      fetch: vi.fn(async () => new Response("captcha", { status: 403 })) as unknown as typeof fetch
+      fetch: vi.fn(async () => new Response("captcha", { status: 403 })) as unknown as typeof fetch,
+      translateEnabled: false
     });
     const fallback = {
       id: "ozon",

@@ -1,3 +1,4 @@
+import { load } from "cheerio";
 import type {
   AdapterContext,
   AdapterHealth,
@@ -9,11 +10,14 @@ import { matchesBrand, normalizeRating } from "../utils/normalize.js";
 import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 
 const SEARCH_ENDPOINT = "https://www.ozon.ru/api/composer-api.bx/page/json/v2";
+const TRANSLATE_ORIGIN = "https://www-ozon-ru.translate.goog";
 const PLATFORM_DOMAIN = "ozon.ru";
 const PLATFORM_ID = "ozon";
 const SOURCE = "ozon:composer-api:edgeone-browser";
+const TRANSLATE_SOURCE = "ozon:search-html:google-translate";
 const DEFAULT_MAX_PAGES = 50;
 const DEFAULT_MAX_DOCUMENT_BYTES = 15_000_000;
+const MAX_TRANSLATE_REDIRECTS = 2;
 
 type JsonObject = Record<string, unknown>;
 
@@ -25,6 +29,7 @@ type SearchTile = {
   rating: number | null;
   rawRating: unknown;
   rawReviewCount: unknown;
+  source: typeof SOURCE | typeof TRANSLATE_SOURCE;
 };
 
 type SearchPage = {
@@ -38,6 +43,8 @@ export type OzonBrowserAdapterOptions = {
   maxPages?: number;
   maxDocumentBytes?: number;
   now?: () => Date;
+  /** Test-only escape hatch for composer-specific fixtures. Production stays translate-first. */
+  translateEnabled?: boolean;
 };
 
 function isObject(value: unknown): value is JsonObject {
@@ -157,7 +164,8 @@ function parseTile(value: unknown): SearchTile | null {
     reviews: reviewCount(rawReviewCount),
     rating: rating(rawRating),
     rawRating,
-    rawReviewCount
+    rawReviewCount,
+    source: SOURCE
   };
 }
 
@@ -184,6 +192,270 @@ function parseSearchPage(value: unknown): SearchPage {
   return { items, rawItemCount: raw.length, totalPages: totalPages(value) };
 }
 
+function canonicalTranslatedProduct(value: string): { listingId: string; url: string } {
+  const url = new URL(value, TRANSLATE_ORIGIN);
+  if (!["www-ozon-ru.translate.goog", "www.ozon.ru"].includes(url.hostname)) {
+    throw new ParserChangedError(`Ozon translated tile linked to unexpected host ${url.hostname}`);
+  }
+  const segment = url.pathname.match(/^\/product\/([^/]+)\/?$/i)?.[1];
+  const listingId = segment ? skuFromUrl(`/product/${segment}/`) : undefined;
+  if (!segment || !listingId) throw new ParserChangedError("Ozon translated tile has no stable product SKU");
+  return { listingId, url: `https://www.ozon.ru/product/${segment}/` };
+}
+
+function parsedReviewLabel(value: string): number | null {
+  const normalized = value.normalize("NFKC").toLocaleLowerCase("ru-RU").trim();
+  const match = normalized.match(
+    /^([\d\s\u00a0\u202f]+)\s*\u043e\u0442\u0437\u044b\u0432(?:\u0430|\u043e\u0432)?$/iu
+  );
+  if (!match) return null;
+  const count = Number(match[1]!.replace(/[\s\u00a0\u202f]+/g, ""));
+  return Number.isSafeInteger(count) && count >= 0 ? count : null;
+}
+
+function parseTranslatedTile($: ReturnType<typeof load>, element: Parameters<ReturnType<typeof load>>[0]): SearchTile {
+  const tile = $(element);
+  const anchors = tile.find('a[href*="/product/"]').toArray();
+  if (anchors.length === 0) throw new ParserChangedError("Ozon translated tile has no product link");
+
+  const links = anchors.map((anchor) => canonicalTranslatedProduct($(anchor).attr("href") ?? ""));
+  const listingIds = new Set(links.map((link) => link.listingId));
+  if (listingIds.size !== 1) throw new ParserChangedError("Ozon translated tile links to multiple product SKUs");
+  const listingId = links[0]!.listingId;
+  const title = anchors
+    .map((anchor) => $(anchor).text().normalize("NFKC").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length)[0];
+  if (!title) throw new ParserChangedError("Ozon translated tile has no product title");
+
+  const reviewSpans = tile.find("span").toArray().filter((span) => parsedReviewLabel($(span).text()) !== null);
+  if (reviewSpans.length > 1) throw new ParserChangedError("Ozon translated tile exposes multiple review counters");
+
+  let reviews: number | null = null;
+  let parsedRating: number | null = null;
+  let rawReviewCount: unknown = null;
+  let rawRating: unknown = null;
+  if (reviewSpans.length === 1) {
+    const reviewSpan = $(reviewSpans[0]!);
+    const metricRow = reviewSpan.parent();
+    if (metricRow.find('svg[style*="graphicRating"]').length !== 1) {
+      throw new ParserChangedError("Ozon translated review counter is not paired with one rating marker");
+    }
+    const ratingValues = metricRow.find("span").toArray()
+      .map((span) => $(span).text().normalize("NFKC").trim())
+      .filter((text) => /^[0-5](?:[.,]\d+)?$/.test(text));
+    if (ratingValues.length !== 1) {
+      throw new ParserChangedError("Ozon translated review counter is not paired with one numeric rating");
+    }
+    rawReviewCount = reviewSpan.text().normalize("NFKC").trim();
+    reviews = parsedReviewLabel(String(rawReviewCount))!;
+    rawRating = ratingValues[0]!;
+    parsedRating = rating(rawRating);
+    if (parsedRating === null || parsedRating <= 0 || reviews === null || reviews <= 0) {
+      throw new ParserChangedError("Ozon translated tile returned inconsistent review metrics");
+    }
+  } else {
+    const ratingMarkers = tile.find('svg[style*="graphicRating"]');
+    if (ratingMarkers.length > 1) throw new ParserChangedError("Ozon translated tile exposes multiple rating markers");
+    if (ratingMarkers.length === 1) {
+      const metricRow = ratingMarkers.first().parent();
+      const ratingValues = metricRow.find("span").toArray()
+        .map((span) => $(span).text().normalize("NFKC").trim())
+        .filter((text) => /^[0-5](?:[.,]\d+)?$/.test(text));
+      if (ratingValues.length !== 1) throw new ParserChangedError("Ozon translated tile has an ambiguous numeric rating");
+      rawRating = ratingValues[0]!;
+      parsedRating = rating(rawRating);
+      if (parsedRating === null || parsedRating <= 0) throw new ParserChangedError("Ozon translated tile has an invalid rating");
+      rawReviewCount = metricRow.text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    }
+  }
+
+  return {
+    listingId,
+    title,
+    url: links[0]!.url,
+    reviews,
+    rating: parsedRating,
+    rawRating,
+    rawReviewCount,
+    source: TRANSLATE_SOURCE
+  };
+}
+
+const ALLOWED_OZON_SEARCH_PARAMETERS = new Set([
+  "category_was_predicted",
+  "deny_category_prediction",
+  "from_global",
+  "page",
+  "text"
+]);
+
+function validateTranslatedTarget(target: URL, brand: string, page: number): void {
+  const isSearch = target.pathname === "/search/";
+  const isCategory = /^\/category\/[a-z0-9-]+\/$/i.test(target.pathname);
+  if (target.protocol !== "https:" || target.hostname !== "www.ozon.ru" || target.hash || (!isSearch && !isCategory)) {
+    throw new ParserChangedError("Ozon translated search redirected outside the allowed search/category path");
+  }
+  if ([...target.searchParams.keys()].some((key) => !ALLOWED_OZON_SEARCH_PARAMETERS.has(key))) {
+    throw new ParserChangedError("Ozon translated search added an unexpected query parameter");
+  }
+  if (target.searchParams.get("text")?.normalize("NFKC").trim() !== brand || target.searchParams.get("from_global") !== "true") {
+    throw new ParserChangedError("Ozon translated search changed the requested brand");
+  }
+  const requestedPage = target.searchParams.get("page");
+  if (page === 1 ? requestedPage !== null && requestedPage !== "1" : requestedPage !== String(page)) {
+    throw new ParserChangedError("Ozon translated search changed the requested page");
+  }
+  if (isCategory && (
+    target.searchParams.get("category_was_predicted") !== "true" ||
+    target.searchParams.get("deny_category_prediction") !== "true"
+  )) {
+    throw new ParserChangedError("Ozon translated category redirect has no prediction proof");
+  }
+}
+
+function targetSignature(target: URL): string {
+  const parameters = [...target.searchParams.entries()].sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+    leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue)
+  );
+  return `${target.protocol}//${target.hostname}${target.pathname}?${new URLSearchParams(parameters).toString()}`;
+}
+
+function translatedProxyUrl(target: URL): URL {
+  const proxy = new URL(`${target.pathname}${target.search}`, TRANSLATE_ORIGIN);
+  proxy.searchParams.set("_x_tr_sl", "ru");
+  proxy.searchParams.set("_x_tr_tl", "en");
+  proxy.searchParams.set("_x_tr_hl", "en");
+  return proxy;
+}
+
+function translatedRedirect(html: string): URL | undefined {
+  const encoded = html.match(/location\.replace\(("(?:\\.|[^"\\])*")\)/)?.[1];
+  if (!encoded) return undefined;
+  try {
+    return new URL(JSON.parse(encoded) as string);
+  } catch {
+    throw new ParserChangedError("Ozon translated search returned an invalid client redirect");
+  }
+}
+
+function parseTranslatedSearchPage(html: string, target: URL, page: number): SearchPage {
+  if (!/<\/html>\s*$/i.test(html) || !html.includes("window.__NUXT__.state=")) {
+    throw new ParserChangedError("Ozon translated search returned incomplete server-rendered HTML");
+  }
+  const $ = load(html);
+  const baseValue = $("base[href]").first().attr("href");
+  if (!baseValue) throw new ParserChangedError("Ozon translated search has no source URL proof");
+  const base = new URL(baseValue);
+  if (targetSignature(base) !== targetSignature(target)) {
+    throw new ParserChangedError("Ozon translated search returned a different source page");
+  }
+
+  const state = $("script").toArray()
+    .map((script) => $(script).text())
+    .find((text) => text.includes("window.__NUXT__.state="));
+  if (!state) throw new ParserChangedError("Ozon translated search has no application state");
+  const totals = [...state.matchAll(/"totalPages":(\d+)/g)].map((match) => Number(match[1]));
+  const distinctTotals = [...new Set(totals)];
+  if (distinctTotals.length !== 1 || !Number.isSafeInteger(distinctTotals[0]) || distinctTotals[0]! < 0) {
+    throw new ParserChangedError("Ozon translated search has no unambiguous totalPages value");
+  }
+
+  const roots = $('[data-widget="tileGridDesktop"] .tile-root').toArray();
+  const explicitEmpty = state.includes("catalog.searchEmptyState");
+  if (explicitEmpty) {
+    if (roots.length > 0) throw new ParserChangedError("Ozon translated search exposes products and an empty-state together");
+    return { items: [], rawItemCount: 0, totalPages: 0 };
+  }
+  if (roots.length === 0) throw new ParserChangedError("Ozon translated search has no product grid and no empty-state proof");
+  const declaredTotalPages = distinctTotals[0]!;
+  if (declaredTotalPages < page) {
+    throw new ParserChangedError("Ozon translated search returned products beyond its declared page count");
+  }
+  const items = roots.map((root) => parseTranslatedTile($, root));
+  if (items.length !== roots.length) throw new ParserChangedError("Ozon translated search did not parse every product tile");
+  return { items, rawItemCount: roots.length, totalPages: declaredTotalPages };
+}
+
+type ExactProductMetrics = {
+  product: string;
+  reviews: number;
+  rating: number | null;
+  rawRating: number | null;
+};
+
+function exactNonNegativeInteger(value: unknown): number | null {
+  if (typeof value === "number") return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  if (typeof value !== "string" || !/^\d+$/.test(value.trim())) return null;
+  const parsed = Number(value.trim());
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function productJsonLdEntries(value: unknown): JsonObject[] {
+  if (Array.isArray(value)) return value.flatMap(productJsonLdEntries);
+  if (!isObject(value)) return [];
+  const graph = Array.isArray(value["@graph"]) ? value["@graph"]!.flatMap(productJsonLdEntries) : [];
+  return [value, ...graph];
+}
+
+function parseExactProductMetrics(html: string, target: URL, listingId: string): ExactProductMetrics {
+  if (!/<\/html>\s*$/i.test(html) || !html.includes("window.__NUXT__.state=")) {
+    throw new ParserChangedError("Ozon translated product returned incomplete server-rendered HTML");
+  }
+  const $ = load(html);
+  const baseValue = $("base[href]").first().attr("href");
+  if (!baseValue || targetSignature(new URL(baseValue)) !== targetSignature(target)) {
+    throw new ParserChangedError("Ozon translated product returned a different source page");
+  }
+
+  const products: JsonObject[] = [];
+  for (const script of $('script[type="application/ld+json"]').toArray()) {
+    try {
+      products.push(...productJsonLdEntries(JSON.parse($(script).text()) as unknown));
+    } catch {
+      throw new ParserChangedError("Ozon translated product JSON-LD is invalid");
+    }
+  }
+  const product = products.find((entry) =>
+    (entry["@type"] === "Product" || (Array.isArray(entry["@type"]) && entry["@type"].includes("Product"))) &&
+    asSku(entry.sku) === listingId
+  );
+  const title = product ? asString(product.name) : undefined;
+  if (!product || !title) throw new ParserChangedError("Ozon translated product has no matching Product JSON-LD");
+
+  const scoreValue = $('[id^="state-webSingleProductScore"]').first().attr("data-state");
+  if (!scoreValue) throw new ParserChangedError("Ozon translated product has no review score proof");
+  let score: JsonObject;
+  try {
+    const parsed = JSON.parse(scoreValue) as unknown;
+    if (!isObject(parsed)) throw new Error("non-object");
+    score = parsed;
+  } catch {
+    throw new ParserChangedError("Ozon translated product review score is invalid JSON");
+  }
+  const scoreText = asString(score.text)?.replace(/\s+/g, " ") ?? "";
+  const aggregate = isObject(product.aggregateRating) ? product.aggregateRating : undefined;
+  if (!aggregate) {
+    if (!/^\u043d\u0435\u0442 \u043e\u0442\u0437\u044b\u0432\u043e\u0432$/iu.test(scoreText)) {
+      throw new ParserChangedError("Ozon translated product has no AggregateRating and no explicit zero-review proof");
+    }
+    return { product: title, reviews: 0, rating: null, rawRating: null };
+  }
+
+  const reviews = exactNonNegativeInteger(aggregate.reviewCount);
+  const rawRating = rating(aggregate.ratingValue);
+  if (reviews === null || reviews <= 0 || rawRating === null || rawRating <= 0) {
+    throw new ParserChangedError("Ozon translated product AggregateRating is incomplete");
+  }
+  const scoreMatch = scoreText.match(/^([0-5](?:[.,]\d+)?)\s*[\u2022\u00b7]\s*([\d\s\u00a0\u202f]+)\s*\u043e\u0442\u0437\u044b\u0432(?:\u0430|\u043e\u0432)?$/iu);
+  const scoreReviews = scoreMatch ? exactNonNegativeInteger(scoreMatch[2]!.replace(/[\s\u00a0\u202f]+/g, "")) : null;
+  const scoreRating = scoreMatch ? rating(scoreMatch[1]) : null;
+  if (scoreReviews !== reviews || scoreRating !== rawRating) {
+    throw new ParserChangedError("Ozon translated product JSON-LD and visible review score disagree");
+  }
+  return { product: title, reviews, rating: normalizeRating(rawRating, 5), rawRating };
+}
+
 function blockedBody(value: string): boolean {
   return /(?:captcha|antibot|access denied|доступ (?:ограничен|запрещен)|вы робот|variti)/i.test(value);
 }
@@ -196,12 +468,15 @@ export class OzonBrowserAdapter implements SiteAdapter {
   private readonly maxPages: number;
   private readonly maxDocumentBytes: number;
   private readonly now: () => Date;
+  private readonly translateEnabled: boolean;
+  private detailSerial: Promise<void> = Promise.resolve();
 
   constructor(options: OzonBrowserAdapterOptions = {}) {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.maxPages = options.maxPages ?? DEFAULT_MAX_PAGES;
     this.maxDocumentBytes = options.maxDocumentBytes ?? DEFAULT_MAX_DOCUMENT_BYTES;
     this.now = options.now ?? (() => new Date());
+    this.translateEnabled = options.translateEnabled ?? true;
     if (!Number.isInteger(this.maxPages) || this.maxPages < 1 || this.maxPages > 100) {
       throw new RangeError("Ozon browser maxPages must be an integer from 1 to 100");
     }
@@ -283,17 +558,26 @@ export class OzonBrowserAdapter implements SiteAdapter {
         rawRating: product.rawRating,
         rawReviewCount: product.rawReviewCount,
         capturedAt,
-        source: SOURCE
+        source: product.source
       }
     }));
   }
 
-  async collect(ref: ProductRef, _context: AdapterContext): Promise<Observation> {
+  async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
     const listingId = asSku(ref.listingId);
-    const product = ref.title?.normalize("NFKC").trim();
+    let product = ref.title?.normalize("NFKC").trim();
     if (!listingId || !product) throw new ParserChangedError("Ozon composer ProductRef is incomplete");
-    const reviews = reviewCount(ref.metadata.reviewCount);
-    const rawRating = rating(ref.metadata.rating);
+    const source = ref.metadata.source === TRANSLATE_SOURCE ? TRANSLATE_SOURCE : SOURCE;
+    let reviews = reviewCount(ref.metadata.reviewCount);
+    let rawRating = rating(ref.metadata.rating);
+    if (source === TRANSLATE_SOURCE) {
+      const exact = await this.serialProductDetail(() => this.fetchExactTranslatedProduct(ref, listingId, context));
+      if (!matchesBrand(exact.product, ref.brand)) {
+        throw new ParserChangedError("Ozon translated product JSON-LD belongs to a different brand");
+      }
+      reviews = exact.reviews;
+      rawRating = exact.rawRating;
+    }
     let normalizedRating = rawRating === null ? null : normalizeRating(rawRating, 5);
     let status: Observation["status"];
     if (reviews === 0) {
@@ -317,11 +601,143 @@ export class OzonBrowserAdapter implements SiteAdapter {
       ...(rawRating === null ? {} : { rawRating, rawRatingScale: 5 }),
       status,
       capturedAt: Number.isNaN(captured) ? this.now().toISOString() : new Date(captured).toISOString(),
-      source: SOURCE
+      source
     };
   }
 
+  private serialProductDetail<T>(task: () => Promise<T>): Promise<T> {
+    const result = this.detailSerial.catch(() => undefined).then(task);
+    this.detailSerial = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private async fetchExactTranslatedProduct(
+    ref: ProductRef,
+    listingId: string,
+    context: AdapterContext
+  ): Promise<ExactProductMetrics> {
+    const target = new URL(canonicalUrl(ref.url, listingId));
+    if (
+      target.protocol !== "https:" || target.hostname !== "www.ozon.ru" || target.search || target.hash ||
+      !/^\/product\/[a-z0-9-]+\/$/i.test(target.pathname) || skuFromUrl(target.toString()) !== listingId
+    ) {
+      throw new ParserChangedError("Ozon translated ProductRef is outside the fixed product path");
+    }
+    const endpoint = translatedProxyUrl(target);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(endpoint, {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          accept: "text/html,application/xhtml+xml",
+          "accept-language": "ru-RU,ru;q=0.9",
+          "cache-control": "no-cache"
+        },
+        signal: context.signal
+      });
+    } catch (error) {
+      if (context.signal?.aborted) throw error;
+      throw new AdapterBlockedError(`Ozon translated product request failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const declaredLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > this.maxDocumentBytes) {
+      throw new ParserChangedError("Ozon translated product exceeded the document safety limit");
+    }
+    const body = await response.text();
+    if (body.length > this.maxDocumentBytes) throw new ParserChangedError("Ozon translated product exceeded the document safety limit");
+    if ([403, 407, 423, 429, 498, 503].includes(response.status) ||
+      /(?:incidentId|Antibot Captcha|abt-challenge|Target URL returned error 403)/i.test(body)) {
+      throw new AdapterBlockedError(`Ozon blocked the translated product collector (HTTP ${response.status})`);
+    }
+    if (!response.ok) throw new AdapterBlockedError(`Ozon translated product returned HTTP ${response.status}`);
+    if (!/text\/html|application\/xhtml\+xml/i.test(response.headers.get("content-type") ?? "")) {
+      throw new ParserChangedError("Ozon translated product returned non-HTML data");
+    }
+    if (translatedRedirect(body)) throw new ParserChangedError("Ozon translated product returned an unexpected client redirect");
+    return parseExactProductMetrics(body, target, listingId);
+  }
+
   private async fetchSearchPage(brand: string, page: number, context: AdapterContext): Promise<SearchPage> {
+    let translateFailure: AdapterBlockedError | ParserChangedError | undefined;
+    if (this.translateEnabled) {
+      try {
+        return await this.fetchTranslatedSearchPage(brand, page, context);
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        translateFailure = error instanceof ParserChangedError || error instanceof AdapterBlockedError
+          ? error
+          : new ParserChangedError(`Ozon translated search failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    try {
+      return await this.fetchComposerSearchPage(brand, page, context);
+    } catch (composerFailure) {
+      if (!translateFailure) throw composerFailure;
+      const message = `Ozon translated search: ${translateFailure.message}; composer browser: ${composerFailure instanceof Error ? composerFailure.message : String(composerFailure)}`;
+      if (translateFailure instanceof ParserChangedError || composerFailure instanceof ParserChangedError) {
+        throw new ParserChangedError(message);
+      }
+      throw new AdapterBlockedError(message);
+    }
+  }
+
+  private async fetchTranslatedSearchPage(brand: string, page: number, context: AdapterContext): Promise<SearchPage> {
+    const search = new URL("https://www.ozon.ru/search/");
+    search.searchParams.set("text", brand);
+    search.searchParams.set("from_global", "true");
+    if (page > 1) search.searchParams.set("page", String(page));
+    let target = search;
+
+    for (let redirectCount = 0; redirectCount <= MAX_TRANSLATE_REDIRECTS; redirectCount += 1) {
+      validateTranslatedTarget(target, brand, page);
+      const endpoint = translatedProxyUrl(target);
+      let response: Response;
+      try {
+        response = await this.fetchImpl(endpoint, {
+          method: "GET",
+          redirect: "manual",
+          headers: {
+            accept: "text/html,application/xhtml+xml",
+            "accept-language": "ru-RU,ru;q=0.9",
+            "cache-control": "no-cache"
+          },
+          signal: context.signal
+        });
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        throw new AdapterBlockedError(`Ozon translated search request failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const declaredLength = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declaredLength) && declaredLength > this.maxDocumentBytes) {
+        throw new ParserChangedError("Ozon translated search exceeded the document safety limit");
+      }
+      const body = await response.text();
+      if (body.length > this.maxDocumentBytes) {
+        throw new ParserChangedError("Ozon translated search exceeded the document safety limit");
+      }
+      if ([403, 407, 423, 429, 498, 503].includes(response.status) ||
+        /(?:incidentId|Antibot Captcha|abt-challenge|Target URL returned error 403)/i.test(body)) {
+        throw new AdapterBlockedError(`Ozon blocked the translated search collector (HTTP ${response.status})`);
+      }
+      if (!response.ok) throw new AdapterBlockedError(`Ozon translated search returned HTTP ${response.status}`);
+      if (!/text\/html|application\/xhtml\+xml/i.test(response.headers.get("content-type") ?? "")) {
+        throw new ParserChangedError("Ozon translated search returned non-HTML data");
+      }
+
+      const redirected = translatedRedirect(body);
+      if (!redirected) return parseTranslatedSearchPage(body, target, page);
+      if (redirectCount >= MAX_TRANSLATE_REDIRECTS) {
+        throw new ParserChangedError("Ozon translated search exceeded the redirect safety limit");
+      }
+      validateTranslatedTarget(redirected, brand, page);
+      target = redirected;
+    }
+    throw new ParserChangedError("Ozon translated search did not reach a product page");
+  }
+
+  private async fetchComposerSearchPage(brand: string, page: number, context: AdapterContext): Promise<SearchPage> {
     const search = new URL("https://www.ozon.ru/search/");
     search.searchParams.set("text", brand);
     search.searchParams.set("from_global", "true");
