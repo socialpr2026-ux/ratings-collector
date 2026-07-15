@@ -25,6 +25,13 @@ type AgentContext = {
   sandbox: SandboxApi;
 };
 
+export function shouldAutoRetryInitialCollection(
+  initialStatus: "queued" | "running" | "review" | "publishing" | "published" | "failed",
+  partitions: Array<{ status: string }>
+): boolean {
+  return initialStatus === "queued" && partitions.some(({ status }) => status === "blocked" || status === "error");
+}
+
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
     status,
@@ -609,7 +616,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
             await repository.releaseLease(apifyLease).catch(() => undefined);
           }
         });
-        const runtime = await createCollectorRuntime({
+        const runtimeOptions = () => ({
           repository,
           evidence: new RemoteEvidenceStore(repository),
           fetch: browserFetch(context.sandbox, {
@@ -619,8 +626,17 @@ export async function onRequest(context: AgentContext): Promise<Response> {
           env: context.env,
           apifyExclusive
         });
+        let runtime = await createCollectorRuntime(runtimeOptions());
         try {
-          const completed = await runtime.service.executeRun(run.id);
+          let completed = await runtime.service.executeRun(run.id);
+          if (shouldAutoRetryInitialCollection(run.status, completed.partitions)) {
+            // A fresh runtime clears per-adapter cooldowns and transient route
+            // state. Successful partitions are checkpointed, so the second
+            // pass touches only failed domain/brand pairs and can never create
+            // duplicate observations.
+            runtime = await createCollectorRuntime(runtimeOptions());
+            completed = await runtime.service.executeRun(run.id);
+          }
           return json({ id: completed.id, status: completed.status });
         } catch (error) {
           const failed = await runtime.service.getRun(run.id);

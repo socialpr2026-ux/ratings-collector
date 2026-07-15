@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   browserFetch,
   createLazySandboxAcquire,
-  hasExplicitWildberriesNoResults
+  hasExplicitWildberriesNoResults,
+  shouldAutoRetryInitialCollection
 } from "../agents/ratings/index.js";
 import { AdapterBlockedError } from "../src/server/adapters/errors.js";
 
@@ -385,5 +386,21 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
     await Promise.all([acquire(), acquire()]);
     expect(run).toHaveBeenCalledOnce();
+  });
+});
+
+describe("ratings Agent initial recovery pass", () => {
+  it("retries a failed partition once only on the initial collection", () => {
+    expect(shouldAutoRetryInitialCollection("queued", [
+      { status: "complete" },
+      { status: "blocked" }
+    ])).toBe(true);
+    expect(shouldAutoRetryInitialCollection("queued", [
+      { status: "complete" },
+      { status: "no_results" }
+    ])).toBe(false);
+    expect(shouldAutoRetryInitialCollection("review", [
+      { status: "error" }
+    ])).toBe(false);
   });
 });
