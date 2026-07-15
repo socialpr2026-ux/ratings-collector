@@ -78,6 +78,7 @@ describe("additional pharmacy adapters", () => {
     const fetchSpy = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
       if (url.pathname.startsWith("/preparation/")) {
+        if (url.pathname === "/preparation/khondrofen/") throw new TypeError("upstream connection reset");
         return new Response("optional preparation gateway unavailable", { status: preparationStatuses.get(url.pathname) ?? 502 });
       }
       if (url.pathname === "/sitemap-product.xml") {

@@ -276,7 +276,10 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
         // that optional lookup as a transient upstream status. Keep walking
         // the bounded transliteration candidates and let the filtered,
         // first-party product sitemap remain the authoritative fallback.
-        if (error instanceof AdapterBlockedError && /HTTP (?:404|410|429|502|503|504)\b/.test(error.message)) continue;
+        // Any access failure on this optional hint is non-authoritative. The
+        // filtered first-party sitemap below remains the bounded proof source;
+        // parser/content errors still fail closed instead of being hidden.
+        if (error instanceof AdapterBlockedError) continue;
         throw error;
       }
       page.$("a[href*='/product/']").each((_index, node) => {
