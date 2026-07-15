@@ -149,7 +149,7 @@ describe("first-party review-site adapters", () => {
     expect(result.productEvidence?.variants).toEqual([]);
     expect(JSON.stringify(result.productEvidence)).not.toMatch(/Гранулы или плацебо|6 грамм сахара|Супер препарат/iu);
     expect(identity).toMatchObject({
-      label: "гранулы гомеопатические №30",
+      label: "гранулы №30",
       granularity: "variant",
       confidence: "exact"
     });

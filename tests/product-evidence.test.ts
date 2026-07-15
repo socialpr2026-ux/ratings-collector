@@ -214,7 +214,7 @@ describe("product page evidence", () => {
     expect(analyzeProductIdentity({ brand: "Оциллококцинум", product, evidence })).toMatchObject({
       granularity: "variant",
       confidence: "exact",
-      label: "гранулы гомеопатические №30"
+      label: "гранулы №30"
     });
   });
 });
