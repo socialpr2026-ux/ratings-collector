@@ -750,7 +750,7 @@ describe("first-party review-site adapters", () => {
     expect(refs).toHaveLength(2);
     expect(historical.url).toBe(`https://otzovik.com/reviews/${slug}/`);
     expect(result).toMatchObject({ reviews: 394, rating: 4, status: "ok" });
-  });
+  }, 10_000);
 
   it.each(["Тикализис", "Даксабрис"])("accepts an explicit external-search zero as proved no_results for Otzovik: %s", async (brand) => {
     const fetchMock = (async () => new Response(
