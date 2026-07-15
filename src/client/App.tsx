@@ -801,8 +801,10 @@ export function App() {
   const runtimeRouteLabels = visibleTechnicalRoute
     .map((event) => technicalLabelsFor(event)[0])
     .filter((label, index, labels) => Boolean(label) && labels.indexOf(label) === index);
-  const runtimeStageLabel = activityStageLabels[focusedActivity?.stage ?? "prepare"];
-  const runtimeStateLabel = focusedActivity?.status === "warning"
+  const runtimeStageLabel = cleanReviewReady ? activityStageLabels.qa : activityStageLabels[focusedActivity?.stage ?? "prepare"];
+  const runtimeStateLabel = cleanReviewReady
+    ? "Готово"
+    : focusedActivity?.status === "warning"
     ? "Нужен резерв"
     : focusedActivity?.status === "active"
       ? "Сейчас"
@@ -1077,12 +1079,12 @@ export function App() {
           <span style={{ width: `${progress}%` }} />
         </div>
         <div className="runtime-map" aria-label="Живая карта реальных процессов сбора">
-          <div className={`runtime-live-field state-${focusedActivity?.status ?? "pending"}`}>
+          <div className={`runtime-live-field state-${cleanReviewReady ? "complete" : focusedActivity?.status ?? "pending"}`}>
             <span className="runtime-live-pulse" aria-hidden="true" />
             <div className="runtime-live-copy">
               <span>{runtimeStageLabel}</span>
-              <strong>{focusedActivity?.label ?? "Определяем технический маршрут"}</strong>
-              <small>{focusedActivity?.detail ?? "Первый подтверждённый канал появится здесь автоматически."}</small>
+              <strong>{cleanReviewReady ? "Проверка целостности" : focusedActivity?.label ?? "Определяем технический маршрут"}</strong>
+              <small>{cleanReviewReady ? "Снимок готов к публикации" : focusedActivity?.detail ?? "Первый подтверждённый канал появится здесь автоматически."}</small>
             </div>
             <span className="runtime-live-state">{runtimeStateLabel}</span>
             <div className="runtime-route-line">
@@ -1101,7 +1103,7 @@ export function App() {
               </li>)}
             </ol>
           </details>}
-          <span className="sr-only" aria-live="polite">{focusedActivity ? `${focusedActivity.label}. ${focusedActivity.detail ?? ""}` : "Подготавливаем маршрут сбора"}</span>
+          <span className="sr-only" aria-live="polite">{cleanReviewReady ? "Проверка целостности. Снимок готов к публикации" : focusedActivity ? `${focusedActivity.label}. ${focusedActivity.detail ?? ""}` : "Подготавливаем маршрут сбора"}</span>
         </div>
         {busyAction === "continue" && automaticContinuation && <div className="continuation-status" role="status">
           <span aria-hidden="true">↻</span>

@@ -50,7 +50,7 @@ describe("Interfox Ratings product shell", () => {
     expect(appSource).toContain('aria-label="Живая карта реальных процессов сбора"');
     expect(appSource).toContain("run?.activity?.active");
     expect(appSource).toContain('parsing: "Извлечение"');
-    expect(appSource).toContain('className={`runtime-live-field state-${focusedActivity?.status ?? "pending"}`}');
+    expect(appSource).toContain('className={`runtime-live-field state-${cleanReviewReady ? "complete" : focusedActivity?.status ?? "pending"}`}');
     expect(appSource).toContain('runtimeRouteLabels.join(" → ")');
     expect(appSource).toContain("activityChannelLabels[channel]");
     expect(appSource).toContain("Google Translate SSR");
@@ -72,5 +72,6 @@ describe("Interfox Ratings product shell", () => {
     expect(appSource).toContain("resolveProductOverride(item");
     expect(appSource).toContain("productLabels: Object.fromEntries");
     expect(appSource).toContain("Точный вариант готов к подтверждению");
+    expect(appSource).toContain('cleanReviewReady ? "Снимок готов к публикации"');
   });
 });
