@@ -13,6 +13,44 @@ const observation = (listingId: string, monthReviews = 100): Observation => ({
 });
 
 describe("Google Sheets model", () => {
+  it("writes one Khondrofen product for brand aggregates when only one variant is proven", () => {
+    const familyIdentity: NonNullable<Observation["productIdentity"]> = {
+      label: "Общий рейтинг бренда",
+      granularity: "family" as const,
+      confidence: "partial" as const,
+      missing: [],
+      reasons: ["Площадка публикует единый рейтинг без списка товарных вариантов"]
+    };
+    const exactIdentity: NonNullable<Observation["productIdentity"]> = {
+      label: "мазь 30 г", granularity: "variant", confidence: "exact", missing: [], reasons: []
+    };
+    const sources: Array<[string, string, string, NonNullable<Observation["productIdentity"]>]> = [
+      ["wildberries.ru", "822669171", "Хондрофен мазь для наружного применения 30 г 1 шт", exactIdentity],
+      ["irecommend.ru", "3232715", "Лекарственный препарат Биосинтез ХОНДРОФЕН мазь для наружного применения", familyIdentity],
+      ["med-otzyv.ru", "751", "Хондрофен", familyIdentity],
+      ["review.example", "khondrofen", "Мазь Биосинтез Хондрофен", familyIdentity]
+    ];
+    const observations = sources.map(([domain, listingId, product, productIdentity]): Observation => ({
+      domain, platform: domain, listingId, brand: "Хондрофен",
+      canonicalUrl: `https://${domain}/product/${listingId}`, product,
+      reviews: 1, rating: 4.8, status: "ok", capturedAt: "2026-07-15T00:00:00.000Z",
+      productIdentity
+    }));
+    const khondrofenRequest: RunRequest = {
+      ...request,
+      domains: sources.map(([domain]) => domain),
+      brands: ["Хондрофен"]
+    };
+    const document = buildSheetDocument({ values: [] }, khondrofenRequest, [], {
+      "2026-07": Object.fromEntries(observations.map((item) => [`${item.domain}:${item.listingId}`, item]))
+    });
+
+    expect(document.values
+      .filter((_row, index) => document.rowKinds[index] === "product")
+      .map((row) => row[2]))
+      .toEqual(["мазь 30 г", "мазь 30 г", "мазь 30 г", "мазь 30 г"]);
+  });
+
   it("publishes one human product label for equivalent variants from different sites", () => {
     const variants: Observation[] = [
       ["megamarket.ru", "100024502669", "Оциллококцинум гранулы гомеопатические 1 г №30"],

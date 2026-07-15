@@ -61,7 +61,7 @@ describe("cross-site product identity contract", () => {
     ]);
 
     expect(recovered).toBe("гранулы №30");
-    expect(unknown).toBe("Общий рейтинг бренда");
+    expect(unknown).toBe("гранулы №30");
   });
 
   it("treats one exact pack on an aggregate review domain as that product, not a brand aggregate", () => {
@@ -114,6 +114,56 @@ describe("cross-site product identity contract", () => {
     ]);
 
     expect(new Set(labels).size).toBe(4);
+  });
+
+  it("attaches brand aggregates to one proven product but not to competing variants", () => {
+    const familyIdentity = {
+      label: "Общий рейтинг бренда",
+      granularity: "family" as const,
+      confidence: "partial" as const,
+      missing: [],
+      reasons: ["Площадка публикует единый рейтинг без списка товарных вариантов"]
+    };
+    const exactIdentity = (label: string) => ({
+      label,
+      granularity: "variant" as const,
+      confidence: "exact" as const,
+      missing: [],
+      reasons: []
+    });
+    const oneProduct = canonicalProductDescriptors([
+      {
+        brand: "Хондрофен",
+        product: "Хондрофен мазь для наружного применения 30 г 1 шт",
+        productIdentity: exactIdentity("мазь 30 г")
+      },
+      {
+        brand: "Хондрофен",
+        product: "Лекарственный препарат Биосинтез ХОНДРОФЕН мазь для наружного применения",
+        productIdentity: familyIdentity
+      },
+      { brand: "Хондрофен", product: "Мазь Биосинтез Хондрофен", productIdentity: familyIdentity },
+      { brand: "Хондрофен", product: "Хондрофен", productIdentity: familyIdentity }
+    ]);
+
+    expect(oneProduct).toEqual(["мазь 30 г", "мазь 30 г", "мазь 30 г", "мазь 30 г"]);
+
+    const competingVariants = canonicalProductDescriptors([
+      { brand: "Хондрофен", product: "Хондрофен мазь 30 г", productIdentity: exactIdentity("мазь 30 г") },
+      { brand: "Хондрофен", product: "Хондрофен мазь 50 г", productIdentity: exactIdentity("мазь 50 г") },
+      { brand: "Хондрофен", product: "Хондрофен", productIdentity: familyIdentity }
+    ]);
+    expect(competingVariants).toEqual(["мазь 30 г", "мазь 50 г", "Общий рейтинг бренда"]);
+
+    const multiVariantAggregate = canonicalProductDescriptors([
+      { brand: "Хондрофен", product: "Хондрофен мазь 30 г", productIdentity: exactIdentity("мазь 30 г") },
+      {
+        brand: "Хондрофен",
+        product: "Хондрофен",
+        productIdentity: { ...familyIdentity, confidence: "exact", variantCount: 2 }
+      }
+    ]);
+    expect(multiVariantAggregate).toEqual(["мазь 30 г", "Общий рейтинг бренда"]);
   });
 
   it("does not turn company or marketing words into a separate product", () => {

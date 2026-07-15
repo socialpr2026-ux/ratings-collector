@@ -831,10 +831,11 @@ function doseKey(parts: ProductParts): string {
 }
 
 /**
- * Reconciles equivalent variants across sites without borrowing attributes
- * from neighbouring products.  If the same brand/form/pack is observed both
- * with and without one non-conflicting strength, the shorter proven wording is
- * canonical for both rows.  Conflicting strengths are always kept separate.
+ * Reconciles equivalent variants across sites. If the same brand/form/pack is
+ * observed both with and without one non-conflicting strength, the shorter
+ * proven wording is canonical for both rows. A brand-wide aggregate may inherit
+ * the label only when the complete input proves exactly one semantic variant;
+ * conflicting variants are always kept separate.
  */
 export function canonicalProductVariants(items: readonly ProductNameInput[]): CanonicalProductVariant[] {
   const identities = items.map(identityForReconciliation);
@@ -890,6 +891,26 @@ export function canonicalProductVariants(items: readonly ProductNameInput[]): Ca
       .sort((left, right) => left.length - right.length || left.localeCompare(right, "ru"))[0];
     for (const index of indices) result[index] = { label, variantKey: key };
   }
+
+  // Review sites often publish a brand-wide aggregate without pack details.
+  // When every exact marketplace/pharmacy card in the same snapshot resolves
+  // to one semantic product, attach those aggregates to that one product. If
+  // even two different variants are present, keep the aggregate explicit.
+  const exactVariantsByBrand = new Map<string, Map<string, string>>();
+  result.forEach((variant, index) => {
+    if (identities[index].granularity !== "variant" || !variant.variantKey) return;
+    const brand = normalizeText(items[index].brand);
+    const variants = exactVariantsByBrand.get(brand) ?? new Map<string, string>();
+    variants.set(variant.variantKey, variant.label);
+    exactVariantsByBrand.set(brand, variants);
+  });
+  identities.forEach((identity, index) => {
+    if (identity.granularity !== "family" || (identity.variantCount ?? 0) > 1) return;
+    const variants = exactVariantsByBrand.get(normalizeText(items[index].brand));
+    if (variants?.size !== 1) return;
+    const [variantKey, label] = variants.entries().next().value!;
+    result[index] = { label, variantKey };
+  });
   return result;
 }
 
