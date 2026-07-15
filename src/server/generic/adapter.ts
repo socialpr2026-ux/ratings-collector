@@ -60,20 +60,63 @@ function numericText(value: string | undefined): number | undefined {
   return Number.isFinite(number) ? number : undefined;
 }
 
+function sameCanonicalPage(left: string, right: string): boolean {
+  try {
+    const first = new URL(canonicalizeUrl(left));
+    const second = new URL(canonicalizeUrl(right));
+    const normalizedPath = (value: URL) => value.pathname.replace(/\/+$/, "") || "/";
+    return first.origin === second.origin && normalizedPath(first) === normalizedPath(second) && first.search === second.search;
+  } catch {
+    return false;
+  }
+}
+
+function selectJsonLdProduct(
+  candidates: ReturnType<typeof extractJsonLdProducts>,
+  pageUrl: string,
+  brand?: string
+): { product?: ReturnType<typeof extractJsonLdProducts>[number]; ambiguous: boolean } {
+  const matchesRequestedBrand = (candidate: ReturnType<typeof extractJsonLdProducts>[number]) =>
+    !brand || matchesBrand(candidate.name ?? "", brand);
+  const canonicalMatches = candidates.filter((candidate) =>
+    candidate.url && sameCanonicalPage(candidate.url, pageUrl) && matchesRequestedBrand(candidate)
+  );
+  if (canonicalMatches.length === 1) return { product: canonicalMatches[0], ambiguous: false };
+  if (canonicalMatches.length > 1) return { ambiguous: true };
+  if (candidates.length === 1 && matchesRequestedBrand(candidates[0])) {
+    return { product: candidates[0], ambiguous: false };
+  }
+  return { ambiguous: candidates.length > 0 };
+}
+
 function visibleMetrics(html: string, profile: SiteProfile) {
   const $ = load(html);
   const read = (selector?: string) => {
-    if (!selector) return undefined;
-    const node = $(selector).first();
-    return node.attr("content") ?? node.attr("data-rating") ?? node.attr("data-review-count") ?? node.text();
+    if (!selector) return { value: undefined, ambiguous: false };
+    const nodes = $(selector);
+    if (nodes.length !== 1) return { value: undefined, ambiguous: nodes.length > 1 };
+    const node = nodes.first();
+    const secondaryContainer = node.parents().filter((_index, parent) => {
+      const marker = `${$(parent).attr("class") ?? ""} ${$(parent).attr("id") ?? ""}`;
+      return /(?:^|[\s_-])(analog(?:ue)?s?|recommend(?:ation)?s?|related|similar|upsell|cross[-_ ]?sell)(?:[\s_-]|$)/i.test(marker);
+    });
+    if (secondaryContainer.length) return { value: undefined, ambiguous: true };
+    return {
+      value: node.attr("content") ?? node.attr("data-rating") ?? node.attr("data-review-count") ?? node.text(),
+      ambiguous: false
+    };
   };
-  const rawRating = numericText(read(profile.ratingSelector));
-  const rawReviews = numericText(read(profile.reviewCountSelector));
+  const title = read(profile.titleSelector);
+  const ratingValue = read(profile.ratingSelector);
+  const reviewValue = read(profile.reviewCountSelector);
+  const rawRating = numericText(ratingValue.value);
+  const rawReviews = numericText(reviewValue.value);
   return {
-    name: read(profile.titleSelector)?.replace(/\s+/g, " ").trim(),
+    name: title.value?.replace(/\s+/g, " ").trim(),
     rawRating,
     rating: rawRating === undefined ? undefined : normalizeRating(rawRating, profile.ratingScale),
-    reviewCount: rawReviews === undefined ? undefined : Math.trunc(rawReviews)
+    reviewCount: rawReviews === undefined ? undefined : Math.trunc(rawReviews),
+    ambiguous: title.ambiguous || ratingValue.ambiguous || reviewValue.ambiguous
   };
 }
 
@@ -124,10 +167,14 @@ export class GenericSiteAdapter implements SiteAdapter {
         }
         const html = await readTextBounded(response, 10_000_000);
         const jsonLd = extractJsonLdProducts(html, target);
+        const selected = selectJsonLdProduct(jsonLd, target);
         const visible = visibleMetrics(html, this.profile);
-        const hasFeedback = jsonLd.some((item) => item.reviewCount !== undefined || item.ratingCount !== undefined) || visible.reviewCount !== undefined;
-        const hasRating = jsonLd.some((item) => item.rating !== undefined) || visible.rating !== undefined;
-        const confirmedNoFeedback = jsonLd.some((item) => item.reviewCount === 0 || item.ratingCount === 0) || visible.reviewCount === 0;
+        if (selected.ambiguous || visible.ambiguous) {
+          return { ok: false, checkedAt: new Date().toISOString(), message: "Canary contains ambiguous product metrics" };
+        }
+        const hasFeedback = selected.product?.reviewCount !== undefined || selected.product?.ratingCount !== undefined || visible.reviewCount !== undefined;
+        const hasRating = selected.product?.rating !== undefined || visible.rating !== undefined;
+        const confirmedNoFeedback = selected.product?.reviewCount === 0 || selected.product?.ratingCount === 0 || visible.reviewCount === 0;
         if (!hasFeedback || !hasRating && !confirmedNoFeedback) {
           return { ok: false, checkedAt: new Date().toISOString(), message: "Canary больше не содержит ожидаемые отзыв/рейтинг" };
         }
@@ -254,7 +301,8 @@ export class GenericSiteAdapter implements SiteAdapter {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const html = await readTextBounded(response, 10_000_000);
     const candidates = extractJsonLdProducts(html, ref.url);
-    const product = candidates.find((item) => matchesBrand(item.name ?? "", ref.brand)) ?? candidates[0];
+    const selected = selectJsonLdProduct(candidates, ref.url, ref.brand);
+    const product = selected.product;
     const visible = visibleMetrics(html, this.profile);
     const productEvidence = extractPageProductEvidence(html, ref.url, ref.brand, {
       structuredSignals: candidates.flatMap((item) => [item.name, item.description].filter((value): value is string => Boolean(value)))
@@ -267,13 +315,14 @@ export class GenericSiteAdapter implements SiteAdapter {
       productEvidence,
       bodyDigest: createHash("sha256").update(html).digest("hex")
     });
-    const rawReviewCount = product?.reviewCount ?? visible.reviewCount;
-    const rating = product?.rating ?? visible.rating;
+    const canUseVisibleMetrics = !selected.ambiguous && !visible.ambiguous && matchesBrand(visible.name ?? "", ref.brand);
+    const rawReviewCount = selected.ambiguous ? undefined : product?.reviewCount ?? (canUseVisibleMetrics ? visible.reviewCount : undefined);
+    const rating = selected.ambiguous ? undefined : product?.rating ?? (canUseVisibleMetrics ? visible.rating : undefined);
     const reviews = rawReviewCount === undefined ? null : Math.max(0, Math.trunc(rawReviewCount));
     const ratingCount = product?.ratingCount === undefined ? null : Math.max(0, Math.trunc(product.ratingCount));
     const feedbackCount = Math.max(...[reviews, ratingCount].filter((value): value is number => value !== null));
     const resolvedName = product?.name ?? visible.name ?? ref.title ?? ref.brand;
-    const metricsComplete = matchesBrand(resolvedName, ref.brand) && Number.isFinite(feedbackCount) &&
+    const metricsComplete = !selected.ambiguous && !visible.ambiguous && matchesBrand(resolvedName, ref.brand) && Number.isFinite(feedbackCount) &&
       (feedbackCount === 0 || rating !== undefined) && this.profile.reviewCountMeaning !== "unknown";
     return {
       domain: ref.domain,
@@ -284,7 +333,7 @@ export class GenericSiteAdapter implements SiteAdapter {
       product: resolvedName,
       reviews,
       rating: feedbackCount === 0 ? null : rating ?? null,
-      rawRating: product?.rating ?? visible.rawRating,
+      rawRating: selected.ambiguous ? undefined : product?.rating ?? (canUseVisibleMetrics ? visible.rawRating : undefined),
       rawRatingScale: product?.ratingScale ?? this.profile.ratingScale,
       ratingCount,
       status: this.profile.status === "approved" && metricsComplete ? (feedbackCount === 0 ? "no_reviews" : "ok") : "needs_review",
