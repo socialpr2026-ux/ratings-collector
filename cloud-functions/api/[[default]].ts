@@ -80,6 +80,19 @@ type RuOtzyvTarget = {
   translated: URL;
 };
 
+type UtekaReviewsTarget = {
+  source: URL;
+};
+
+function parseUtekaReviewsTarget(target: URL): UtekaReviewsTarget | undefined {
+  if (
+    target.protocol !== "https:" || target.hostname !== "uteka.ru" || target.port ||
+    target.username || target.password || target.search || target.hash ||
+    !/^\/(?:[a-z0-9][a-z0-9-]*\/){2,}[a-z0-9][a-z0-9-]*\/reviews\/$/i.test(target.pathname)
+  ) return undefined;
+  return { source: new URL(target.toString()) };
+}
+
 function parseRuOtzyvTarget(target: URL): RuOtzyvTarget | undefined {
   if (
     target.protocol !== "https:" || target.hostname !== "ru.otzyv.com" || target.port ||
@@ -1460,6 +1473,67 @@ function compactAptekaRuHtml(html: string, requested: AptekaRuTarget): string | 
 }
 
 /**
+ * Uteka review pages include recommendation payloads for other products. Keep
+ * only the one schema.org Product aggregate bound to the canonical reviews
+ * route. Uteka may move a product between categories, so a redirect is accepted
+ * only when the terminal product slug is unchanged; analog counters never pass.
+ */
+function compactUtekaReviewsHtml(html: string, requested: UtekaReviewsTarget): string | undefined {
+  if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
+  const $ = load(html);
+  const normalized = (value: string) => value.normalize("NFKC").replace(/\s+/g, " ").trim();
+  const title = normalized($("title").first().text());
+  if (!title || /(?:captcha|access denied|unusual traffic|Target URL returned error)/i.test(title) ||
+    /<(?:iframe|form|input)\b[^>]*(?:captcha|challenge)/i.test(html.slice(0, 180_000))) return undefined;
+
+  let canonical: URL;
+  let openGraphUrl: URL;
+  try {
+    canonical = new URL($("link[rel='canonical'][href]").first().attr("href") ?? "", requested.source);
+    openGraphUrl = new URL($("meta[property='og:url'][content]").first().attr("content") ?? "", requested.source);
+  } catch { return undefined; }
+  const requestedSlug = requested.source.pathname.match(/\/([a-z0-9][a-z0-9-]*)\/reviews\/$/i)?.[1];
+  const canonicalTarget = parseUtekaReviewsTarget(canonical);
+  const canonicalSlug = canonical.pathname.match(/\/([a-z0-9][a-z0-9-]*)\/reviews\/$/i)?.[1];
+  if (!canonicalTarget || !requestedSlug || canonicalSlug !== requestedSlug ||
+    exactUrlSignature(openGraphUrl) !== exactUrlSignature(canonical)) return undefined;
+
+  const products = $("[itemscope][itemtype='https://schema.org/Product']").toArray();
+  if (products.length !== 1) return undefined;
+  const product = $(products[0]);
+  const productName = normalized(product.find("meta[itemprop='name'][content]").first().attr("content") ?? "");
+  const heading = normalized(product.find("h1").first().text());
+  if (!productName || !heading || !heading.toLocaleLowerCase("ru-RU").includes(productName.toLocaleLowerCase("ru-RU"))) {
+    return undefined;
+  }
+
+  const aggregates = product.find("[itemscope][itemprop='aggregateRating'][itemtype='https://schema.org/AggregateRating']").toArray();
+  if (aggregates.length !== 1) return undefined;
+  const aggregate = $(aggregates[0]);
+  const countText = aggregate.find("[itemprop='reviewCount']").first().attr("content")?.replace(/[\s\u00a0\u202f]+/g, "") ?? "";
+  const ratingText = aggregate.find("[itemprop='ratingValue']").first().attr("content")?.replace(",", ".") ?? "";
+  const bestText = aggregate.find("[itemprop='bestRating']").first().attr("content")?.replace(",", ".") ?? "5";
+  if (!/^\d+$/.test(countText)) return undefined;
+  const reviewCount = Number(countText);
+  const ratingValue = Number(ratingText);
+  const bestRating = Number(bestText);
+  if (!Number.isSafeInteger(reviewCount) || reviewCount < 0 || reviewCount > 10_000_000 ||
+    !Number.isFinite(bestRating) || bestRating !== 5 ||
+    reviewCount > 0 && (!Number.isFinite(ratingValue) || ratingValue <= 0 || ratingValue > bestRating) ||
+    reviewCount === 0 && ratingText && (!Number.isFinite(ratingValue) || ratingValue < 0 || ratingValue > bestRating)) {
+    return undefined;
+  }
+
+  return `<html><head><base href="${escapeHtml(canonical.toString())}">` +
+    `<link rel="canonical" href="${escapeHtml(canonical.toString())}"><title>${escapeHtml(title)}</title></head>` +
+    `<body><main itemscope itemtype="https://schema.org/Product"><meta itemprop="name" content="${escapeHtml(productName)}">` +
+    `<h1>${escapeHtml(heading)}</h1><div itemprop="aggregateRating" itemscope itemtype="https://schema.org/AggregateRating">` +
+    `<meta itemprop="reviewCount" content="${reviewCount}">` +
+    `${reviewCount > 0 ? `<meta itemprop="ratingValue" content="${ratingValue}">` : ""}` +
+    `<meta itemprop="bestRating" content="5"></div></main></body></html>`;
+}
+
+/**
  * EdgeOne's cross-runtime hand-off can truncate multi-megabyte sitemap
  * responses even though the first-party XML itself is complete. Keep every
  * product URL (discovery remains exhaustive) while dropping lastmod/priority
@@ -1553,12 +1627,15 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
   const host = target.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
   const irecommendTarget = parseIrecommendTarget(target);
   const ruOtzyvTarget = parseRuOtzyvTarget(target);
+  const utekaReviewsTarget = parseUtekaReviewsTarget(target);
+  const utekaSitemapTarget = target.protocol === "https:" && target.hostname === "uteka.ru" &&
+    !target.port && !target.username && !target.password && !target.search && !target.hash &&
+    target.pathname === "/sitemaps/sitemap-reviews.xml";
   const reviewTarget = new Set([
-    "uteka.ru",
     "megapteka.ru",
     "otzovik.com",
     "pravogolosa.net"
-  ]).has(host) || Boolean(irecommendTarget) || Boolean(ruOtzyvTarget);
+  ]).has(host) || Boolean(irecommendTarget) || Boolean(ruOtzyvTarget) || Boolean(utekaReviewsTarget) || utekaSitemapTarget;
   const medOtzyvSearchTarget = target.protocol === "https:" && host === "med-otzyv.ru" &&
     target.pathname === "/__external_search__" && !target.port && !target.username && !target.password && !target.hash &&
     [...target.searchParams.keys()].every((key) => key === "brand") && target.searchParams.getAll("brand").length === 1 &&
@@ -1632,6 +1709,70 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         "x-ratings-source": "duckduckgo-exact-med-otzyv-index"
       }
     });
+  }
+  if (utekaReviewsTarget) {
+    let fallbackAllowed = false;
+    try {
+      const direct = await safeFetch(utekaReviewsTarget.source.toString(), {
+        method: "GET",
+        redirect: "follow",
+        headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+      }, fetch, 4, 60_000);
+      const directBody = await readTextBounded(direct, 12_000_000, 60_000);
+      if (direct.ok) {
+        const compact = /(?:text\/html|application\/xhtml\+xml)/i.test(direct.headers.get("content-type") ?? "")
+          ? compactUtekaReviewsHtml(directBody, utekaReviewsTarget)
+          : undefined;
+        if (compact && compact.length <= 100_000) {
+          return new Response(compact, { status: 200, headers: {
+            "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
+            "x-ratings-source": "uteka-first-party-compact",
+            "x-ratings-original-bytes": String(new TextEncoder().encode(directBody).byteLength),
+            "x-ratings-proof-bytes": String(new TextEncoder().encode(compact).byteLength)
+          } });
+        }
+        // A CDN shell can return HTTP 200 without the requested aggregate.
+        // It is not product proof, but it is safe to try the independently
+        // source-bound reader before failing closed.
+        fallbackAllowed = true;
+      } else if ([404, 410].includes(direct.status)) {
+        return new Response(directBody, { status: direct.status, headers: {
+          "content-type": direct.headers.get("content-type") ?? "text/html; charset=utf-8",
+          "cache-control": "no-store"
+        } });
+      } else {
+        fallbackAllowed = [403, 408, 425, 429, 499, 500, 502, 503, 504].includes(direct.status);
+      }
+      if (!direct.ok && !fallbackAllowed) {
+        return new Response(directBody, { status: direct.status, headers: {
+          "content-type": direct.headers.get("content-type") ?? "text/html; charset=utf-8",
+          "cache-control": "no-store"
+        } });
+      }
+    } catch {
+      fallbackAllowed = true;
+    }
+
+    if (fallbackAllowed) {
+      try {
+        const reader = await safeFetch(readerProxyUrl(utekaReviewsTarget.source).toString(), {
+          method: "GET",
+          redirect: "follow",
+          headers: { accept: "text/html,application/xhtml+xml", "x-return-format": "html", "x-no-cache": "true", dnt: "1" }
+        }, fetch, 4, 60_000);
+        const readerBody = await readTextBounded(reader, 12_000_000, 60_000);
+        const compact = reader.ok ? compactUtekaReviewsHtml(readerBody, utekaReviewsTarget) : undefined;
+        if (compact && compact.length <= 100_000) {
+          return new Response(compact, { status: 200, headers: {
+            "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
+            "x-ratings-source": "uteka-reader-compact",
+            "x-ratings-original-bytes": String(new TextEncoder().encode(readerBody).byteLength),
+            "x-ratings-proof-bytes": String(new TextEncoder().encode(compact).byteLength)
+          } });
+        }
+      } catch { /* the exact reader proof remains unavailable */ }
+    }
+    return json({ error: "Uteka access fallback did not prove the exact requested product aggregate" }, 502);
   }
   if (megamarketTranslatedTarget) {
     const upstream = await safeFetch(target.toString(), {

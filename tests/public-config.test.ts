@@ -868,6 +868,69 @@ describe("fixed first-party collection egress", () => {
     { INTERNAL_AGENT_TOKEN: token }
   );
 
+  it("recovers a category-moved Uteka reviews card after HTTP 499 and excludes analog counters", async () => {
+    const source = "https://uteka.ru/lekarstvennye-sredstva/obezbolivayushhie-sredstva/dimeksid/reviews/";
+    const canonical = "https://uteka.ru/lekarstvennye-sredstva/protivovospalitelnye-preparaty/dimeksid/reviews/";
+    const fullPage = `<!doctype html><html><head><title>Димексид — отзывы покупателей | Ютека</title>
+      <link rel="canonical" href="${canonical}"><meta property="og:url" content="${canonical}"></head><body>
+      <main class="catalog-reviews-page" itemscope itemtype="https://schema.org/Product">
+        <meta itemprop="name" content="Димексид"><h1>Димексид отзывы</h1>
+        <div itemprop="aggregateRating" itemscope itemtype="https://schema.org/AggregateRating">
+          <meta itemprop="reviewCount" content="103"><meta itemprop="ratingValue" content="3.9">
+          <meta itemprop="bestRating" content="5"><meta itemprop="worstRating" content="1">
+        </div>
+      </main>
+      <aside data-test="analogs"><meta itemprop="reviewCount" content="999"><meta itemprop="ratingValue" content="1.1"></aside>
+      <script>window.__NUXT__={recommendations:[{reviewCount:777,ratingValue:2.2}]}</script></body></html>`;
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "uteka.ru") return new Response("upstream closed request", { status: 499 });
+      expect(url.hostname).toBe("r.jina.ai");
+      expect(url.pathname).toContain("/https://uteka.ru/lekarstvennye-sredstva/obezbolivayushhie-sredstva/dimeksid/reviews/");
+      return new Response(fullPage, { headers: { "content-type": "text/html; charset=utf-8" } });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(source);
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("uteka-reader-compact");
+    expect(proof).toContain(`rel="canonical" href="${canonical}"`);
+    expect(proof).toContain('itemprop="reviewCount" content="103"');
+    expect(proof).toContain('itemprop="ratingValue" content="3.9"');
+    expect(proof).not.toContain("999");
+    expect(proof).not.toContain("777");
+    expect(Number(response.headers.get("x-ratings-proof-bytes"))).toBeLessThan(
+      Number(response.headers.get("x-ratings-original-bytes"))
+    );
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a mismatched Uteka reader card fail-closed instead of synthesizing zero", async () => {
+    const source = "https://uteka.ru/lekarstvennye-sredstva/obezbolivayushhie-sredstva/dimeksid/reviews/";
+    const other = "https://uteka.ru/lekarstvennye-sredstva/nervnaya-sistema/cereton/reviews/";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "uteka.ru") return new Response("temporary edge block", { status: 499 });
+      return new Response(`<!doctype html><html><head><title>Церетон отзывы</title>
+        <link rel="canonical" href="${other}"><meta property="og:url" content="${other}"></head><body>
+        <main itemscope itemtype="https://schema.org/Product"><meta itemprop="name" content="Церетон"><h1>Церетон отзывы</h1>
+        <div itemprop="aggregateRating" itemscope itemtype="https://schema.org/AggregateRating">
+        <meta itemprop="reviewCount" content="0"><meta itemprop="bestRating" content="5"></div></main></body></html>`, {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+    }));
+
+    const response = await callGateway(source);
+    const body = await response.text();
+
+    expect(response.status).toBe(502);
+    expect(body).toContain("did not prove the exact requested product aggregate");
+    expect(body).not.toContain("reviewCount");
+    expect((await callGateway(`${source}?redirect=https://evil.example`)).status).toBe(400);
+  });
+
   it("compacts a complete exact Yandex model shard without dropping product URLs", async () => {
     const source = "https://reviews.yandex.ru/ugcpub/sitemap_model_690000000-699999999-0.xml";
     const locations = [
