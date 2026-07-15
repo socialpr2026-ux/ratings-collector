@@ -381,6 +381,42 @@ describe("canonical product descriptors", () => {
     expect(identity.variantCount).toBeUndefined();
   });
 
+  it("keeps a source-bound Canpol consumer product as its own exact human variant", () => {
+    const identity = analyzeProductIdentity({
+      brand: "Canpol Babies",
+      product: "Canpol Babies бутылочка антиколиковая 120 мл 6 мес+ в Москве",
+      evidence: {
+        scope: "product_family",
+        signals: [{ source: "title", text: "Canpol Babies бутылочка антиколиковая 120 мл 6 мес+ в Москве" }],
+        variants: [],
+        identifiers: [{ type: "product_id", value: "canpol-120" }],
+        imageUrls: [],
+        instructionUrls: []
+      }
+    });
+
+    expect(identity).toMatchObject({
+      label: "бутылочка антиколиковая 120 мл 6 мес+",
+      granularity: "variant",
+      confidence: "exact",
+      missing: []
+    });
+  });
+
+  it("does not auto-exact a consumer title without a stable product id", () => {
+    const identity = analyzeProductIdentity({
+      brand: "Canpol Babies",
+      product: "Canpol Babies пустышка силиконовая",
+      evidence: {
+        scope: "product_family",
+        signals: [{ source: "title", text: "Canpol Babies пустышка силиконовая" }],
+        variants: [], identifiers: [], imageUrls: [], instructionUrls: []
+      }
+    });
+
+    expect(identity.granularity).not.toBe("variant");
+  });
+
   it("counts distinct named lines and uses correct Russian plural forms in family labels", () => {
     const identity = analyzeProductIdentity({
       brand: "Бактоблис",

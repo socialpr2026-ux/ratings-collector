@@ -510,6 +510,33 @@ function variantWord(count: number): string {
   return "вариантов";
 }
 
+const CONSUMER_PRODUCT_NOUN = /(?<!\p{L})(?:погремушк\p{L}*|бутылочк\p{L}*|клеенк\p{L}*|накладк\p{L}*|насадк\p{L}*|трусик\p{L}*|пустышк\p{L}*|ниблер\p{L}*|молокоотсос\p{L}*|соск\p{L}*|поильник\p{L}*|игрушк\p{L}*|щетк\p{L}*|контейнер\p{L}*|термометр\p{L}*|прорезывател\p{L}*)(?!\p{L})/iu;
+
+function consumerProductIdentity(item: ProductNameInput): ProductIdentity | undefined {
+  const evidence = item.evidence;
+  if (evidence?.scope !== "product_family") return undefined;
+  const stableProduct = evidence.identifiers.some((identifier) =>
+    identifier.type === "product_id" && identifier.value.trim().length > 0
+  );
+  if (!stableProduct) return undefined;
+  const sourceTitle = evidence.signals.find((signal) => signal.source === "title")?.text ?? item.product;
+  const withoutBrand = removeBrand(sourceTitle, item.brand)
+    .replace(/^\s*[-–—,:;|]+\s*/u, "")
+    .replace(/\s+в\s+[А-ЯЁ][\p{L}-]+(?:\s+[А-ЯЁ][\p{L}-]+)?\s*$/u, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!withoutBrand || normalizeText(withoutBrand) === normalizeText(sourceTitle) || !CONSUMER_PRODUCT_NOUN.test(withoutBrand)) {
+    return undefined;
+  }
+  return {
+    label: withoutBrand,
+    granularity: "variant",
+    confidence: "exact",
+    missing: [],
+    reasons: ["Отдельная товарная страница и стабильный ID подтверждают потребительский вариант"]
+  };
+}
+
 function unresolvedIdentity(parts: ProductParts, reason: string): ProductIdentity {
   const line = lineName(parts);
   const known = parts.generic ? undefined : render(parts);
@@ -553,6 +580,8 @@ export function analyzeProductIdentity(item: ProductNameInput): ProductIdentity 
     // "Оциллококцинум гранулы 30 доз" a brand aggregate: the page itself still
     // proves one sellable variant.  Preserve a single unambiguous exact variant
     // and use family/line only when several variants are actually evidenced.
+    const consumerProduct = consumerProductIdentity(item);
+    if (consumerProduct) return consumerProduct;
     const exactPageVariants = collapseDominatedVariants(candidates.filter(isExactVariant));
     if (exactPageVariants.length === 1 && variantGroups.size <= 1) {
       const resolved = exactPageVariants[0];

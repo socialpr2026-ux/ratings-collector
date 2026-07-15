@@ -548,7 +548,7 @@ describe("run orchestration and fail-closed QA", () => {
     expect(review.qa?.ok).toBe(false);
   });
 
-  it("does not auto-collapse several exact product pages into one brand aggregate", async () => {
+  it("keeps several source-bound consumer product pages as separate exact variants", async () => {
     const domain = "uteka.ru";
     const service = new RatingsService(new MemoryRepository(), async () => ({
       id: "uteka-distinct-products",
@@ -582,9 +582,10 @@ describe("run orchestration and fail-closed QA", () => {
     })).id);
 
     expect(run.observations).toHaveLength(2);
-    expect(run.observations.every((item) => item.status === "needs_review")).toBe(true);
-    expect(run.observations.every((item) => item.productIdentity?.label === "Общий рейтинг бренда")).toBe(true);
-    expect(run.qa?.ok).toBe(false);
+    expect(run.observations.map((item) => item.productIdentity?.label).sort()).toEqual(["погремушка", "пустышка"]);
+    expect(run.observations.every((item) => item.status === "ok" &&
+      item.productIdentity?.granularity === "variant" && item.productIdentity.confidence === "exact")).toBe(true);
+    expect(run.qa).toMatchObject({ ok: true, blockers: [] });
   });
 
   it("auto-accepts a dedicated Yandex model aggregate with a stable model id", async () => {
