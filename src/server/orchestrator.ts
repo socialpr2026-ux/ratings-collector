@@ -149,9 +149,29 @@ function brandConcurrency(domain: string): number {
 }
 
 const SUCCESSFUL_PARTITION_STATUSES = new Set(["complete", "no_results"]);
+const GENERIC_AGGREGATE_TITLE_TOKENS = new Set([
+  "отзыв", "отзывы", "рейтинг", "оценка", "оценки", "препарат", "лекарство", "средство", "продукт", "бренд"
+]);
 
 function partitionKey(domain: string, brand: string): string {
   return `${domain}\u0000${brand}`;
+}
+
+function collapsesDistinctProductPages(
+  identity: Observation["productIdentity"],
+  evidence: Observation["productEvidence"],
+  discoveredCount: number,
+  brand: string,
+  product: string
+): boolean {
+  if (discoveredCount <= 1 || !identity || !["family", "line"].includes(identity.granularity)) return false;
+  if (identity.confidence === "exact" || (identity.variantCount ?? 0) > 1) return false;
+  if (evidence?.scope !== "product_family" || (evidence.variants?.length ?? 0) > 0) return false;
+  const brandTokens = new Set(normalizeText(brand).split(" ").filter(Boolean));
+  const specificTokens = normalizeText(product).split(" ").filter((token) =>
+    token && !brandTokens.has(token) && !GENERIC_AGGREGATE_TITLE_TOKENS.has(token)
+  );
+  return specificTokens.length > 0;
 }
 
 export class RatingsService {
@@ -405,10 +425,18 @@ export class RatingsService {
                   url: observation.canonicalUrl,
                   evidence: observation.productEvidence
                 });
+                const collapsedDistinctProducts = collapsesDistinctProductPages(
+                  observation.productIdentity,
+                  observation.productEvidence,
+                  discovered.length,
+                  observation.brand,
+                  observation.product
+                );
                 if (
                   ["ok", "no_reviews"].includes(observation.status) &&
-                  observation.productIdentity.granularity !== "variant" &&
-                  !hasDeterministicAggregateProof(observation)
+                  (collapsedDistinctProducts ||
+                    observation.productIdentity.granularity !== "variant" &&
+                    !hasDeterministicAggregateProof(observation))
                 ) {
                   observation.status = "needs_review";
                 }

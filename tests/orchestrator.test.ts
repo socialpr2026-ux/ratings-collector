@@ -548,6 +548,45 @@ describe("run orchestration and fail-closed QA", () => {
     expect(review.qa?.ok).toBe(false);
   });
 
+  it("does not auto-collapse several exact product pages into one brand aggregate", async () => {
+    const domain = "uteka.ru";
+    const service = new RatingsService(new MemoryRepository(), async () => ({
+      id: "uteka-distinct-products",
+      supportedDomains: [domain],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand: string): Promise<ProductRef[]> {
+        return [
+          { listingId: "rattle", product: `${brand} погремушка` },
+          { listingId: "pacifier", product: `${brand} пустышка` }
+        ].map(({ listingId, product }) => ({
+          domain, platform: domain, listingId, brand,
+          url: `https://${domain}/catalog/${listingId}/reviews/`, title: product, metadata: {}
+        }));
+      },
+      async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain, platform: domain, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: ref.title!, reviews: 5, rating: 4.8,
+          status: "ok", capturedAt: new Date().toISOString(), evidenceRef: `${ref.url}#aggregate`,
+          source: "product-aggregate",
+          productEvidence: {
+            scope: "product_family", signals: [{ source: "title", text: ref.title! }], variants: [],
+            identifiers: [{ type: "product_id", value: ref.listingId }], imageUrls: [], instructionUrls: []
+          }
+        };
+      }
+    }));
+
+    const run = await service.executeRun((await service.createRun({
+      ...request, domains: [domain], brands: ["Canpol Babies"]
+    })).id);
+
+    expect(run.observations).toHaveLength(2);
+    expect(run.observations.every((item) => item.status === "needs_review")).toBe(true);
+    expect(run.observations.every((item) => item.productIdentity?.label === "Общий рейтинг бренда")).toBe(true);
+    expect(run.qa?.ok).toBe(false);
+  });
+
   it("auto-accepts a dedicated Yandex model aggregate with a stable model id", async () => {
     const domain = "market.yandex.ru";
     const service = new RatingsService(new MemoryRepository(), async () => ({
