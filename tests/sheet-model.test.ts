@@ -207,7 +207,7 @@ describe("Google Sheets model", () => {
     expect(formulas).not.toContain("34");
   });
 
-  it("counts one proven shared Ozon aggregate once while keeping both pack variants", () => {
+  it("publishes one human product row for variants sharing one proven Ozon aggregate", () => {
     const shared = "ozon:variants:148170210,148170802";
     const variants = [
       { listingId: "148170210", pack: 12, aggregateGroupId: shared },
@@ -228,13 +228,24 @@ describe("Google Sheets model", () => {
     const rows = document.values.filter((_row, index) => document.rowKinds[index] === "product");
     const summary = document.formulas.filter((_row, index) => document.rowKinds[index] === "summary");
 
-    expect(rows).toHaveLength(2);
-    expect(rows.map((row) => row.slice(2, 6))).toEqual([
-      ["гранулы 1 г №12", null, 2454, 4.9],
-      ["гранулы 1 г №30", null, 2454, 4.9]
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.slice(1, 6)).toEqual([
+      "https://www.ozon.ru/product/otsillokoktsinum-148170210/",
+      "гранулы 1 г №12 и №30", null, 2454, 4.9
     ]);
     expect(summary[0][4]).toBe("=SUM(E4)");
     expect(summary[1][4]).toBe('=COUNTIFS({F4};">=4";{E4};">0")');
+  });
+
+  it("keeps shared-group variants separate when their monthly metrics conflict", () => {
+    const shared = "ozon:variants:1,2";
+    const first = { ...observation("149024614", 100), aggregateGroupId: shared };
+    const second = { ...observation("149024615", 101), aggregateGroupId: shared };
+    const document = buildSheetDocument({ values: [] }, request, [], {
+      "2026-07": { "ozon.ru:149024614": first, "ozon.ru:149024615": second }
+    });
+
+    expect(document.values.filter((_row, index) => document.rowKinds[index] === "product")).toHaveLength(2);
   });
 
   it("does not merge unrelated cards merely because their metrics are equal", () => {

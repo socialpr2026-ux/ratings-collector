@@ -101,6 +101,67 @@ function mergeCanonicalDuplicates(products: Iterable<RowProduct>): RowProduct[] 
   return [...byCanonical.values()];
 }
 
+function combinedAggregateLabel(items: readonly RowProduct[]): string {
+  const labels = [...new Set(items.map((item) => item.product.trim()))];
+  if (labels.length < 2) return labels[0] ?? "";
+  const parsed = labels.map((label) => label.match(/^(.*?)(?:\s*№\s*)(\d+)(.*)$/u));
+  if (parsed.every((match) => match)) {
+    const prefix = parsed[0]![1]!.trim();
+    const suffix = parsed[0]![3]!.trim();
+    const sameShape = parsed.every((match) =>
+      normalizeText(match![1]!) === normalizeText(prefix) && normalizeText(match![3]!) === normalizeText(suffix)
+    );
+    if (sameShape) {
+      const variants = [...new Set(parsed.map((match) => Number(match![2]!)))]
+        .sort((left, right) => left - right)
+        .map((value) => `№${value}`);
+      const list = variants.length === 2
+        ? variants.join(" и ")
+        : `${variants.slice(0, -1).join(", ")} и ${variants.at(-1)}`;
+      return [prefix, list, suffix].filter(Boolean).join(" ");
+    }
+  }
+  return labels.join(" / ");
+}
+
+function collapseSharedAggregateRows(products: readonly RowProduct[], months: readonly string[]): RowProduct[] {
+  const groups = new Map<string, RowProduct[]>();
+  for (const item of products) {
+    const key = item.aggregateGroupId
+      ? `${item.domain}\u0000${normalizeText(item.brand)}\u0000${item.aggregateGroupId}`
+      : `${item.domain}\u0000${item.listingId}`;
+    const members = groups.get(key) ?? [];
+    members.push(item);
+    groups.set(key, members);
+  }
+  return [...groups.values()].flatMap((members) => {
+    if (members.length < 2 || !members[0]!.aggregateGroupId) return members;
+    for (const month of months) {
+      const fingerprints = new Set(members.flatMap((item) => {
+        const metric = item.metrics[month];
+        return metric && (metric.reviews !== null || metric.rating !== null)
+          ? [`${metric.reviews ?? "null"}:${metric.rating ?? "null"}`]
+          : [];
+      }));
+      if (fingerprints.size > 1) return members;
+    }
+    const first = members[0]!;
+    const metrics: RowProduct["metrics"] = {};
+    for (const month of months) {
+      const metric = members.map((item) => item.metrics[month])
+        .find((value) => value && (value.reviews !== null || value.rating !== null));
+      if (metric) metrics[month] = metric;
+    }
+    return [{
+      ...first,
+      product: combinedAggregateLabel(members),
+      firstSeenMonth: members.map((item) => item.firstSeenMonth).sort()[0]!,
+      lastSeenMonth: members.map((item) => item.lastSeenMonth).sort().at(-1)!,
+      metrics
+    }];
+  });
+}
+
 function parseLegacy(existing: ExistingSheet, request: RunRequest): { products: RowProduct[]; months: string[] } {
   const values = existing.values;
   const currentLayout = normalizeText(String(values[0]?.[0] ?? "")) === "бренд" &&
@@ -195,11 +256,11 @@ export function buildSheetDocument(
   deduplicated.forEach((item, index) => { item.product = variants[index].label; });
   const domainOrder = [...new Set([...request.domains, ...deduplicated.map((item) => item.domain).filter((domain) => !request.domains.includes(domain)).sort()])];
   const brandOrder = [...new Set([...request.brands, ...deduplicated.map((item) => item.brand).filter((brand) => !request.brands.includes(brand)).sort((a, b) => a.localeCompare(b, "ru"))])];
-  const ordered = deduplicated.sort((a, b) =>
+  const ordered = collapseSharedAggregateRows(deduplicated.sort((a, b) =>
     domainOrder.indexOf(a.domain) - domainOrder.indexOf(b.domain) ||
     brandOrder.indexOf(a.brand) - brandOrder.indexOf(b.brand) ||
     a.product.localeCompare(b.product, "ru") || a.listingId.localeCompare(b.listingId)
-  );
+  ), months);
   const columnCount = 4 + months.length * 2;
   const values: SheetScalar[][] = [];
   const formulas: Array<Array<string | null>> = [];
@@ -257,36 +318,11 @@ export function buildSheetDocument(
   const labels = ["Всего отзывов / оценок", "Карточки с рейтингом ≥4 баллов", "Карточки с рейтингом <4 баллов", "Карточки без отзывов / оценок"];
   labels.forEach((label, metricIndex) => {
     const row: SheetScalar[] = [label]; const formula: Array<string | null> = [];
-    months.forEach((month, index) => {
+    months.forEach((_month, index) => {
       const reviewsColumn = columnLetter(5 + index * 2); const ratingColumn = columnLetter(6 + index * 2);
       const countRow = summaryStartRow + 1 + metricIndex;
-      const groups = new Map<string, Array<{ item: RowProduct; row: number }>>();
-      for (const entry of productRows) {
-        const key = entry.item.aggregateGroupId
-          ? `${entry.item.domain}\u0000${normalizeText(entry.item.brand)}\u0000${entry.item.aggregateGroupId}`
-          : `${entry.item.domain}\u0000${entry.item.listingId}`;
-        const members = groups.get(key) ?? [];
-        members.push(entry);
-        groups.set(key, members);
-      }
-      const representatives = [...groups.values()].flatMap((members) => {
-        if (members.length < 2 || !members[0]!.item.aggregateGroupId) return members;
-        const populated = members.filter(({ item }) => {
-          const metric = item.metrics[month];
-          return metric && (metric.reviews !== null || metric.rating !== null);
-        });
-        if (populated.length < 2) return populated.length ? [populated[0]!] : [members[0]!];
-        const fingerprints = new Set(populated.map(({ item }) => {
-          const metric = item.metrics[month]!;
-          return `${metric.reviews ?? "null"}:${metric.rating ?? "null"}`;
-        }));
-        // A platform aggregate is counted once only while every populated
-        // member proves the same metrics. Conflicts remain visible and are not
-        // silently collapsed.
-        return fingerprints.size === 1 ? [populated[0]!] : members;
-      });
-      const reviewCells = representatives.map(({ row: productRow }) => `${reviewsColumn}${productRow}`);
-      const ratingCells = representatives.map(({ row: productRow }) => `${ratingColumn}${productRow}`);
+      const reviewCells = productRows.map(({ row: productRow }) => `${reviewsColumn}${productRow}`);
+      const ratingCells = productRows.map(({ row: productRow }) => `${ratingColumn}${productRow}`);
       const reviewArray = `{${reviewCells.join(";")}}`;
       const ratingArray = `{${ratingCells.join(";")}}`;
       const formulasForMetric = [
