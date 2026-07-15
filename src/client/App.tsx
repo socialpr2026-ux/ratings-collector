@@ -24,6 +24,10 @@ import {
   parseTemporarilyBlockedDomainList,
   updateDomainSelection
 } from "./site-catalog.js";
+import {
+  collectWithCheckpointContinuation,
+  type AutomaticContinuationNotice
+} from "./checkpoint-resume.js";
 
 type Config = {
   domains: readonly string[];
@@ -49,7 +53,7 @@ const FORM_STORAGE_KEY = "ratings-last-configuration";
 const CONVERSATION_STORAGE_KEY = "ratings-conversation-id";
 const LAST_RUN_STORAGE_KEY = "ratings-last-run-id";
 const pendingStatuses = new Set<RunState["status"]>(["queued", "running", "publishing"]);
-type BusyAction = "resume" | "start" | "retry" | "review" | "profile" | "publish" | "companion";
+type BusyAction = "resume" | "start" | "retry" | "continue" | "review" | "profile" | "publish" | "companion";
 
 type CompanionState = {
   status: "idle" | "checking" | "collecting" | "importing" | "unavailable" | "captcha" | "error";
@@ -214,6 +218,7 @@ export function App() {
   const [reviewOnly, setReviewOnly] = useState(true);
   const [listQuery, setListQuery] = useState("");
   const [busyAction, setBusyAction] = useState<BusyAction>();
+  const [automaticContinuation, setAutomaticContinuation] = useState<AutomaticContinuationNotice>();
   const [error, setError] = useState("");
   const [companionState, setCompanionState] = useState<CompanionState>({ status: "idle" });
   const formRef = useRef<HTMLFormElement>(null);
@@ -289,6 +294,7 @@ export function App() {
   const checkCount = normalizedDomains.length * normalizedBrands.length;
   const sheetIsValid = isGoogleSheetUrl(sheetUrl);
   const busy = busyAction !== undefined;
+  const collectionIsContinuing = busyAction === "retry" || busyAction === "continue";
   const formIsReady = Boolean(config)
     && sheetIsValid
     && Boolean(month)
@@ -348,21 +354,83 @@ export function App() {
     }
   }
 
-  async function pollRetry(
+  async function pollCollectionAttempt(
     id: string,
     previousUpdatedAt: string,
     triggerError: () => Error | undefined,
     triggerFinished: () => boolean
   ) {
+    let lastUpdatedAt = previousUpdatedAt;
+    let unchangedPollsAfterFailure = 0;
     for (;;) {
-      const failure = triggerError();
-      if (failure) throw failure;
       const next = await fetchRun(id);
       setRun(next);
       const retryHasStarted = next.updatedAt !== previousUpdatedAt || pendingStatuses.has(next.status);
       if (!pendingStatuses.has(next.status) && (retryHasStarted || triggerFinished())) return next;
+      const failure = triggerError();
+      if (failure) {
+        if (next.updatedAt === lastUpdatedAt) unchangedPollsAfterFailure += 1;
+        else unchangedPollsAfterFailure = 0;
+        lastUpdatedAt = next.updatedAt;
+        // A lost Agent response may precede its final failed checkpoint. Keep
+        // polling while the server is still advancing, but never hang forever
+        // on a stale `running` marker.
+        if (unchangedPollsAfterFailure >= 4) return next;
+      }
       await new Promise((resolve) => setTimeout(resolve, 2500));
     }
+  }
+
+  async function executeCollectionAttempt(id: string, checkpoint: RunState) {
+    let triggerFailure: Error | undefined;
+    let triggerFinished = false;
+    const trigger = api(
+      config?.agentMode ? "/ratings" : `/api/runs/${encodeURIComponent(id)}/retry`,
+      {
+        method: "POST",
+        body: config?.agentMode ? JSON.stringify({ runId: id }) : "{}"
+      }
+    )
+      .catch((caught) => { triggerFailure = caught as Error; })
+      .finally(() => { triggerFinished = true; });
+    const polled = await pollCollectionAttempt(
+      id,
+      checkpoint.updatedAt,
+      () => triggerFailure,
+      () => triggerFinished
+    );
+    await trigger;
+    const latest = await fetchRun(id).catch(() => polled);
+    setRun(latest);
+    return { run: latest, ...(triggerFailure ? { error: triggerFailure } : {}) };
+  }
+
+  async function collectRun(initial: RunState, initialAttemptAlreadyStarted = false): Promise<RunState> {
+    let firstAttempt = true;
+    const result = await collectWithCheckpointContinuation(
+      initial,
+      async (checkpoint) => {
+        if (firstAttempt && initialAttemptAlreadyStarted) {
+          firstAttempt = false;
+          return {
+            run: await pollCollectionAttempt(initial.id, checkpoint.updatedAt, () => undefined, () => false)
+          };
+        }
+        firstAttempt = false;
+        return executeCollectionAttempt(initial.id, checkpoint);
+      },
+      (notice) => {
+        setAutomaticContinuation(notice);
+        setBusyAction("continue");
+      }
+    );
+    setRun(result.run);
+    if (result.error) throw result.error;
+    if (result.run.status === "failed") {
+      const message = [...result.run.errors].reverse().find((item) => item.partition === "orchestrator")?.message;
+      throw new Error(message ?? "Сбор остановлен до завершения всех проверок");
+    }
+    return result.run;
   }
 
   function saveCurrentConfiguration(): SavedConfiguration {
@@ -385,6 +453,7 @@ export function App() {
     setReviewOnly(true);
     setListQuery("");
     setCompanionState({ status: "idle" });
+    setAutomaticContinuation(undefined);
     saveCurrentConfiguration();
     try {
       const created = await api("/api/runs", {
@@ -405,14 +474,9 @@ export function App() {
             body: JSON.stringify({ runId: created.id, operation: "preflight" })
           });
         }
-        let triggerFailure: Error | undefined;
-        const trigger = config?.agentMode
-          ? api("/ratings", { method: "POST", body: JSON.stringify({ runId: created.id }) })
-            .catch((caught) => { triggerFailure = caught as Error; })
-          : Promise.resolve();
-        await poll(created.id, () => triggerFailure);
-        await trigger;
-        if (triggerFailure) throw triggerFailure;
+        // The local Fastify endpoint starts execution while creating the run;
+        // EdgeOne creates a queued run and needs the separate Agent request.
+        await collectRun(created, !config?.agentMode);
       }
     } catch (caught) {
       setError(friendlyErrorMessage(caught, "start"));
@@ -443,23 +507,9 @@ export function App() {
     if (!run || !canRetryFailedPartitions(run.status, partitionSummary?.failed ?? 0)) return;
     setBusyAction("retry");
     setError("");
-    const previousUpdatedAt = run.updatedAt;
-    let triggerFailure: Error | undefined;
-    let triggerFinished = false;
+    setAutomaticContinuation(undefined);
     try {
-      const trigger = api(
-        config?.agentMode ? "/ratings" : `/api/runs/${encodeURIComponent(run.id)}/retry`,
-        {
-          method: "POST",
-          body: config?.agentMode ? JSON.stringify({ runId: run.id }) : "{}"
-        }
-      )
-        .catch((caught) => { triggerFailure = caught as Error; })
-        .finally(() => { triggerFinished = true; });
-      await pollRetry(run.id, previousUpdatedAt, () => triggerFailure, () => triggerFinished);
-      await trigger;
-      if (triggerFailure) throw triggerFailure;
-      setRun(await fetchRun(run.id));
+      await collectRun(run);
     } catch (caught) {
       setError(friendlyErrorMessage(caught, "retry"));
       setRun(await fetchRun(run.id).catch(() => run));
@@ -848,19 +898,23 @@ export function App() {
             <span id="setup-status">{setupStatus}</span>
           </div>
           <button className="button button-primary button-large" type="submit" disabled={!formIsReady || busy || config?.authRequired} aria-describedby="setup-status">
-            <span>{busyAction === "resume" ? "Восстанавливаем…" : busyAction === "start" ? "Собираем данные…" : "Запустить сбор"}</span><span aria-hidden="true">→</span>
+            <span>{busyAction === "resume" ? "Восстанавливаем…" : busyAction === "continue" ? "Продолжаем сбор…" : busyAction === "start" ? "Собираем данные…" : "Запустить сбор"}</span><span aria-hidden="true">→</span>
           </button>
         </div>
       </form>
 
-      {(busy || run) && <section className={`card progress-card ${run && pendingStatuses.has(run.status) ? "progress-active" : ""}`} aria-labelledby="progress-title" aria-live="polite" aria-busy={Boolean(run && pendingStatuses.has(run.status))}>
+      {(busy || run) && <section className={`card progress-card ${run && (pendingStatuses.has(run.status) || collectionIsContinuing) ? "progress-active" : ""}`} aria-labelledby="progress-title" aria-live="polite" aria-busy={Boolean(run && (pendingStatuses.has(run.status) || collectionIsContinuing))}>
         <div className="card-heading compact">
-          <div><p className="section-number">Шаг 2</p><h2 id="progress-title">{busyAction === "resume" ? "Восстанавливаем последний запуск" : busyAction === "retry" ? "Повторяем неуспешные площадки" : run ? runStatusLabels[run.status] : "Создаём запуск"}</h2><p>{busyAction === "resume" ? "Загружаем сохранённый результат и актуальный статус площадок." : busyAction === "retry" ? (run?.progress.current ? `Повторная проверка: ${run.progress.current}` : "Уже собранные данные сохранены. Обновляем только площадки с ошибками.") : run?.progress.current ? `Сейчас проверяем: ${run.progress.current}` : pendingStatuses.has(run?.status ?? "queued") ? "Можно перейти в другую вкладку — этот экран обновится автоматически." : "Сбор завершён. Ниже можно проверить результат."}</p></div>
+          <div><p className="section-number">Шаг 2</p><h2 id="progress-title">{busyAction === "resume" ? "Восстанавливаем последний запуск" : busyAction === "continue" ? `Автоматически продолжаем сбор · ${automaticContinuation?.attempt ?? 1}/${automaticContinuation?.maxAttempts ?? 3}` : busyAction === "retry" ? "Повторяем неуспешные площадки" : run ? runStatusLabels[run.status] : "Создаём запуск"}</h2><p>{busyAction === "resume" ? "Загружаем сохранённый результат и актуальный статус площадок." : busyAction === "continue" ? `Сохранено ${automaticContinuation?.completedPartitions ?? run?.progress.completedPartitions ?? 0} из ${automaticContinuation?.totalPartitions ?? run?.progress.totalPartitions ?? 0} проверок. Готовые площадки остаются на месте; продолжаются только незавершённые.` : busyAction === "retry" ? (run?.progress.current ? `Повторная проверка: ${run.progress.current}` : "Уже собранные данные сохранены. Обновляем только площадки с ошибками.") : run?.progress.current ? `Сейчас проверяем: ${run.progress.current}` : pendingStatuses.has(run?.status ?? "queued") ? "Можно перейти в другую вкладку — этот экран обновится автоматически." : "Сбор завершён. Ниже можно проверить результат."}</p></div>
           <div className="progress-value"><strong>{run ? `${progress}%` : "…"}</strong><small>{run ? `${run.progress.completedPartitions} из ${run.progress.totalPartitions}` : "подготовка"}</small></div>
         </div>
         <div className="progress-track" role="progressbar" aria-label="Ход сбора" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
           <span style={{ width: `${progress}%` }} />
         </div>
+        {busyAction === "continue" && automaticContinuation && <div className="continuation-status" role="status">
+          <span aria-hidden="true">↻</span>
+          <p><strong>Продолжение {automaticContinuation.attempt} из {automaticContinuation.maxAttempts}</strong><small>Ни одна завершённая проверка не запускается повторно.</small></p>
+        </div>}
         {run && <div className="metrics">
           <article><strong>{run.observations.length.toLocaleString("ru-RU")}</strong><span>карточек найдено</span></article>
           <article><strong>{partitionSummary?.complete ?? 0}</strong><span>проверок завершено</span></article>
@@ -880,9 +934,9 @@ export function App() {
 
         {(partitionSummary?.failed ?? 0) > 0 && <div className="collection-warning" role="status">
           <span className="notice-icon" aria-hidden="true">!</span>
-          <div><strong>{busyAction === "retry" ? "Повторно проверяем проблемные площадки…" : "Сбор неполный — публикация отключена"}</strong><p>{busyAction === "retry" ? "Готовые результаты остаются на месте. После завершения список и проверка публикации обновятся автоматически." : "Данные не будут записаны частично. Можно повторить только неуспешные площадки, не запуская весь сбор заново."}</p></div>
+          <div><strong>{collectionIsContinuing ? busyAction === "continue" ? "Автоматически продолжаем с сохранённого места…" : "Повторно проверяем проблемные площадки…" : "Сбор неполный — публикация отключена"}</strong><p>{collectionIsContinuing ? "Готовые результаты остаются на месте. После завершения список и проверка публикации обновятся автоматически." : "Данные не будут записаны частично. Можно повторить только неуспешные площадки, не запуская весь сбор заново."}</p></div>
           <div className="collection-warning-actions">
-            {canRetry && <button className="button button-secondary" type="button" onClick={retryFailedPartitions} disabled={busy}>{busyAction === "retry" ? "Повторяем…" : "Повторить неуспешные площадки"}</button>}
+            {canRetry && <button className="button button-secondary" type="button" onClick={retryFailedPartitions} disabled={busy}>{collectionIsContinuing ? "Продолжаем…" : "Повторить неуспешные площадки"}</button>}
             <a className="button button-quiet" href="#publish-status">Посмотреть причины</a>
           </div>
         </div>}

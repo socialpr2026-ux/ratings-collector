@@ -156,6 +156,11 @@ input::placeholder, textarea::placeholder { color: #9aa09d; }
 .progress-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #1d624b, #55a87e); transition: width .35s ease; }
 .progress-active .progress-track span { position: relative; overflow: hidden; }
 .progress-active .progress-track span::after { position: absolute; inset: 0; content: ""; background: linear-gradient(90deg, transparent, rgba(255,255,255,.42), transparent); animation: progress-sheen 1.7s ease-in-out infinite; transform: translateX(-100%); }
+.continuation-status { display: flex; align-items: center; gap: 10px; margin-top: 13px; padding: 10px 12px; border: 1px solid #bed9ca; border-radius: 12px; background: #f1f8f4; color: #174d3b; }
+.continuation-status > span { display: grid; width: 26px; height: 26px; place-items: center; border-radius: 50%; background: #dceee4; font-size: 16px; }
+.continuation-status p { display: grid; gap: 2px; margin: 0; }
+.continuation-status strong { font-size: 12px; }
+.continuation-status small { color: #527366; font-size: 10px; }
 @keyframes progress-sheen { to { transform: translateX(100%); } }
 .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
 .metrics article { min-height: 82px; padding: 14px 15px; border: 1px solid #e3e9e5; border-radius: 12px; background: rgba(255,255,255,.74); }
