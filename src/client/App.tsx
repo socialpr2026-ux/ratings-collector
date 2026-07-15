@@ -32,6 +32,7 @@ import {
 type Config = {
   domains: readonly string[];
   brands: readonly string[];
+  companyBrands?: readonly string[];
   googleClientId: string | null;
   authRequired: boolean;
   agentMode?: boolean;
@@ -884,12 +885,17 @@ export function App() {
             </details>
           </section>
 
-          <label className="brand-field">
-            <span className="label-row"><span>Бренды</span><small>{normalizedBrands.length}</small></span>
-            <textarea value={brands} onChange={(event) => setBrands(event.target.value)} rows={12} placeholder={"Кагоцел\nАрбидол\nИнгавирин"} required />
+          <section className="brand-field" aria-labelledby="brands-label">
+            <span className="label-row"><label id="brands-label" htmlFor="brands-list">Бренды</label><small>{normalizedBrands.length}</small></span>
+            {config?.companyBrands?.length ? <button
+              className="brand-preset"
+              type="button"
+              onClick={() => setBrands(config.companyBrands!.join("\n"))}
+            >Наши бренды · {config.companyBrands.length}</button> : null}
+            <textarea id="brands-list" value={brands} onChange={(event) => setBrands(event.target.value)} rows={12} placeholder={"Кагоцел\nАрбидол\nИнгавирин"} required />
             <small className="field-help">По одному бренду в строке. Повторы будут убраны автоматически.</small>
             <span className="brand-hint"><span aria-hidden="true">✓</span><span>Название бренда и уточнение продукта будут записаны в разные столбцы.</span></span>
-          </label>
+          </section>
         </div>
 
         <div className="setup-footer">

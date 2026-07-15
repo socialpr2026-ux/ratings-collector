@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { load } from "cheerio";
-import { INITIAL_BRANDS, INITIAL_DOMAINS } from "../../src/shared/constants.js";
+import { COMPANY_BRANDS, INITIAL_BRANDS, INITIAL_DOMAINS } from "../../src/shared/constants.js";
 import type { RunState } from "../../src/shared/types.js";
 import { authenticate, authConfig, type AuthUser } from "../../src/server/auth.js";
 import { BlobEvidenceStore, BlobRepository } from "../../src/server/blob-repository.js";
@@ -2204,7 +2204,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
 export default async function onRequest(context: Context): Promise<Response> {
   const url = new URL(context.request.url);
   if (url.pathname === "/api/config") return json({
-    domains: INITIAL_DOMAINS, brands: INITIAL_BRANDS,
+    domains: INITIAL_DOMAINS, brands: INITIAL_BRANDS, companyBrands: COMPANY_BRANDS,
     googleClientId: null,
     authRequired: context.env.RATINGS_ALLOW_UNAUTHENTICATED !== "true", agentMode: true
   });

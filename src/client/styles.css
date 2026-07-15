@@ -126,6 +126,8 @@ input::placeholder, textarea::placeholder { color: #9aa09d; }
 .manual-domains > label { display: block; margin: 12px 0 7px; color: #4f5a54; font-size: 10px; }
 .manual-domains textarea { min-height: 112px; background: #fff; }
 .brand-field { display: grid; gap: 8px; align-content: start; }
+.brand-preset { width: fit-content; min-height: 30px; border: 1px solid #c6d9ce; border-radius: 8px; padding: 5px 9px; color: var(--green); background: #f1f7f4; font-size: 10px; font-weight: 800; }
+.brand-preset:hover { border-color: #91b19f; background: #e8f2ec; }
 .brand-field textarea { min-height: 330px; background: #fff; }
 .brand-hint { display: flex; gap: 8px; align-items: flex-start; margin-top: 5px; padding: 10px; border-radius: 10px; color: #597066; background: #f1f7f4; font-size: 10px; font-weight: 600; line-height: 1.45; }
 .brand-hint > span:first-child { width: 17px; height: 17px; flex: 0 0 17px; display: grid; place-items: center; border-radius: 50%; color: #fff; background: var(--green); font-size: 9px; font-weight: 900; }

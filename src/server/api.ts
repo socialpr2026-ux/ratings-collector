@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { INITIAL_BRANDS, INITIAL_DOMAINS } from "../shared/constants.js";
+import { COMPANY_BRANDS, INITIAL_BRANDS, INITIAL_DOMAINS } from "../shared/constants.js";
 import { authenticate, authConfig } from "./auth.js";
 import type { Runtime } from "./runtime.js";
 import { safeErrorMessage } from "./utils/error-message.js";
@@ -16,7 +16,7 @@ function webHeaders(request: FastifyRequest): Headers {
 
 export async function registerApi(server: FastifyInstance, runtime: Runtime) {
   server.get("/api/config", async () => ({
-    domains: INITIAL_DOMAINS, brands: INITIAL_BRANDS,
+    domains: INITIAL_DOMAINS, brands: INITIAL_BRANDS, companyBrands: COMPANY_BRANDS,
     googleClientId: authConfig().clientId ?? null, authRequired: !authConfig().allowUnauthenticated, agentMode: false
   }));
 

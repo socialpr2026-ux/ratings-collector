@@ -14,6 +14,9 @@ describe("public configuration", () => {
     expect(response.status).toBe(200);
     expect(config).not.toHaveProperty("defaultSheetUrl");
     expect(JSON.stringify(config)).not.toContain("docs.google.com/spreadsheets");
+    expect(config.companyBrands).toHaveLength(68);
+    expect(config.companyBrands).toEqual(expect.arrayContaining(["Canpol Babies", "Кагоцел", "Хондрофен", "Даксабрис"]));
+    expect(new Set(config.companyBrands as string[]).size).toBe(68);
   });
 
 });
