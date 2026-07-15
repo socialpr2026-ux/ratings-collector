@@ -21,10 +21,29 @@ export type RepositoryRpc =
   | { action: "releaseLease"; lease: { token: string; keys: string[] } }
   | { action: "putEvidence"; payload: unknown };
 
+const RETRYABLE_ACTIONS = new Set<RepositoryRpc["action"]>([
+  "getRun",
+  "saveRun",
+  "getProfile",
+  "saveProfile",
+  "listProducts",
+  "getSnapshots",
+  "getPublication",
+  "putEvidence"
+]);
+
+const transientStatus = (status: number) => status === 429 || status >= 500;
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export class RemoteRepository implements Repository {
   private readonly token: string;
 
-  constructor(private readonly endpoint: string, token: string, private readonly fetchImpl: typeof fetch = fetch) {
+  constructor(
+    private readonly endpoint: string,
+    token: string,
+    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly wait: (ms: number) => Promise<unknown> = delay
+  ) {
     this.token = token.trim();
     if (this.token.length < 32) {
       throw new Error("INTERNAL_AGENT_TOKEN не настроен или короче 32 символов");
@@ -32,15 +51,42 @@ export class RemoteRepository implements Repository {
   }
 
   async call<T>(request: RepositoryRpc): Promise<T> {
-    const response = await this.fetchImpl(this.endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${this.token}` },
-      body: JSON.stringify(request),
-      signal: AbortSignal.timeout(30_000)
-    });
-    const value = await response.json() as { result?: T; error?: string };
-    if (!response.ok) throw new Error(value.error ?? `Repository RPC HTTP ${response.status}`);
-    return value.result as T;
+    const attempts = RETRYABLE_ACTIONS.has(request.action) ? 3 : 1;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        const response = await this.fetchImpl(this.endpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${this.token}` },
+          body: JSON.stringify(request),
+          signal: AbortSignal.timeout(30_000)
+        });
+        const text = await response.text();
+        let value: { result?: T; error?: string };
+        try {
+          value = JSON.parse(text) as typeof value;
+        } catch {
+          if (attempt < attempts && transientStatus(response.status)) {
+            await this.wait(200 * attempt);
+            continue;
+          }
+          throw new Error(`Repository RPC HTTP ${response.status}: non-JSON response`);
+        }
+        if (!response.ok) {
+          if (attempt < attempts && transientStatus(response.status)) {
+            await this.wait(200 * attempt);
+            continue;
+          }
+          throw new Error(value.error ?? `Repository RPC HTTP ${response.status}`);
+        }
+        return value.result as T;
+      } catch (error) {
+        lastError = error;
+        if (attempt >= attempts || error instanceof Error && /^Repository RPC HTTP \d+:/.test(error.message)) throw error;
+        await this.wait(200 * attempt);
+      }
+    }
+    throw lastError;
   }
 
   getRun(id: string) { return this.call<RunState | undefined>({ action: "getRun", id }); }
