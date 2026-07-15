@@ -31,12 +31,12 @@ describe("Google Apps Script bridge source", () => {
     expect(source).not.toContain("sheet.setFrozenColumns(Math.min(3, columns));");
     expect(source).toContain("sheet.setHiddenGridlines(true);");
     expect(source).toContain('sheet.setTabColor("#ff4d00");');
-    expect(source).toContain("sheet.setColumnWidth(2, 150);");
-    expect(source).toContain("sheet.setColumnWidth(1, 320);");
+    expect(source).toContain("sheet.setColumnWidth(1, 150);");
+    expect(source).toContain("sheet.setColumnWidth(2, 320);");
     expect(source).toContain("sheet.setColumnWidth(3, 310);");
     expect(source).toContain("sheet.setColumnWidth(4, 24);");
-    expect(source).toContain("sheet.getRange(productBlockStart + 1, 1, productCount, 1).setFontColor");
-    expect(source).not.toContain("sheet.getRange(productBlockStart + 1, 2, productCount, 1).setFontColor");
+    expect(source).toContain("sheet.getRange(productBlockStart + 1, 2, productCount, 1).setFontColor");
+    expect(source).not.toContain("sheet.getRange(productBlockStart + 1, 1, productCount, 1).setFontColor");
     expect(source).toContain("sheet.setColumnWidth(metricColumn, 110);");
     expect(source).toContain("sheet.setColumnWidth(metricColumn + 1, 82);");
   });

@@ -17,7 +17,7 @@ import {
 
 describe("review summary copy", () => {
   it("describes per-brand sheets without a duplicate brand column", () => {
-    expect(BRAND_SHEET_COLUMNS_TEXT).toBe("Столбцы каждого листа: Ссылка · Площадка · Продукт · Отзывы / оценки · Рейтинг.");
+    expect(BRAND_SHEET_COLUMNS_TEXT).toBe("Столбцы каждого листа: Площадка · Ссылка · Продукт · Отзывы / оценки · Рейтинг.");
     expect(BRAND_SHEET_COLUMNS_TEXT).not.toContain("Бренд ·");
     expect(brandSheetDestinationText(1)).toBe("листе бренда");
     expect(brandSheetDestinationText(2)).toBe("отдельных листах брендов");

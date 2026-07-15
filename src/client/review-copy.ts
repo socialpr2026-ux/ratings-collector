@@ -253,7 +253,7 @@ export function reviewIntroText(reviewCount: number, failedPartitionCount: numbe
     : "Все карточки определены. Результат готов к записи в таблицу.";
 }
 
-export const BRAND_SHEET_COLUMNS_TEXT = "Столбцы каждого листа: Ссылка · Площадка · Продукт · Отзывы / оценки · Рейтинг.";
+export const BRAND_SHEET_COLUMNS_TEXT = "Столбцы каждого листа: Площадка · Ссылка · Продукт · Отзывы / оценки · Рейтинг.";
 
 export function brandSheetDestinationText(brandCount: number) {
   return brandCount === 1 ? "листе бренда" : "отдельных листах брендов";

@@ -635,7 +635,7 @@ function applyFormatting_(sheet, rowKinds, rows, columns) {
       var productRange = sheet.getRange(productBlockStart + 1, 1, productCount, columns);
       productRange.setBackground("#ffffff")
         .setBorder(null, null, true, null, null, true, "#ebe9f4", SpreadsheetApp.BorderStyle.SOLID);
-      sheet.getRange(productBlockStart + 1, 1, productCount, 1).setFontColor("#4932a8").setFontLine("underline");
+      sheet.getRange(productBlockStart + 1, 2, productCount, 1).setFontColor("#4932a8").setFontLine("underline");
       sheet.getRange(productBlockStart + 1, 3, productCount, 1).setFontWeight("bold").setFontColor("#120755");
       if (columns > 4) {
         sheet.getRange(productBlockStart + 1, 5, productCount, columns - 4)
@@ -715,8 +715,8 @@ function applyLayout_(sheet, rowKinds, rows, columns) {
   // publication even though the spreadsheet is editable.
   sheet.setFrozenColumns(Math.min(4, columns));
   sheet.setTabColor("#ff4d00");
-  sheet.setColumnWidth(1, 320);
-  if (columns >= 2) sheet.setColumnWidth(2, 150);
+  sheet.setColumnWidth(1, 150);
+  if (columns >= 2) sheet.setColumnWidth(2, 320);
   if (columns >= 3) sheet.setColumnWidth(3, 310);
   if (columns >= 4) sheet.setColumnWidth(4, 24);
   // The first column in every monthly pair is the combined public counter
