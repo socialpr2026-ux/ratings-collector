@@ -18,7 +18,7 @@ import { validateRun } from "./qa.js";
 import { productKey, type Repository } from "./repository.js";
 import { AdapterBlockedError, AdapterQuotaError, ParserChangedError } from "./adapters/errors.js";
 import { safeErrorMessage } from "./utils/error-message.js";
-import { normalizeText } from "./utils/normalize.js";
+import { matchesBrand, normalizeText } from "./utils/normalize.js";
 import { assertSafePublicUrl, extractSpreadsheetId } from "./utils/urls.js";
 import { analyzeProductIdentity } from "./utils/product-name.js";
 import { titleProductEvidence } from "./utils/product-evidence.js";
@@ -175,6 +175,22 @@ function collapsesDistinctProductPages(
     token && !brandTokens.has(token) && !GENERIC_AGGREGATE_TITLE_TOKENS.has(token)
   );
   return specificTokens.length > 0;
+}
+
+function canAutoAcceptDedicatedReviewAggregate(observation: Observation): boolean {
+  const identity = observation.productIdentity;
+  const sourceBoundDedicated = observation.profileVersion === undefined &&
+    observation.historical !== true &&
+    observation.productOverride === undefined &&
+    Boolean(identity && ["family", "line"].includes(identity.granularity) && identity.confidence !== "ambiguous") &&
+    matchesBrand(observation.product, observation.brand) &&
+    hasDeterministicAggregateProof(observation);
+  if (!sourceBoundDedicated) return false;
+  // A Yandex Reviews model is already source-bound by its stable model_id.
+  // Other review sites need explicit family-page evidence; a listing/profile
+  // result is never enough for automatic publication.
+  return observation.domain === "market.yandex.ru" || observation.domain === "reviews.yandex.ru" ||
+    observation.productEvidence?.scope === "product_family";
 }
 
 export class RatingsService {
@@ -553,11 +569,12 @@ export class RatingsService {
                   observation.brand,
                   observation.product
                 );
+                const autoAcceptedReviewAggregate = canAutoAcceptDedicatedReviewAggregate(observation);
                 if (
                   ["ok", "no_reviews"].includes(observation.status) &&
-                  (collapsedDistinctProducts ||
+                  ((collapsedDistinctProducts && !autoAcceptedReviewAggregate) ||
                     observation.productIdentity.granularity !== "variant" &&
-                    !hasDeterministicAggregateProof(observation))
+                    !autoAcceptedReviewAggregate)
                 ) {
                   observation.status = "needs_review";
                 }
