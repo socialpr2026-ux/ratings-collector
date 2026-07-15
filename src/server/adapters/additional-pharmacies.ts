@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { load, type CheerioAPI } from "cheerio";
 import type { AdapterContext, AdapterHealth, Observation, ProductRef, SiteAdapter } from "../../shared/types.js";
 import type { EvidenceStore } from "../evidence.js";
-import { matchesBrand } from "../utils/normalize.js";
+import { matchesBrand, normalizeText } from "../utils/normalize.js";
 import { titleProductEvidence } from "../utils/product-evidence.js";
 import { readTextBounded, safeFetch } from "../utils/safe-fetch.js";
 import { AdapterBlockedError, ParserChangedError } from "./errors.js";
@@ -254,6 +254,26 @@ function jsonLdProducts($: CheerioAPI): Array<Record<string, unknown>> {
   return products;
 }
 
+function aptekaVisibleFeedback(
+  $: CheerioAPI,
+  expectedUrl: string,
+  expectedTitle: string
+): { count: number; rating: number } | undefined {
+  const selected = $(".variantButton[aria-selected='true']");
+  if (selected.length !== 1) return undefined;
+  const link = selected.find("a.variantButton__link[href][aria-label]").first();
+  const source = sourceHref(link.attr("href"), APTEKA_DOMAIN);
+  const title = compactText(link.attr("aria-label") ?? "");
+  if (!source || source.pathname !== new URL(expectedUrl).pathname || normalizeText(title) !== normalizeText(expectedTitle)) {
+    return undefined;
+  }
+  const metric = selected.find(".variantButton__rating .ItemRating");
+  if (metric.length !== 1) return undefined;
+  const count = exactInteger(metric.find(".caption3 span").first().text());
+  const rating = exactRating(metric.find(".ItemRating__label").first().text());
+  return count === undefined || rating === undefined ? undefined : { count, rating };
+}
+
 export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
   readonly id = "apteka.ru:preparation-jsonld-v1";
   readonly supportedDomains = [APTEKA_DOMAIN, `www.${APTEKA_DOMAIN}`] as const;
@@ -351,11 +371,18 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
       ratingCount = exactInteger(record.ratingCount);
       value = exactRating(record.ratingValue);
     }
+    const feedbackCount = Math.max(reviews ?? 0, ratingCount ?? 0);
+    if (feedbackCount > 0) {
+      const visible = aptekaVisibleFeedback(page.$, parsedRef.url, title);
+      if (!visible || visible.count !== feedbackCount || visible.rating !== value) {
+        throw new ParserChangedError(`${APTEKA_DOMAIN}:${ref.listingId}: structured feedback is not proven by the selected product variant`);
+      }
+    }
     if (reviews === undefined && ratingCount === undefined) {
       const text = compactText(page.$("body").text());
       if (/Отзывы\s*0\b|нет отзывов/i.test(text)) reviews = 0;
     }
-    if (reviews === undefined && ratingCount === undefined || Math.max(reviews ?? 0, ratingCount ?? 0) > 0 && value === undefined) {
+    if (reviews === undefined && ratingCount === undefined || feedbackCount > 0 && value === undefined) {
       throw new ParserChangedError(`${APTEKA_DOMAIN}:${ref.listingId}: complete feedback aggregate is missing`);
     }
     return observation(this.evidence, ref, page, {
@@ -396,6 +423,22 @@ function nfExplicitEmptyProductReviews($: CheerioAPI): boolean {
   } catch {
     return false;
   }
+}
+
+function nfVisibleReviewMetrics($: CheerioAPI, expectedTitle: string): { reviews: number; rating: number } | undefined {
+  const section = $("#review");
+  if (section.length !== 1) return undefined;
+  const items = section.find(".testimonial[itemscope][itemtype*='Review']");
+  if (!items.length) return undefined;
+  let sum = 0;
+  for (const node of items.toArray()) {
+    const item = $(node);
+    const reviewed = compactText(item.find("meta[itemprop='itemReviewed']").first().attr("content") ?? "");
+    const score = exactRating(item.find("[itemprop='reviewRating'] [itemprop='ratingValue']").first().attr("content"));
+    if (normalizeText(reviewed) !== normalizeText(expectedTitle) || score === undefined) return undefined;
+    sum += score;
+  }
+  return { reviews: items.length, rating: Math.round(sum / items.length * 100) / 100 };
 }
 
 export class NfAptekaAdapter extends AdditionalPharmacyAdapter {
@@ -459,6 +502,12 @@ export class NfAptekaAdapter extends AdditionalPharmacyAdapter {
     const value = exactRating(aggregate.find("[itemprop='ratingValue']").first().attr("content") ?? aggregate.find("[itemprop='ratingValue']").first().text());
     if (reviews === undefined || reviews > 0 && value === undefined) {
       throw new ParserChangedError(`${NF_DOMAIN}:${ref.listingId}: complete product feedback microdata is missing`);
+    }
+    if (reviews > 0) {
+      const visible = nfVisibleReviewMetrics(page.$, title);
+      if (!visible || visible.reviews !== reviews || Math.abs(visible.rating - value!) > 0.01) {
+        throw new ParserChangedError(`${NF_DOMAIN}:${ref.listingId}: aggregate feedback is not proven by the exact product review list`);
+      }
     }
     return observation(this.evidence, ref, page, {
       domain: NF_DOMAIN,

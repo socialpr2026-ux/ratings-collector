@@ -1009,6 +1009,20 @@ describe("first-party review-site adapters", () => {
   });
 });
 
+describe("aggregate identity guardrails", () => {
+  it("rejects same-brand analogue JSON-LD when no Product is bound to the requested review page", async () => {
+    const requested = "https://vseotzyvy.ru/item/51734/reviews-anvifen/";
+    const html = `<h1>Анвифен отзывы</h1><script type="application/ld+json">${JSON.stringify([
+      { "@type": "Product", name: "Анвифен 50 мг", url: "https://vseotzyvy.ru/item/999/reviews-anvifen-50/", aggregateRating: { reviewCount: 7, ratingValue: 4 } },
+      { "@type": "Product", name: "Анвифен 250 мг", url: "https://vseotzyvy.ru/item/998/reviews-anvifen-250/", aggregateRating: { reviewCount: 3, ratingValue: 5 } }
+    ])}</script>`;
+    const adapter = adapterFor("vseotzyvy.ru", vi.fn(async () => new Response(html)) as unknown as typeof fetch);
+    await expect(adapter.collect({
+      domain: "vseotzyvy.ru", platform: "vseotzyvy.ru", listingId: "51734", brand: "Анвифен", url: requested, metadata: {}
+    }, context)).rejects.toMatchObject({ code: "parser_changed" });
+  });
+});
+
 describe("blocked free-mode review sites", () => {
   it.each(BLOCKED_FREE_MODE_DOMAINS)("registers %s without making a request or using Apify", async (domain) => {
     const adapter = new BlockedFreeModeAdapter(domain);

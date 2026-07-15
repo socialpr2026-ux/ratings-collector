@@ -305,7 +305,7 @@ export class OkaptekaAdapter extends PharmacyAdapter {
     if (aggregate.reviews > 0 && aggregate.ratings !== aggregate.reviews) {
       throw new ParserChangedError(`${OK_DOMAIN}:${ref.listingId}: не у каждого текстового отзыва найдена оценка`);
     }
-    const normalizedRating = aggregate.reviews ? Math.round(aggregate.sum / aggregate.ratings * 10) / 10 : null;
+    const normalizedRating = aggregate.reviews ? Math.round(aggregate.sum / aggregate.ratings * 100) / 100 : null;
     return evidenceObservation(this.evidence, {
       domain: OK_DOMAIN,
       listingId: ref.listingId,
@@ -466,7 +466,7 @@ export class RiglaAdapter extends PharmacyAdapter {
       ratings.push(values[0]);
     }
     const reviews = reviewItems.length;
-    const average = reviews ? Math.round(ratings.reduce((sum, value) => sum + value, 0) / reviews * 10) / 10 : null;
+    const average = reviews ? Math.round(ratings.reduce((sum, value) => sum + value, 0) / reviews * 100) / 100 : null;
     return evidenceObservation(this.evidence, {
       domain: RIGLA_DOMAIN,
       listingId: ref.listingId,
