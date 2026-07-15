@@ -6,6 +6,7 @@ import { matchesBrand, normalizeText } from "../utils/normalize.js";
 import { titleProductEvidence } from "../utils/product-evidence.js";
 import { readTextBounded, safeFetch } from "../utils/safe-fetch.js";
 import { AdapterBlockedError, ParserChangedError } from "./errors.js";
+import { canonicalProductDescriptor } from "../utils/product-name.js";
 
 const MAX_HTML_BYTES = 12_000_000;
 const TRANSLATE_PARAMETERS = { _x_tr_sl: "ru", _x_tr_tl: "en", _x_tr_hl: "en" } as const;
@@ -425,17 +426,19 @@ function nfExplicitEmptyProductReviews($: CheerioAPI): boolean {
   }
 }
 
-function nfVisibleReviewMetrics($: CheerioAPI, expectedTitle: string): { reviews: number; rating: number } | undefined {
+function nfVisibleReviewMetrics($: CheerioAPI, brand: string, expectedTitle: string): { reviews: number; rating: number } | undefined {
   const section = $("#review");
   if (section.length !== 1) return undefined;
   const items = section.find(".testimonial[itemscope][itemtype*='Review']");
   if (!items.length) return undefined;
+  const expectedProduct = canonicalProductDescriptor(brand, expectedTitle);
+  if (!expectedProduct) return undefined;
   let sum = 0;
   for (const node of items.toArray()) {
     const item = $(node);
     const reviewed = compactText(item.find("meta[itemprop='itemReviewed']").first().attr("content") ?? "");
     const score = exactRating(item.find("[itemprop='reviewRating'] [itemprop='ratingValue']").first().attr("content"));
-    if (normalizeText(reviewed) !== normalizeText(expectedTitle) || score === undefined) return undefined;
+    if (canonicalProductDescriptor(brand, reviewed) !== expectedProduct || score === undefined) return undefined;
     sum += score;
   }
   return { reviews: items.length, rating: Math.round(sum / items.length * 100) / 100 };
@@ -504,7 +507,7 @@ export class NfAptekaAdapter extends AdditionalPharmacyAdapter {
       throw new ParserChangedError(`${NF_DOMAIN}:${ref.listingId}: complete product feedback microdata is missing`);
     }
     if (reviews > 0) {
-      const visible = nfVisibleReviewMetrics(page.$, title);
+      const visible = nfVisibleReviewMetrics(page.$, ref.brand, title);
       const aggregateMatchesVisible = visible && (
         Math.abs(visible.rating - value!) <= 0.01 ||
         Number.isInteger(value) && Math.round(visible.rating) === value
