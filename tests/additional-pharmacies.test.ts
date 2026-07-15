@@ -115,7 +115,9 @@ describe("additional pharmacy adapters", () => {
       subtitleFull: "гранулы гомеопатические N12", reviewsStats: { rating: 5, reviewsCount: 0 }
     };
     const statePage = (source: string, state: object) => translated(source, `<script>window.__INITIAL_STATE__=${JSON.stringify(state)};document.currentScript.remove()</script>`);
-    const search = statePage(searchSource, { search: { searchResultNew: [item], searchResultCount: 1 } });
+    const search = statePage(searchSource, {
+      search: { searchQuery: "Оциллококцинум", searchResultNew: [item], searchResultCount: 1 }
+    });
     const product = statePage(productSource, { products: { product: item } });
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
@@ -128,6 +130,59 @@ describe("additional pharmacy adapters", () => {
     await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({
       reviews: 0, rating: null, status: "no_reviews", product: "ОЦИЛЛОКОКЦИНУМ гранулы гомеопатические N12"
     });
+  });
+
+  it("collects the single live Хондрофен card when eTabl's broad count is larger", async () => {
+    const searchSource = "https://etabl.ru/search?query=%D0%A5%D0%BE%D0%BD%D0%B4%D1%80%D0%BE%D1%84%D0%B5%D0%BD&limit=100";
+    const productSource = "https://etabl.ru/product/khondrofen=187242009440";
+    const item = {
+      id: "187242009440", name: "ХОНДРОФЕН", url: "khondrofen=187242009440",
+      subtitleFull: "мазь 30г N1", reviewsStats: { rating: 5, reviewsCount: 0 }
+    };
+    const translatedCanonical = (source: string, state: object) => {
+      const canonical = new URL(source);
+      canonical.search = "";
+      return `<!doctype html><html><head><link rel="canonical" href="${canonical}"><base href="/"></head><body>` +
+        `<script>window.__INITIAL_STATE__=${JSON.stringify(state)};document.currentScript.remove()</script></body></html>`;
+    };
+    const search = translatedCanonical(searchSource, {
+      search: { searchQuery: "Хондрофен", searchResultNew: [item], searchResultCount: 2 }
+    });
+    const product = translatedCanonical(productSource, { products: { product: item } });
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      return new Response(url.pathname === "/search" ? search : product, {
+        status: 200, headers: { "content-type": "text/html" }
+      });
+    }) as unknown as typeof fetch;
+    const adapter = new EtablAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const refs = await adapter.discover("Хондрофен", context);
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toMatchObject({
+      listingId: "187242009440",
+      title: "ХОНДРОФЕН мазь 30г N1",
+      url: productSource
+    });
+    await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({
+      product: "ХОНДРОФЕН мазь 30г N1",
+      reviews: 0,
+      rating: null,
+      status: "no_reviews"
+    });
+  });
+
+  it("keeps eTabl fail-closed when a positive counter has no product cards", async () => {
+    const searchSource = "https://etabl.ru/search?query=%D0%A5%D0%BE%D0%BD%D0%B4%D1%80%D0%BE%D1%84%D0%B5%D0%BD&limit=100";
+    const search = translated(searchSource,
+      `<script>window.__INITIAL_STATE__=${JSON.stringify({
+        search: { searchQuery: "Хондрофен", searchResultNew: [], searchResultCount: 1 }
+      })};document.currentScript.remove()</script>`);
+    const adapter = new EtablAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(search, {
+      status: 200, headers: { "content-type": "text/html" }
+    })) as unknown as typeof fetch);
+
+    await expect(adapter.discover("Хондрофен", context)).rejects.toBeInstanceOf(ParserChangedError);
   });
 
   it("keeps Apteka April as an explicit access block, never an empty result", async () => {

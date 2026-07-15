@@ -451,7 +451,8 @@ function hasExplicitSearchNoResults($: CheerioAPI, brand: string, domain: string
   const text = $.root().text().replace(/\s+/g, " ").trim();
   if (domain === "otzyv.pro") return /Ничего не найдено!/iu.test(text);
   if (domain === "vseotzyvy.ru") {
-    return /(?:Ничего не найдено|По вашему запросу ничего не найдено)/iu.test(text);
+    return matchesBrand(text, brand) &&
+      /(?:Ничего не найдено|По вашему запросу ничего не найдено|Подходящих объектов не найдено)/iu.test(text);
   }
   if (domain === "irecommend.ru") {
     const heading = $("h1").first().text().replace(/\s+/g, " ").trim();

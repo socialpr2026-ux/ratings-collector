@@ -27,6 +27,11 @@ function sameSource(left: URL, right: URL): boolean {
   return JSON.stringify([...left.searchParams.entries()].sort()) === JSON.stringify([...right.searchParams.entries()].sort());
 }
 
+function sameSourcePage(left: URL, right: URL): boolean {
+  return left.protocol === "https:" && right.protocol === "https:" &&
+    host(left.hostname) === host(right.hostname) && left.pathname === right.pathname;
+}
+
 function translatedUrl(source: URL, translatedHost: string): URL {
   const result = new URL(`${source.pathname}${source.search}`, `https://${translatedHost}`);
   for (const [key, value] of Object.entries(TRANSLATE_PARAMETERS)) result.searchParams.set(key, value);
@@ -42,7 +47,18 @@ function assertTranslatedSource($: CheerioAPI, source: URL): void {
     try { return sameSource(new URL(value, source), source); }
     catch { return false; }
   });
-  if (!proven) throw new ParserChangedError(`${host(source.hostname)}: translated page returned another source URL`);
+  // Google Translate now emits a first-party canonical URL plus a relative
+  // base instead of repeating the full requested URL. The canonical proves
+  // the exact source host and path; adapters must still bind query-specific
+  // state (for example eTabl's searchQuery) before accepting any product.
+  const canonical = $("link[rel='canonical']").first().attr("href");
+  const canonicalProven = canonical ? (() => {
+    try { return sameSourcePage(new URL(canonical, source), source); }
+    catch { return false; }
+  })() : false;
+  if (!proven && !canonicalProven) {
+    throw new ParserChangedError(`${host(source.hostname)}: translated page returned another source URL`);
+  }
 }
 
 async function requestPage(
@@ -436,10 +452,22 @@ export class EtablAdapter extends AdditionalPharmacyAdapter {
     source.searchParams.set("limit", "100");
     const page = await requestPage(source, context, this.fetchImpl, ETABL_TRANSLATE_HOST);
     const state = initialState(page.$, ETABL_DOMAIN);
-    const search = state.search as { searchResultNew?: unknown; searchResultCount?: unknown } | undefined;
+    const search = state.search as {
+      searchResultNew?: unknown;
+      searchResultCount?: unknown;
+      searchQuery?: unknown;
+    } | undefined;
     const products = Array.isArray(search?.searchResultNew) ? search.searchResultNew as EtablProduct[] : undefined;
     const count = exactInteger(search?.searchResultCount);
-    if (!products || count === undefined || count !== products.length) {
+    const normalizedQuery = compactText(String(search?.searchQuery ?? ""))
+      .toLocaleLowerCase("ru-RU").replace(/ё/g, "е");
+    const normalizedBrand = compactText(brand).toLocaleLowerCase("ru-RU").replace(/ё/g, "е");
+    // searchResultCount is a broad catalogue counter and can exceed the
+    // sellable cards in searchResultNew (live Хондрофен: 2 vs 1). It is not a
+    // pagination proof. Require the exact echoed query and a structurally
+    // consistent card array; a positive counter with no cards stays blocked.
+    if (!products || count === undefined || normalizedQuery !== normalizedBrand ||
+      count < products.length || count > 0 && products.length === 0) {
       throw new ParserChangedError(`${ETABL_DOMAIN}: search result is incomplete or malformed`);
     }
     for (const product of products) {

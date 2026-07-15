@@ -180,6 +180,28 @@ describe("first-party review-site adapters", () => {
     await expect(ambiguous.discover("Даксабрис", context)).rejects.toMatchObject({ code: "blocked" });
   });
 
+  it("accepts the live Vseotzyvy empty-search proof for Хондрофен", async () => {
+    const adapter = adapterFor("vseotzyvy.ru", (async () => new Response(`
+      <main>
+        <h1>Хондрофен</h1>
+        <p>Подходящих объектов не найдено. Попробуйте изменить запрос поиска.</p>
+      </main>
+    `)) as typeof fetch);
+
+    await expect(adapter.discover("Хондрофен", context)).resolves.toEqual([]);
+  });
+
+  it("does not accept a Vseotzyvy no-results message for another query", async () => {
+    const adapter = adapterFor("vseotzyvy.ru", (async () => new Response(`
+      <main>
+        <h1>Другой препарат</h1>
+        <p>Подходящих объектов не найдено. Попробуйте изменить запрос поиска.</p>
+      </main>
+    `)) as typeof fetch);
+
+    await expect(adapter.discover("Хондрофен", context)).rejects.toMatchObject({ code: "blocked" });
+  });
+
   it.each([
     { domain: "otzyv.pro", brand: "Тикализис", path: "/category/lekarstvennyie-sredstva/823845-tikalizis.html", reviews: 1, rating: 5 },
     { domain: "vseotzyvy.ru", brand: "Тикализис", path: "/item/113727/reviews-tikalizis/", reviews: 1, rating: 5 },
