@@ -335,6 +335,16 @@ describe("run orchestration and fail-closed QA", () => {
     expect(blockedRun.partitions[0].message).toContain("blocked: blocked_free_mode");
     expect((await blockedRepository.getProfile("example.com"))?.status).toBe("approved");
 
+    const transientRepository = new MemoryRepository();
+    await transientRepository.saveProfile(profile);
+    const transientService = new RatingsService(
+      transientRepository,
+      async () => new UnhealthyAdapter("HTTP 502")
+    );
+    const transientRun = await transientService.executeRun((await transientService.createRun(request)).id);
+    expect(transientRun.partitions[0].message).toBe("blocked: HTTP 502");
+    expect((await transientRepository.getProfile("example.com"))?.status).toBe("approved");
+
     const nonApifyService = new RatingsService(
       new MemoryRepository(),
       async () => new UnhealthyAdapter("blocked_free_mode: origin HTTP 403; Apify не используется")
