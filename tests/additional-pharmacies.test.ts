@@ -63,26 +63,35 @@ describe("additional pharmacy adapters", () => {
     }, context)).rejects.toBeInstanceOf(ParserChangedError);
   });
 
-  it("discovers Хондрофен through the filtered product sitemap when no preparation page exists", async () => {
+  it("discovers Хондрофен through the filtered sitemap when optional Agent gateway preparation routes fail", async () => {
     const id = "630e04ccbb7256f6b07f621f";
     const productUrl = `https://apteka.ru/product/xondrofen-maz-dlya-naruzhnogo-primeneniya-30-gr-${id}/`;
     const product = `<!doctype html><html><head><script type="application/ld+json">${JSON.stringify({
       "@type": "Product", sku: id, name: "Хондрофен мазь для наружного применения 30 гр",
       aggregateRating: { reviewCount: 157, ratingValue: 4.7 }
     })}</script></head><body></body></html>`;
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const preparationStatuses = new Map([
+      ["/preparation/hondrofen/", 502],
+      ["/preparation/khondrofen/", 503],
+      ["/preparation/xondrofen/", 404]
+    ]);
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
-      if (url.pathname.startsWith("/preparation/")) return new Response("missing", { status: 404 });
+      if (url.pathname.startsWith("/preparation/")) {
+        return new Response("optional preparation gateway unavailable", { status: preparationStatuses.get(url.pathname) ?? 502 });
+      }
       if (url.pathname === "/sitemap-product.xml") {
         expect(url.searchParams.get("slugs")?.split(",")).toEqual(expect.arrayContaining(["hondrofen", "khondrofen", "xondrofen"]));
         return new Response(`<urlset><url><loc>${productUrl}</loc></url></urlset>`, { headers: { "content-type": "application/xml" } });
       }
       return new Response(product, { headers: { "content-type": "text/html" } });
-    }) as unknown as typeof fetch;
+    });
+    const fetchMock = fetchSpy as unknown as typeof fetch;
     const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), fetchMock);
 
     const refs = await adapter.discover("Хондрофен", context);
     expect(refs).toMatchObject([{ listingId: id, url: productUrl }]);
+    expect(fetchSpy.mock.calls.some(([input]) => new URL(String(input)).pathname === "/sitemap-product.xml")).toBe(true);
     await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({ reviews: 157, rating: 4.7, status: "ok" });
   });
 

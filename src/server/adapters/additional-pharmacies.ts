@@ -271,7 +271,12 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
       try {
         page = await requestPage(source, context, this.fetchImpl);
       } catch (error) {
-        if (error instanceof AdapterBlockedError && /HTTP (?:404|410)\b/.test(error.message)) continue;
+        // Preparation pages are only a fast discovery hint. Some valid brands
+        // have no preparation route and the fixed Function egress can surface
+        // that optional lookup as a transient upstream status. Keep walking
+        // the bounded transliteration candidates and let the filtered,
+        // first-party product sitemap remain the authoritative fallback.
+        if (error instanceof AdapterBlockedError && /HTTP (?:404|410|429|502|503|504)\b/.test(error.message)) continue;
         throw error;
       }
       page.$("a[href*='/product/']").each((_index, node) => {
