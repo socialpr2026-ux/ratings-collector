@@ -317,8 +317,16 @@ export class YandexAdapter implements SiteAdapter {
     if (!title) throw new ParserChangedError(`Yandex model ${listingId} JSON-LD Product has no name`);
 
     const description = nonEmptyString(product.description);
+    const reviewedProductTitles = extractReviewedProductTitles(html, ref.brand);
     const productEvidence = extractPageProductEvidence(html, canonicalUrl, ref.brand, {
-      structuredSignals: [title, description].filter((value): value is string => Boolean(value))
+      // Yandex's page-level Product name is sometimes abbreviated to the
+      // dosage form (for example, "Хондрофен мазь д/нар.прим.").  The
+      // source-bound `reasonToTrust` field identifies the exact item bought by
+      // each reviewer and is not review prose.  Keep those titles as strong
+      // structured evidence; conflicting packs remain separate candidates and
+      // therefore fail closed in product identity analysis.
+      structuredSignals: [title, description, ...reviewedProductTitles]
+        .filter((value): value is string => Boolean(value))
     });
     productEvidence.identifiers.push({ type: "model_id", value: listingId });
     const aggregate = isObject(product.aggregateRating) ? product.aggregateRating : undefined;
@@ -950,6 +958,42 @@ function isObject(value: unknown): value is JsonObject {
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function extractReviewedProductTitles(html: string, brand: string): string[] {
+  const result = new Set<string>();
+  const accept = (value: string | undefined): void => {
+    if (!value) return;
+    const compact = decodeHtmlEntities(value.replace(/<[^>]+>/g, " "))
+      .normalize("NFKC")
+      .replace(/[\s\u00a0\u202f]+/g, " ")
+      .trim();
+    const title = compact.match(/^(?:Товар|Product)\s*[—-]\s*(.+)$/iu)?.[1]?.trim();
+    if (!title || title.length > 500 || !matchesBrand(title, brand)) return;
+    result.add(title);
+  };
+
+  // Direct and translated SSR pages both retain this source-bound visible
+  // field.  Review text is deliberately outside the selector and is never
+  // considered product evidence.
+  for (const match of html.matchAll(
+    /<[^>]+class\s*=\s*(?:"[^"]*\bReview-ReasonToTrustText\b[^"]*"|'[^']*\bReview-ReasonToTrustText\b[^']*')[^>]*>([\s\S]*?)<\/[^>]+>/giu
+  )) accept(match[1]);
+
+  // Hydration state is a second deterministic representation of the same
+  // Yandex-owned field.  Decode only the JSON string assigned to the exact
+  // `reasonToTrust.text` property; arbitrary review bodies are not scanned.
+  for (const match of html.matchAll(
+    /"reasonToTrust"\s*:\s*\{\s*"text"\s*:\s*"((?:\\.|[^"\\])*)"/gu
+  )) {
+    try {
+      accept(JSON.parse(`"${match[1]}"`) as string);
+    } catch {
+      // A malformed hydration fragment is ignored; the page-level Product and
+      // visible source-bound fields still decide whether collection is usable.
+    }
+  }
+  return [...result].slice(0, 30);
 }
 
 function extractBrandNames(product: JsonObject): string[] {

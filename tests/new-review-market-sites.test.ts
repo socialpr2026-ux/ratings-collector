@@ -105,11 +105,37 @@ describe("Med-otzyv exact indexed adapter", () => {
       product: "Оциллококцинум",
       reviews: 42,
       rating: null,
-      rawRating: 0,
+      rawRating: null,
       ratingUnavailable: true,
       status: "ok"
     });
     observation.productIdentity = analyzeProductIdentity(observation);
+    expect(hasDeterministicAggregateProof(observation)).toBe(true);
+  });
+
+  it("publishes Khondrofen feedback for stable id 751 without inventing a rating or manual gate", async () => {
+    const khondrofenResult = `<!doctype html><html><body>
+      <a class="result__a" href="https://med-otzyv.ru/lekarstva/143-kh/751-khondrofen">
+        Хондрофен - 1 отзыв врачей и пациентов
+      </a>
+    </body></html>`;
+    const adapter = new MedOtzyvAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(khondrofenResult, { headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+
+    const [ref] = await adapter.discover("Хондрофен", context);
+    const observation = await adapter.collect(ref);
+    observation.productIdentity = analyzeProductIdentity(observation);
+
+    expect(observation).toMatchObject({
+      domain: "med-otzyv.ru",
+      listingId: "751",
+      product: "Хондрофен",
+      reviews: 1,
+      rating: null,
+      rawRating: null,
+      ratingUnavailable: true,
+      status: "ok"
+    });
     expect(hasDeterministicAggregateProof(observation)).toBe(true);
   });
 

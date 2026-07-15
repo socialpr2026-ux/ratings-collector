@@ -152,8 +152,9 @@ export class MedOtzyvAdapter implements SiteAdapter {
       product: title,
       reviews: reviewCount,
       rating: null,
-      rawRating: 0,
-      rawRatingScale: 5,
+      // The index proves feedback count but publishes no aggregate score.
+      // Keep both normalized and raw rating empty instead of synthesizing 0/5.
+      rawRating: null,
       ratingUnavailable: reviewCount > 0 || undefined,
       status: reviewCount === 0 ? "no_reviews" : "ok",
       capturedAt,
