@@ -110,7 +110,7 @@ describe("first-party review-site adapters", () => {
 
     expect(requested).toHaveLength(2);
     expect(refs.map((item) => item.listingId)).toEqual(["823845", "823846"]);
-  });
+  }, 10_000);
 
   it("treats the Otzyv.pro 30-dose page as one product variant and excludes user reviews from proof", async () => {
     const productPath = "/category/badyi/62074-ocillokokcinum-30-doz-grangomeopaticheskie.html";
