@@ -63,6 +63,21 @@ describe("additional pharmacy adapters", () => {
     }, context)).rejects.toBeInstanceOf(ParserChangedError);
   });
 
+  it("checks Apteka.ru health against a stable exact Product instead of brand discovery spelling", async () => {
+    const id = "5e3268eaca7bdc000192d316";
+    const canary = `<!doctype html><html><head><script type="application/ld+json">${JSON.stringify({
+      "@type": "Product", sku: id, name: "Оциллококцинум 30 шт. гранулы"
+    })}</script></head><body></body></html>`;
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      expect(String(input)).toBe(`https://apteka.ru/product/oczillokokczinum-30-sht-granuly-${id}/`);
+      return new Response(canary, { headers: { "content-type": "text/html" } });
+    });
+    const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    await expect(adapter.healthCheck(context)).resolves.toMatchObject({ ok: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("discovers Хондрофен through the filtered sitemap when optional Agent gateway preparation routes fail", async () => {
     const id = "630e04ccbb7256f6b07f621f";
     const productUrl = `https://apteka.ru/product/xondrofen-maz-dlya-naruzhnogo-primeneniya-30-gr-${id}/`;

@@ -258,8 +258,20 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
   readonly id = "apteka.ru:preparation-jsonld-v1";
   readonly supportedDomains = [APTEKA_DOMAIN, `www.${APTEKA_DOMAIN}`] as const;
 
-  healthCheck(context: AdapterContext): Promise<AdapterHealth> {
-    return this.canary("Оциллококцинум", context);
+  async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
+    const checkedAt = new Date().toISOString();
+    const canaryId = "5e3268eaca7bdc000192d316";
+    const canaryUrl = `https://${APTEKA_DOMAIN}/product/oczillokokczinum-30-sht-granuly-${canaryId}/`;
+    try {
+      const page = await requestPage(new URL(canaryUrl), context, this.fetchImpl);
+      const products = jsonLdProducts(page.$).filter((item) => String(item.sku ?? "") === canaryId);
+      if (products.length !== 1 || !matchesBrand(compactText(String(products[0].name ?? "")), "Оциллококцинум")) {
+        throw new ParserChangedError(`${this.id}: control Product JSON-LD is missing or ambiguous`);
+      }
+      return { ok: true, checkedAt, message: `${this.id}: control product structure is valid` };
+    } catch (error) {
+      return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
