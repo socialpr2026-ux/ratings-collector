@@ -162,15 +162,16 @@ describe("additional pharmacy adapters", () => {
 
   it("accepts an integer-rounded NFapteka aggregate only when the exact review list proves it", async () => {
     const brand = "\u041a\u0430\u0433\u043e\u0446\u0435\u043b";
-    const title = `${brand} \u0442\u0430\u0431\u043b\u0435\u0442\u043a\u0438 12 \u043c\u0433 \u211620`;
-    const path = "/tambov/catalog/lekarstva/kagocel-tabletki-12-mg-20.html";
+    const title = `${brand} \u0442\u0430\u0431\u043b\u0435\u0442\u043a\u0438 No10 12 \u043c\u0433 \u0432 \u0422\u0430\u043c\u0431\u043e\u0432\u0435`;
+    const reviewedTitle = `${brand} \u0442\u0430\u0431\u043b\u0435\u0442\u043a\u0438 \u211610 12 \u043c\u0433`;
+    const path = "/tambov/catalog/zabolevaniya/prostuda-i-gripp/profilaktika-orvi-i-grippa/kagotsel-tab-12-mg-10.html";
     const productSource = `https://nfapteka.ru${path}`;
-    const page = (aggregateRating: number) => translated(productSource,
-      `<link rel="canonical" href="${productSource}"><h1>${title}</h1><input name="productId" value="20020">` +
+    const page = (aggregateRating: number, itemReviewed = reviewedTitle) => translated(productSource,
+      `<link rel="canonical" href="${productSource}"><h1>${title}</h1><input name="productId" value="108514">` +
       `<div itemprop="aggregateRating"><meta itemprop="ratingValue" content="${aggregateRating}">` +
-      `<span itemprop="reviewCount">3</span></div>${nfReviewList(title, [5, 5, 4])}`);
+      `<span itemprop="reviewCount">3</span></div>${nfReviewList(itemReviewed, [4, 5, 5])}`);
     const ref = {
-      domain: "nfapteka.ru", platform: "nfapteka.ru", listingId: "20020", brand,
+      domain: "nfapteka.ru", platform: "nfapteka.ru", listingId: "108514", brand,
       url: productSource, metadata: {}
     };
 
@@ -187,6 +188,11 @@ describe("additional pharmacy adapters", () => {
     const mismatched = new NfAptekaAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
       new Response(page(4), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
     await expect(mismatched.collect(ref, context)).rejects.toBeInstanceOf(ParserChangedError);
+
+    const anotherVariant = `${brand} \u0442\u0430\u0431\u043b\u0435\u0442\u043a\u0438 \u211620 12 \u043c\u0433`;
+    const wrongProduct = new NfAptekaAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(page(5, anotherVariant), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+    await expect(wrongProduct.collect(ref, context)).rejects.toBeInstanceOf(ParserChangedError);
   });
 
   it("accepts only the exact empty NFapteka product review section as zero feedback", async () => {
