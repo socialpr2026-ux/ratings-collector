@@ -5,8 +5,72 @@ import {
   canonicalProductDescriptors,
   canonicalProductVariants
 } from "../src/server/utils/product-name.js";
+import { COMPANY_BRANDS } from "../src/shared/constants.js";
 
 describe("canonical product descriptors", () => {
+  it("removes every company brand without leaking catalog punctuation or technical suffixes", () => {
+    for (const brand of COMPANY_BRANDS) {
+      const identity = analyzeProductIdentity({
+        brand,
+        product: `${brand}, таблетки покрытые пленочной оболочкой 100 мг, №10`
+      });
+      expect(identity, brand).toMatchObject({
+        label: "таблетки 100 мг №10",
+        granularity: "variant",
+        confidence: "exact"
+      });
+      expect(identity.label, brand).toMatch(/^[\p{L}\p{N}№,.%/+×\-\s]+$/u);
+      expect(identity.label, brand).not.toMatch(/(?:вариант не определ[её]н|polioksidonii|detail\.aspx)/iu);
+    }
+  });
+
+  it.each([
+    ["Комплигам Б", "Комплигам Б р-р д/в/м введ. 2 мл №10", "раствор для инъекций 2 мл №10"],
+    ["Эниксум", "Эниксум р-р д/ин. 10000 МЕ/мл 0,4 мл №10", "раствор для инъекций 10000 МЕ/мл 0,4 мл №10"],
+    ["Амелотекс", "Амелотекс раствор в/м 10 мг/мл 1,5 мл 5 ампул", "раствор для инъекций 10 мг/мл 1,5 мл №5"],
+    ["Нейпилепт", "Нейпилепт р-р для приема внутрь 100 мг в 1 мл, фл. 30 мл", "раствор для приема внутрь 100 мг/мл 30 мл"],
+    ["Дантинорм", "Дантинорм Бэби раствор для приема внутрь 1 мл №10", "Бэби раствор для приема внутрь 1 мл №10"],
+    ["Необутин", "Необутин Ретард таблетки 300 мг №20", "Ретард таблетки 300 мг №20"],
+    ["Эмолентум", "Эмолентум эмульсия для купания 200 мл", "эмульсия 200 мл"],
+    ["Натума Эмолибейз", "Натума Эмолибейз бальзам для тела 200 мл", "бальзам 200 мл"],
+    ["Avene Cleanance", "Avene Cleanance очищающий гель 200 мл", "гель 200 мл"],
+    ["Фортедетрим", "Фортедетрим капсулы 4000 МЕ №30", "капсулы 4000 МЕ №30"],
+    ["Стодаль", "Стодаль сироп 200 мл", "сироп 200 мл"],
+    ["Хондрогард р-р", "Хондрогард р-р для в/м введения 100 мг/мл 2 мл №10", "раствор для инъекций 100 мг/мл 2 мл №10"]
+  ] as const)("uses a human canonical label for %s catalog wording", (brand, product, expected) => {
+    expect(canonicalProductDescriptor(brand, product)).toBe(expected);
+  });
+
+  it("normalizes only proven concentration and pack notation while preserving real differences", () => {
+    const variants = canonicalProductVariants([
+      { brand: "Нейпилепт", product: "Нейпилепт раствор для приема внутрь 100 мг в 1 мл, 30 мл" },
+      { brand: "Нейпилепт", product: "Нейпилепт р-р д/приема внутрь 100 мг/мл, флакон 30 мл" },
+      { brand: "Нейпилепт", product: "Нейпилепт раствор для приема внутрь 100 мг/мл, 100 мл" },
+      { brand: "Нейпилепт", product: "Нейпилепт раствор для приема внутрь 200 мг/мл, 30 мл" },
+      { brand: "Нейпилепт", product: "Нейпилепт раствор для инъекций 100 мг/мл, 4 мл №5" }
+    ]);
+
+    expect(variants[0]).toEqual(variants[1]);
+    expect(variants[0].label).toBe("раствор для приема внутрь 100 мг/мл 30 мл");
+    expect(new Set(variants.map((item) => item.variantKey)).size).toBe(4);
+  });
+
+  it("enriches only an identical parenteral solution with proven route wording", () => {
+    const variants = canonicalProductVariants([
+      { brand: "Комплигам Б", product: "Комплигам Б раствор 2 мл №10" },
+      { brand: "Комплигам Б", product: "Комплигам Б р-р для в/м введения 2 мл №10" },
+      { brand: "Комплигам Б", product: "Комплигам Б раствор для инъекций 2 мл №5" },
+      { brand: "Комплигам Б", product: "Комплигам Б раствор для инъекций 4 мл №10" },
+      { brand: "Комплигам Б", product: "Комплигам Б раствор для приема внутрь 2 мл №10" }
+    ]);
+
+    expect(variants.slice(0, 2).map((item) => item.label)).toEqual([
+      "раствор для инъекций 2 мл №10",
+      "раствор для инъекций 2 мл №10"
+    ]);
+    expect(variants[0].variantKey).toBe(variants[1].variantKey);
+    expect(new Set(variants.map((item) => item.variantKey)).size).toBe(4);
+  });
   it("keeps the intravenous and intramuscular route in Cereton family labels", () => {
     for (const product of [
       "Церетон раствор для внутривенного и внутримышечного введения",
