@@ -231,7 +231,8 @@ describe("ratings Agent lazy Sandbox routing", () => {
 
     for (const target of [
       "https://apteka.ru/preparation/otsillokoktsinum/",
-      "https://apteka.ru/product/oczillokokczinum-30-sht-granuly-5e3268eaca7bdc000192d316/"
+      "https://apteka.ru/product/oczillokokczinum-30-sht-granuly-5e3268eaca7bdc000192d316/",
+      "https://apteka.ru/sitemap-product.xml?slugs=hondrofen%2Ckhondrofen%2Cxondrofen"
     ]) {
       expect(await (await routedFetch(target)).text()).toBe("apteka proof");
     }

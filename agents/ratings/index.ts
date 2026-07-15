@@ -261,9 +261,14 @@ export function browserFetch(
         /^\/p_[a-z0-9][a-z0-9-]*-\d+\.html$/i.test(url.pathname)
       );
     const fixedAptekaTarget = url.protocol === "https:" && url.hostname === "apteka.ru" &&
-      !url.port && !url.username && !url.password && !url.hash && !url.search && (
-        /^\/preparation\/[a-z0-9][a-z0-9-]*\/$/i.test(url.pathname) ||
-        /^\/product\/[a-z0-9-]+-[a-f0-9]{24}\/$/i.test(url.pathname)
+      !url.port && !url.username && !url.password && !url.hash && (
+        !url.search && (
+          /^\/preparation\/[a-z0-9][a-z0-9-]*\/$/i.test(url.pathname) ||
+          /^\/product\/[a-z0-9-]+-[a-f0-9]{24}\/$/i.test(url.pathname)
+        ) ||
+        url.pathname === "/sitemap-product.xml" && url.searchParams.getAll("slugs").length === 1 &&
+          [...url.searchParams.keys()].every((key) => key === "slugs") &&
+          url.searchParams.get("slugs")!.split(",").every((slug) => /^[a-z0-9-]{3,80}$/i.test(slug))
       );
     if (staticProxy && [
       "www-ozon-ru.translate.goog",

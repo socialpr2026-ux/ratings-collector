@@ -776,6 +776,24 @@ describe("static pharmacy Translate gateway", () => {
     expect((await callGateway("https://apteka.ru/search?q=Оциллококцинум")).status).toBe(400);
   });
 
+  it("filters the first-party Apteka.ru product sitemap by bounded transliteration candidates", async () => {
+    const match = "https://apteka.ru/product/xondrofen-maz-30-gr-630e04ccbb7256f6b07f621f/";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe("https://apteka.ru/sitemap-product.xml");
+      return new Response(`<urlset><url><loc>${match}</loc></url>` +
+        `<url><loc>https://apteka.ru/product/drug-x-aaaaaaaaaaaaaaaaaaaaaaaa/</loc></url></urlset>`, {
+        headers: { "content-type": "application/xml" }
+      });
+    }));
+
+    const response = await callGateway("https://apteka.ru/sitemap-product.xml?slugs=hondrofen%2Ckhondrofen%2Cxondrofen");
+    const proof = await response.text();
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("apteka-first-party-product-sitemap");
+    expect(proof).toContain(match);
+    expect(proof).not.toContain("drug-x");
+  });
+
   it("canonicalizes translated Apteka.ru preparation links to the source host", async () => {
     const source = "https://apteka.ru/preparation/otsillokoktsinum/";
     const id = "5e3268eaca7bdc000192d316";

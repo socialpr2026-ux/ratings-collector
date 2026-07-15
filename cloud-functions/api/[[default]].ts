@@ -58,9 +58,10 @@ type PharmacyTranslateTarget = {
 };
 
 type AptekaRuTarget = {
-  kind: "preparation" | "product";
+  kind: "preparation" | "product" | "sitemap";
   source: URL;
   productId?: string;
+  slugs?: string[];
 };
 
 type OzonTranslateTarget = {
@@ -249,7 +250,16 @@ function parsePharmacyTranslateTarget(target: URL): PharmacyTranslateTarget | un
 
 function parseAptekaRuTarget(target: URL): AptekaRuTarget | undefined {
   if (target.protocol !== "https:" || target.hostname !== "apteka.ru" || target.port || target.username ||
-    target.password || target.search || target.hash) return undefined;
+    target.password || target.hash) return undefined;
+  if (target.pathname === "/sitemap-product.xml") {
+    if ([...target.searchParams.keys()].some((key) => key !== "slugs") || target.searchParams.getAll("slugs").length !== 1) {
+      return undefined;
+    }
+    const slugs = target.searchParams.get("slugs")!.split(",");
+    if (!slugs.length || slugs.length > 6 || slugs.some((slug) => !/^[a-z0-9-]{3,80}$/i.test(slug))) return undefined;
+    return { kind: "sitemap", source: new URL("https://apteka.ru/sitemap-product.xml"), slugs: [...new Set(slugs)] };
+  }
+  if (target.search) return undefined;
   if (/^\/preparation\/[a-z0-9][a-z0-9-]*\/$/i.test(target.pathname)) {
     return { kind: "preparation", source: new URL(target.toString()) };
   }
@@ -874,9 +884,27 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
   });
   const pageText = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();
   const empty = pageText.match(/(?:отзывов пока нет|нет отзывов|no reviews yet|no reviews)/i)?.[0];
-  if (!reviews.length && !empty) return undefined;
+  const wrapper = $(".s-reviews-wrapper");
+  let exactEmptyWrapper = "";
+  if (wrapper.length === 1 && !wrapper.find("[itemprop='review'], [data-review-id], .review-item").length &&
+    !wrapper.children().not("a[name], h1").length) {
+    const heading = wrapper.find("h1").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    const link = wrapper.find("h1 a[href]").first();
+    try {
+      const productGroup = new URL(link.attr("href") ?? "", `https://${OKAPTEKA_TRANSLATE_HOST}`);
+      const reviewBrand = decodeURIComponent(requested.source.pathname.match(/^\/reviews\/([^/]+)\/$/i)?.[1] ?? "");
+      const groupBrand = decodeURIComponent(productGroup.pathname.match(/^\/pg\/([^/]+)\/$/i)?.[1] ?? "");
+      if ([OKAPTEKA_TRANSLATE_HOST, "okapteka.ru"].includes(productGroup.hostname) && reviewBrand &&
+        reviewBrand.normalize("NFKC").toLocaleLowerCase("ru-RU") === groupBrand.normalize("NFKC").toLocaleLowerCase("ru-RU") &&
+        heading === `Отзывы на ${reviewBrand}`) {
+        exactEmptyWrapper = `<div class="s-reviews-wrapper"><a name="reviewheader"></a><h1>Отзывы на ` +
+          `<a href="https://okapteka.ru/pg/${escapeHtml(encodeURIComponent(reviewBrand))}/">${escapeHtml(reviewBrand)}</a></h1></div>`;
+      }
+    } catch { /* ambiguous empty template remains fail-closed */ }
+  }
+  if (!reviews.length && !empty && !exactEmptyWrapper) return undefined;
   return `<html><head>${base}</head><body>${reviews.join("")}<nav class="pagination">${pages.join("")}</nav>` +
-    `${empty ? `<p>${escapeHtml(empty)}</p>` : ""}</body></html>`;
+    `${empty ? `<p>${escapeHtml(empty)}</p>` : exactEmptyWrapper}</body></html>`;
 }
 
 function parseOzonTranslateTarget(target: URL): OzonTranslateTarget | undefined {
@@ -1620,16 +1648,40 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     });
   }
   if (aptekaRuTarget) {
-    const upstream = await safeFetch(target.toString(), {
+    const upstream = await safeFetch(aptekaRuTarget.source.toString(), {
       method: "GET",
       redirect: "manual",
-      headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+      headers: { accept: aptekaRuTarget.kind === "sitemap" ? "application/xml,text/xml" : "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
     }, fetch, 0, 60_000);
     const html = await readTextBounded(upstream, 12_000_000, 60_000);
     if (!upstream.ok) {
       return new Response(html, {
         status: upstream.status,
         headers: { "content-type": upstream.headers.get("content-type") ?? "text/html; charset=utf-8" }
+      });
+    }
+    if (aptekaRuTarget.kind === "sitemap") {
+      if (!/<urlset\b/i.test(html)) return json({ error: "Apteka.ru product sitemap is invalid" }, 502);
+      const locations: string[] = [];
+      for (const match of html.matchAll(/<loc>([^<]+)<\/loc>/gi)) {
+        let product: URL;
+        try { product = new URL(match[1].replace(/&amp;/gi, "&")); }
+        catch { continue; }
+        const productSlug = product.pathname.match(/^\/product\/([a-z0-9-]+)-[a-f0-9]{24}\/?$/i)?.[1];
+        if (product.protocol !== "https:" || product.hostname !== "apteka.ru" || !productSlug ||
+          !aptekaRuTarget.slugs!.some((slug) => productSlug === slug || productSlug.startsWith(`${slug}-`))) continue;
+        locations.push(product.toString());
+      }
+      if (locations.length > 100) return json({ error: "Apteka.ru sitemap filter is too broad" }, 400);
+      const compactXml = `<?xml version="1.0" encoding="UTF-8"?><urlset data-source-url="${escapeHtml(target.toString())}">` +
+        locations.map((location) => `<url><loc>${escapeHtml(location)}</loc></url>`).join("") + `</urlset>`;
+      return new Response(compactXml, {
+        status: 200,
+        headers: {
+          "content-type": "application/xml; charset=utf-8",
+          "cache-control": "no-store",
+          "x-ratings-source": "apteka-first-party-product-sitemap"
+        }
       });
     }
     if (!/(?:text\/html|application\/xhtml\+xml)/i.test(upstream.headers.get("content-type") ?? "")) {

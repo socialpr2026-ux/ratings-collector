@@ -117,18 +117,20 @@ async function sitemap(url: string, context: AdapterContext, fallbackFetch: type
   return body;
 }
 
-function transliterate(value: string, tse = false): string {
+function transliterate(value: string, tse = false, kha: "h" | "kh" | "x" = "h"): string {
   const map: Record<string, string> = {
     а: "a", б: "b", в: "v", г: "g", д: "d", е: "e", ё: "e", ж: "zh", з: "z", и: "i", й: "y",
     к: "k", л: "l", м: "m", н: "n", о: "o", п: "p", р: "r", с: "s", т: "t", у: "u", ф: "f",
-    х: "h", ц: tse ? "ts" : "c", ч: "ch", ш: "sh", щ: "sch", ъ: "", ы: "y", ь: "", э: "e", ю: "yu", я: "ya"
+    х: kha, ц: tse ? "ts" : "c", ч: "ch", ш: "sh", щ: "sch", ъ: "", ы: "y", ь: "", э: "e", ю: "yu", я: "ya"
   };
   return value.toLocaleLowerCase("ru-RU").split("").map((character) => map[character] ?? character).join("")
     .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
 function brandSlugs(brand: string): string[] {
-  return [...new Set(aliasesForBrand(brand).flatMap((alias) => [transliterate(alias), transliterate(alias, true)]).filter(Boolean))];
+  return [...new Set(aliasesForBrand(brand).flatMap((alias) =>
+    (["h", "kh", "x"] as const).flatMap((kha) => [transliterate(alias, false, kha), transliterate(alias, true, kha)])
+  ).filter(Boolean))];
 }
 
 function slugMatches(pathSlug: string, slugs: readonly string[]): boolean {

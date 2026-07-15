@@ -45,7 +45,7 @@ describe("additional pharmacy adapters", () => {
       rating: 4.9,
       status: "ok"
     });
-    expect(fetchSpy.mock.calls.every(([input]) => new URL(String(input)).hostname === "apteka-ru.translate.goog")).toBe(true);
+    expect(fetchSpy.mock.calls.every(([input]) => new URL(String(input)).hostname === "apteka.ru")).toBe(true);
   });
 
   it("fails closed when Apteka.ru Product JSON-LD loses its feedback aggregate", async () => {
@@ -61,6 +61,29 @@ describe("additional pharmacy adapters", () => {
       domain: "apteka.ru", platform: "apteka.ru", listingId: id, brand: "Оциллококцинум",
       url: productUrl, metadata: {}
     }, context)).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
+  it("discovers Хондрофен through the filtered product sitemap when no preparation page exists", async () => {
+    const id = "630e04ccbb7256f6b07f621f";
+    const productUrl = `https://apteka.ru/product/xondrofen-maz-dlya-naruzhnogo-primeneniya-30-gr-${id}/`;
+    const product = `<!doctype html><html><head><script type="application/ld+json">${JSON.stringify({
+      "@type": "Product", sku: id, name: "Хондрофен мазь для наружного применения 30 гр",
+      aggregateRating: { reviewCount: 157, ratingValue: 4.7 }
+    })}</script></head><body></body></html>`;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.startsWith("/preparation/")) return new Response("missing", { status: 404 });
+      if (url.pathname === "/sitemap-product.xml") {
+        expect(url.searchParams.get("slugs")?.split(",")).toEqual(expect.arrayContaining(["hondrofen", "khondrofen", "xondrofen"]));
+        return new Response(`<urlset><url><loc>${productUrl}</loc></url></urlset>`, { headers: { "content-type": "application/xml" } });
+      }
+      return new Response(product, { headers: { "content-type": "text/html" } });
+    }) as unknown as typeof fetch;
+    const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const refs = await adapter.discover("Хондрофен", context);
+    expect(refs).toMatchObject([{ listingId: id, url: productUrl }]);
+    await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({ reviews: 157, rating: 4.7, status: "ok" });
   });
 
   it("discovers NFapteka by exact first-party search and reads product microdata", async () => {

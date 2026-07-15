@@ -99,6 +99,19 @@ describe("OkaptekaAdapter", () => {
 
     await expect(adapter.collect(refs[0], context)).rejects.toBeInstanceOf(ParserChangedError);
   });
+
+  it("accepts the exact empty brand-review wrapper as zero feedback", async () => {
+    const group = `<!doctype html><html><head><base href="https://okapteka.ru/pg/%D0%A5%D0%BE%D0%BD%D0%B4%D1%80%D0%BE%D1%84%D0%B5%D0%BD/"></head><body>
+      <article class="product"><a href="https://okapteka.ru/khondrofen-maz-30g-143645/">Хондрофен мазь 30 г</a></article></body></html>`;
+    const reviews = `<!doctype html><html><head><base href="https://okapteka.ru/reviews/%D0%A5%D0%BE%D0%BD%D0%B4%D1%80%D0%BE%D1%84%D0%B5%D0%BD/"></head><body>
+      <div class="s-reviews-wrapper"><a name="reviewheader"></a><h1>Отзывы на <a href="https://okapteka.ru/pg/%D0%A5%D0%BE%D0%BD%D0%B4%D1%80%D0%BE%D1%84%D0%B5%D0%BD/">Хондрофен</a></h1></div></body></html>`;
+    const adapter = new OkaptekaAdapter(new MemoryEvidenceStore(), vi.fn(async (input: RequestInfo | URL) =>
+      new Response(new URL(String(input)).pathname.startsWith("/pg/") ? group : reviews)
+    ) as unknown as typeof fetch);
+
+    const refs = await adapter.discover("Хондрофен", context);
+    await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({ reviews: 0, rating: null, status: "no_reviews" });
+  });
 });
 
 describe("RiglaAdapter", () => {

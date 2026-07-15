@@ -245,6 +245,23 @@ function okProduct(value: string): { id: string; url: string } | undefined {
 
 type OkReviewAggregate = { reviews: number; sum: number; ratings: number };
 
+function okaptekaExplicitEmptyReviews($: CheerioAPI, brand: string): boolean {
+  const wrappers = $(".s-reviews-wrapper");
+  if (wrappers.length !== 1) return false;
+  const wrapper = wrappers.first();
+  if (wrapper.find("[itemprop='review'], [data-review-id], .review-item").length) return false;
+  if (wrapper.children().not("a[name], h1").length) return false;
+  const link = wrapper.find("h1 a[href]").first();
+  if (link.length !== 1 || compactText(wrapper.find("h1").first().text()) !== `Отзывы на ${brand}`) return false;
+  try {
+    const target = sourceUrlFromTranslatedHref(link.attr("href"), OK_DOMAIN, OK_TRANSLATE_HOST);
+    const linkedBrand = target?.pathname.match(/^\/pg\/([^/]+)\/$/i)?.[1];
+    return linkedBrand !== undefined && normalizeText(decodeURIComponent(linkedBrand)) === normalizeText(brand);
+  } catch {
+    return false;
+  }
+}
+
 export class OkaptekaAdapter extends PharmacyAdapter {
   readonly id = "pharmacy:okapteka:v1";
   readonly supportedDomains = [OK_DOMAIN, `www.${OK_DOMAIN}`] as const;
@@ -337,6 +354,7 @@ export class OkaptekaAdapter extends PharmacyAdapter {
       if (!/^\/reviews\//i.test(base.pathname)) throw new ParserChangedError(`${OK_DOMAIN}: unexpected reviews page`);
       const pageText = compactText($.root().text());
       explicitNoReviews ||= /отзывов пока нет|нет отзывов|no reviews yet|no reviews/i.test(pageText);
+      explicitNoReviews ||= okaptekaExplicitEmptyReviews($, brand);
       $("[itemprop='review']").each((_index, node) => {
         const reviewId = $(node).attr("data-id")?.trim();
         const href = $(node).find("a[href]").first().attr("href");

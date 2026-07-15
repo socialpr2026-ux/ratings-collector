@@ -286,4 +286,33 @@ describe("recovered first-party pharmacy adapters", () => {
       domain: "asna.ru", platform: "asna.ru", listingId: "14666", brand: "Кагоцел", url: card, metadata: {}
     }, { region: "Москва" })).rejects.toThrow(/identity or aggregate changed/);
   });
+
+  it("discovers Cyrillic Х brands when first-party slugs use kh", async () => {
+    const polzaFamilyUrl = "https://polza.ru/product/khondrofen/";
+    const polzaProductUrl = "https://polza.ru/catalog/khondrofen-maz-30-g_53076/";
+    const asnaUrl = "https://www.asna.ru/cards/khondrofen_30g_maz_biosintez.html";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "polza.ru") return new Response(`<urlset><url><loc>${polzaFamilyUrl}</loc></url></urlset>`);
+      if (url.hostname === "polza-ru.translate.goog" && url.pathname === "/product/khondrofen/") {
+        return new Response(translated(polzaFamilyUrl, `<div class="catalog__block--cards"><div class="catalog-block__items">
+          <div class="catalog-card" itemscope><link itemprop="url" href="${polzaProductUrl}"><meta itemprop="sku" content="53076">
+          <span itemprop="aggregateRating"><meta itemprop="reviewCount" content="3"><meta itemprop="ratingValue" content="5"></span></div>
+        </div></div>`), { headers: { "content-type": "text/html" } });
+      }
+      if (url.hostname === "www.asna.ru" && url.pathname.endsWith("sitemap_cards.xml")) {
+        return new Response(`<urlset><url><loc>${asnaUrl}</loc></url></urlset>`);
+      }
+      if (url.hostname === "www.asna.ru") return new Response("<urlset></urlset>");
+      if (url.hostname === "www-asna-ru.translate.goog") {
+        return new Response(asnaCard(asnaUrl, "519674", 5), { headers: { "content-type": "text/html" } });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch;
+
+    await expect(new PolzaAdapter(new MemoryEvidenceStore(), fetchMock).discover("Хондрофен", { region: "Москва" }))
+      .resolves.toMatchObject([{ listingId: "53076", url: polzaProductUrl }]);
+    await expect(new AsnaAdapter(new MemoryEvidenceStore(), fetchMock).discover("Хондрофен", { region: "Москва" }))
+      .resolves.toMatchObject([{ listingId: "519674", url: asnaUrl }]);
+  });
 });

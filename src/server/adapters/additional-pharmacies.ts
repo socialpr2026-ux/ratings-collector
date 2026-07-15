@@ -119,14 +119,20 @@ function sourceHref(value: string | undefined, domain: string): URL | undefined 
   }
 }
 
-function transliterate(value: string, useTs = false): string {
+function transliterate(value: string, useTs = false, kha: "h" | "kh" | "x" = "h"): string {
   const map: Record<string, string> = {
     а: "a", б: "b", в: "v", г: "g", д: "d", е: "e", ё: "e", ж: "zh", з: "z", и: "i", й: "y",
     к: "k", л: "l", м: "m", н: "n", о: "o", п: "p", р: "r", с: "s", т: "t", у: "u", ф: "f",
-    х: "h", ц: useTs ? "ts" : "c", ч: "ch", ш: "sh", щ: "sch", ъ: "", ы: "y", ь: "", э: "e", ю: "yu", я: "ya"
+    х: kha, ц: useTs ? "ts" : "c", ч: "ch", ш: "sh", щ: "sch", ъ: "", ы: "y", ь: "", э: "e", ю: "yu", я: "ya"
   };
   return value.toLocaleLowerCase("ru-RU").split("").map((character) => map[character] ?? character).join("")
     .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function transliteratedSlugs(value: string): string[] {
+  return [...new Set((["h", "kh", "x"] as const).flatMap((kha) =>
+    [transliterate(value, false, kha), transliterate(value, true, kha)]
+  ).filter(Boolean))];
 }
 
 function historicalRefs(
@@ -217,7 +223,6 @@ abstract class AdditionalPharmacyAdapter implements SiteAdapter {
 }
 
 const APTEKA_DOMAIN = "apteka.ru";
-const APTEKA_TRANSLATE_HOST = "apteka-ru.translate.goog";
 const APTEKA_PRODUCT = /^\/product\/([a-z0-9-]+-([a-f0-9]{24}))\/?$/i;
 
 function aptekaRef(value: string, expectedId?: string): { id: string; url: string } | undefined {
@@ -259,24 +264,46 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = historicalRefs(APTEKA_DOMAIN, brand, context, aptekaRef);
-    const source = new URL(`https://${APTEKA_DOMAIN}/preparation/${transliterate(brand, true)}/`);
-    const page = await requestPage(source, context, this.fetchImpl, APTEKA_TRANSLATE_HOST);
-    const heading = compactText(page.$("h1").first().text());
-    page.$("a[href*='/product/']").each((_index, node) => {
-      const parsed = aptekaRef(page.$(node).attr("href") ?? "");
-      if (!parsed) return;
-      const card = page.$(node).closest("article, li, [class*='product'], [class*='item']");
-      const title = compactText(page.$(node).attr("aria-label") || page.$(node).text() || card.text());
-      if (!matchesBrand(title, brand)) return;
-      refs.set(parsed.id, {
-        domain: APTEKA_DOMAIN, platform: APTEKA_DOMAIN, listingId: parsed.id, brand,
-        url: parsed.url, title, metadata: { discovery: "first-party-preparation-page" }
+    const slugs = transliteratedSlugs(brand);
+    for (const slug of slugs) {
+      const source = new URL(`https://${APTEKA_DOMAIN}/preparation/${slug}/`);
+      let page: HtmlPage;
+      try {
+        page = await requestPage(source, context, this.fetchImpl);
+      } catch (error) {
+        if (error instanceof AdapterBlockedError && /HTTP (?:404|410)\b/.test(error.message)) continue;
+        throw error;
+      }
+      page.$("a[href*='/product/']").each((_index, node) => {
+        const parsed = aptekaRef(page.$(node).attr("href") ?? "");
+        if (!parsed) return;
+        const card = page.$(node).closest("article, li, [class*='product'], [class*='item']");
+        const title = compactText(page.$(node).attr("aria-label") || page.$(node).text() || card.text());
+        if (!matchesBrand(title, brand)) return;
+        refs.set(parsed.id, {
+          domain: APTEKA_DOMAIN, platform: APTEKA_DOMAIN, listingId: parsed.id, brand,
+          url: parsed.url, title, metadata: { discovery: "first-party-preparation-page" }
+        });
       });
-    });
+      if (refs.size) break;
+    }
     if (!refs.size) {
-      const text = compactText(page.$("main, body").text());
-      if (matchesBrand(heading, brand) && /товар(?:ы|ов)|ничего не найдено|нет в наличии/i.test(text)) return [];
-      throw new AdapterBlockedError(`${APTEKA_DOMAIN}: preparation page proved neither exact products nor no results`);
+      const sitemap = new URL(`https://${APTEKA_DOMAIN}/sitemap-product.xml`);
+      sitemap.searchParams.set("slugs", slugs.join(","));
+      const page = await requestPage(sitemap, context, this.fetchImpl);
+      if (!/<urlset\b/i.test(page.html)) {
+        throw new ParserChangedError(`${APTEKA_DOMAIN}: product sitemap proof is missing`);
+      }
+      for (const match of page.html.matchAll(/<loc>([^<]+)<\/loc>/gi)) {
+        const parsed = aptekaRef(match[1].replace(/&amp;/gi, "&"));
+        if (!parsed) continue;
+        const productSlug = new URL(parsed.url).pathname.match(/^\/product\/([a-z0-9-]+)-[a-f0-9]{24}\/?$/i)?.[1] ?? "";
+        if (!slugs.some((slug) => productSlug === slug || productSlug.startsWith(`${slug}-`))) continue;
+        refs.set(parsed.id, {
+          domain: APTEKA_DOMAIN, platform: APTEKA_DOMAIN, listingId: parsed.id, brand,
+          url: parsed.url, metadata: { discovery: "first-party-product-sitemap" }
+        });
+      }
     }
     return [...refs.values()].sort((left, right) => (left.title ?? "").localeCompare(right.title ?? "", "ru"));
   }
@@ -284,7 +311,7 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
     const parsedRef = aptekaRef(ref.url, ref.listingId);
     if (!parsedRef) throw new ParserChangedError(`${APTEKA_DOMAIN}:${ref.listingId}: invalid product URL or ID`);
-    const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl, APTEKA_TRANSLATE_HOST);
+    const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl);
     const products = jsonLdProducts(page.$).filter((item) => String(item.sku ?? "") === ref.listingId);
     if (products.length !== 1) throw new ParserChangedError(`${APTEKA_DOMAIN}:${ref.listingId}: exact Product JSON-LD is missing or ambiguous`);
     const product = products[0];
