@@ -136,8 +136,20 @@ export function friendlyErrorMessage(error: unknown, action: UserAction) {
   if (action === "review" && /не содержит доказанного товарного варианта/i.test(raw)) {
     return "Карточке не хватает данных для точного определения товара. Обновите страницу; если сообщение останется, не подтверждайте эту карточку.";
   }
-  if (action === "publish" || /permission|forbidden|доступ[^.]{0,40}(?:таблиц|редактор)|google\s*(?:sheet|таблиц)/i.test(raw)) {
+  if (action === "publish" && /freeze columns|frozen columns|merged cell|закреп\S* столбц|объедин[её]нн\S* яче/i.test(raw)) {
+    return "Не удалось применить оформление таблицы. Результат сбора сохранён — повторите запись.";
+  }
+  if (action === "publish" && /revision[_\s-]*mismatch|таблиц\S* изменил|изменилась после чтения/i.test(raw)) {
+    return "Таблица изменилась во время записи. Результат сбора сохранён — повторите запись.";
+  }
+  if (action === "publish" && /sheet[_\s-]*too[_\s-]*large|превышает лимит|лист слишком велик/i.test(raw)) {
+    return "Лист слишком велик для безопасной записи. Удалите лишние пустые строки или столбцы и повторите.";
+  }
+  if (/permission|forbidden|public[_\s-]*edit[_\s-]*required|доступ[^.]{0,80}(?:таблиц|редактор)|ролью\s+[«\"]?редактор/i.test(raw)) {
     return actionFallbacks.publish;
+  }
+  if (action === "publish") {
+    return "Не удалось записать данные в Google Таблицу. Результат сбора сохранён — повторите запись.";
   }
   if (/\/api\/|syntaxerror|unexpected token|internal server|service unavailable|status code|\bat\s+\w+\s*\(|\b[a-z]+_[a-z_]+\b|\b(?:typeerror|econn\w*|etimedout)\b/i.test(raw)) {
     return actionFallbacks[action];

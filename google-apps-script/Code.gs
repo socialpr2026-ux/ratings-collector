@@ -526,9 +526,10 @@ function applyLayout_(sheet, rowKinds, rows, columns) {
   // from the previous three-column layout during an in-place migration.
   sheet.setHiddenGridlines(true);
   sheet.setFrozenRows(Math.min(3, rows));
-  // Summary labels and the footnote end at column C; the blank D column stays
-  // as a visual separator before the monthly metrics.
-  sheet.setFrozenColumns(Math.min(3, columns));
+  // The report header merges A:D, so the freeze boundary must sit after D.
+  // Freezing only A:C cuts that merged cell and Google rejects the entire
+  // publication even though the spreadsheet is editable.
+  sheet.setFrozenColumns(Math.min(4, columns));
   sheet.setTabColor("#ff4d00");
   sheet.setColumnWidth(1, 150);
   if (columns >= 2) sheet.setColumnWidth(2, 320);

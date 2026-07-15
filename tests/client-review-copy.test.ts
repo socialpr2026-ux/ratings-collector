@@ -68,6 +68,21 @@ describe("plain-language feedback", () => {
     expect(friendlyErrorMessage("permission denied", "publish")).toContain("доступ «Редактор»");
   });
 
+  it("does not misreport a Sheets layout failure as missing edit access", () => {
+    const message = friendlyErrorMessage(
+      "Sorry, you can't freeze columns which contain only part of a merged cell.",
+      "publish"
+    );
+    expect(message).toBe("Не удалось применить оформление таблицы. Результат сбора сохранён — повторите запись.");
+    expect(message).not.toContain("Редактор");
+  });
+
+  it("keeps unknown publication failures retryable without blaming permissions", () => {
+    const message = friendlyErrorMessage("Неожиданная ошибка оформления", "publish");
+    expect(message).toBe("Не удалось записать данные в Google Таблицу. Результат сбора сохранён — повторите запись.");
+    expect(message).not.toContain("Редактор");
+  });
+
   it("keeps the affected site while simplifying QA blockers", () => {
     expect(friendlyIssueText("ozon.ru / Анвифен: quota_exceeded: квота исчерпана")).toBe("ozon.ru / Анвифен: исчерпан доступный лимит сбора.");
     expect(friendlyIssueText("wildberries.ru: HTTP 429 blocked")).toBe("wildberries.ru: площадка временно ограничила сбор. Повторите позже.");

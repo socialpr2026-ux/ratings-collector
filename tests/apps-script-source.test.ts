@@ -27,7 +27,8 @@ describe("Google Apps Script bridge source", () => {
 
   it("keeps the operational sheet readable during monthly work", () => {
     expect(source).toContain("sheet.setFrozenRows(Math.min(3, rows));");
-    expect(source).toContain("sheet.setFrozenColumns(Math.min(3, columns));");
+    expect(source).toContain("sheet.setFrozenColumns(Math.min(4, columns));");
+    expect(source).not.toContain("sheet.setFrozenColumns(Math.min(3, columns));");
     expect(source).toContain("sheet.setHiddenGridlines(true);");
     expect(source).toContain('sheet.setTabColor("#ff4d00");');
     expect(source).toContain("sheet.setColumnWidth(metricColumn, 110);");
