@@ -5,7 +5,7 @@ import type { EvidenceStore } from "../evidence.js";
 import { AdapterBlockedError } from "../adapters/errors.js";
 import { safeErrorMessage } from "../utils/error-message.js";
 import { canonicalizeUrl } from "../utils/urls.js";
-import { matchesBrand } from "../utils/normalize.js";
+import { matchesBrand, normalizeRating } from "../utils/normalize.js";
 import { readTextBounded, safeFetch } from "../utils/safe-fetch.js";
 import { extractPageProductEvidence } from "../utils/product-evidence.js";
 import { extractJsonLdProducts } from "./jsonld.js";
@@ -72,7 +72,7 @@ function visibleMetrics(html: string, profile: SiteProfile) {
   return {
     name: read(profile.titleSelector)?.replace(/\s+/g, " ").trim(),
     rawRating,
-    rating: rawRating === undefined ? undefined : Math.round(Math.max(0, Math.min(5, rawRating / profile.ratingScale * 5)) * 10) / 10,
+    rating: rawRating === undefined ? undefined : normalizeRating(rawRating, profile.ratingScale),
     reviewCount: rawReviews === undefined ? undefined : Math.trunc(rawReviews)
   };
 }

@@ -663,7 +663,7 @@ describe("first-party review-site adapters", () => {
 
     expect(refs).toHaveLength(2);
     expect(results.map((item) => item.listingId)).toEqual(refs.map((item) => item.listingId));
-    expect(results).toMatchObject([{ reviews: 83, rating: 4 }, { reviews: 12, rating: 4.3 }]);
+    expect(results).toMatchObject([{ reviews: 83, rating: 4.04 }, { reviews: 12, rating: 4.25 }]);
     expect(results.every((item) => item.productEvidence?.scope === "product_family")).toBe(true);
     expect(results.every((item) => item.productEvidence?.variants.length === 1)).toBe(true);
     expect(results.every((item) => item.productEvidence?.identifiers.some((identifier) =>
@@ -702,7 +702,7 @@ describe("first-party review-site adapters", () => {
     }, context)));
 
     expect(results.map((item) => [item.reviews, item.rating, item.status])).toEqual([
-      [72, 4.5, "ok"], [25, 4.9, "ok"], [17, 4, "ok"]
+      [72, 4.53, "ok"], [25, 4.86, "ok"], [17, 4, "ok"]
     ]);
     expect(results.every((item) => item.productEvidence?.scope === "product_family")).toBe(true);
     expect(results.every((item) => item.productEvidence?.variants.length === 1)).toBe(true);
@@ -787,7 +787,7 @@ describe("first-party review-site adapters", () => {
     await expect(adapter.collect({
       domain: "otzovik.com", platform: "otzovik.com", listingId: "kagocel", brand: "Кагоцел",
       url: "https://otzovik.com/reviews/protivovirusniy_preparat_kagocel/", metadata: {}
-    }, context)).resolves.toMatchObject({ reviews: 37, rating: 4.9, status: "ok" });
+    }, context)).resolves.toMatchObject({ reviews: 37, rating: 4.86, status: "ok" });
   });
 
   it.each([404, 410])("marks an exact retired Otzovik product as a removable search candidate: HTTP %s", async (status) => {

@@ -28,6 +28,13 @@ describe("generic site onboarding", () => {
     expect(result).toMatchObject({ product: "Анвифен капсулы 250 мг", reviews: 1234, rating: 4.3, status: "ok", source: "visible-dom" });
   });
 
+  it("keeps hundredths produced by a precise alternate-scale score", async () => {
+    const adapter = new GenericSiteAdapter(profile(), new MemoryEvidenceStore());
+    const fetchMock = async () => new Response(`<html><h1>Анвифен капсулы 250 мг</h1><b class="reviews">12 отзывов</b><i class="score">9,87 из 10</i></html>`, { status: 200 });
+    const result = await adapter.collect(ref, { region: "Москва", fetch: fetchMock as typeof fetch });
+    expect(result).toMatchObject({ reviews: 12, rating: 4.94, rawRating: 9.87, rawRatingScale: 10 });
+  });
+
   it("accepts a confirmed JSON-LD ratingCount-only profile", async () => {
     const adapter = new GenericSiteAdapter(profile({ reviewCountMeaning: "ratings" }), new MemoryEvidenceStore());
     const html = `<script type="application/ld+json">${JSON.stringify({

@@ -39,6 +39,8 @@ describe("Google Apps Script bridge source", () => {
     expect(source).not.toContain("sheet.getRange(productBlockStart + 1, 1, productCount, 1).setFontColor");
     expect(source).toContain("sheet.setColumnWidth(metricColumn, 110);");
     expect(source).toContain("sheet.setColumnWidth(metricColumn + 1, 82);");
+    expect(source).toContain('rowFormats.push("0.##")');
+    expect(source).not.toContain('rowFormats.push("0.0")');
   });
 
   it("publishes all brand tabs under one lock and rolls the batch back together", () => {

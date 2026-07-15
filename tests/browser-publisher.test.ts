@@ -25,11 +25,11 @@ const request: RunRequest = {
   month: "2026-07", region: "Москва", domains: ["example.com"], brands: ["Бренд"]
 };
 
-function sheetDocument(): SheetDocument {
+function sheetDocument(rating = 4.9): SheetDocument {
   const observation: Observation = {
     domain: "example.com", platform: "example", listingId: "1", brand: "Бренд",
     canonicalUrl: "https://example.com/p/1", product: "Бренд — упаковка",
-    reviews: 12, rating: 4.9, status: "ok", capturedAt: "2026-07-13T00:00:00.000Z"
+    reviews: 12, rating, status: "ok", capturedAt: "2026-07-13T00:00:00.000Z"
   };
   return buildSheetDocument({ values: [] }, request, [], { "2026-07": { "example.com:1": observation } });
 }
@@ -197,6 +197,18 @@ describe("browser-only Google Sheets publisher", () => {
     expect(productCells[0].value).toBe("example.com");
     expect(productCells[1].value).toBe("https://example.com/p/1");
     expect(productCells[2].value).toBe("Упаковка");
+  });
+
+  it("publishes rating hundredths without forcing trailing precision", () => {
+    const precise = buildBrowserSheetClipboardPlan(sheetDocument(4.93));
+    const preciseRow = precise.cells.find((_row, index) => sheetDocument(4.93).rowKinds[index] === "product")!;
+    expect(preciseRow[5].value).toBe(4.93);
+    expect(precise.payload.plainText).toContain("4,93");
+    expect(precise.payload.htmlText).toContain("mso-number-format:'0.##'");
+
+    const oneDecimal = buildBrowserSheetClipboardPlan(sheetDocument(4.9));
+    expect(oneDecimal.payload.plainText).toContain("4,9");
+    expect(oneDecimal.payload.plainText).not.toContain("4,90");
   });
 
   it("rejects non-Google targets before opening a browser page", async () => {
