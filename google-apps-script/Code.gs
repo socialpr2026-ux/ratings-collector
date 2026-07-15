@@ -452,7 +452,7 @@ function applyFormatting_(sheet, rowKinds, rows, columns) {
       productRange.setBackground("#ffffff")
         .setBorder(null, null, true, null, null, true, "#ebe9f4", SpreadsheetApp.BorderStyle.SOLID);
       sheet.getRange(productBlockStart + 1, 1, productCount, 1).setFontWeight("bold").setFontColor("#120755");
-      sheet.getRange(productBlockStart + 1, 2, productCount, 1).setFontColor("#4932a8").setFontLine("underline");
+      sheet.getRange(productBlockStart + 1, 3, productCount, 1).setFontColor("#4932a8").setFontLine("underline");
       if (columns > 4) {
         sheet.getRange(productBlockStart + 1, 5, productCount, columns - 4)
           .setBackground("#fbfaff").setHorizontalAlignment("center");

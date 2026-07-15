@@ -34,6 +34,8 @@ describe("Google Apps Script bridge source", () => {
     expect(source).toContain("sheet.setColumnWidth(2, 150);");
     expect(source).toContain("sheet.setColumnWidth(3, 320);");
     expect(source).toContain("sheet.setColumnWidth(4, 310);");
+    expect(source).toContain("sheet.getRange(productBlockStart + 1, 3, productCount, 1).setFontColor");
+    expect(source).not.toContain("sheet.getRange(productBlockStart + 1, 2, productCount, 1).setFontColor");
     expect(source).toContain("sheet.setColumnWidth(metricColumn, 110);");
     expect(source).toContain("sheet.setColumnWidth(metricColumn + 1, 82);");
   });
