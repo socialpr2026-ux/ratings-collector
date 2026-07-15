@@ -385,7 +385,7 @@ describe("YandexAdapter collection", () => {
       text: "Хондрофен мазь для наружного применения 30 г 1 шт"
     });
     expect(identity).toMatchObject({
-      label: "мазь 30 г №1",
+      label: "мазь 30 г",
       granularity: "variant",
       confidence: "exact"
     });

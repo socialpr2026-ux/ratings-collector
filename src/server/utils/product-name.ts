@@ -282,6 +282,15 @@ function canonicalForm(form: string | undefined): string | undefined {
   return form === "гранулы гомеопатические" ? "гранулы" : form;
 }
 
+/**
+ * A measured single container does not become a different product merely
+ * because one catalog spells out "1 шт".  The physical pack is already
+ * identified by "30 г"/"100 мл"; real multi-packs remain distinct.
+ */
+function canonicalCount(parts: Pick<ProductParts, "form" | "doses" | "count">): number | undefined {
+  return parts.count === 1 && hasPackMeasure(parts) ? undefined : parts.count;
+}
+
 function cleanFallback(value: string): string {
   const cleaned = value
     .replace(/(?<![\p{L}\p{N}])(?:detail(?:\.aspx)?|index(?:\.html?))(?![\p{L}\p{N}])/giu, " ")
@@ -392,7 +401,7 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
 }
 
 function partsKey(parts: ProductParts): string {
-  return [parts.modifier, canonicalForm(parts.form), parts.doses.join("+"), parts.count, parts.multipack].map((item) => item ?? "").join("|");
+  return [parts.modifier, canonicalForm(parts.form), parts.doses.join("+"), canonicalCount(parts), parts.multipack].map((item) => item ?? "").join("|");
 }
 
 function specificity(parts: ProductParts): number {
@@ -406,7 +415,8 @@ function render(parts: ProductParts): string {
   const form = canonicalForm(parts.form);
   if (form) chunks.push(form);
   chunks.push(...parts.doses);
-  if (parts.count) chunks.push(`№${parts.count}`);
+  const count = canonicalCount(parts);
+  if (count) chunks.push(`№${count}`);
   if (parts.multipack && parts.multipack > 1) chunks.push(`×${parts.multipack} упаковки`);
   return chunks.join(" ") || "Общая карточка бренда";
 }
@@ -418,8 +428,9 @@ function lineName(parts: ProductParts): string | undefined {
   return LINE_NAMES.find((name) => parts.modifier?.split(/\s+/u).includes(name));
 }
 
-function hasPackMeasure(parts: ProductParts): boolean {
-  return Boolean(parts.form && PACK_MEASURE_FORMS.has(parts.form) && parts.doses.some((dose) => /\s(?:мл|г)$/u.test(dose)));
+function hasPackMeasure(parts: Pick<ProductParts, "form" | "doses">): boolean {
+  const form = canonicalForm(parts.form);
+  return Boolean(form && (PACK_MEASURE_FORMS.has(form) || form.startsWith("раствор")) && parts.doses.some((dose) => /\s(?:мл|г)$/u.test(dose)));
 }
 
 function missingFields(parts: ProductParts): ProductIdentity["missing"] {
@@ -454,7 +465,9 @@ function setIsSubset(left: readonly string[], right: readonly string[]): boolean
 
 function partsCompatible(left: ProductParts, right: ProductParts): boolean {
   if (left.form && right.form && canonicalForm(left.form) !== canonicalForm(right.form)) return false;
-  if (left.count && right.count && left.count !== right.count) return false;
+  const leftCount = canonicalCount(left);
+  const rightCount = canonicalCount(right);
+  if (leftCount && rightCount && leftCount !== rightCount) return false;
   if (left.multipack && right.multipack && left.multipack !== right.multipack) return false;
   if (left.modifier && right.modifier) {
     const leftModifiers = left.modifier.split(/\s+/u);
@@ -468,7 +481,8 @@ function partsCompatible(left: ProductParts, right: ProductParts): boolean {
 function partsSubsumes(richer: ProductParts, poorer: ProductParts): boolean {
   if (!partsCompatible(richer, poorer)) return false;
   if (poorer.form && canonicalForm(richer.form) !== canonicalForm(poorer.form)) return false;
-  if (poorer.count && richer.count !== poorer.count) return false;
+  const poorerCount = canonicalCount(poorer);
+  if (poorerCount && canonicalCount(richer) !== poorerCount) return false;
   if (poorer.multipack && richer.multipack !== poorer.multipack) return false;
   if (poorer.modifier && (!richer.modifier || !setIsSubset(poorer.modifier.split(/\s+/u), richer.modifier.split(/\s+/u)))) return false;
   if (!setIsSubset(poorer.doses, richer.doses)) return false;
@@ -534,6 +548,59 @@ function variantWord(count: number): string {
 
 const CONSUMER_PRODUCT_NOUN = /(?<!\p{L})(?:погремушк\p{L}*|бутылочк\p{L}*|клеенк\p{L}*|накладк\p{L}*|насадк\p{L}*|трусик\p{L}*|пустышк\p{L}*|ниблер\p{L}*|молокоотсос\p{L}*|соск\p{L}*|поильник\p{L}*|игрушк\p{L}*|щетк\p{L}*|контейнер\p{L}*|термометр\p{L}*|прорезывател\p{L}*)(?!\p{L})/iu;
 
+const CONSUMER_NOUNS: Array<{ value: string; pattern: RegExp }> = [
+  { value: "погремушка", pattern: /(?<!\p{L})погремушк\p{L}*(?!\p{L})/giu },
+  { value: "бутылочка", pattern: /(?<!\p{L})бутылочк\p{L}*(?!\p{L})/giu },
+  { value: "клеенка", pattern: /(?<!\p{L})клеенк\p{L}*(?!\p{L})/giu },
+  { value: "накладка", pattern: /(?<!\p{L})накладк\p{L}*(?!\p{L})/giu },
+  { value: "насадка", pattern: /(?<!\p{L})насадк\p{L}*(?!\p{L})/giu },
+  { value: "трусики", pattern: /(?<!\p{L})трусик\p{L}*(?!\p{L})/giu },
+  { value: "пустышка", pattern: /(?<!\p{L})пустышк\p{L}*(?!\p{L})/giu },
+  { value: "ниблер", pattern: /(?<!\p{L})ниблер\p{L}*(?!\p{L})/giu },
+  { value: "молокоотсос", pattern: /(?<!\p{L})молокоотсос\p{L}*(?!\p{L})/giu },
+  { value: "соска", pattern: /(?<!\p{L})соск\p{L}*(?!\p{L})/giu },
+  { value: "поильник", pattern: /(?<!\p{L})поильник\p{L}*(?!\p{L})/giu },
+  { value: "игрушка", pattern: /(?<!\p{L})игрушк\p{L}*(?!\p{L})/giu },
+  { value: "щетка", pattern: /(?<!\p{L})щетк\p{L}*(?!\p{L})/giu },
+  { value: "контейнер", pattern: /(?<!\p{L})контейнер\p{L}*(?!\p{L})/giu },
+  { value: "термометр", pattern: /(?<!\p{L})термометр\p{L}*(?!\p{L})/giu },
+  { value: "прорезыватель", pattern: /(?<!\p{L})прорезывател\p{L}*(?!\p{L})/giu }
+];
+
+function canonicalConsumerLabel(value: string): string {
+  const cleaned = value
+    .normalize("NFKC")
+    .replace(/(?<![\p{L}\p{N}])1\s*(?:шт(?:ук[аи]?)?\.?)(?![\p{L}\p{N}])/giu, " ")
+    .replace(/(\d+(?:[.,]\d+)?)\s*(мл|мг|г|см)(?!\p{L})/giu, "$1 $2")
+    .replace(/\s*[,;|]+\s*/gu, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[-–—:\s]+|[-–—:\s]+$/gu, "")
+    .trim();
+  return cleaned ? cleaned[0].toLocaleLowerCase("ru-RU") + cleaned.slice(1) : cleaned;
+}
+
+function consumerVariantKey(brand: string, value: string): string | undefined {
+  if (!CONSUMER_PRODUCT_NOUN.test(value)) return undefined;
+  let normalized = normalizeText(canonicalConsumerLabel(value))
+    .replace(/(?<!\p{L})(\d+)\s*(?:месяц\p{L}*|мес)(?!\p{L})/giu, "$1 мес")
+    .replace(/(?<!\p{L})(\d+)\s*(?:год\p{L}*|лет)(?!\p{L})/giu, "$1 лет");
+  let primaryNoun: { value: string; index: number } | undefined;
+  for (const noun of CONSUMER_NOUNS) {
+    noun.pattern.lastIndex = 0;
+    const match = noun.pattern.exec(normalized);
+    noun.pattern.lastIndex = 0;
+    if (match && (!primaryNoun || match.index < primaryNoun.index)) {
+      primaryNoun = { value: noun.value, index: match.index };
+    }
+  }
+  if (!primaryNoun) return undefined;
+  for (const noun of CONSUMER_NOUNS) normalized = normalized.replace(noun.pattern, noun.value);
+  const tokens = normalized.split(/\s+/u)
+    .filter((token) => token && !/^(?:для|от|с|со|и|на)$/u.test(token))
+    .sort((left, right) => left.localeCompare(right, "ru"));
+  return tokens.length ? `${normalizeText(brand)}|consumer|${primaryNoun.value}|${tokens.join("|")}` : undefined;
+}
+
 function consumerProductIdentity(item: ProductNameInput): ProductIdentity | undefined {
   const evidence = item.evidence;
   if (evidence?.scope !== "product_family") return undefined;
@@ -592,8 +659,11 @@ export function analyzeProductIdentity(item: ProductNameInput): ProductIdentity 
     const variantGroups = new Map<string, ProductParts>();
     for (const text of evidenceVariants) {
       const parts = parseProduct(item.brand, text);
-      if (parts.generic) continue;
-      const baseKey = [parts.modifier, canonicalForm(parts.form), [...parts.doses].sort().join("+"), parts.count, parts.multipack].map((value) => value ?? "").join("|");
+      // A bare counter such as "№30" is not a product. It used to leak into
+      // the employee-facing label as "Общий рейтинг: №30" when a review
+      // control was mistaken for a variant selector.
+      if (parts.generic || !parts.form && !parts.doses.length && !parts.modifier) continue;
+      const baseKey = [parts.modifier, canonicalForm(parts.form), [...parts.doses].sort().join("+"), canonicalCount(parts), parts.multipack].map((value) => value ?? "").join("|");
       const previous = variantGroups.get(baseKey);
       if (!previous || specificity(parts) > specificity(previous)) variantGroups.set(baseKey, parts);
     }
@@ -609,7 +679,7 @@ export function analyzeProductIdentity(item: ProductNameInput): ProductIdentity 
       const resolved = exactPageVariants[0];
       return { label: render(resolved), granularity: "variant", confidence: "exact", missing: [], reasons: [] };
     }
-    if (variantGroups.size === 0 && evidenceVariants.length === 0) {
+    if (variantGroups.size === 0) {
       const line = lineName(primary);
       return {
         label: line ? `Общий рейтинг линейки «${line}»` : "Общий рейтинг бренда",
@@ -619,7 +689,7 @@ export function analyzeProductIdentity(item: ProductNameInput): ProductIdentity 
         reasons: ["Площадка публикует единый рейтинг без списка товарных вариантов"]
       };
     }
-    const count = variantGroups.size || evidenceVariants.length;
+    const count = variantGroups.size;
     const line = lineName(primary);
     const humanVariants = [...variantGroups.values()].map(render);
     const visibleVariants = humanVariants.slice(0, 3);
@@ -717,6 +787,26 @@ export type CanonicalProductVariant = {
   variantKey?: string;
 };
 
+function isLegacyBareCounterAggregate(identity: ProductIdentity): boolean {
+  return identity.granularity !== "variant"
+    && /^Общий рейтинг\s*:\s*(?:№|#|N(?:o)?\.?)\s*\d+\s*$/iu.test(identity.label);
+}
+
+function identityForReconciliation(item: ProductNameInput): ProductIdentity {
+  if (!item.productIdentity || !isLegacyBareCounterAggregate(item.productIdentity)) {
+    return item.productIdentity ?? analyzeProductIdentity(item);
+  }
+  const rebuilt = analyzeProductIdentity({ ...item, productIdentity: undefined });
+  if (rebuilt.granularity === "variant") return rebuilt;
+  return {
+    label: "Общий рейтинг бренда",
+    granularity: "family",
+    confidence: "partial",
+    missing: [],
+    reasons: ["Сохранённый счётчик не является названием товарного варианта"]
+  };
+}
+
 function exactParts(item: ProductNameInput): ProductParts | undefined {
   const candidates = uniqueParsedCandidates(item);
   if (item.productIdentity?.granularity === "variant") {
@@ -731,7 +821,7 @@ function variantCoreKey(brand: string, parts: ProductParts): string {
     normalizeText(brand),
     normalizeText(parts.modifier ?? ""),
     normalizeText(canonicalForm(parts.form) ?? ""),
-    parts.count ?? "",
+    canonicalCount(parts) ?? "",
     parts.multipack ?? ""
   ].join("|");
 }
@@ -747,8 +837,12 @@ function doseKey(parts: ProductParts): string {
  * canonical for both rows.  Conflicting strengths are always kept separate.
  */
 export function canonicalProductVariants(items: readonly ProductNameInput[]): CanonicalProductVariant[] {
-  const identities = items.map((item) => item.productIdentity ?? analyzeProductIdentity(item));
-  const parsed = items.map((item, index) => identities[index].granularity === "variant" ? exactParts(item) : undefined);
+  const identities = items.map(identityForReconciliation);
+  const parsed = items.map((item, index) =>
+    identities[index].granularity === "variant" && !CONSUMER_PRODUCT_NOUN.test(identities[index].label)
+      ? exactParts(item)
+      : undefined
+  );
   const groups = new Map<string, number[]>();
 
   parsed.forEach((parts, index) => {
@@ -770,7 +864,8 @@ export function canonicalProductVariants(items: readonly ProductNameInput[]): Ca
       const canonicalParts: ProductParts = {
         ...parts,
         form: canonicalForm(parts.form),
-        doses: omitNonDiscriminatingDose ? [] : parts.doses
+        doses: omitNonDiscriminatingDose ? [] : parts.doses,
+        count: canonicalCount(parts)
       };
       const canonicalDose = doseKey(canonicalParts);
       result[index] = {
@@ -778,6 +873,22 @@ export function canonicalProductVariants(items: readonly ProductNameInput[]): Ca
         variantKey: canonicalDose ? `${coreKey}|${canonicalDose}` : coreKey
       };
     }
+  }
+
+  const consumerGroups = new Map<string, number[]>();
+  identities.forEach((identity, index) => {
+    if (identity.granularity !== "variant" || parsed[index]) return;
+    const key = consumerVariantKey(items[index].brand, identity.label);
+    if (!key) return;
+    const group = consumerGroups.get(key) ?? [];
+    group.push(index);
+    consumerGroups.set(key, group);
+  });
+  for (const [key, indices] of consumerGroups) {
+    const label = indices
+      .map((index) => canonicalConsumerLabel(identities[index].label))
+      .sort((left, right) => left.length - right.length || left.localeCompare(right, "ru"))[0];
+    for (const index of indices) result[index] = { label, variantKey: key };
   }
   return result;
 }

@@ -113,6 +113,70 @@ describe("canonical product descriptors", () => {
     ])).toEqual(["гранулы №30", "гранулы №30"]);
   });
 
+  it("treats an explicit one-piece measured container as the same real product", () => {
+    const variants = canonicalProductVariants([
+      { brand: "Хондрофен", product: "Хондрофен мазь для наружного применения 30 г 1 шт" },
+      { brand: "Хондрофен", product: "Хондрофен мазь 30 г" },
+      { brand: "Хондрофен", product: "Хондрофен мазь 50 г" },
+      { brand: "Хондрофен", product: "Хондрофен мазь 30 г 2 шт" }
+    ]);
+
+    expect(variants.map((item) => item.label)).toEqual([
+      "мазь 30 г",
+      "мазь 30 г",
+      "мазь 50 г",
+      "мазь 30 г №2"
+    ]);
+    expect(variants[0].variantKey).toBe(variants[1].variantKey);
+    expect(new Set(variants.map((item) => item.variantKey)).size).toBe(3);
+  });
+
+  it("reconciles equivalent source-bound consumer wording without merging real differences", () => {
+    const exactConsumer = (label: string) => ({
+      label,
+      granularity: "variant" as const,
+      confidence: "exact" as const,
+      missing: [],
+      reasons: []
+    });
+    const variants = canonicalProductVariants([
+      {
+        brand: "Canpol Babies",
+        product: "Canpol Babies бутылочка антиколиковая 120 мл, 1 шт",
+        productIdentity: exactConsumer("бутылочка антиколиковая 120 мл, 1 шт")
+      },
+      {
+        brand: "Canpol Babies",
+        product: "Canpol Babies антиколиковая бутылочка 120мл",
+        productIdentity: exactConsumer("антиколиковая бутылочка 120мл")
+      },
+      {
+        brand: "Canpol Babies",
+        product: "Canpol Babies бутылочка антиколиковая 240 мл",
+        productIdentity: exactConsumer("бутылочка антиколиковая 240 мл")
+      },
+      {
+        brand: "Canpol Babies",
+        product: "Canpol Babies бутылочка антиколиковая 120 мл, 2 шт",
+        productIdentity: exactConsumer("бутылочка антиколиковая 120 мл, 2 шт")
+      },
+      {
+        brand: "Canpol Babies",
+        product: "Canpol Babies соска для бутылочки 120 мл",
+        productIdentity: exactConsumer("соска для бутылочки 120 мл")
+      },
+      {
+        brand: "Canpol Babies",
+        product: "Canpol Babies бутылочка с соской 120 мл",
+        productIdentity: exactConsumer("бутылочка с соской 120 мл")
+      }
+    ]);
+
+    expect(variants[0]).toEqual(variants[1]);
+    expect(variants[0].label).toBe("антиколиковая бутылочка 120 мл");
+    expect(new Set(variants.map((item) => item.variantKey)).size).toBe(5);
+  });
+
   it("never hides conflicting strengths while reconciling a shorter title", () => {
     const variants = canonicalProductVariants([
       { brand: "Анвифен", product: "Анвифен капсулы 50 мг №20" },
@@ -484,7 +548,7 @@ describe("canonical product descriptors", () => {
 
   it("keeps compound strength and is idempotent across repeated publications", () => {
     expect(canonicalProductDescriptor("Полиоксидоний", "Полиоксидоний раствор 6 мг/мл, флакон 5 мл, 1 шт"))
-      .toBe("раствор 6 мг/мл 5 мл №1");
+      .toBe("раствор 6 мг/мл 5 мл");
     const once = canonicalProductDescriptors([{ brand: "Полиоксидоний", product: "Лиоф. д/приг. р-ра, фл. polioksidonii", url: "https://example.ru/polioksidonii" }])[0];
     const twice = canonicalProductDescriptors([{ brand: "Полиоксидоний", product: once, url: "https://example.ru/polioksidonii" }])[0];
     expect(twice).toBe(once);

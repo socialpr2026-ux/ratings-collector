@@ -15,6 +15,55 @@ const emptyFamilyEvidence = {
 };
 
 describe("cross-site product identity contract", () => {
+  it("never promotes a bare review counter to a product named 'Общий рейтинг: №30'", () => {
+    const identity = analyzeProductIdentity({
+      brand: "Оциллококцинум",
+      product: "Оциллококцинум отзывы",
+      evidence: {
+        ...emptyFamilyEvidence,
+        signals: [{ source: "title", text: "Оциллококцинум отзывы" }],
+        variants: ["№30"]
+      }
+    });
+
+    expect(identity).toMatchObject({
+      label: "Общий рейтинг бренда",
+      granularity: "family",
+      confidence: "partial"
+    });
+    expect(identity.label).not.toContain("№30");
+  });
+
+  it("migrates a stored bare-counter aggregate from the real source title", () => {
+    const [recovered, unknown] = canonicalProductDescriptors([
+      {
+        brand: "Оциллококцинум",
+        product: "Оциллококцинум гранулы гомеопатические 30 доз",
+        productIdentity: {
+          label: "Общий рейтинг: №30",
+          granularity: "family",
+          confidence: "exact",
+          missing: [],
+          reasons: ["legacy"]
+        }
+      },
+      {
+        brand: "Оциллококцинум",
+        product: "Общий рейтинг: №30",
+        productIdentity: {
+          label: "Общий рейтинг: №30",
+          granularity: "family",
+          confidence: "exact",
+          missing: [],
+          reasons: ["legacy"]
+        }
+      }
+    ]);
+
+    expect(recovered).toBe("гранулы №30");
+    expect(unknown).toBe("Общий рейтинг бренда");
+  });
+
   it("treats one exact pack on an aggregate review domain as that product, not a brand aggregate", () => {
     const identity = analyzeProductIdentity({
       brand: "Оциллококцинум",
