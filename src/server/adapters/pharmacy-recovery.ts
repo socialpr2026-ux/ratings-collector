@@ -209,6 +209,37 @@ function polzaRef(value: string | URL): { listingId: string; canonicalUrl: strin
   }
 }
 
+// Polza product titles are recovered from canonical first-party slugs when the
+// translated family page does not expose a reliable Cyrillic name.  Translate
+// only this bounded pharmacy vocabulary: an arbitrary Latin token must remain
+// visible and therefore cannot accidentally prove a dosage form.
+const POLZA_PRODUCT_SLUG_TOKENS: Readonly<Record<string, string>> = Object.freeze({
+  granuly: "гранулы",
+  gomeopaticheskie: "гомеопатические",
+  tabletki: "таблетки",
+  kapsuly: "капсулы",
+  poroshok: "порошок",
+  maz: "мазь",
+  gel: "гель",
+  krem: "крем",
+  rastvor: "раствор",
+  sirop: "сироп",
+  sprei: "спрей",
+  sprey: "спрей",
+  kapli: "капли",
+  suspenziya: "суспензия",
+  suspenziia: "суспензия",
+  suppozitorii: "суппозитории",
+  liofilizat: "лиофилизат",
+  ampuly: "ампулы",
+  flakony: "флаконы",
+  mg: "мг",
+  ml: "мл",
+  g: "г",
+  sht: "шт.",
+  doz: "доз"
+});
+
 function polzaProductTitle(canonicalUrl: string, brand: string): string {
   const slug = new URL(canonicalUrl).pathname.split("/").filter(Boolean).at(-1)?.replace(/_\d+$/, "") ?? "";
   const brandSlug = [...brandSlugs(brand)].sort((left, right) => right.length - left.length)
@@ -216,18 +247,7 @@ function polzaProductTitle(canonicalUrl: string, brand: string): string {
   const detail = (brandSlug ? slug.slice(brandSlug.length).replace(/^-+/, "") : slug)
     .split("-")
     .filter(Boolean)
-    .map((token) => ({
-      granuly: "гранулы",
-      gomeopaticheskie: "гомеопатические",
-      tabletki: "таблетки",
-      kapsuly: "капсулы",
-      poroshok: "порошок",
-      mg: "мг",
-      ml: "мл",
-      g: "г",
-      sht: "шт.",
-      doz: "доз"
-    })[token] ?? token)
+    .map((token) => POLZA_PRODUCT_SLUG_TOKENS[token] ?? token)
     .join(" ");
   return `${brand}${detail ? ` ${detail}` : ""}`.replace(/\s+/g, " ").trim();
 }

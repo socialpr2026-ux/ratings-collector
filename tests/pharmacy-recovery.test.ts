@@ -300,6 +300,11 @@ describe("recovered first-party pharmacy adapters", () => {
           <span itemprop="aggregateRating"><meta itemprop="reviewCount" content="3"><meta itemprop="ratingValue" content="5"></span></div>
         </div></div>`), { headers: { "content-type": "text/html" } });
       }
+      if (url.hostname === "polza-ru.translate.goog" && url.pathname.includes("_53076")) {
+        return new Response(translated(polzaProductUrl, `<main itemscope><meta itemprop="sku" content="53076">
+          <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="3"><meta itemprop="ratingValue" content="5"></div>
+        </main>`), { headers: { "content-type": "text/html" } });
+      }
       if (url.hostname === "www.asna.ru" && url.pathname.endsWith("sitemap_cards.xml")) {
         return new Response(`<urlset><url><loc>${asnaUrl}</loc></url></urlset>`);
       }
@@ -310,8 +315,19 @@ describe("recovered first-party pharmacy adapters", () => {
       throw new Error(`unexpected ${url}`);
     }) as unknown as typeof fetch;
 
-    await expect(new PolzaAdapter(new MemoryEvidenceStore(), fetchMock).discover("Хондрофен", { region: "Москва" }))
-      .resolves.toMatchObject([{ listingId: "53076", url: polzaProductUrl }]);
+    const polza = new PolzaAdapter(new MemoryEvidenceStore(), fetchMock);
+    const polzaRefs = await polza.discover("Хондрофен", { region: "Москва" });
+    expect(polzaRefs).toMatchObject([{ listingId: "53076", url: polzaProductUrl, title: "Хондрофен мазь 30 г" }]);
+    const polzaResult = await polza.collect(polzaRefs[0], { region: "Москва" });
+    expect(polzaResult).toMatchObject({
+      product: "Хондрофен мазь 30 г", reviews: 3, rating: 5, status: "ok"
+    });
+    expect(analyzeProductIdentity({
+      brand: polzaResult.brand,
+      product: polzaResult.product,
+      url: polzaResult.canonicalUrl,
+      evidence: polzaResult.productEvidence
+    })).toMatchObject({ label: "мазь 30 г", granularity: "variant", confidence: "exact" });
     await expect(new AsnaAdapter(new MemoryEvidenceStore(), fetchMock).discover("Хондрофен", { region: "Москва" }))
       .resolves.toMatchObject([{ listingId: "519674", url: asnaUrl }]);
   });
