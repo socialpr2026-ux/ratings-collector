@@ -331,6 +331,55 @@ describe("canonical product descriptors", () => {
     expect(identity.label).not.toContain("Общий рейтинг");
   });
 
+  it("resolves a source-bound concentrated oral solution and removes SANOFI only after exact brand match", () => {
+    const title = "Раствор для приема внутрь SANOFI Когитум 25мг/мл";
+    const identity = analyzeProductIdentity({
+      brand: "Когитум",
+      product: title,
+      evidence: {
+        scope: "product_family",
+        signals: [{ source: "title", text: title }],
+        variants: [], identifiers: [], imageUrls: [], instructionUrls: []
+      }
+    });
+
+    expect(identity).toEqual({
+      label: "раствор для приема внутрь 25 мг/мл",
+      granularity: "variant",
+      confidence: "exact",
+      missing: [],
+      reasons: []
+    });
+    expect(analyzeProductIdentity({
+      brand: "Когитум",
+      product: "SANOFI Когитум продукт"
+    }).label).not.toContain("SANOFI");
+    expect(analyzeProductIdentity({
+      brand: "Когитум",
+      product: "SANOFI другой продукт"
+    }).label).toContain("SANOFI");
+  });
+
+  it("keeps conflicting oral-solution concentrations ambiguous", () => {
+    const identity = analyzeProductIdentity({
+      brand: "Когитум",
+      product: "Когитум раствор для приема внутрь 25 мг/мл",
+      evidence: {
+        scope: "listing",
+        signals: [
+          { source: "title", text: "Когитум раствор для приема внутрь 25 мг/мл" },
+          { source: "json_ld", text: "Когитум раствор для приема внутрь 50 мг/мл" }
+        ],
+        variants: [], identifiers: [], imageUrls: [], instructionUrls: []
+      }
+    });
+
+    expect(identity).toMatchObject({
+      granularity: "unresolved",
+      confidence: "ambiguous"
+    });
+  });
+
   it("never exposes draft wording in product labels", () => {
     const labels = canonicalProductDescriptors([
       { brand: "Амиксин", product: "Модель 128489946 amiksin" },

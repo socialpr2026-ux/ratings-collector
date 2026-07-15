@@ -25,6 +25,7 @@ export type ProductNameInput = {
 
 const FORM_RULES: Array<{ value: string; pattern: RegExp }> = [
   { value: "суппозитории вагинальные и ректальные", pattern: /(?<![\p{L}\p{N}])(?:суппозитор(?:ии|иев)|свечи)[^,.]{0,30}вагинальн[^,.]{0,30}ректальн/iu },
+  { value: "раствор для приема внутрь", pattern: /(?<![\p{L}\p{N}])(?:раствор(?:а|ом)?|р[.\s-]*р)[^,.;]{0,60}для\s+при[её]ма\s+внутрь(?![\p{L}\p{N}])/iu },
   { value: "раствор в ампулах", pattern: /(?<![\p{L}\p{N}])раствор[^,.]{0,70}(?:ампул(?:а|ы|ах)?|амп\.?)(?![\p{L}\p{N}])/iu },
   { value: "таблетки для рассасывания", pattern: /(?<![\p{L}\p{N}])(?:табл?\.?|таблет(?:ка|ки|ок)|пастил(?:ки|ок)|леденц(?:ы|ов))(?![\p{L}\p{N}])[^,.]{0,24}(?:для\s+рассасывания|д\s*\/?\s*рассас|рассасывающ)/iu },
   { value: "таблетки", pattern: /(?<![\p{L}\p{N}])(?:табл?\.?|таблет(?:ка|ки|ок|ку|кой))(?![\p{L}\p{N}])/iu },
@@ -74,6 +75,22 @@ const MODIFIERS: Array<{ value: string; pattern: RegExp }> = [
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hasExactRequestedBrand(value: string, brand: string): boolean {
+  const requested = brand.normalize("NFKC").trim();
+  if (!requested) return false;
+  const flexible = escapeRegExp(requested)
+    .replace(/[\s‐‑‒–—−-]+/g, "[\\s‐‑‒–—−-]*");
+  return new RegExp(`(^|[^\\p{L}\\p{N}])${flexible}(?=$|[^\\p{L}\\p{N}])`, "iu").test(value);
+}
+
+function removeForeignVendorAfterBrandMatch(value: string, brand: string): string {
+  // SANOFI is a manufacturer token in source titles, not a Cogitum product
+  // modifier. Never strip it from an unverified title: the exact requested
+  // brand must be present in the same source-bound text first.
+  if (!hasExactRequestedBrand(value, brand)) return value;
+  return value.replace(/(?<![\p{L}\p{N}])SANOFI(?![\p{L}\p{N}])/giu, " ");
 }
 
 const LATIN: Record<string, string> = {
@@ -321,10 +338,11 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
     .replace(/[\t\r\n\u00a0\u202f]+/g, " ")
     .replace(/\s{2,}/g, " ")
     .trim();
-  const rawWithoutBrand = removeBrand(normalized, brand);
+  const sourceWithoutVendor = removeForeignVendorAfterBrandMatch(normalized, brand);
+  const rawWithoutBrand = removeBrand(sourceWithoutVendor, brand);
   const hasStrongDetail = countFromText(rawWithoutBrand) !== undefined || /\d+(?:[.,]\d+)?\s*(?:мкг|мг|г|мл|ме|%)(?:\s*\/\s*(?:мл|г|доз(?:а|у)?))?/iu.test(rawWithoutBrand);
   const isFinalAggregateLabel = /^(?:Общая карточка|Линейка «)/iu.test(normalized);
-  const withUrlHint = hasStrongDetail || isFinalAggregateLabel ? normalized : `${normalized} ${productHintFromUrl(url)}`.trim();
+  const withUrlHint = hasStrongDetail || isFinalAggregateLabel ? sourceWithoutVendor : `${sourceWithoutVendor} ${productHintFromUrl(url)}`.trim();
   const withoutStoredPrefix = withUrlHint.replace(/^(.{1,160}?)\s+[—–]\s+/, (full, prefix: string) =>
     normalizeText(prefix) === normalizeText(brand) ? "" : full
   );
@@ -418,11 +436,15 @@ function missingFields(parts: ProductParts): ProductIdentity["missing"] {
 
 function isExactVariant(parts: ProductParts): boolean {
   const hasPack = Boolean(parts.count || parts.multipack || hasPackMeasure(parts));
+  const concentratedOralSolution = parts.form === "раствор для приема внутрь"
+    && parts.doses.some((dose) => /\/мл$/u.test(dose));
   // Either the pharmaceutical form or a concrete strength/detail together
   // with a pack is enough to identify a human product.  Thus both
   // "таблетки №20" and "100 мг №10" are publishable, while a bare
-  // "таблетки"/"капсулы" remains a review-only aggregate.
-  return !parts.generic && hasPack && Boolean(parts.form || parts.doses.length);
+  // "таблетки"/"капсулы" remains a review-only aggregate. A source-bound
+  // oral solution plus its concentration also identifies the reviewed product
+  // even when that review page does not publish the bottle size.
+  return !parts.generic && (hasPack && Boolean(parts.form || parts.doses.length) || concentratedOralSolution);
 }
 
 function setIsSubset(left: readonly string[], right: readonly string[]): boolean {
