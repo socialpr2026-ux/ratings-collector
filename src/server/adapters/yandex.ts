@@ -141,7 +141,11 @@ export class YandexAdapter implements SiteAdapter {
     this.cacheTtlMs = boundedInteger(options.cacheTtlMs, 30 * 60_000, 0, 24 * 60 * 60_000);
     this.sitemapRetryAttempts = boundedInteger(options.sitemapRetryAttempts, 3, 1, 5);
     this.sitemapRetryBaseMs = boundedInteger(options.sitemapRetryBaseMs, 250, 0, 10_000);
-    this.sitemapReadTimeoutMs = boundedInteger(options.sitemapReadTimeoutMs, 20_000, 1, 120_000);
+    // The fixed EdgeOne route validates and compacts complete multi-megabyte
+    // shards before handing them to the adapter. On a cold function the
+    // verified transfer can legitimately take more than 20 seconds; keep the
+    // safety deadline, but do not misclassify a healthy shard as blocked.
+    this.sitemapReadTimeoutMs = boundedInteger(options.sitemapReadTimeoutMs, 60_000, 1, 120_000);
     this.now = options.now ?? (() => new Date());
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }

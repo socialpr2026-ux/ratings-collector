@@ -7,6 +7,21 @@ import {
 } from "../src/server/utils/product-name.js";
 
 describe("canonical product descriptors", () => {
+  it("resolves abbreviated Farmlend oral solutions as exact zero-review products", () => {
+    for (const [product, expected] of [
+      ["Церетон 120мг/мл 100мл р-р д/пр.внутр. фл. Сотекс фармфирма зао_2 в Уфе", "раствор для приема внутрь 120 мг/мл 100 мл"],
+      ["Церетон 120мг/мл 30мл р-р д/пр.внутр. фл. Сотекс фармфирма зао_2 в Уфе", "раствор для приема внутрь 120 мг/мл 30 мл"]
+    ] as const) {
+      expect(analyzeProductIdentity({ brand: "Церетон", product })).toEqual({
+        label: expected,
+        granularity: "variant",
+        confidence: "exact",
+        missing: [],
+        reasons: []
+      });
+    }
+  });
+
   it("normalizes form, strength and count independently of wording and order", () => {
     const values = canonicalProductDescriptors([
       { brand: "Кагоцел", product: "Кагоцел табл. 100мг 10 шт" },

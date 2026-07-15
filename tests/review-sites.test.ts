@@ -448,6 +448,24 @@ describe("first-party review-site adapters", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("proves and excludes Otzyv.pro editorial advice pages without aborting product collection", async () => {
+    const path = "/category/zdorove2/749425-cereton-otzyvy-pacientov.html";
+    const adapter = adapterFor("otzyv.pro", (async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/") return new Response(`<article><h2>Церетон отзывы пациентов</h2><a href="${path}">Церетон отзывы пациентов</a></article>`);
+      return new Response(`<html><head><title>ЦЕРЕТОН отзывы пациентов советы и инструкции 2026</title></head><body><h1>Церетон</h1></body></html>`);
+    }) as typeof fetch);
+
+    const [ref] = await adapter.discover("Церетон", context);
+    await expect(adapter.collect(ref, context)).resolves.toMatchObject({
+      listingId: "749425",
+      status: "not_found",
+      reviews: null,
+      rating: null,
+      source: "review_site_non_product_candidate"
+    });
+  });
+
   it("preserves a registered iRecommend id when the reader exposes an image id", async () => {
     const canonical = "https://irecommend.ru/content/lekarstvennyi-preparat-biosintez-khondrofen-maz-dlya-naruzhnogo-primeneniya";
     const adapter = adapterFor("irecommend.ru", (async () => new Response(`<html><body>

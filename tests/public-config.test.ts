@@ -367,6 +367,21 @@ describe("static Otzovik product gateway", () => {
     expect(await response.text()).toContain("did not prove the requested product aggregate");
   });
 
+  it("canonicalizes a www Otzovik product URL before source-bound collection", async () => {
+    const path = "/reviews/kapsuli_soteks_cereton/";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`
+      <html><head><base href="https://otzovik.com${path}">
+      <link rel="canonical" href="https://otzovik.com${path}"></head><body>
+      <main itemscope itemtype="https://schema.org/Product"><h1>Капсулы Сотекс Церетон</h1>
+      <div itemprop="aggregateRating"><meta itemprop="ratingValue" content="4.5">
+      <meta itemprop="reviewCount" content="72"></div></main></body></html>`)));
+
+    const response = await callGateway(`https://www.otzovik.com${path}`);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('itemprop="reviewCount" content="72"');
+  });
+
   it("discovers exact Otzovik products from the source-bound first-party search", async () => {
     const brand = "Оциллококцинум";
     const source = `https://otzovik.com/?search_text=${encodeURIComponent(brand)}`;
@@ -721,6 +736,39 @@ describe("static pharmacy Translate gateway", () => {
     const invalid = translated("www-asna-ru.translate.goog", "/cards/not-a-card");
     expect((await callGateway(invalid.toString())).status).toBe(400);
     expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to the exact first-party ASNA card when Google Translate returns 502", async () => {
+    const source = "https://www.asna.ru/cards/tsereton_400mg_n28_kaps_soteks.html";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname.endsWith("translate.goog")) return new Response("temporary", { status: 502 });
+      return new Response(`<html><head><link rel="canonical" href="${source}"></head><body>
+        <div class="productPage__content product__item" itemscope itemtype="http://schema.org/Product">
+          <meta itemprop="sku" content="36138"><div itemprop="aggregateRating" itemscope>
+          <meta itemprop="ratingValue" content="4.9"><meta itemprop="reviewCount" content="17"></div>
+        </div></body></html>`, { headers: { "content-type": "text/html" } });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(translated("www-asna-ru.translate.goog", new URL(source).pathname).toString());
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("asna-first-party-ssr");
+    expect(await response.text()).toContain('itemprop="reviewCount" content="17"');
+  });
+
+  it("compacts the exact first-party Med-otzyv aggregate", async () => {
+    const source = "https://med-otzyv.ru/lekarstva/165-c/36138-tsereton";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head>
+      <link rel="canonical" href="${source}"></head><body><h1>Церетон</h1>
+      <div>Все отзывы 49</div></body></html>`, { headers: { "content-type": "text/html" } })));
+
+    const response = await callGateway(source);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("med-otzyv-first-party-compact");
+    expect(await response.text()).toContain('itemprop="reviewCount" content="49"');
   });
 
   it("accepts and compacts source-bound Polza family and product metrics", async () => {

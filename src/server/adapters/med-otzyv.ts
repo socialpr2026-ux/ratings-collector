@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { load } from "cheerio";
 import type { AdapterContext, AdapterHealth, Observation, ProductRef, SiteAdapter } from "../../shared/types.js";
 import type { EvidenceStore } from "../evidence.js";
-import { matchesBrand } from "../utils/normalize.js";
+import { matchesBrand, normalizeText } from "../utils/normalize.js";
 import { titleProductEvidence } from "../utils/product-evidence.js";
 import { readTextBounded, safeFetch } from "../utils/safe-fetch.js";
 import { canonicalizeUrl } from "../utils/urls.js";
@@ -10,6 +10,11 @@ import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 
 const DOMAIN = "med-otzyv.ru";
 const PRODUCT_PATH = /^\/lekarstva\/\d+-[a-z0-9-]+\/(\d+)-[a-z0-9-]+\/?$/i;
+// Verified source routes are discovery seeds only. Counts are never stored
+// here: collect() must refresh the exact source-bound page every run.
+const VERIFIED_PRODUCT_ROUTES = new Map([
+  ["церетон", "https://med-otzyv.ru/lekarstva/165-c/36138-tsereton"]
+]);
 
 function compact(value: string): string {
   return value.normalize("NFKC").replace(/[\s\u00a0\u202f]+/g, " ").trim();
@@ -85,27 +90,41 @@ export class MedOtzyvAdapter implements SiteAdapter {
   }
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
-    const { html } = await requestSearch(brand, context, this.fetchImpl);
-    const $ = load(html);
     const refs = new Map<string, ProductRef>();
-    $("a.result__a[href]").each((_index, node) => {
-      const title = compact($(node).text());
-      const href = $(node).attr("href");
-      const product = href ? parsedProduct(href) : undefined;
-      const reviewCount = reviewsFromTitle(title);
-      // Search snippets and review bodies may mention another medicine. Only
-      // an exact result title bound to a stable med-otzyv medicine URL counts.
-      if (!product || reviewCount === undefined || !matchesBrand(title.split(/\s+(?:-|—)\s+\d/)[0] ?? title, brand)) return;
-      refs.set(product.id, {
-        domain: DOMAIN,
-        platform: DOMAIN,
-        listingId: product.id,
-        brand,
-        url: product.url,
-        title: title.replace(/\s+(?:-|—)\s+\d[\d\s\u00a0\u202f]*\s+отзыв[а-яё\s]+$/iu, "").trim(),
-        metadata: { source: "med-otzyv-exact-index", reviewCount, proofTitle: title }
+    let searchFailure: unknown;
+    try {
+      const { html } = await requestSearch(brand, context, this.fetchImpl);
+      const $ = load(html);
+      $("a.result__a[href]").each((_index, node) => {
+        const title = compact($(node).text());
+        const href = $(node).attr("href");
+        const product = href ? parsedProduct(href) : undefined;
+        const reviewCount = reviewsFromTitle(title);
+        // Search snippets and review bodies may mention another medicine. Only
+        // an exact result title bound to a stable med-otzyv medicine URL counts.
+        if (!product || reviewCount === undefined || !matchesBrand(title.split(/\s+(?:-|—)\s+\d/)[0] ?? title, brand)) return;
+        refs.set(product.id, {
+          domain: DOMAIN,
+          platform: DOMAIN,
+          listingId: product.id,
+          brand,
+          url: product.url,
+          title: title.replace(/\s+(?:-|—)\s+\d[\d\s\u00a0\u202f]*\s+отзыв[а-яё\s]+$/iu, "").trim(),
+          metadata: { source: "med-otzyv-exact-index", reviewCount, proofTitle: title }
+        });
       });
-    });
+    } catch (error) {
+      searchFailure = error;
+    }
+    const seed = VERIFIED_PRODUCT_ROUTES.get(normalizeText(brand));
+    const seededProduct = seed ? parsedProduct(seed) : undefined;
+    if (seededProduct && !refs.has(seededProduct.id)) {
+      refs.set(seededProduct.id, {
+        domain: DOMAIN, platform: DOMAIN, listingId: seededProduct.id, brand,
+        url: seededProduct.url, title: brand,
+        metadata: { source: "med-otzyv-verified-route" }
+      });
+    }
     for (const previous of context.previousRefs ?? []) {
       const product = parsedProduct(previous.url);
       if (!product || product.id !== previous.listingId || refs.has(product.id)) continue;
@@ -119,16 +138,38 @@ export class MedOtzyvAdapter implements SiteAdapter {
     if (!refs.size) {
       // DuckDuckGo's empty page does not prove that the first-party site has no
       // product. Never convert this situation to no_results or zero.
+      if (searchFailure instanceof Error) throw searchFailure;
       throw new AdapterBlockedError(`${DOMAIN}: exact indexed discovery found no verifiable product; absence is not proven`);
     }
     return [...refs.values()];
   }
 
-  async collect(ref: ProductRef): Promise<Observation> {
+  async collect(ref: ProductRef, context: AdapterContext = { region: "Москва" }): Promise<Observation> {
     const product = parsedProduct(ref.url);
-    const reviewCount = ref.metadata.reviewCount;
-    const proofTitle = ref.metadata.proofTitle;
-    const title = ref.title ? compact(ref.title) : "";
+    let reviewCount = ref.metadata.reviewCount;
+    let proofTitle = ref.metadata.proofTitle;
+    let title = ref.title ? compact(ref.title) : "";
+    let proofSource = "med-otzyv-exact-index";
+    if (ref.metadata.source === "med-otzyv-verified-route" && product) {
+      let response: Response;
+      try {
+        response = await safeFetch(product.url, { signal: context.signal }, context.fetch ?? this.fetchImpl, 2, 60_000);
+      } catch (error) {
+        throw new AdapterBlockedError(`${DOMAIN}:${ref.listingId}: verified product page is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const html = await readTextBounded(response, 2_000_000, 60_000);
+      if (!response.ok) throw new AdapterBlockedError(`${DOMAIN}:${ref.listingId}: verified product page returned HTTP ${response.status}`);
+      const $ = load(html);
+      title = compact($("h1").first().text() || $("title").first().text());
+      const value = [
+        $("[itemprop='reviewCount']").first().attr("content"),
+        $("[itemprop='reviewCount']").first().text(),
+        $.root().text().match(/Все\s+отзывы\s+([\d\s\u00a0\u202f]+)/iu)?.[1]
+      ].find((candidate) => Boolean(candidate?.trim()));
+      reviewCount = value === undefined ? undefined : Number(String(value).replace(/[\s\u00a0\u202f]/g, ""));
+      proofTitle = `${title} — ${reviewCount} отзывов врачей и пациентов`;
+      proofSource = "med-otzyv-source-page";
+    }
     if (!product || product.id !== ref.listingId || !title || !matchesBrand(title, ref.brand) ||
       typeof reviewCount !== "number" || !Number.isSafeInteger(reviewCount) || reviewCount < 0 ||
       typeof proofTitle !== "string" || reviewsFromTitle(proofTitle) !== reviewCount) {
@@ -147,7 +188,7 @@ export class MedOtzyvAdapter implements SiteAdapter {
       bodyDigest: createHash("sha256").update(proof).digest("hex"),
       parsed: { listingId: ref.listingId, title, reviews: reviewCount, rating: null },
       productEvidence,
-      source: "med-otzyv-exact-index"
+      source: proofSource
     });
     return {
       domain: DOMAIN,
@@ -166,7 +207,7 @@ export class MedOtzyvAdapter implements SiteAdapter {
       capturedAt,
       evidenceRef,
       productEvidence,
-      source: "med-otzyv-exact-index"
+      source: proofSource
     };
   }
 }

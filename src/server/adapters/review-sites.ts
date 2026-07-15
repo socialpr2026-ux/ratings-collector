@@ -136,6 +136,18 @@ function absoluteProductUrl(value: string | undefined, base: string, definition:
   }
 }
 
+function isExplicitNonProductReviewPage(html: string, definition: ReviewSiteDefinition): boolean {
+  if (definition.domain !== "otzyv.pro") return false;
+  const $ = load(html);
+  const title = $("title").first().text().replace(/\s+/g, " ").trim();
+  const hasAggregate = $("[itemprop='aggregateRating'], [itemprop='reviewCount'], [itemprop='ratingValue']").length > 0 ||
+    /"aggregateRating"\s*:|"reviewCount"\s*:|"ratingValue"\s*:/i.test(html);
+  // Otzyv.pro search mixes product aggregates with editorial advice pages.
+  // The latter identify themselves in the page title and expose no aggregate
+  // at all; they are proved non-product candidates, not parser failures.
+  return !hasAggregate && /(?:советы\s+и\s+инструкции|стать[ьяи]|справочн)/iu.test(title);
+}
+
 function jsonLdMetrics(html: string, pageUrl: string, brand: string): ParsedMetrics {
   const products = extractJsonLdProducts(html, pageUrl);
   const canonicalPageUrl = canonicalizeUrl(pageUrl);
@@ -987,13 +999,17 @@ export class ReviewSiteAdapter implements SiteAdapter {
   }
 
   private refFor(url: string, brand: string, title?: string): ProductRef {
-    const parsed = new URL(url);
+    const canonical = this.definition.domain === "otzovik.com"
+      ? canonicalOtzovikProductUrl(url)
+      : canonicalizeUrl(url);
+    if (!canonical) throw new ParserChangedError(`Небезопасная ссылка карточки ${this.definition.domain}`);
+    const parsed = new URL(canonical);
     return {
       domain: this.definition.domain,
       platform: this.definition.domain,
-      listingId: this.definition.idFromUrl(parsed) ?? hashId(canonicalizeUrl(url)),
+      listingId: this.definition.idFromUrl(parsed) ?? hashId(canonical),
       brand,
-      url: canonicalizeUrl(url),
+      url: canonical,
       title,
       metadata: { source: "site-search" }
     };
@@ -1105,6 +1121,21 @@ export class ReviewSiteAdapter implements SiteAdapter {
     }
     if (isBlockPage(html)) {
       throw new AdapterBlockedError(`${this.definition.domain} вернул защитную страницу для карточки ${ref.listingId}`);
+    }
+    if (isExplicitNonProductReviewPage(html, this.definition)) {
+      return {
+        domain: this.definition.domain,
+        platform: this.definition.domain,
+        listingId: ref.listingId,
+        brand: ref.brand,
+        canonicalUrl: canonicalizeUrl(ref.url),
+        product: ref.title ?? ref.brand,
+        reviews: null,
+        rating: null,
+        status: "not_found",
+        capturedAt,
+        source: "review_site_non_product_candidate"
+      };
     }
     const parsed = this.definition.parse(html, ref.url, ref.brand);
     const canonicalUrl = absoluteProductUrl(parsed.canonicalUrl, ref.url, this.definition) ?? canonicalizeUrl(ref.url);

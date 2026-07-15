@@ -144,4 +144,26 @@ describe("Med-otzyv exact indexed adapter", () => {
       new Response("<html><body>No results found</body></html>")) as unknown as typeof fetch);
     await expect(adapter.discover("Оциллококцинум", context)).rejects.toBeInstanceOf(AdapterBlockedError);
   });
+
+  it("refreshes the verified Cereton route from the exact source page when the index misses it", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/__external_search__") return new Response("missing", { status: 502 });
+      if (url.pathname === "/lekarstva/165-c/36138-tsereton") return new Response(`
+        <html><head><link rel="canonical" href="${url.toString()}"></head><body>
+          <h1>Церетон</h1><meta itemprop="reviewCount" content="49">
+        </body></html>`, { headers: { "content-type": "text/html" } });
+      throw new Error(`Unexpected URL ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new MedOtzyvAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const [ref] = await adapter.discover("Церетон", context);
+    const observation = await adapter.collect(ref, context);
+
+    expect(ref).toMatchObject({ listingId: "36138", metadata: { source: "med-otzyv-verified-route" } });
+    expect(observation).toMatchObject({
+      listingId: "36138", product: "Церетон", reviews: 49, rating: null,
+      ratingUnavailable: true, status: "ok", source: "med-otzyv-source-page"
+    });
+  });
 });

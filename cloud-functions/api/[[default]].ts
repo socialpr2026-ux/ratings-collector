@@ -1651,6 +1651,31 @@ function compactYandexModelSitemap(xml: string, requested: URL): string | undefi
     `</urlset>`;
 }
 
+function compactMedOtzyvProductHtml(html: string, requested: URL): string | undefined {
+  if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
+  const $ = load(html);
+  const normalized = (value: string) => value.normalize("NFKC").replace(/\s+/g, " ").trim();
+  const title = normalized($("h1").first().text() || $("title").first().text());
+  const pageText = normalized($.root().text());
+  const countText = [
+    $("[itemprop='reviewCount']").first().attr("content"),
+    $("[itemprop='reviewCount']").first().text(),
+    pageText.match(/Все\s+отзывы\s+([\d\s\u00a0\u202f]+)/iu)?.[1],
+    title.match(/(?:-|—)\s*([\d\s\u00a0\u202f]+)\s+отзыв/iu)?.[1]
+  ].find((value) => Boolean(value?.trim()));
+  const reviewCount = countText === undefined ? Number.NaN : Number(String(countText).replace(/[\s\u00a0\u202f]/g, ""));
+  let canonical: URL;
+  try {
+    canonical = new URL($("link[rel='canonical'][href]").first().attr("href") ?? requested.toString(), requested);
+  } catch { return undefined; }
+  if (!title || !Number.isSafeInteger(reviewCount) || reviewCount < 0 ||
+    canonical.protocol !== "https:" || canonical.hostname.replace(/^www\./, "") !== "med-otzyv.ru" ||
+    canonical.pathname.replace(/\/$/, "") !== requested.pathname.replace(/\/$/, "")) return undefined;
+  return `<html><head><base href="${escapeHtml(requested.toString())}">` +
+    `<link rel="canonical" href="${escapeHtml(requested.toString())}"></head><body>` +
+    `<h1>${escapeHtml(title)}</h1><meta itemprop="reviewCount" content="${reviewCount}"></body></html>`;
+}
+
 function assertOwner(run: RunState, user: AuthUser): void {
   if (run.ownerEmail && run.ownerEmail !== user.email) throw new Error("Этот запуск принадлежит другому сотруднику");
 }
@@ -1716,6 +1741,9 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     target.pathname === "/__external_search__" && !target.port && !target.username && !target.password && !target.hash &&
     [...target.searchParams.keys()].every((key) => key === "brand") && target.searchParams.getAll("brand").length === 1 &&
     (target.searchParams.get("brand")?.trim().length ?? 0) >= 2 && (target.searchParams.get("brand")?.trim().length ?? 0) <= 160;
+  const medOtzyvProductTarget = target.protocol === "https:" && host === "med-otzyv.ru" &&
+    !target.port && !target.username && !target.password && !target.search && !target.hash &&
+    /^\/lekarstva\/\d+-[a-z0-9-]+\/\d+-[a-z0-9-]+\/?$/i.test(target.pathname);
   const megamarketTranslatedTarget = target.protocol === "https:" && target.hostname === "megamarket-ru.translate.goog" &&
     !target.port && !target.username && !target.password && !target.hash && (
       target.pathname === "/catalog/" || /^\/catalog\/details\/[a-z0-9-]+-\d{6,18}\/?$/i.test(target.pathname)
@@ -1764,8 +1792,23 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         /^\d+$/.test(page) && Number(page) >= 1 && Number(page) <= 100;
     } catch { /* invalid nested Ozon search URL */ }
   }
-  if (target.protocol !== "https:" || !(reviewTarget || medOtzyvSearchTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || pharmacyTranslatedTarget || aptekaRuTarget)) {
+  if (target.protocol !== "https:" || !(reviewTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || pharmacyTranslatedTarget || aptekaRuTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
+  }
+  if (medOtzyvProductTarget) {
+    try {
+      const upstream = await safeFetch(target.toString(), {
+        method: "GET", redirect: "follow",
+        headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+      }, fetch, 4, 60_000);
+      const html = await readTextBounded(upstream, 12_000_000, 60_000);
+      const compact = upstream.ok ? compactMedOtzyvProductHtml(html, target) : undefined;
+      if (compact) return new Response(compact, { status: 200, headers: {
+        "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
+        "x-ratings-source": "med-otzyv-first-party-compact"
+      } });
+    } catch { /* exact public page remains unavailable */ }
+    return json({ error: "Med-otzyv product page did not prove the exact aggregate" }, 502);
   }
   if (medOtzyvSearchTarget) {
     const brand = target.searchParams.get("brand")!.trim();
@@ -1968,17 +2011,40 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       redirect: "manual",
       headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
     }, fetch, 0, 60_000);
-    const html = await readTextBounded(upstream, 12_000_000, 60_000);
-    if (!upstream.ok) {
+    let html = await readTextBounded(upstream, 12_000_000, 60_000);
+    let compactHtml = upstream.ok && /(?:text\/html|application\/xhtml\+xml)/i.test(upstream.headers.get("content-type") ?? "")
+      ? compactPharmacyTranslateHtml(html, pharmacyTranslatedTarget)
+      : undefined;
+    let source = "google-translate-pharmacy-ssr";
+    // ASNA's first-party card is public and source-bound, while Google
+    // Translate intermittently answers 502 for the same card. Use the exact
+    // canonical product page as a free fallback and still pass it through the
+    // same strict SKU/aggregate compactor. No recommendation card can enter.
+    if (!compactHtml && pharmacyTranslatedTarget.kind === "asna-product") {
+      try {
+        const direct = await safeFetch(pharmacyTranslatedTarget.source.toString(), {
+          method: "GET",
+          redirect: "follow",
+          headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+        }, fetch, 4, 60_000);
+        const directHtml = await readTextBounded(direct, 12_000_000, 60_000);
+        if (direct.ok && /(?:text\/html|application\/xhtml\+xml)/i.test(direct.headers.get("content-type") ?? "text/html")) {
+          const sourceBoundHtml = directHtml.replace(/<head([^>]*)>/i,
+            `<head$1><base href="${escapeHtml(pharmacyTranslatedTarget.source.toString())}">`);
+          compactHtml = compactPharmacyTranslateHtml(sourceBoundHtml, pharmacyTranslatedTarget);
+          if (compactHtml) {
+            html = directHtml;
+            source = "asna-first-party-ssr";
+          }
+        }
+      } catch { /* exact ASNA aggregate remains unavailable */ }
+    }
+    if (!upstream.ok && !compactHtml && pharmacyTranslatedTarget.kind !== "asna-product") {
       return new Response(html, {
         status: upstream.status,
         headers: { "content-type": upstream.headers.get("content-type") ?? "text/html; charset=utf-8" }
       });
     }
-    if (!/(?:text\/html|application\/xhtml\+xml)/i.test(upstream.headers.get("content-type") ?? "")) {
-      return json({ error: "Translated pharmacy response is not HTML" }, 502);
-    }
-    const compactHtml = compactPharmacyTranslateHtml(html, pharmacyTranslatedTarget);
     if (!compactHtml || compactHtml.length > 350_000) {
       return json({ error: "Translated pharmacy page did not prove the requested source and metrics" }, 502);
     }
@@ -1987,7 +2053,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       headers: {
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
-        "x-ratings-source": "google-translate-pharmacy-ssr",
+        "x-ratings-source": source,
         "x-ratings-original-bytes": String(new TextEncoder().encode(html).byteLength),
         "x-ratings-proof-bytes": String(new TextEncoder().encode(compactHtml).byteLength)
       }
@@ -2174,9 +2240,12 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     return json({ error: "iRecommend response did not prove the requested product or search result" }, 502);
   }
   if (host === "otzovik.com" && /^\/reviews\/[a-z0-9_-]+\/?$/i.test(target.pathname)) {
-    if (target.search || target.hash || target.hostname !== "otzovik.com") {
+    if (target.search || target.hash || !["otzovik.com", "www.otzovik.com"].includes(target.hostname)) {
       return json({ error: "Invalid Otzovik product source URL" }, 400);
     }
+    // Search indexes and old Sheets may retain www. The proof gateway always
+    // binds the translated response to the same apex-host product path.
+    target.hostname = "otzovik.com";
     const translated = new URL(`https://otzovik-com.translate.goog${target.pathname}`);
     translated.searchParams.set("_x_tr_sl", "ru");
     translated.searchParams.set("_x_tr_tl", "en");
