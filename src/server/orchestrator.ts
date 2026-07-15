@@ -114,7 +114,7 @@ function healthCheckFailure(message: string): AdapterBlockedError | AdapterQuota
     return new AdapterQuotaError(message);
   }
   if (
-    /blocked[_\s-]*free[_\s-]*mode|captcha|капч|\bpow\b|заблокирован|блокирует|access\s*denied|forbidden|HTTP\s+(?:401|403|408|425|429|498|5\d\d)\b/i.test(message)
+    /^\s*blocked\s*:|blocked[_\s-]*free[_\s-]*mode|captcha|капч|\bpow\b|заблокирован|блокирует|access\s*denied|forbidden|HTTP\s+(?:401|403|408|425|429|498|499|5\d\d)\b/i.test(message)
   ) {
     return new AdapterBlockedError(message);
   }

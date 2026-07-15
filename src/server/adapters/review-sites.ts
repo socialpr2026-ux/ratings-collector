@@ -593,7 +593,13 @@ export class ReviewSiteAdapter implements SiteAdapter {
       }
       return { ok: true, checkedAt, message: `HTTP ${status}` };
     } catch (error) {
-      return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ok: false,
+        checkedAt,
+        message: error instanceof AdapterBlockedError ? `blocked: ${message}` :
+          error instanceof ParserChangedError ? `parser_changed: ${message}` : message
+      };
     }
   }
 
@@ -1015,7 +1021,6 @@ export class ReviewSiteAdapter implements SiteAdapter {
       /^\d+$/.test(ref.listingId) &&
       Boolean(ref.title) &&
       matchesBrand(ref.title!, ref.brand) &&
-      PHARMACEUTICAL_REVIEW_TITLE.test(ref.title!) &&
       typeof ref.metadata.reviewCount === "number" &&
       Number.isInteger(ref.metadata.reviewCount) &&
       ref.metadata.reviewCount >= 0 &&

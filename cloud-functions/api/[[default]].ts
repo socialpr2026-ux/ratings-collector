@@ -1096,6 +1096,66 @@ function escapeHtml(value: string): string {
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
+const MED_OTZYV_PRODUCT_PATH = /^\/lekarstva\/\d+-[a-z0-9-]+\/(\d+)-[a-z0-9-]+\/?$/i;
+
+function medOtzyvProductFromSearchHref(value: string, base: URL): URL | undefined {
+  try {
+    let candidate = new URL(value, base);
+    if (candidate.hostname === "translate.google.com" && candidate.pathname === "/website") {
+      const nested = candidate.searchParams.get("u");
+      if (!nested) return undefined;
+      candidate = new URL(nested);
+    }
+    if (candidate.hostname === "duckduckgo.com" && candidate.pathname === "/l/") {
+      const nested = candidate.searchParams.get("uddg");
+      if (!nested) return undefined;
+      candidate = new URL(nested);
+    }
+    const match = candidate.pathname.match(MED_OTZYV_PRODUCT_PATH);
+    if (candidate.protocol !== "https:" || candidate.hostname !== "med-otzyv.ru" || candidate.port ||
+      candidate.username || candidate.password || candidate.search || candidate.hash || !match) return undefined;
+    return new URL(candidate.toString());
+  } catch {
+    return undefined;
+  }
+}
+
+function compactTranslatedMedOtzyvSearch(
+  html: string,
+  translated: URL,
+  discovery: URL,
+  brand: string
+): string | undefined {
+  if (!/(?:<\/html>|<\/body>)\s*$/i.test(html) || /anomaly-modal|captcha|access denied/iu.test(html.slice(0, 150_000))) {
+    return undefined;
+  }
+  const $ = load(html);
+  const baseValue = $("base[href]").first().attr("href");
+  if (!baseValue) return undefined;
+  try {
+    const source = new URL(baseValue);
+    if (source.protocol !== "https:" || source.hostname !== discovery.hostname || source.pathname !== discovery.pathname ||
+      source.searchParams.getAll("q").length !== 1 || source.searchParams.get("q") !== discovery.searchParams.get("q") ||
+      [...source.searchParams.keys()].some((key) => key !== "q")) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  const cards = new Map<string, string>();
+  $("a.result__a[href], a.result-link[href]").each((_index, node) => {
+    const title = $(node).text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    const href = $(node).attr("href");
+    const product = href ? medOtzyvProductFromSearchHref(href, translated) : undefined;
+    const reviews = title.match(/(?:-|—)\s*([\d\s\u00a0\u202f]+)\s+отзыв(?:а|ов)?\s+(?:врачей|пациентов)/iu)?.[1];
+    if (!product || !reviews || !matchesBrand(title.split(/\s+(?:-|—)\s+\d/)[0] ?? title, brand)) return;
+    const count = Number(reviews.replace(/[\s\u00a0\u202f]/g, ""));
+    if (!Number.isSafeInteger(count) || count < 0) return;
+    cards.set(product.toString(), `<a class="result__a" href="${escapeHtml(product.toString())}">${escapeHtml(title)}</a>`);
+  });
+  if (!cards.size) return undefined;
+  return `<html><head><base href="${escapeHtml(discovery.toString())}"></head><body>${[...cards.values()].join("")}</body></html>`;
+}
+
 function otzovikSourceProductUrl(value: string, searchSource: URL): URL | undefined {
   try {
     const candidate = new URL(value, searchSource);
@@ -1695,20 +1755,46 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     const brand = target.searchParams.get("brand")!.trim();
     const discovery = new URL("https://html.duckduckgo.com/html/");
     discovery.searchParams.set("q", `site:med-otzyv.ru/lekarstva/ "${brand}"`);
-    const upstream = await safeFetch(discovery.toString(), {
-      method: "GET",
-      redirect: "follow",
-      headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
-    }, fetch, 4, 45_000);
-    const html = await readTextBounded(upstream, 2_000_000, 45_000);
-    return new Response(html, {
-      status: upstream.status,
-      headers: {
-        "content-type": "text/html; charset=utf-8",
-        "cache-control": "no-store",
-        "x-ratings-source": "duckduckgo-exact-med-otzyv-index"
+    try {
+      const upstream = await safeFetch(discovery.toString(), {
+        method: "GET",
+        redirect: "follow",
+        headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+      }, fetch, 4, 45_000);
+      const html = await readTextBounded(upstream, 2_000_000, 45_000);
+      if (upstream.status === 200 && !/anomaly-modal|captcha|access denied/iu.test(html.slice(0, 150_000))) {
+        return new Response(html, {
+          status: 200,
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store",
+            "x-ratings-source": "duckduckgo-exact-med-otzyv-index"
+          }
+        });
       }
-    });
+    } catch { /* try the fixed translated egress below */ }
+
+    const translated = new URL(discovery.pathname, "https://html-duckduckgo-com.translate.goog");
+    translated.searchParams.set("q", discovery.searchParams.get("q")!);
+    translated.searchParams.set("_x_tr_sl", "auto");
+    translated.searchParams.set("_x_tr_tl", "ru");
+    translated.searchParams.set("_x_tr_hl", "ru");
+    try {
+      const fallback = await safeFetch(translated.toString(), {
+        method: "GET",
+        redirect: "manual",
+        headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+      }, fetch, 0, 60_000);
+      const fallbackBody = await readTextBounded(fallback, 3_000_000, 60_000);
+      const compact = fallback.ok
+        ? compactTranslatedMedOtzyvSearch(fallbackBody, translated, discovery, brand)
+        : undefined;
+      if (compact) return new Response(compact, { status: 200, headers: {
+        "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
+        "x-ratings-source": "google-translate-duckduckgo-med-otzyv"
+      } });
+    } catch { /* no exact translated result proof */ }
+    return json({ error: "Med-otzyv discovery did not prove an exact product aggregate" }, 502);
   }
   if (utekaReviewsTarget) {
     let fallbackAllowed = false;

@@ -14,6 +14,30 @@ class FakeAdapter implements SiteAdapter {
 }
 
 describe("run orchestration and fail-closed QA", () => {
+  it("keeps an explicit transient health-check access failure blocked instead of parser_changed", async () => {
+    const service = new RatingsService(new MemoryRepository(), async () => ({
+      id: "transient-health",
+      supportedDomains: ["example.com"],
+      async healthCheck() {
+        return {
+          ok: false,
+          checkedAt: new Date().toISOString(),
+          message: "blocked: both verified egress paths returned HTTP 502"
+        };
+      },
+      async discover() { throw new Error("discovery must not run after a failed health check"); },
+      async collect() { throw new Error("collection must not run after a failed health check"); }
+    }));
+
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    expect(run.partitions).toMatchObject([{
+      status: "blocked",
+      message: expect.stringMatching(/^blocked: blocked: .*HTTP 502$/)
+    }]);
+    expect(run.partitions[0]!.message).not.toContain("parser_changed");
+  });
+
   it("retries only failed partitions and preserves successful observations", async () => {
     const repository = new MemoryRepository();
     const calls = new Map<string, number>();

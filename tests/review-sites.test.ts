@@ -448,6 +448,27 @@ describe("first-party review-site adapters", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("collects a proven Baktoblis search aggregate without a second CAPTCHA-prone request", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/srch") return new Response(`<html><body>
+        <ul class="srch-result-nodes"><li><div class="ProductTizer" data-type="2" data-nid="399872">
+          <div class="title"><a href="/content/respiratornyi-probiotik-bactoblis-baktoblis">Респираторный пробиотик Bactoblis Бактоблис</a></div>
+          <a class="read-all-reviews-link"><span class="counter">33</span></a><span class="reviewsLink">33 отзыва</span>
+          <div class="fivestar-summary"><span class="average-rating"><span>4.5</span></span></div>
+        </div></li></ul></body></html>`);
+      throw new Error("a complete source-bound ProductTizer must not request the product page");
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("irecommend.ru", fetchMock);
+
+    const refs = await adapter.discover("Бактоблис", { ...context, brands: ["Бактоблис"] });
+    const observation = await adapter.collect(refs[0]!, context);
+
+    expect(refs).toMatchObject([{ listingId: "399872", metadata: { reviewCount: 33, rating: 4.5 } }]);
+    expect(observation).toMatchObject({ listingId: "399872", reviews: 33, rating: 4.5, status: "ok" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("checks iRecommend through its strict search route instead of the now-disallowed origin", async () => {
     const requested: URL[] = [];
     const adapter = adapterFor("irecommend.ru", (async (input: RequestInfo | URL) => {

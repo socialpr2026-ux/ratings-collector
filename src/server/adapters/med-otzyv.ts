@@ -74,7 +74,13 @@ export class MedOtzyvAdapter implements SiteAdapter {
         ? { ok: true, checkedAt, message: `${DOMAIN}: exact indexed canary reviewCount=${exact.metadata.reviewCount}` }
         : { ok: false, checkedAt, message: `${DOMAIN}: exact indexed canary changed` };
     } catch (error) {
-      return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ok: false,
+        checkedAt,
+        message: error instanceof AdapterBlockedError ? `blocked: ${message}` :
+          error instanceof ParserChangedError ? `parser_changed: ${message}` : message
+      };
     }
   }
 

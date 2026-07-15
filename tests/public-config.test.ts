@@ -48,6 +48,60 @@ describe("new static collector gateways", () => {
     expect(await response.text()).toContain("34740-otsillokoktsinum");
   });
 
+  it("recovers an exact med-otzyv result through fixed translated DuckDuckGo egress", async () => {
+    const brand = "Хондрофен";
+    const product = "https://med-otzyv.ru/lekarstva/143-kh/751-khondrofen";
+    const query = `site:med-otzyv.ru/lekarstva/ "${brand}"`;
+    const source = new URL("https://html.duckduckgo.com/html/");
+    source.searchParams.set("q", query);
+    const redirect = new URL("https://duckduckgo.com/l/");
+    redirect.searchParams.set("uddg", product);
+    const translatedLink = new URL("https://translate.google.com/website");
+    translatedLink.searchParams.set("sl", "auto");
+    translatedLink.searchParams.set("tl", "ru");
+    translatedLink.searchParams.set("hl", "ru");
+    translatedLink.searchParams.set("u", redirect.toString());
+    const requested: URL[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      requested.push(url);
+      if (url.hostname === "html.duckduckgo.com") {
+        return new Response('<div class="anomaly-modal">challenge</div>', { status: 202 });
+      }
+      expect(url.hostname).toBe("html-duckduckgo-com.translate.goog");
+      expect(url.searchParams.get("q")).toBe(query);
+      return new Response(`<!doctype html><html><head><base href="${source.toString()}"></head><body>
+        <a class="result__a" href="${translatedLink.toString().replace(/&/g, "&amp;")}">
+          Хондрофен - 4 отзыва врачей и пациентов
+        </a></body></html>`, { headers: { "content-type": "text/html; charset=utf-8" } });
+    }));
+
+    const response = await callGateway(`https://med-otzyv.ru/__external_search__?brand=${encodeURIComponent(brand)}`);
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-duckduckgo-med-otzyv");
+    expect(proof).toContain(`href="${product}"`);
+    expect(proof).toContain("Хондрофен - 4 отзыва врачей и пациентов");
+    expect(proof).not.toContain("translate.google.com");
+    expect(requested).toHaveLength(2);
+  });
+
+  it("fails closed when translated med-otzyv discovery is not bound to the requested brand", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "html.duckduckgo.com") return new Response("challenge", { status: 202 });
+      return new Response(`<!doctype html><html><head><base href="https://html.duckduckgo.com/html/?q=wrong"></head>
+        <body><a class="result__a" href="https://med-otzyv.ru/lekarstva/143-a/47087-anvifen">
+          Анвифен - 12 отзывов врачей и пациентов
+        </a></body></html>`);
+    }));
+
+    const response = await callGateway(`https://med-otzyv.ru/__external_search__?brand=${encodeURIComponent("Хондрофен")}`);
+
+    expect(response.status).toBe(502);
+  });
+
   it("allows only fixed Megamarket translated search/product routes", async () => {
     const source = "https://megamarket.ru/catalog/?q=Оциллококцинум";
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"></head><body>proof</body></html>`, {
