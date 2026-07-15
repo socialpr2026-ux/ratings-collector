@@ -55,6 +55,7 @@ describe("run orchestration and fail-closed QA", () => {
 
     expect(calls).toEqual(new Map([["example.com", 1], ["example.org", 2]]));
     expect(retried.progress).toMatchObject({ totalPartitions: 2, completedPartitions: 2 });
+    expect(retried.progress.current).toBeUndefined();
     expect(retried.partitions.map((item) => [item.domain, item.status])).toEqual([
       ["example.com", "complete"],
       ["example.org", "complete"]

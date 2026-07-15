@@ -480,6 +480,7 @@ export class RatingsService {
         run.request.brands.indexOf(a.brand) - run.request.brands.indexOf(b.brand) ||
         a.product.localeCompare(b.product, "ru") || a.listingId.localeCompare(b.listingId)
       );
+      delete run.progress.current;
       await this.refreshDraftProfileExamples(run);
       run.payloadHash = stableHash({ request: run.request, observations: run.observations });
       run.status = "review";
