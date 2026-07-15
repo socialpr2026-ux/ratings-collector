@@ -246,10 +246,11 @@ function parseLegacy(existing: ExistingSheet, request: RunRequest): { products: 
     headerSecond === "площадка" && headerThird === "ссылка";
   const linkFirstLayout = headerFirst === "бренд" &&
     headerSecond === "ссылка";
-  const brandSheetLayout = headerFirst === "ссылка" && headerSecond === "площадка" && headerThird === "продукт";
-  const structuredLayout = platformFirstLayout || linkFirstLayout || brandSheetLayout;
-  const urlColumn = platformFirstLayout ? 2 : linkFirstLayout ? 1 : 0;
-  const productColumn = platformFirstLayout ? 3 : linkFirstLayout || brandSheetLayout ? 2 : 1;
+  const brandSheetLinkFirstLayout = headerFirst === "ссылка" && headerSecond === "площадка" && headerThird === "продукт";
+  const brandSheetPlatformFirstLayout = headerFirst === "площадка" && headerSecond === "ссылка" && headerThird === "продукт";
+  const structuredLayout = platformFirstLayout || linkFirstLayout || brandSheetLinkFirstLayout || brandSheetPlatformFirstLayout;
+  const urlColumn = platformFirstLayout ? 2 : linkFirstLayout || brandSheetPlatformFirstLayout ? 1 : 0;
+  const productColumn = structuredLayout ? (platformFirstLayout ? 3 : 2) : 1;
   const metricStartColumn = structuredLayout ? 4 : 3;
   const months: string[] = [];
   for (let column = metricStartColumn; column < (values[headerRow]?.length ?? 0); column += 2) {
@@ -264,7 +265,7 @@ function parseLegacy(existing: ExistingSheet, request: RunRequest): { products: 
     const { domain, listingId } = inferListing(url);
     const storedBrand = platformFirstLayout || linkFirstLayout
       ? String(values[row]?.[0] ?? "").trim()
-      : brandSheetLayout && request.brands.length === 1
+      : (brandSheetLinkFirstLayout || brandSheetPlatformFirstLayout) && request.brands.length === 1
         ? request.brands[0]!
         : "";
     const brand = storedBrand || inferBrand(url, rawProduct, request.brands);
@@ -381,7 +382,7 @@ export function buildSheetDocument(
   merges.push({ startRow: 0, endRow: 1, startColumn: 0, endColumn: 4 });
   if (columnCount > 4) merges.push({ startRow: 0, endRow: 1, startColumn: 4, endColumn: columnCount });
 
-  const title: SheetScalar[] = ["Ссылка", "Площадка", "Продукт", null];
+  const title: SheetScalar[] = ["Площадка", "Ссылка", "Продукт", null];
   const subheader: SheetScalar[] = [null, null, null, null];
   for (let column = 0; column < 4; column += 1) {
     merges.push({ startRow: 1, endRow: 3, startColumn: column, endColumn: column + 1 });
@@ -403,7 +404,7 @@ export function buildSheetDocument(
       null
     ]);
     for (const item of inCategory) {
-      const row: SheetScalar[] = [item.canonicalUrl, platformLabel(item.domain), item.product, null];
+      const row: SheetScalar[] = [platformLabel(item.domain), item.canonicalUrl, item.product, null];
       months.forEach((month, index) => {
         const metric = item.metrics[month]; row[4 + index * 2] = metric?.reviews ?? null; row[5 + index * 2] = metric?.rating ?? null;
       });
