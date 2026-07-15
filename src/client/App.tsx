@@ -10,6 +10,7 @@ import {
   observationIssueText,
   observationMatchesQuery,
   ozonCompanionEligibleBrands,
+  productProofLines,
   reviewIntroText,
   setupReadinessText,
   summarizeIssues
@@ -964,13 +965,14 @@ export function App() {
                 const confirmable = canConfirmObservation(item);
                 const canonicalProduct = canonicalProducts.get(productKey(item)) ?? item.product;
                 const identity = item.productIdentity ?? analyzeProductIdentity({ brand: item.brand, product: item.product, url: item.canonicalUrl, evidence: item.productEvidence });
+                const proofLines = productProofLines({ productIdentity: identity });
                 return <tr key={productKey(item)} className={item.status === "needs_review" ? "row-review" : ""}>
                   <td className={`check-column ${item.status !== "needs_review" ? "check-empty" : ""}`} data-label="Выбрать">{item.status === "needs_review" && (confirmable
                     ? <input aria-label={`Подтвердить карточку ${item.product}`} type="checkbox" checked={selected.has(productKey(item))} onChange={(event) => setSelected((current) => { const next = new Set(current); event.target.checked ? next.add(productKey(item)) : next.delete(productKey(item)); return next; })} />
                     : <span className="check-unavailable" aria-label="Карточку нельзя подтвердить без полных метрик">—</span>)}</td>
                   <td data-label="Площадка"><span className="domain-name">{item.domain}</span></td>
                   <td className="brand-cell" data-label="Бренд"><strong>{item.brand}</strong></td>
-                  <td className="product-cell" data-label="Продукт"><a href={item.canonicalUrl} target="_blank" rel="noreferrer" aria-label={`Открыть карточку «${item.product}» на ${item.domain} в новой вкладке`}>{canonicalProduct}<span aria-hidden="true">↗</span></a><div className={`identity-badge identity-${identity.granularity}`}>{productIdentityLabels[identity.granularity]}</div><small>Название на площадке: {item.product} · ID {item.listingId}</small>{(identity.reasons.length > 0 || (item.productEvidence?.variants.length ?? 0) > 0) && <details className="product-proof"><summary>На основании каких данных</summary>{identity.reasons.map((reason) => <p key={reason}>{reason}</p>)}{(item.productEvidence?.variants.length ?? 0) > 0 && <ul>{item.productEvidence!.variants.slice(0, 6).map((variant) => <li key={variant}>{variant}</li>)}</ul>}</details>}</td>
+                  <td className="product-cell" data-label="Продукт"><a href={item.canonicalUrl} target="_blank" rel="noreferrer" aria-label={`Открыть карточку «${item.product}» на ${item.domain} в новой вкладке`}>{canonicalProduct}<span aria-hidden="true">↗</span></a><div className={`identity-badge identity-${identity.granularity}`}>{productIdentityLabels[identity.granularity]}</div><small>Название на площадке: {item.product} · ID {item.listingId}</small>{proofLines.length > 0 && <details className="product-proof"><summary>На основании каких данных</summary><ul>{proofLines.map((line) => <li key={line}>{line}</li>)}</ul></details>}</td>
                   <td className="number-cell" data-label="Отзывы / оценки">{formatReviews(item.reviews)}</td>
                   <td className="number-cell" data-label="Рейтинг">{formatRating(item.rating)}</td>
                   <td data-label="Результат"><span className={`result-badge result-${item.status}`}>{observationStatusLabels[item.status]}</span>{item.status === "needs_review" && !confirmable && <small className={`result-note ${identity.granularity === "not_product" ? "result-note-error" : ""}`}>{observationIssueText(item)}</small>}</td>

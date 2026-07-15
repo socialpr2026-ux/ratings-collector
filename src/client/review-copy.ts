@@ -191,6 +191,27 @@ export function finalProductLabel(identityLabel: string, sourceTitle: string) {
   return identityLabel.trim() || sourceTitle.trim() || "Продукт по данным площадки";
 }
 
+/**
+ * Product proof shown to an operator must stay semantic and bounded. Raw
+ * `productEvidence.variants` are intentionally excluded here: on review sites
+ * a comment card can use the same generic DOM class as a product switcher and
+ * its heading must never be presented as a product characteristic.
+ */
+export function productProofLines(item: Pick<Observation, "productIdentity">): string[] {
+  const identity = item.productIdentity;
+  if (!identity) return [];
+  const result = identity.granularity === "variant"
+    ? [`Определён товарный вариант: ${identity.label}`]
+    : identity.granularity === "not_product"
+      ? []
+      : [`Определена общая карточка: ${identity.label}`];
+  for (const reason of identity.reasons) {
+    const value = reason.trim();
+    if (value && !result.includes(value)) result.push(value);
+  }
+  return result.slice(0, 5);
+}
+
 export function canRetryFailedPartitions(status: "queued" | "running" | "review" | "publishing" | "published" | "failed", failedPartitionCount: number) {
   return failedPartitionCount > 0 && (status === "review" || status === "failed");
 }

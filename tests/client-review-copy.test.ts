@@ -7,6 +7,7 @@ import {
   friendlyIssueText,
   observationIssueText,
   observationMatchesQuery,
+  productProofLines,
   reviewIntroText,
   setupReadinessText,
   summarizeIssues
@@ -142,6 +143,21 @@ describe("final product labels", () => {
 
   it("keeps already final product labels unchanged", () => {
     expect(finalProductLabel("таблетки №20", "Кагоцел таблетки №20")).toBe("таблетки №20");
+  });
+
+  it("shows semantic product proof without leaking raw review-page fragments", () => {
+    const productIdentity = {
+      label: "гранулы №30",
+      granularity: "variant" as const,
+      confidence: "exact" as const,
+      missing: [],
+      reasons: ["Единственный товарный вариант подтверждён названием карточки"]
+    };
+    expect(productProofLines({ productIdentity })).toEqual([
+      "Определён товарный вариант: гранулы №30",
+      "Единственный товарный вариант подтверждён названием карточки"
+    ]);
+    expect(productProofLines({ productIdentity }).join(" ")).not.toContain("Гранулы или плацебо?");
   });
 });
 
