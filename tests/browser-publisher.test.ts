@@ -63,6 +63,7 @@ function mockDriver(options: {
   return {
     open: vi.fn(async () => undefined),
     selectTab: vi.fn(async () => undefined),
+    ensureTab: vi.fn(async (preferredTitle: string) => preferredTitle),
     assertEditable: vi.fn(async () => undefined),
     captureCurrentRegion: vi.fn(async () => options.current ?? backup()),
     clearRange: vi.fn(async () => undefined),
@@ -83,7 +84,8 @@ describe("browser-only Google Sheets publisher", () => {
     expect(result.status).toBe("published");
     expect(result.attempts).toBe(1);
     expect(result.range).toBe(`A1:F${document.values.length}`);
-    expect(driver.selectTab).toHaveBeenCalledWith("Рейтинги");
+    expect(driver.ensureTab).toHaveBeenCalledWith("Ratings", ["Рейтинги"]);
+    expect(result.tabName).toBe("Ratings");
     expect(driver.writeClipboard).toHaveBeenCalledTimes(1);
     expect(driver.clearRange).toHaveBeenCalledTimes(1);
     expect(driver.readRange).toHaveBeenCalledWith(result.range, document.values.length, document.columnCount);

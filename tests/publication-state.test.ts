@@ -57,6 +57,7 @@ describe("anonymous browser publication state", () => {
     });
     expect(completed.status).toBe("published");
     expect(completed.publication?.verification?.method).toBe("anonymous-browser-readback");
+    expect(completed.publication?.updatedRange).toBe("'Ratings'!A1:E12");
     expect(await repository.listProducts("test_sheet")).toHaveLength(1);
     expect(Object.keys((await repository.getSnapshots("test_sheet"))["2026-07"])).toEqual(["example.com:1"]);
     expect((await repository.getRun(current.id))?.status).toBe("published");
@@ -99,6 +100,30 @@ describe("anonymous browser publication state", () => {
     expect((await repository.getRun(second.id))?.status).toBe("published");
   });
 
+  it("does not replay a publication marker from a different ratings tab", async () => {
+    const repository = new MemoryRepository();
+    const ratings = service(repository);
+    const legacy = run();
+    legacy.sheetTabName = "Рейтинги";
+    await repository.saveRun(legacy);
+    const legacyIntent = await prepareBrowserPublication(repository, ratings, legacy);
+    await completeBrowserPublication(repository, ratings, legacyIntent, {
+      range: "A1:E12",
+      verifiedAt: "2026-07-13T01:00:00.000Z",
+      attempts: 1,
+      limitations: [],
+      tabName: "Рейтинги"
+    });
+
+    const canonical = run();
+    canonical.status = "review";
+    canonical.sheetTabName = "Ratings";
+    await repository.saveRun(canonical);
+    const canonicalIntent = await prepareBrowserPublication(repository, ratings, canonical);
+
+    expect(canonicalIntent.shouldPublish).toBe(true);
+  });
+
   it("records Apps Script readback without changing the idempotency contract", async () => {
     const repository = new MemoryRepository();
     const ratings = service(repository);
@@ -111,10 +136,12 @@ describe("anonymous browser publication state", () => {
       verifiedAt: "2026-07-13T01:00:00.000Z",
       attempts: 1,
       limitations: [],
+      tabName: "Рейтинги",
       verificationMethod: "apps-script-readback"
     });
 
     expect(completed.publication?.verification?.method).toBe("apps-script-readback");
+    expect(completed.publication?.updatedRange).toBe("'Рейтинги'!A1:E12");
     expect((await repository.getPublication("test_sheet:2026-07"))?.payloadHash).toBe("payload-1");
   });
 

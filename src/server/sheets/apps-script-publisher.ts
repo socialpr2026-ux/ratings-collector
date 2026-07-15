@@ -1,8 +1,12 @@
 import type { SheetDocument, SheetRowKind, SheetScalar } from "./model.js";
 import { columnLetter } from "./model.js";
 import { extractSpreadsheetId } from "../utils/urls.js";
+import {
+  isRatingsTabName,
+  RATINGS_TAB_NAME,
+  type RatingsTabName
+} from "./tab-name.js";
 
-const SHEET_TAB = "Рейтинги";
 const MAX_CELLS = 50_000;
 const ROW_KINDS = new Set<SheetRowKind>([
   "brand",
@@ -25,7 +29,7 @@ export type AppsScriptSheetMerge = {
 
 export type AppsScriptSheetReadback = {
   spreadsheetId: string;
-  tabName: "Рейтинги";
+  tabName: RatingsTabName;
   values: SheetScalar[][];
   formulas: Array<Array<string | null>>;
   merges: AppsScriptSheetMerge[];
@@ -221,12 +225,12 @@ export function parseAppsScriptReadback(input: unknown): AppsScriptSheetReadback
   if (typeof value.spreadsheetId !== "string" || !/^[a-zA-Z0-9_-]+$/.test(value.spreadsheetId)) {
     throw new AppsScriptPublisherError("Некорректный spreadsheetId в ответе", "invalid_response");
   }
-  if (value.tabName !== SHEET_TAB) {
+  if (!isRatingsTabName(value.tabName)) {
     throw new AppsScriptPublisherError(`Web App вернул недопустимую вкладку ${String(value.tabName)}`, "invalid_response");
   }
   return {
     spreadsheetId: value.spreadsheetId,
-    tabName: SHEET_TAB,
+    tabName: value.tabName,
     values,
     formulas,
     merges,
@@ -298,7 +302,7 @@ export class AppsScriptSheetsPublisher {
 
   async read(sheetUrl: string): Promise<AppsScriptSheetReadback> {
     const spreadsheetId = extractSpreadsheetId(sheetUrl);
-    const payload = await this.call({ action: "read", spreadsheetId, tabName: SHEET_TAB });
+    const payload = await this.call({ action: "read", spreadsheetId, tabName: RATINGS_TAB_NAME });
     const response = record(payload);
     if (response.action !== "read") throw new AppsScriptPublisherError("Web App вернул ответ другой операции", "invalid_response");
     const readback = parseAppsScriptReadback(response.readback);
@@ -312,7 +316,7 @@ export class AppsScriptSheetsPublisher {
     sheetUrl: string;
     document: SheetDocument;
     expectedRevision: string;
-    tabName?: "Рейтинги";
+    tabName?: RatingsTabName;
   }): Promise<AppsScriptPublicationResult> {
     validateAppsScriptDocument(input.document);
     if (!/^[a-f0-9]{64}$/i.test(input.expectedRevision)) throw new Error("Некорректная expectedRevision");
@@ -320,7 +324,7 @@ export class AppsScriptSheetsPublisher {
     const payload = await this.call({
       action: "write",
       spreadsheetId,
-      tabName: input.tabName ?? SHEET_TAB,
+      tabName: input.tabName ?? RATINGS_TAB_NAME,
       expectedRevision: input.expectedRevision,
       document: {
         values: input.document.values,

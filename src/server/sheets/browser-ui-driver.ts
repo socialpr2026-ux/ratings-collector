@@ -25,6 +25,7 @@ export type BrowserSheetReadback = {
 export interface SheetsUiDriver {
   open(sheetUrl: string): Promise<void>;
   selectTab(title: string): Promise<void>;
+  ensureTab(preferredTitle: string, fallbackTitles?: readonly string[]): Promise<string>;
   assertEditable(): Promise<void>;
   captureCurrentRegion(): Promise<BrowserSheetReadback>;
   clearRange(a1Range: string): Promise<void>;
@@ -216,6 +217,7 @@ export type LocatorLike = {
   nth(index: number): LocatorLike;
   filter(options: { hasText: string }): LocatorLike;
   click(options?: { timeout?: number; force?: boolean }): Promise<void>;
+  dblclick(options?: { timeout?: number; force?: boolean }): Promise<void>;
   hover(options?: { timeout?: number }): Promise<void>;
   fill(value: string, options?: { timeout?: number }): Promise<void>;
   press(key: string, options?: { timeout?: number }): Promise<void>;
@@ -278,6 +280,82 @@ export class PlaywrightSheetsUiDriver implements SheetsUiDriver {
   }
 
   async selectTab(title: string): Promise<void> {
+    if (await this.trySelectTab(title)) return;
+    throw new BrowserSheetsUiError(`В Google Sheets не найден лист «${title}»`);
+  }
+
+  async ensureTab(preferredTitle: string, fallbackTitles: readonly string[] = []): Promise<string> {
+    if (await this.trySelectTab(preferredTitle)) return preferredTitle;
+    for (const fallbackTitle of fallbackTitles) {
+      if (await this.trySelectTab(fallbackTitle)) return fallbackTitle;
+    }
+
+    await this.assertEditable();
+    const addButtons = this.page.locator([
+      "#docs-sheet-add",
+      ".docs-sheet-add",
+      "[aria-label='Добавить лист']",
+      "[aria-label='Add sheet']",
+      "[data-tooltip='Добавить лист']",
+      "[data-tooltip='Add sheet']"
+    ].join(","));
+    let added = false;
+    for (let index = 0; index < await addButtons.count(); index += 1) {
+      const button = addButtons.nth(index);
+      if (!(await button.isVisible({ timeout: 300 }).catch(() => false))) continue;
+      await button.click({ timeout: this.timeoutMs });
+      added = true;
+      break;
+    }
+    if (!added) throw new BrowserSheetsUiError(`Не удалось создать лист «${preferredTitle}»`);
+    await this.page.waitForTimeout(300);
+
+    const activeTabs = this.page.locator([
+      ".docs-sheet-active-tab .docs-sheet-tab-name",
+      ".docs-sheet-tab.docs-sheet-active-tab .docs-sheet-tab-name",
+      ".docs-sheet-tab[aria-selected='true'] .docs-sheet-tab-name",
+      "[role='tab'][aria-selected='true'] .docs-sheet-tab-name",
+      "[role='tab'][aria-selected='true']"
+    ].join(","));
+    let activeTab: LocatorLike | undefined;
+    for (let index = 0; index < await activeTabs.count(); index += 1) {
+      const candidate = activeTabs.nth(index);
+      if (await candidate.isVisible({ timeout: 300 }).catch(() => false)) {
+        activeTab = candidate;
+        break;
+      }
+    }
+    if (!activeTab) throw new BrowserSheetsUiError(`Лист создан, но его вкладка не найдена для переименования в «${preferredTitle}»`);
+    await activeTab.dblclick({ timeout: this.timeoutMs });
+
+    const renameInputs = this.page.locator([
+      "input.docs-sheet-tab-name-input",
+      ".docs-sheet-tab-name-input input",
+      ".docs-sheet-active-tab input",
+      ".docs-sheet-active-tab [contenteditable='true']",
+      ".docs-sheet-tab-name input",
+      "[role='tab'][aria-selected='true'] input",
+      "[role='tab'][aria-selected='true'] [contenteditable='true']"
+    ].join(","));
+    let renameInput: LocatorLike | undefined;
+    for (let index = 0; index < await renameInputs.count(); index += 1) {
+      const candidate = renameInputs.nth(index);
+      if (await candidate.isVisible({ timeout: 500 }).catch(() => false)) {
+        renameInput = candidate;
+        break;
+      }
+    }
+    if (!renameInput) throw new BrowserSheetsUiError(`Лист создан, но Google Sheets не открыл переименование в «${preferredTitle}»`);
+    await renameInput.fill(preferredTitle, { timeout: this.timeoutMs });
+    await renameInput.press("Enter", { timeout: this.timeoutMs });
+    await this.page.waitForTimeout(300);
+    if (!(await this.trySelectTab(preferredTitle))) {
+      throw new BrowserSheetsUiError(`Google Sheets не подтвердил имя нового листа «${preferredTitle}»`);
+    }
+    return preferredTitle;
+  }
+
+  private async trySelectTab(title: string): Promise<boolean> {
     const selectors = [".docs-sheet-tab-name", "[role='tab']"];
     for (const selector of selectors) {
       const candidates = this.page.locator(selector).filter({ hasText: title });
@@ -287,10 +365,10 @@ export class PlaywrightSheetsUiDriver implements SheetsUiDriver {
         await candidate.click({ timeout: this.timeoutMs });
         this.activeGid = await this.resolveActiveGid();
         if (!this.activeGid) throw new BrowserSheetsUiError("Не удалось определить gid активного листа для безопасной резервной копии");
-        return;
+        return true;
       }
     }
-    throw new BrowserSheetsUiError(`В Google Sheets не найден лист «${title}»`);
+    return false;
   }
 
   async assertEditable(): Promise<void> {

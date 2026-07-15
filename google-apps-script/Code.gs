@@ -4,10 +4,11 @@
  * Deploy as a Web App that executes as the owner and is available to Anyone.
  * The endpoint intentionally has no application secret, so every request is
  * restricted to a spreadsheet that is itself shared as public Editor and to
- * the single tab named "Рейтинги".
+ * the canonical "Ratings" tab (or the legacy "Рейтинги" tab).
  */
 
-var RATINGS_TAB = "Рейтинги";
+var RATINGS_TAB = "Ratings";
+var LEGACY_RATINGS_TAB = "Рейтинги";
 var MAX_CELLS = 50000;
 var LOCK_WAIT_MS = 30000;
 var ROW_KINDS = {
@@ -170,8 +171,8 @@ function openTarget_(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw serviceError_("invalid_request", "Тело запроса должно быть JSON-объектом", false);
   }
-  if (payload.tabName !== RATINGS_TAB) {
-    throw serviceError_("invalid_tab", "Разрешена только вкладка «" + RATINGS_TAB + "»", false);
+  if (payload.tabName !== RATINGS_TAB && payload.tabName !== LEGACY_RATINGS_TAB) {
+    throw serviceError_("invalid_tab", "Разрешены только вкладки «" + RATINGS_TAB + "» и «" + LEGACY_RATINGS_TAB + "»", false);
   }
   if (typeof payload.spreadsheetId !== "string" || !/^[a-zA-Z0-9_-]+$/.test(payload.spreadsheetId)) {
     throw serviceError_("invalid_spreadsheet_id", "Некорректный spreadsheetId", false);
@@ -206,8 +207,23 @@ function openTarget_(payload) {
   } catch (error) {
     throw serviceError_("spreadsheet_unavailable", "Не удалось открыть таблицу", false);
   }
-  var sheet = spreadsheet.getSheetByName(RATINGS_TAB);
-  if (!sheet) throw serviceError_("tab_not_found", "Вкладка «" + RATINGS_TAB + "» не найдена", false);
+  var sheet = spreadsheet.getSheetByName(payload.tabName);
+  if (!sheet && payload.action === "read") {
+    sheet = spreadsheet.getSheetByName(RATINGS_TAB) || spreadsheet.getSheetByName(LEGACY_RATINGS_TAB);
+    if (!sheet) {
+      try {
+        sheet = spreadsheet.insertSheet(RATINGS_TAB);
+      } catch (error) {
+        // A manual edit can race with this request even though Web App calls
+        // are serialized by LockService. Re-read before reporting failure.
+        sheet = spreadsheet.getSheetByName(RATINGS_TAB);
+        if (!sheet) throw serviceError_("tab_create_failed", "Не удалось создать вкладку «" + RATINGS_TAB + "»", false);
+      }
+    }
+  }
+  if (!sheet) {
+    throw serviceError_("tab_changed", "Рабочая вкладка изменилась после проверки. Повторите публикацию.", true);
+  }
   return { spreadsheetId: payload.spreadsheetId, spreadsheet: spreadsheet, sheet: sheet };
 }
 
@@ -323,7 +339,7 @@ function captureSheet_(spreadsheetId, sheet, forcedRows, forcedColumns) {
   var revisionPayload = { rows: rows, columns: columns, values: values, formulas: formulas, merges: merges };
   return {
     spreadsheetId: spreadsheetId,
-    tabName: RATINGS_TAB,
+    tabName: sheet.getName(),
     values: values,
     formulas: formulas,
     displayValues: displayValues,

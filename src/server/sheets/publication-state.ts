@@ -20,6 +20,12 @@ export type BrowserPublicationIntent = {
   shouldPublish: boolean;
 };
 
+function targetsResolvedTab(record: PublicationRecord, run: RunState): boolean {
+  const tabName = run.sheetTabName ?? "Ratings";
+  const prefix = `'${tabName.replace(/'/g, "''")}'!`;
+  return record.updatedRange.startsWith(prefix);
+}
+
 export class PublicationCommitUncertainError extends Error {
   constructor(readonly saveError: unknown, readonly verificationError: unknown) {
     super("Маркер публикации мог быть сохранён, но его состояние не удалось подтвердить");
@@ -34,7 +40,7 @@ export async function reconcileBrowserPublication(
   if (!run.payloadHash) return run;
   const spreadsheetId = extractSpreadsheetId(run.request.sheetUrl);
   const prior = await repository.getPublication(`${spreadsheetId}:${run.request.month}`);
-  if (prior?.payloadHash !== run.payloadHash) return run;
+  if (prior?.payloadHash !== run.payloadHash || !targetsResolvedTab(prior, run)) return run;
   run.status = "published";
   run.publication = prior;
   run.updatedAt = prior.publishedAt;
@@ -67,7 +73,7 @@ export async function prepareBrowserPublication(
   if (!run.payloadHash) throw new Error("У запуска нет контрольной суммы");
 
   const prior = await repository.getPublication(publicationKey);
-  if (prior?.payloadHash === run.payloadHash) {
+  if (prior?.payloadHash === run.payloadHash && targetsResolvedTab(prior, run)) {
     run.status = "published";
     run.publication = prior;
     run.updatedAt = prior.publishedAt;
@@ -94,6 +100,7 @@ export async function completeBrowserPublication(
     verifiedAt: string;
     attempts: number;
     limitations: string[];
+    tabName?: string;
     evidenceRef?: string;
     verificationMethod?: "anonymous-browser-readback" | "apps-script-readback";
   }
@@ -101,13 +108,15 @@ export async function completeBrowserPublication(
   const { run, spreadsheetId, publicationKey } = intent;
   if (!run.payloadHash) throw new Error("У запуска нет контрольной суммы");
   await service.commitSuccessfulRun(run);
+  const tabName = result.tabName ?? run.sheetTabName ?? "Ratings";
+  run.sheetTabName = tabName === "Рейтинги" ? "Рейтинги" : "Ratings";
   const publication: PublicationRecord = {
     runId: run.id,
     spreadsheetId,
     month: run.request.month,
     payloadHash: run.payloadHash,
     publishedAt: result.verifiedAt,
-    updatedRange: `'Рейтинги'!${result.range}`,
+    updatedRange: `'${run.sheetTabName}'!${result.range}`,
     verification: {
       method: result.verificationMethod ?? "anonymous-browser-readback",
       attempts: result.attempts,

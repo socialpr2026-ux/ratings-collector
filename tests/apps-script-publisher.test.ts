@@ -31,7 +31,7 @@ function document(): SheetDocument {
 function readback(overrides: Partial<AppsScriptSheetReadback> = {}): AppsScriptSheetReadback {
   return {
     spreadsheetId: "test_sheet",
-    tabName: "Рейтинги",
+    tabName: "Ratings",
     values: [["Заголовок", null], ["Строка", 1]],
     formulas: [[null, null], [null, "=SUM(A2:A2)"]],
     merges: [{ startRow: 0, endRow: 1, startColumn: 0, endColumn: 2 }],
@@ -56,10 +56,10 @@ describe("Apps Script Sheets publisher", () => {
     expect(() => validateAppsScriptEndpoint(`${endpoint}?token=secret`)).toThrow(/должен иметь вид/);
   });
 
-  it("reads the fixed tab and validates the server response", async () => {
+  it("requests the canonical tab and validates the server response", async () => {
     const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       const request = JSON.parse(String(init?.body));
-      expect(request).toEqual({ action: "read", spreadsheetId: "test_sheet", tabName: "Рейтинги" });
+      expect(request).toEqual({ action: "read", spreadsheetId: "test_sheet", tabName: "Ratings" });
       return jsonResponse({ ok: true, action: "read", readback: readback() });
     }) as unknown as typeof fetch;
     const publisher = new AppsScriptSheetsPublisher(endpoint, { fetchImpl });
@@ -67,7 +67,7 @@ describe("Apps Script Sheets publisher", () => {
     const result = await publisher.read(sheetUrl);
 
     expect(result.revision).toBe(revision);
-    expect(result.tabName).toBe("Рейтинги");
+    expect(result.tabName).toBe("Ratings");
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
@@ -76,7 +76,7 @@ describe("Apps Script Sheets publisher", () => {
       const request = JSON.parse(String(init?.body));
       expect(request.action).toBe("write");
       expect(request.expectedRevision).toBe(revision);
-      expect(request.tabName).toBe("Рейтинги");
+      expect(request.tabName).toBe("Ratings");
       expect(request.document.rowKinds).toEqual(["title", "summary"]);
       return jsonResponse({
         ok: true,
@@ -95,6 +95,42 @@ describe("Apps Script Sheets publisher", () => {
     expect(result.range).toBe("A1:B2");
     expect(result.attempts).toBe(1);
     expect(result.revision).toBe("b".repeat(64));
+  });
+
+  it("keeps publishing to a legacy tab returned by preflight", async () => {
+    const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body));
+      expect(request.tabName).toBe("Рейтинги");
+      return jsonResponse({
+        ok: true,
+        action: "write",
+        range: "A1:B2",
+        attempts: 1,
+        verifiedAt: "2026-07-14T01:02:03.000Z",
+        readback: readback({ tabName: "Рейтинги", revision: "b".repeat(64) })
+      });
+    }) as unknown as typeof fetch;
+    const publisher = new AppsScriptSheetsPublisher(endpoint, { fetchImpl });
+
+    const result = await publisher.publish({
+      sheetUrl,
+      document: document(),
+      expectedRevision: revision,
+      tabName: "Рейтинги"
+    });
+
+    expect(result.readback.tabName).toBe("Рейтинги");
+  });
+
+  it("rejects a response for an unrelated tab", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({
+      ok: true,
+      action: "read",
+      readback: { ...readback(), tabName: "Лист1" }
+    })) as unknown as typeof fetch;
+    const publisher = new AppsScriptSheetsPublisher(endpoint, { fetchImpl });
+
+    await expect(publisher.read(sheetUrl)).rejects.toMatchObject({ code: "invalid_response" });
   });
 
   it("normalizes localized formula separators during verification", () => {

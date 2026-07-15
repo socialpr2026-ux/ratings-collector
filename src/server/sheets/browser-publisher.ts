@@ -6,6 +6,7 @@ import type {
   BrowserSheetReadback,
   SheetsUiDriver
 } from "./browser-ui-driver.js";
+import { LEGACY_RATINGS_TAB_NAME, RATINGS_TAB_NAME } from "./tab-name.js";
 
 export type BrowserSheetPublication = {
   sheetUrl: string;
@@ -16,6 +17,7 @@ export type BrowserSheetPublication = {
 
 export type BrowserSheetPublicationResult = {
   status: "published";
+  tabName: string;
   range: string;
   attempts: number;
   verifiedAt: string;
@@ -315,13 +317,16 @@ export class BrowserSheetsPublisher {
 
   async publish(publication: BrowserSheetPublication): Promise<BrowserSheetPublicationResult> {
     const sheetUrl = validateSheetUrl(publication.sheetUrl);
-    const tabName = publication.tabName ?? "Рейтинги";
+    let tabName = publication.tabName ?? RATINGS_TAB_NAME;
     const plan = buildBrowserSheetClipboardPlan(publication.document, this.locale);
     let backup = publication.preimage;
     if (!backup) {
       await this.driver.open(sheetUrl);
-      await this.driver.selectTab(tabName);
       await this.driver.assertEditable();
+      tabName = await this.driver.ensureTab(
+        tabName,
+        publication.tabName ? [] : [LEGACY_RATINGS_TAB_NAME]
+      );
       backup = await this.driver.captureCurrentRegion();
     } else {
       await this.driver.assertEditable();
@@ -350,6 +355,7 @@ export class BrowserSheetsPublisher {
     if (!existingMismatches.length) {
       return {
         status: "published",
+        tabName,
         range: plan.range,
         attempts: 0,
         verifiedAt: new Date().toISOString(),
@@ -382,7 +388,7 @@ export class BrowserSheetsPublisher {
         lastMismatches = verifyBrowserSheetReadback(readback, expected, plan.merges);
         if (!lastMismatches.length) {
           return {
-            status: "published", range: plan.range, attempts: attempt, verifiedAt: new Date().toISOString(),
+            status: "published", tabName, range: plan.range, attempts: attempt, verifiedAt: new Date().toISOString(),
             limitations: ["Браузерный путь проверяет сохранённые значения, формулы и объединения после перезагрузки; точное воспроизведение каждого параметра форматирования не гарантируется."],
             readback
           };
@@ -410,7 +416,7 @@ export class BrowserSheetsPublisher {
     const backup = publication.preimage;
     if (!backup) throw new Error("Для компенсирующего rollback отсутствует preimage листа");
     const sheetUrl = validateSheetUrl(publication.sheetUrl);
-    const tabName = publication.tabName ?? "Рейтинги";
+    const tabName = publication.tabName ?? RATINGS_TAB_NAME;
     buildBrowserSheetClipboardPlan(publication.document, this.locale);
     const oldSize = readbackDimensions(backup);
     const cleanupRows = Math.max(oldSize.rows, publication.document.values.length, 1);

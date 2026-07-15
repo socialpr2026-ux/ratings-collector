@@ -4,6 +4,15 @@ import { describe, expect, it } from "vitest";
 const source = readFileSync(new URL("../google-apps-script/Code.gs", import.meta.url), "utf8");
 
 describe("Google Apps Script bridge source", () => {
+  it("creates the canonical Ratings tab and preserves a legacy tab", () => {
+    expect(source).toContain('var RATINGS_TAB = "Ratings";');
+    expect(source).toContain('var LEGACY_RATINGS_TAB = "Рейтинги";');
+    expect(source).toContain("spreadsheet.getSheetByName(RATINGS_TAB) || spreadsheet.getSheetByName(LEGACY_RATINGS_TAB)");
+    expect(source).toContain("spreadsheet.insertSheet(RATINGS_TAB)");
+    expect(source).toContain("tabName: sheet.getName()");
+    expect(source).not.toContain('serviceError_("tab_not_found"');
+  });
+
   it("preserves ru-RU formula separators on write", () => {
     expect(source).toContain("function normalizeFormulaForWrite_(formula)");
     expect(source).toContain("return String(formula);");

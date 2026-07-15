@@ -12,6 +12,11 @@ import {
 } from "../../src/server/sheets/apps-script-publisher.js";
 import { buildSheetDocument } from "../../src/server/sheets/model.js";
 import {
+  LEGACY_RATINGS_TAB_NAME,
+  RATINGS_TAB_NAME,
+  type RatingsTabName
+} from "../../src/server/sheets/tab-name.js";
+import {
   completeBrowserPublication,
   failBrowserPublication,
   prepareBrowserPublication,
@@ -38,7 +43,6 @@ type AgentContext = {
   sandbox: SandboxApi;
 };
 
-const SHEET_TAB = "Рейтинги";
 const OPEN_ACCESS_OWNER = "local@ratings";
 const GOOGLE_RESOURCE_DOMAINS = [
   "google.com",
@@ -112,6 +116,7 @@ function readbackEvidence(readback: BrowserSheetReadback) {
 
 function appsScriptReadbackEvidence(readback: AppsScriptSheetReadback) {
   const payload = {
+    tabName: readback.tabName,
     values: readback.values,
     formulas: readback.formulas,
     merges: readback.merges,
@@ -128,7 +133,7 @@ function appsScriptReadbackEvidence(readback: AppsScriptSheetReadback) {
 async function withSheetBrowser<T>(
   context: AgentContext,
   sheetUrl: string,
-  action: (driver: PlaywrightSheetsUiDriver, page: Page) => Promise<T>
+  action: (driver: PlaywrightSheetsUiDriver, page: Page, tabName: RatingsTabName) => Promise<T>
 ): Promise<T> {
   // EdgeOne initializes Sandbox lazily; cdpUrl is unavailable before one async call.
   await context.sandbox.commands.run("true");
@@ -153,9 +158,9 @@ async function withSheetBrowser<T>(
       modifier: "Control"
     });
     await driver.open(sheetUrl);
-    await driver.selectTab(SHEET_TAB);
     await driver.assertEditable();
-    return await action(driver, page);
+    const tabName = await driver.ensureTab(RATINGS_TAB_NAME, [LEGACY_RATINGS_TAB_NAME]) as RatingsTabName;
+    return await action(driver, page, tabName);
   } finally {
     await page?.close().catch(() => undefined);
     if (ownsContext) await browserContext?.close().catch(() => undefined);
@@ -216,18 +221,21 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         ? await new AppsScriptSheetsPublisher(appsScriptUrl).read(run.request.sheetUrl).then((current) => ({
             rows: current.rows,
             columns: current.columns,
+            tabName: current.tabName,
             publisher: "apps-script" as const
           }))
-        : await withSheetBrowser(context, run.request.sheetUrl, async (driver) => {
+        : await withSheetBrowser(context, run.request.sheetUrl, async (driver, _page, tabName) => {
             const current = await driver.captureCurrentRegion();
             const rows = current.cells.length;
             const columns = Math.max(0, ...current.cells.map((row) => row.length));
             if (rows * columns > 50_000) throw new Error(`Лист слишком велик для безопасной браузерной публикации: ${rows * columns} ячеек`);
-            return { rows, columns, publisher: "browser" as const };
+            return { rows, columns, tabName, publisher: "browser" as const };
           });
       const refreshed = await repository.getRun(run.id);
       if (refreshed && refreshed.status !== "published") {
         const previousErrorCount = refreshed.errors.length;
+        const tabChanged = refreshed.sheetTabName !== result.tabName;
+        refreshed.sheetTabName = result.tabName;
         refreshed.errors = refreshed.errors.filter((item) => item.partition !== "sheet-preflight");
         if (
           refreshed.status === "failed" &&
@@ -236,7 +244,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         ) {
           refreshed.status = "queued";
         }
-        if (refreshed.errors.length !== previousErrorCount || refreshed.status !== run.status) {
+        if (tabChanged || refreshed.errors.length !== previousErrorCount || refreshed.status !== run.status) {
           refreshed.updatedAt = new Date().toISOString();
           await repository.saveRun(refreshed);
         }
@@ -246,7 +254,6 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         status: refreshed?.status ?? run.status,
         publicationStatus: "ready",
         sheetReady: true,
-        tabName: SHEET_TAB,
         ...result
       });
     }
@@ -288,7 +295,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         sheetUrl: run.request.sheetUrl,
         document,
         expectedRevision: current.revision,
-        tabName: SHEET_TAB
+        tabName: current.tabName
       });
       const evidenceRef = await evidence.put({
         kind: "apps-script-google-sheets-publication",
@@ -304,6 +311,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
       });
       const completed = await completeBrowserPublication(publicationRepository, service, intent, {
         ...published,
+        tabName: published.readback.tabName,
         evidenceRef,
         verificationMethod: "apps-script-readback"
       });
@@ -315,7 +323,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
       });
     }
 
-    return await withSheetBrowser(context, run.request.sheetUrl, async (driver, page) => {
+    return await withSheetBrowser(context, run.request.sheetUrl, async (driver, page, tabName) => {
       const current = await driver.captureCurrentRegion();
       const document = buildSheetDocument({ values: existingValues(current) }, run.request, registry, snapshots);
       const evidence = new RemoteEvidenceStore(publicationRepository);
@@ -332,7 +340,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         maxAttempts: 2,
         maxBackupCells: 50_000
       });
-      const publication = { sheetUrl: run.request.sheetUrl, document, tabName: SHEET_TAB, preimage: current };
+      const publication = { sheetUrl: run.request.sheetUrl, document, tabName, preimage: current };
       const published = await browserPublisher.publish(publication);
 
       try {
