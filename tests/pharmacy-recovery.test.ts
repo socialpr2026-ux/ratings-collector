@@ -31,11 +31,17 @@ function polzaCard(source: string): string {
       <div itemprop="aggregateRating" itemscope>
         <meta itemprop="reviewCount" content="5"><meta itemprop="ratingValue" content="5">
       </div>
+      ${polzaReviewProof(5)}
     </main>
   `);
 }
 
-function asnaCard(source: string, sku: string, reviews: number): string {
+function polzaReviewProof(reviews: number): string {
+  return `<div id="review_block"><div class="reviews__amount">${reviews}</div>
+    <div class="reviews__list"><div class="reviews__item review-item">Проверенный отзыв</div></div></div>`;
+}
+
+function asnaCard(source: string, sku: string, reviews: number, visibleReviews = true): string {
   return translated(source, `
     <link rel="canonical" href="${source}">
     <div class="productPage__content product__item" itemscope itemtype="http://schema.org/Product">
@@ -43,6 +49,9 @@ function asnaCard(source: string, sku: string, reviews: number): string {
       <div itemprop="aggregateRating" itemscope>
         <meta itemprop="ratingValue" content="5"><meta itemprop="reviewCount" content="${reviews}">
       </div>
+      <p class="product__ratingText">отзывы (${reviews})</p>
+      ${visibleReviews && reviews > 0 ? `<div id="feedbackListContainer" class="product__feedbackList">
+        <div class="product__feedbackItem" itemtype="http://schema.org/Review">Проверенный отзыв</div></div>` : ""}
     </div>
   `);
 }
@@ -89,6 +98,22 @@ describe("recovered first-party pharmacy adapters", () => {
     expect(result.productEvidence?.identifiers).toContainEqual({ type: "product_id", value: "6853" });
   });
 
+  it("does not publish Polza's orphan AggregateRating when the product has no visible reviews", async () => {
+    const card = "https://polza.ru/catalog/tsereton-kapsuly-400-mg-112-sht_56071/";
+    const fetchMock = vi.fn(async () => new Response(translated(card, `
+      <main itemscope itemtype="https://schema.org/Product">
+        <meta itemprop="sku" content="56071">
+        <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5"></div>
+      </main>`), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
+    const adapter = new PolzaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const result = await adapter.collect({
+      domain: "polza.ru", platform: "polza.ru", listingId: "56071", brand: "Церетон", url: card, title: "Церетон капсулы 400 мг 112 шт", metadata: {}
+    }, { region: "Москва" });
+
+    expect(result).toMatchObject({ listingId: "56071", reviews: 0, rating: null, status: "no_reviews" });
+  });
+
   it("derives the exact human Polza variant from a source-bound product URL", async () => {
     const family = "https://polza.ru/product/otsillokoktsinum/";
     const card = "https://polza.ru/catalog/otsillokoktsinum-granuly-1-g-6-doz_20630/";
@@ -103,7 +128,7 @@ describe("recovered first-party pharmacy adapters", () => {
       if (url.pathname.includes("_20630")) return new Response(translated(card, `
         <main itemscope><meta itemprop="sku" content="20630"><div itemprop="aggregateRating">
           <meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5">
-        </div></main>`), { headers: { "content-type": "text/html" } });
+        </div>${polzaReviewProof(1)}</main>`), { headers: { "content-type": "text/html" } });
       throw new Error(`unexpected ${url}`);
     }) as unknown as typeof fetch;
     const adapter = new PolzaAdapter(new MemoryEvidenceStore(), fetchMock);
@@ -144,7 +169,7 @@ describe("recovered first-party pharmacy adapters", () => {
         return new Response(translated(card, `
           <main itemscope><meta itemprop="sku" content="20630"><div itemprop="aggregateRating">
             <meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5">
-          </div></main>`), { headers: { "content-type": "text/html" } });
+          </div>${polzaReviewProof(1)}</main>`), { headers: { "content-type": "text/html" } });
       }
       throw new Error(`unexpected ${url}`);
     }) as unknown as typeof fetch;
@@ -229,6 +254,20 @@ describe("recovered first-party pharmacy adapters", () => {
       listingId: "20046", reviews: 1, rating: 5, status: "ok"
     });
     expect(fetchMock.mock.calls.some(([input]) => new URL(String(input)).hostname === "translate.google.com")).toBe(true);
+  });
+
+  it("does not publish ASNA's orphan AggregateRating when the feedback list is empty", async () => {
+    const card = "https://www.asna.ru/cards/tsereton_400mg_n28_kaps_soteks.html";
+    const fetchMock = vi.fn(async () => new Response(asnaCard(card, "20046", 1, false), {
+      headers: { "content-type": "text/html" }
+    })) as unknown as typeof fetch;
+    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const result = await adapter.collect({
+      domain: "asna.ru", platform: "asna.ru", listingId: "20046", brand: "Церетон", url: card, title: "Церетон 400 мг №28 капсулы", metadata: {}
+    }, { region: "Москва" });
+
+    expect(result).toMatchObject({ listingId: "20046", reviews: 0, rating: null, status: "no_reviews" });
   });
 
   it("rejects an ASNA launcher response whose final renderer URL is not the requested source", async () => {
@@ -369,6 +408,7 @@ describe("recovered first-party pharmacy adapters", () => {
       if (url.hostname === "polza-ru.translate.goog" && url.pathname.includes("_53076")) {
         return new Response(translated(polzaProductUrl, `<main itemscope><meta itemprop="sku" content="53076">
           <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="3"><meta itemprop="ratingValue" content="5"></div>
+          ${polzaReviewProof(3)}
         </main>`), { headers: { "content-type": "text/html" } });
       }
       if (url.hostname === "www.asna.ru" && url.pathname.endsWith("sitemap_cards.xml")) {

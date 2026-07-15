@@ -9,6 +9,19 @@ function requestedUrl(input: RequestInfo | URL): URL {
 
 const context = { region: "Москва" };
 
+function reviewSection(listingId: string, title: string, reviews: number, rating: number): string {
+  return `<section class="sec-item__reviews" data-offer='{"itemId":${listingId},"itemCount":${reviews},"itemRating":${rating}}'>
+    <h4 class="sec-item__reviews-header">${title}: ${reviews} отзывов покупателей и фармацевтов</h4>
+    <div class="sec-item__rating-value">${rating}</div>
+    <div class="reviews-application-container"></div>
+  </section>`;
+}
+
+function translatedProduct(source: string, body: string): string {
+  return `<html><head><base href="${source}"><link rel="canonical" href="${source}"></head>
+    <body><script data-source-url="${source}"></script>${body}</body></html>`;
+}
+
 describe("EaptekaAdapter", () => {
   it("discovers unique matching /goods/id{ID}/ cards and keeps registry cards", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -50,6 +63,7 @@ describe("EaptekaAdapter", () => {
           item_rating: "4,8",
           item_reviews_count: "25"
         });</script>
+        ${reviewSection("12345", "Тикализис, таблетки покрытые пленочной оболочкой 90 мг, 60 шт.", 25, 4.83)}
       </body></html>
     `, { status: 200 })) as unknown as typeof fetch;
     const evidence = new MemoryEvidenceStore();
@@ -70,13 +84,62 @@ describe("EaptekaAdapter", () => {
       brand: "Тикализис",
       canonicalUrl: "https://www.eapteka.ru/goods/id12345/",
       reviews: 25,
-      rating: 4.8,
+      rating: 4.83,
       status: "ok",
       source: "eapteka-data-layer"
     });
     expect(observation.productEvidence?.identifiers).toContainEqual({ type: "product_id", value: "12345" });
     expect(observation.evidenceRef).toMatch(/^evidence:[a-f0-9]{64}$/);
     expect(evidence.items.size).toBe(1);
+  });
+
+  it("ignores Eapteka's stale dataLayer rating when the product has no visible review section", async () => {
+    const productUrl = "https://www.eapteka.ru/goods/id217962/";
+    const productBody = `<h1>Церетон капсулы 400 мг 14 шт</h1>
+      <script>dataLayer.push({item_reviews_count:2,item_rating:5});</script>`;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestedUrl(input);
+      if (url.hostname === "www.eapteka.ru") return new Response(`<html><body>${productBody}</body></html>`, { status: 200 });
+      if (url.hostname === "www-eapteka-ru.translate.goog") {
+        return new Response(translatedProduct(productUrl, productBody), { status: 200 });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new EaptekaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const observation = await adapter.collect({
+      domain: "eapteka.ru", platform: "eapteka.ru", listingId: "217962", brand: "Церетон",
+      url: productUrl, metadata: {}
+    }, context);
+
+    expect(observation).toMatchObject({
+      listingId: "217962", reviews: 0, rating: null, ratingCount: 0, status: "no_reviews",
+      source: "eapteka-visible-product-reviews:google-translate"
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses the visible translated product section instead of stale hidden Eapteka metrics", async () => {
+    const productUrl = "https://www.eapteka.ru/goods/id217962/";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestedUrl(input);
+      if (url.hostname === "www.eapteka.ru") return new Response("Forbidden", { status: 403 });
+      if (url.hostname === "www-eapteka-ru.translate.goog") {
+        return new Response(translatedProduct(productUrl, `<h1>Церетон капсулы 400 мг 14 шт</h1>
+          <script>dataLayer.push({item_reviews_count:2,item_rating:5});</script>`), {
+          headers: { "content-type": "text/html" }
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new EaptekaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const observation = await adapter.collect({
+      domain: "eapteka.ru", platform: "eapteka.ru", listingId: "217962", brand: "Церетон", url: productUrl, metadata: {}
+    }, context);
+
+    expect(observation).toMatchObject({ reviews: 0, rating: null, ratingCount: 0, status: "no_reviews", source: "eapteka-visible-product-reviews:google-translate" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("publishes a proved zero as no_reviews and leaves rating empty", async () => {
@@ -98,10 +161,23 @@ describe("EaptekaAdapter", () => {
     expect(observation).toMatchObject({ reviews: 0, rating: null, status: "no_reviews" });
   });
 
+  it("fails closed when a product page proves neither feedback nor its absence", async () => {
+    const fetchMock = vi.fn(async () => new Response(`
+      <html><body><h1>Даксабрис таблетки 20 мг №100</h1></body></html>
+    `, { status: 200 })) as unknown as typeof fetch;
+    const adapter = new EaptekaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    await expect(adapter.collect({
+      domain: "eapteka.ru", platform: "eapteka.ru", listingId: "67890", brand: "Даксабрис",
+      url: "https://www.eapteka.ru/goods/id67890/", metadata: {}
+    }, context)).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
   it("rejects a positive review count without a valid rating", async () => {
     const fetchMock = vi.fn(async () => new Response(`
       <html><body><h1>Тикализис таблетки №60</h1>
-      <script>dataLayer.push({item_reviews_count: 3, item_rating: 0});</script></body></html>
+      <script>dataLayer.push({item_reviews_count: 3, item_rating: 0});</script>
+      ${reviewSection("12345", "Тикализис таблетки №60", 3, 0)}</body></html>
     `, { status: 200 })) as unknown as typeof fetch;
     const adapter = new EaptekaAdapter(new MemoryEvidenceStore(), fetchMock);
 
@@ -158,7 +234,13 @@ Markdown Content:
 
 4.93
 
-на основе 125 оценок`, { headers: { "content-type": "text/plain" } });
+на основе 125 оценок
+
+Написать отзыв
+
+##### Имя скрыто
+
+Проверенный отзыв о товаре`, { headers: { "content-type": "text/plain" } });
       }
       throw new Error(`unexpected ${url}`);
     }) as unknown as typeof fetch;

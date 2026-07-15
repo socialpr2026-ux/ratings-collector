@@ -352,6 +352,29 @@ function polzaProduct($: CheerioAPI, expectedId?: string): ParsedProduct | undef
   return result;
 }
 
+function polzaProductMetrics(
+  root: ReturnType<CheerioAPI>,
+  $: CheerioAPI
+): Pick<ParsedProduct, "reviews" | "rating"> | undefined {
+  const aggregate = root.find("[itemprop='aggregateRating']").first();
+  const reviews = exactInteger(aggregate.find("meta[itemprop='reviewCount']").first().attr("content"));
+  const rating = exactRating(aggregate.find("meta[itemprop='ratingValue']").first().attr("content"));
+  if (reviews === undefined || reviews > 0 && rating === undefined) return undefined;
+  if (reviews === 0) return { reviews: 0, rating: null };
+
+  // Polza can leave a stale AggregateRating on a product that has no review
+  // section at all. Accept a positive total only when the same product root
+  // exposes the visible review block, its total and at least one review item.
+  const reviewBlocks = $("#review_block");
+  const reviewBlock = reviewBlocks.first();
+  const reviewItems = reviewBlock.find(".reviews__item.review-item");
+  if (!reviewBlocks.length && !reviewItems.length) return { reviews: 0, rating: null };
+  if (reviewBlocks.length !== 1) return undefined;
+  const visibleTotal = exactInteger(reviewBlock.find(".reviews__amount").first().text());
+  if (visibleTotal !== reviews || reviewItems.length === 0) return undefined;
+  return { reviews, rating: rating! };
+}
+
 export class PolzaAdapter implements SiteAdapter {
   readonly id = "polza.ru:translate-v1";
   readonly supportedDomains = ["polza.ru", "www.polza.ru"] as const;
@@ -441,17 +464,15 @@ export class PolzaAdapter implements SiteAdapter {
     const capturedAt = new Date().toISOString();
     const { html, $ } = await translatedPage(new URL(parsedRef.canonicalUrl), "polza-ru.translate.goog", context, this.fetchImpl);
     const root = $(`meta[itemprop='sku'][content='${parsedRef.listingId}']`).closest("[itemscope]").first();
-    const aggregate = root.find("[itemprop='aggregateRating']").first();
-    const reviews = exactInteger(aggregate.find("meta[itemprop='reviewCount']").first().attr("content"));
-    const rating = exactRating(aggregate.find("meta[itemprop='ratingValue']").first().attr("content"));
-    if (root.length !== 1 || reviews === undefined || reviews > 0 && rating === undefined) {
+    const metrics = root.length === 1 ? polzaProductMetrics(root, $) : undefined;
+    if (!metrics) {
       throw new ParserChangedError(`polza.ru:${ref.listingId}: product aggregate is incomplete`);
     }
     return observation("polza.ru", { ...ref, title: ref.title || polzaProductTitle(parsedRef.canonicalUrl, ref.brand) }, {
       listingId: parsedRef.listingId,
       canonicalUrl: parsedRef.canonicalUrl,
-      reviews,
-      rating: reviews === 0 ? null : rating!
+      reviews: metrics.reviews,
+      rating: metrics.rating
     }, html, this.evidence, capturedAt, "polza-product-microdata:google-translate");
   }
 }
@@ -533,6 +554,16 @@ function asnaProduct($: CheerioAPI): ParsedProduct | undefined {
   const reviews = exactInteger(aggregate.find("meta[itemprop='reviewCount']").first().attr("content"));
   const rating = exactRating(aggregate.find("meta[itemprop='ratingValue']").first().attr("content"));
   if (!parsedRef || reviews === undefined || reviews > 0 && rating === undefined) return undefined;
+  if (reviews > 0) {
+    // ASNA also publishes stale positive microdata for some products while the
+    // visible feedback area contains only the "leave a review" form. A real
+    // positive total is accepted only with a source-bound list and review item.
+    const feedbackList = root.find("#feedbackListContainer.product__feedbackList").first();
+    const feedbackItems = feedbackList.find(".product__feedbackItem[itemtype*='Review']");
+    if (!feedbackList.length && !feedbackItems.length) return { ...parsedRef, reviews: 0, rating: null };
+    const visibleTotal = exactInteger(root.find(".product__ratingText").first().text().match(/\((\d[\d\s\u00a0]*)\)/)?.[1]);
+    if (visibleTotal !== reviews || feedbackItems.length === 0) return undefined;
+  }
   return { ...parsedRef, reviews, rating: reviews === 0 ? null : rating! };
 }
 

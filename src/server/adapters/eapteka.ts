@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { load } from "cheerio";
 import type { AdapterContext, AdapterHealth, Observation, ProductRef, SiteAdapter } from "../../shared/types.js";
 import type { EvidenceStore } from "../evidence.js";
-import { matchesBrand } from "../utils/normalize.js";
+import { matchesBrand, normalizeText } from "../utils/normalize.js";
 import { extractPageProductEvidence, titleProductEvidence } from "../utils/product-evidence.js";
 import { readerProxyUrl } from "../utils/reader-proxy.js";
 import { readTextBounded, safeFetch } from "../utils/safe-fetch.js";
@@ -69,6 +69,68 @@ function dataLayerValue(html: string, key: "item_rating" | "item_reviews_count")
   return match?.[1] ?? match?.[2];
 }
 
+function productPageMetrics(
+  $: ReturnType<typeof load>,
+  html: string,
+  listingId: string,
+  title: string
+): { reviews: number; rating: number | null; ratingCount: number; orphanedStructured: boolean } {
+  const hiddenReviews = parseNonNegativeInteger(dataLayerValue(html, "item_reviews_count"));
+  const hiddenRating = parseRating(dataLayerValue(html, "item_rating"));
+  let exactSection: ReturnType<typeof $> | undefined;
+  let offerCount: number | undefined;
+  let offerRating: number | undefined;
+
+  $("section[data-entity-reviews][data-offer], .sec-item__reviews[data-offer]").each((_index, node) => {
+    const entityId = $(node).attr("data-entity-reviews");
+    if (entityId !== undefined && entityId !== listingId) return;
+    let offer: Record<string, unknown>;
+    try { offer = JSON.parse($(node).attr("data-offer") ?? ""); }
+    catch { return; }
+    if (String(offer.itemId ?? "") !== listingId) return;
+    if (exactSection) throw new ParserChangedError(`${DOMAIN}:${listingId}: duplicate visible review sections`);
+    exactSection = $(node);
+    offerCount = parseNonNegativeInteger(String(offer.itemCount ?? ""));
+    offerRating = parseRating(String(offer.itemRating ?? ""));
+  });
+
+  // Some Eapteka product pages keep a stale rating/dataLayer even though the
+  // product has no review section. The employee-visible page is authoritative.
+  if (!exactSection) {
+    if (hiddenReviews === undefined) {
+      throw new ParserChangedError(`${DOMAIN}:${listingId}: product page proved neither reviews nor their absence`);
+    }
+    return { reviews: 0, rating: null, ratingCount: 0, orphanedStructured: (hiddenReviews ?? 0) > 0 };
+  }
+  const section = exactSection as ReturnType<typeof $>;
+  const header = compactText(section.find(".sec-item__reviews-header").first().text());
+  const headerMatch = header.match(/^(.*?):\s*([\d\s\u00a0]+)\s+отзыв/iu);
+  const visibleCount = parseNonNegativeInteger(headerMatch?.[2]);
+  const visibleRating = parseRating(section.find(".sec-item__rating-value").first().text());
+  const hasReviewApplication = section.find(".reviews-application-container").length === 1;
+  const hiddenRatingMatches = hiddenRating === undefined || offerRating !== undefined &&
+    Math.round(hiddenRating * 10) === Math.round(offerRating * 10);
+  if (normalizeText(headerMatch?.[1] ?? "") !== normalizeText(title) ||
+      offerCount === undefined || visibleCount !== offerCount || hiddenReviews !== undefined && hiddenReviews !== offerCount ||
+      offerCount > 0 && (offerRating === undefined || offerRating <= 0 || offerRating > 5 || visibleRating !== offerRating ||
+        !hiddenRatingMatches) ||
+      offerCount > 0 && !hasReviewApplication) {
+    throw new ParserChangedError(`${DOMAIN}:${listingId}: visible product reviews do not match structured metrics`);
+  }
+  return { reviews: offerCount, rating: offerCount === 0 ? null : offerRating!, ratingCount: offerCount, orphanedStructured: false };
+}
+
+function parsedProductPage(html: string, listingId: string, requestUrl: string) {
+  const $ = load(html);
+  const title = compactText($("h1").first().text());
+  if (!title) throw new ParserChangedError(`${DOMAIN}:${listingId}: не найдено название товара`);
+  const canonicalHref = $("link[rel='canonical']").first().attr("href");
+  const canonicalUrl = canonicalHref
+    ? canonicalProductUrl(canonicalHref, listingId) ?? requestUrl
+    : requestUrl;
+  return { $, title, canonicalUrl, metrics: productPageMetrics($, html, listingId, title) };
+}
+
 function isBlockedPage(html: string): boolean {
   const $ = load(html);
   const title = compactText($("title").first().text());
@@ -112,18 +174,22 @@ function readerMetrics(markdown: string, source: URL): { title: string; reviews:
   if (/доступ к сервису запрещ[её]н|requiring captcha|проверяет, что вы не бот/i.test(markdown)) {
     throw new AdapterBlockedError(`${DOMAIN}: product reader is blocked`);
   }
-  const metric = markdown.match(/####[^\r\n]{1,320}:\s*([\d\s\u00a0]+)\s+[^\d\r\n][^\r\n]*\r?\n\r?\n([0-5](?:[.,]\d+)?)\r?\n\r?\n[^\r\n]*?([\d\s\u00a0]+)\s+[^\d\r\n][^\r\n]*/);
-  const reviews = parseNonNegativeInteger(metric?.[1]);
-  const rating = parseRating(metric?.[2]);
-  const ratingCount = parseNonNegativeInteger(metric?.[3]);
+  const title = titleLine.replace(/\s+-\s+(?:купить|цена|отзывы).*$/iu, "").trim();
+  const metric = markdown.match(/####\s*([^\r\n]{1,320}?):\s*([\d\s\u00a0]+)\s+[^\d\r\n][^\r\n]*\r?\n\r?\n([0-5](?:[.,]\d+)?)\r?\n\r?\n[^\r\n]*?([\d\s\u00a0]+)\s+[^\d\r\n][^\r\n]*/);
+  const reviews = parseNonNegativeInteger(metric?.[2]);
+  const rating = parseRating(metric?.[3]);
+  const ratingCount = parseNonNegativeInteger(metric?.[4]);
   if (reviews === undefined || ratingCount === undefined) {
     throw new ParserChangedError(`${DOMAIN}: reader did not prove a written-review and rating total`);
+  }
+  const metricTail = markdown.slice((metric?.index ?? markdown.length) + (metric?.[0].length ?? 0), (metric?.index ?? markdown.length) + 3_000);
+  if (normalizeText(metric?.[1] ?? "") !== normalizeText(title) || reviews > 0 && !/Написать отзыв[\s\S]*^#####\s+/imu.test(metricTail)) {
+    throw new ParserChangedError(`${DOMAIN}: reader metrics are not bound to visible reviews of the requested product`);
   }
   const feedbackCount = Math.max(reviews, ratingCount);
   if (feedbackCount > 0 && (rating === undefined || rating <= 0 || rating > 5)) {
     throw new ParserChangedError(`${DOMAIN}: reader returned feedback without a valid rating`);
   }
-  const title = titleLine.replace(/\s+-\s+(?:купить|цена|отзывы).*$/iu, "").trim();
   return { title, reviews, rating: feedbackCount === 0 ? null : rating!, ratingCount };
 }
 
@@ -257,7 +323,8 @@ export class EaptekaAdapter implements SiteAdapter {
     if (!listingId) throw new ParserChangedError(`${DOMAIN}: некорректный ID карточки ${ref.listingId}`);
     const requestUrl = canonicalProductUrl(ref.url, listingId) ?? `${ORIGIN}/goods/id${listingId}/`;
     const capturedAt = new Date().toISOString();
-    const { response, html } = await this.request(requestUrl, context);
+    let { response, html } = await this.request(requestUrl, context);
+    let source = "eapteka-data-layer";
 
     if (response.status === 404 || response.status === 410) {
       return {
@@ -275,25 +342,30 @@ export class EaptekaAdapter implements SiteAdapter {
       };
     }
     if (!response.ok || isBlockedPage(html)) {
-      return this.collectFromReader(ref, listingId, requestUrl, capturedAt, context);
+      try {
+        ({ response, html } = await this.requestTranslated(requestUrl, context));
+        translatedSource(html, new URL(requestUrl));
+        source = "eapteka-visible-product-reviews:google-translate";
+      } catch (error) {
+        if (!(error instanceof AdapterBlockedError || error instanceof ParserChangedError)) throw error;
+        return this.collectFromReader(ref, listingId, requestUrl, capturedAt, context);
+      }
     }
     this.assertUsable(response, html, requestUrl);
 
-    const $ = load(html);
-    const title = compactText($("h1").first().text());
-    if (!title) throw new ParserChangedError(`${DOMAIN}:${listingId}: не найдено название товара`);
-    const canonicalHref = $("link[rel='canonical']").first().attr("href");
-    const canonicalUrl = canonicalHref
-      ? canonicalProductUrl(canonicalHref, listingId) ?? requestUrl
-      : requestUrl;
-    const reviews = parseNonNegativeInteger(dataLayerValue(html, "item_reviews_count"));
-    if (reviews === undefined) {
-      throw new ParserChangedError(`${DOMAIN}:${listingId}: не найден item_reviews_count в dataLayer`);
+    let page = parsedProductPage(html, listingId, requestUrl);
+    if (source === "eapteka-data-layer" && page.metrics.orphanedStructured) {
+      try {
+        ({ response, html } = await this.requestTranslated(requestUrl, context));
+        translatedSource(html, new URL(requestUrl));
+        source = "eapteka-visible-product-reviews:google-translate";
+        page = parsedProductPage(html, listingId, requestUrl);
+      } catch (error) {
+        if (!(error instanceof AdapterBlockedError || error instanceof ParserChangedError)) throw error;
+        return this.collectFromReader(ref, listingId, requestUrl, capturedAt, context);
+      }
     }
-    const rawRating = parseRating(dataLayerValue(html, "item_rating"));
-    if (reviews > 0 && (rawRating === undefined || rawRating <= 0 || rawRating > 5)) {
-      throw new ParserChangedError(`${DOMAIN}:${listingId}: отзывы есть, но item_rating отсутствует или некорректен`);
-    }
+    const { $, title, canonicalUrl, metrics } = page;
 
     const productEvidence = extractPageProductEvidence(html, canonicalUrl, ref.brand, {
       structuredSignals: [title]
@@ -306,9 +378,9 @@ export class EaptekaAdapter implements SiteAdapter {
       url: requestUrl,
       status: response.status,
       bodyDigest: createHash("sha256").update(html).digest("hex"),
-      parsed: { listingId, title, canonicalUrl, reviews, rating: rawRating ?? null },
+      parsed: { listingId, title, canonicalUrl, reviews: metrics.reviews, rating: metrics.rating, ratingCount: metrics.ratingCount },
       productEvidence,
-      source: "eapteka-data-layer"
+      source
     });
     const brandMatches = matchesBrand(title, ref.brand);
     return {
@@ -318,15 +390,16 @@ export class EaptekaAdapter implements SiteAdapter {
       brand: ref.brand,
       canonicalUrl,
       product: title,
-      reviews,
-      rating: reviews === 0 ? null : rawRating!,
-      rawRating: rawRating ?? null,
+      reviews: metrics.reviews,
+      rating: metrics.rating,
+      rawRating: metrics.rating,
       rawRatingScale: 5,
-      status: brandMatches ? (reviews === 0 ? "no_reviews" : "ok") : "needs_review",
+      ratingCount: metrics.ratingCount,
+      status: brandMatches ? (metrics.reviews === 0 ? "no_reviews" : "ok") : "needs_review",
       capturedAt,
       evidenceRef,
       productEvidence,
-      source: "eapteka-data-layer"
+      source
     };
   }
 
