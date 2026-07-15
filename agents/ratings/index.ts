@@ -39,7 +39,7 @@ export function shouldAutoRetryInitialCollection(
   );
 }
 
-export const MAX_INITIAL_TRANSIENT_RECOVERY_PASSES = 2;
+export const MAX_INITIAL_TRANSIENT_RECOVERY_PASSES = 3;
 
 const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);
 
@@ -673,7 +673,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
           ) {
             // A fresh runtime clears per-adapter cooldowns and transient route
             // state. Successful partitions are checkpointed, so the second
-            // and third passes touch only failed domain/brand pairs and cannot create
+            // through fourth passes touch only failed domain/brand pairs and cannot create
             // duplicate observations.
             runtime = await createCollectorRuntime(runtimeOptions());
             completed = await runtime.service.executeRun(run.id);
