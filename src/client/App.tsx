@@ -741,6 +741,15 @@ export function App() {
     empty: run.partitions.filter((item) => item.status === "no_results").length,
     failed: run.partitions.filter((item) => !["complete", "no_results"].includes(item.status)).length
   } : undefined, [run]);
+  const failedPartitionCount = partitionSummary?.failed ?? 0;
+  const cleanReviewReady = Boolean(run?.status === "review" && reviewItems.length === 0 && failedPartitionCount === 0 && run.qa?.ok !== false);
+  const reviewSectionTitle = reviewItems.length > 0
+    ? "Проверьте спорные находки"
+    : failedPartitionCount > 0 || run?.qa?.ok === false
+      ? "Завершите сбор"
+      : run?.status === "published"
+        ? "Результат записан"
+        : "Результат готов";
   const canRetry = Boolean(run && canRetryFailedPartitions(run.status, partitionSummary?.failed ?? 0));
   const companionBrands = useMemo(() => run ? ozonCompanionEligibleBrands(run) : [], [run]);
   const visibleBlockers = summarizeIssues(run?.qa?.blockers ?? []);
@@ -1042,7 +1051,7 @@ export function App() {
 
       {(busy || run) && <section className={`card progress-card ${run && (pendingStatuses.has(run.status) || collectionIsContinuing) ? "progress-active" : ""}`} aria-labelledby="progress-title" aria-busy={Boolean(run && (pendingStatuses.has(run.status) || collectionIsContinuing))}>
         <div className="card-heading compact">
-          <div><p className="section-number">Шаг 2</p><h2 id="progress-title">{busyAction === "resume" ? "Восстанавливаем последний запуск" : busyAction === "continue" ? `Автоматически продолжаем сбор · ${automaticContinuation?.attempt ?? 1}/${automaticContinuation?.maxAttempts ?? 3}` : busyAction === "retry" ? "Повторяем неуспешные площадки" : run ? runStatusLabels[run.status] : "Создаём запуск"}</h2><p>{busyAction === "resume" ? "Загружаем сохранённый результат и актуальный статус площадок." : busyAction === "continue" ? `Сохранено ${automaticContinuation?.completedPartitions ?? run?.progress.completedPartitions ?? 0} из ${automaticContinuation?.totalPartitions ?? run?.progress.totalPartitions ?? 0} проверок. Готовые площадки остаются на месте; продолжаются только незавершённые.` : busyAction === "retry" ? "Уже собранные данные сохранены. Обновляем только площадки с ошибками." : run?.progress.current ? "Получаем страницы, извлекаем рейтинг и сверяем продукт." : pendingStatuses.has(run?.status ?? "queued") ? "Можно перейти в другую вкладку — этот экран обновится автоматически." : "Сбор завершён. Ниже можно проверить результат."}</p></div>
+          <div><p className="section-number">Шаг 2</p><h2 id="progress-title">{busyAction === "resume" ? "Восстанавливаем последний запуск" : busyAction === "continue" ? `Автоматически продолжаем сбор · ${automaticContinuation?.attempt ?? 1}/${automaticContinuation?.maxAttempts ?? 3}` : busyAction === "retry" ? "Повторяем неуспешные площадки" : cleanReviewReady ? "Сбор готов" : run ? runStatusLabels[run.status] : "Создаём запуск"}</h2><p>{busyAction === "resume" ? "Загружаем сохранённый результат и актуальный статус площадок." : busyAction === "continue" ? `Сохранено ${automaticContinuation?.completedPartitions ?? run?.progress.completedPartitions ?? 0} из ${automaticContinuation?.totalPartitions ?? run?.progress.totalPartitions ?? 0} проверок. Готовые площадки остаются на месте; продолжаются только незавершённые.` : busyAction === "retry" ? "Уже собранные данные сохранены. Обновляем только площадки с ошибками." : cleanReviewReady ? "Данные собраны и проверены. Можно записывать их в таблицу." : run?.progress.current ? "Получаем страницы, извлекаем рейтинг и сверяем продукт." : pendingStatuses.has(run?.status ?? "queued") ? "Можно перейти в другую вкладку — этот экран обновится автоматически." : "Сбор завершён. Ниже можно проверить результат."}</p></div>
           <div className="progress-value"><strong>{run ? `${progress}%` : "…"}</strong><small>{run ? `${run.progress.completedPartitions} из ${run.progress.totalPartitions}` : "подготовка"}</small></div>
         </div>
         <div className="progress-track" role="progressbar" aria-label="Ход сбора" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
@@ -1088,11 +1097,11 @@ export function App() {
 
       {run && !pendingStatuses.has(run.status) && <section className="card review-card" aria-labelledby="review-title">
         <div className="card-heading review-heading">
-          <div><p className="section-number">Шаг 3</p><h2 id="review-title">Проверьте спорные находки</h2><p>{reviewIntroText(reviewItems.length, partitionSummary?.failed ?? 0)}</p></div>
-          <div className="view-switch" role="group" aria-label="Какие карточки показывать">
+          <div><p className="section-number">Шаг 3</p><h2 id="review-title">{reviewSectionTitle}</h2><p>{run.status === "published" ? "Данные уже записаны в Google Таблицу." : reviewIntroText(reviewItems.length, failedPartitionCount)}</p></div>
+          {reviewItems.length > 0 && <div className="view-switch" role="group" aria-label="Какие карточки показывать">
             <button type="button" className={reviewOnly && reviewItems.length ? "active" : ""} aria-pressed={Boolean(reviewOnly && reviewItems.length)} onClick={() => setReviewOnly(true)} disabled={!reviewItems.length}>Требуют проверки <span>{reviewItems.length}</span></button>
             <button type="button" className={!reviewOnly || !reviewItems.length ? "active" : ""} aria-pressed={!reviewOnly || !reviewItems.length} onClick={() => setReviewOnly(false)}>Все <span>{run.observations.length}</span></button>
-          </div>
+          </div>}
         </div>
 
         {(partitionSummary?.failed ?? 0) > 0 && <div className="collection-warning" role="status">

@@ -22,7 +22,7 @@ describe("review summary copy", () => {
 
   it("keeps the normal clean-run message when every partition completed", () => {
     expect(reviewIntroText(0, 0)).toBe(
-      "Проверять ничего не нужно — спорных карточек нет. При желании можно открыть весь список."
+      "Все карточки определены. Результат готов к записи в таблицу."
     );
   });
 

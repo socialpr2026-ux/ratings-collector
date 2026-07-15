@@ -59,4 +59,10 @@ describe("Interfox Ratings product shell", () => {
     expect(appSource).not.toContain('className={`runtime-stage');
     expect(appSource).not.toContain('className="process-domain-list"');
   });
+
+  it("does not ask for review when a clean run has no disputed cards", () => {
+    expect(appSource).toContain('cleanReviewReady ? "Сбор готов"');
+    expect(appSource).toContain('reviewItems.length > 0 && <div className="view-switch"');
+    expect(appSource).toContain(': "Результат готов"');
+  });
 });
