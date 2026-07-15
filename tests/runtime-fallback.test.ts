@@ -417,7 +417,7 @@ describe("collector runtime fallback integration", () => {
       status: "blocked",
       discovered: 0,
       collected: 0,
-      message: "parser_changed: Yandex is unavailable for https://reviews.yandex.ru/ugcpub/sitemap.xml: HTTP 503"
+      message: "blocked: Yandex is unavailable for https://reviews.yandex.ru/ugcpub/sitemap.xml: HTTP 503"
     }]);
 
     const retried = await runtime.service.executeRun(created.id);
