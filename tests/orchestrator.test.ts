@@ -599,6 +599,83 @@ describe("run orchestration and fail-closed QA", () => {
     expect(review.qa?.ok).toBe(false);
   });
 
+  it("auto-accepts separate source-bound review pages even when a family label looks like a collapsed line", async () => {
+    const domain = "vseotzyvy.ru";
+    const brand = "Kagocel";
+    const service = new RatingsService(new MemoryRepository(), async () => ({
+      id: "vseotzyvy-dedicated",
+      supportedDomains: [domain],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(): Promise<ProductRef[]> {
+        return [
+          { domain, platform: domain, listingId: "49555", brand, url: `https://${domain}/item/49555/reviews-kagocel/`, title: brand, metadata: {} },
+          { domain, platform: domain, listingId: "59343", brand, url: `https://${domain}/item/59343/reviews-kagocel-forte/`, title: `${brand} Forte`, metadata: {} }
+        ];
+      },
+      async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain, platform: domain, listingId: ref.listingId, brand,
+          canonicalUrl: ref.url, product: ref.title!, reviews: ref.listingId === "59343" ? 13 : 72,
+          rating: ref.listingId === "59343" ? 4.9 : 5, status: "ok", capturedAt: new Date().toISOString(),
+          evidenceRef: `${ref.url}#aggregate-rating`, source: "vseotzyvy-product-aggregate",
+          productEvidence: {
+            scope: "product_family", signals: [{ source: "title", text: ref.title! }], variants: [],
+            identifiers: [{ type: "product_id", value: ref.listingId }], imageUrls: [], instructionUrls: []
+          }
+        };
+      }
+    }));
+
+    const run = await service.executeRun((await service.createRun({ ...request, domains: [domain], brands: [brand] })).id);
+
+    expect(run.observations).toHaveLength(2);
+    expect(run.observations.map((item) => [item.listingId, item.status])).toEqual([
+      ["49555", "ok"], ["59343", "ok"]
+    ]);
+    expect(run.qa).toMatchObject({ ok: true, blockers: [] });
+  });
+
+  it.each([
+    ["generic profile", { profileVersion: 1 }],
+    ["listing evidence", { evidenceScope: "listing" }],
+    ["historical result", { historical: true }],
+    ["manual override", { productOverride: "tablets 10 mg no. 20" }],
+    ["unmatched product title", { product: "Another medicine Forte" }]
+  ] as const)("does not auto-accept a dedicated aggregate with %s", async (_label, options) => {
+    const domain = "vseotzyvy.ru";
+    const brand = "Kagocel";
+    const service = new RatingsService(new MemoryRepository(), async () => ({
+      id: "unsafe-review-aggregate",
+      supportedDomains: [domain],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover() {
+        return [{ domain, platform: domain, listingId: "59343", brand, url: `https://${domain}/item/59343/reviews-kagocel-forte/`, metadata: {} }];
+      },
+      async collect(ref: ProductRef): Promise<Observation> {
+        const product = "product" in options ? options.product : `${brand} Forte`;
+        return {
+          domain, platform: domain, listingId: ref.listingId, brand, canonicalUrl: ref.url,
+          product, reviews: 13, rating: 4.9, status: "ok", capturedAt: new Date().toISOString(),
+          evidenceRef: `${ref.url}#aggregate-rating`, source: "vseotzyvy-product-aggregate",
+          ...( "profileVersion" in options ? { profileVersion: options.profileVersion } : {}),
+          ...( "historical" in options ? { historical: options.historical } : {}),
+          ...( "productOverride" in options ? { productOverride: options.productOverride } : {}),
+          productEvidence: {
+            scope: "evidenceScope" in options ? options.evidenceScope : "product_family",
+            signals: [{ source: "title", text: product }], variants: [],
+            identifiers: [{ type: "product_id", value: ref.listingId }], imageUrls: [], instructionUrls: []
+          }
+        };
+      }
+    }));
+
+    const run = await service.executeRun((await service.createRun({ ...request, domains: [domain], brands: [brand] })).id);
+
+    expect(run.observations).toHaveLength(1);
+    expect(run.observations[0].status).toBe("needs_review");
+    expect(run.qa?.ok).toBe(false);
+  });
+
   it("keeps several source-bound consumer product pages as separate exact variants", async () => {
     const domain = "uteka.ru";
     const service = new RatingsService(new MemoryRepository(), async () => ({
