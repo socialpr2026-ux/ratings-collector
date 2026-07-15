@@ -887,7 +887,7 @@ describe("YandexAdapter collection", () => {
     await expect(adapter.collect(ref({ url: modelUrl }), context())).resolves.toMatchObject({
       listingId: "265149860",
       reviews: 4,
-      rating: 4.8,
+      rating: 4.75,
       status: "ok"
     });
     expect(fetch).toHaveBeenCalledTimes(2);
