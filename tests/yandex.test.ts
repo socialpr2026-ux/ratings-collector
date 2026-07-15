@@ -489,6 +489,81 @@ describe("YandexAdapter collection", () => {
     expect(hasDeterministicAggregateProof({ ...observation, productIdentity: identity })).toBe(true);
   });
 
+  it("drops a source-unbound stale model without blocking the complete Yandex partition", async () => {
+    const listingId = "5887938423";
+    const url = `https://reviews.yandex.ru/product/tsereton-kaps--${listingId}`;
+    const adapter = new YandexAdapter({
+      fetch: routeFetch({
+        [url]: htmlResponse(productHtml({
+          // This is the exact malformed canonical currently returned by the
+          // first-party page. It cannot bind the aggregate to the discovered
+          // model and therefore must never be published.
+          canonical: `https://reviews.yandex.ru${listingId}`,
+          product: {
+            "@type": "Product",
+            name: "Церетон капс.",
+            aggregateRating: { "@type": "AggregateRating", reviewCount: 3, ratingCount: 31, ratingValue: 4.9 }
+          }
+        }))
+      })
+    });
+
+    await expect(adapter.collect(ref({ listingId, brand: "Церетон", url }), context())).resolves.toMatchObject({
+      listingId,
+      status: "not_found",
+      reviews: null,
+      rating: null,
+      source: "yandex_reviews_missing_candidate"
+    });
+  });
+
+  it.each([
+    ["1897545674", "Церетон р-р д/вн. приема", "Церетон раствор для приема внутрь", 22, 27, 4.8],
+    ["1404748455", "Церетон р-р для в/в и в/м введ.", "Церетон раствор для в/в и в/м введ.", 16, 37, 4.7]
+  ])("uses the first-party model title as exact family evidence for Cereton model %s", async (
+    listingId,
+    title,
+    expandedTitle,
+    reviewCount,
+    ratingCount,
+    ratingValue
+  ) => {
+    const url = `https://reviews.yandex.ru/product/tsereton--${listingId}`;
+    const adapter = new YandexAdapter({
+      fetch: routeFetch({
+        [url]: htmlResponse(productHtml({
+          canonical: url,
+          product: {
+            "@type": "Product",
+            name: title,
+            brand: "Церетон",
+            aggregateRating: { "@type": "AggregateRating", reviewCount, ratingCount, ratingValue }
+          }
+        }))
+      })
+    });
+
+    const observation = await adapter.collect(ref({ listingId, brand: "Церетон", url }), context());
+    const identity = analyzeProductIdentity({
+      brand: observation.brand,
+      product: observation.product,
+      url: observation.canonicalUrl,
+      evidence: observation.productEvidence
+    });
+
+    expect(observation.productEvidence).toMatchObject({
+      scope: "product_family",
+      variants: [expandedTitle]
+    });
+    expect(identity).toMatchObject({
+      granularity: "family",
+      confidence: "exact",
+      missing: [],
+      variantCount: 1
+    });
+    expect(hasDeterministicAggregateProof({ ...observation, productIdentity: identity })).toBe(true);
+  });
+
   it("collects reviewCount (not ratingCount), rating and canonical model URL from Product JSON-LD", async () => {
     const url = "https://reviews.yandex.ru/product/kagotsel--265149860?utm_source=test";
     const fetch = routeFetch({

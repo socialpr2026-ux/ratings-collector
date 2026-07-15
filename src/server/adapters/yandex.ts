@@ -8,7 +8,7 @@ import type {
 import { aliasesForBrand, matchesBrand, normalizeRating } from "../utils/normalize.js";
 import { readTextBounded } from "../utils/safe-fetch.js";
 import { canonicalizeUrl } from "../utils/urls.js";
-import { extractPageProductEvidence } from "../utils/product-evidence.js";
+import { extractPageProductEvidence, titleProvesProductVariant } from "../utils/product-evidence.js";
 import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 
 const DEFAULT_SITEMAP_INDEX = "https://reviews.yandex.ru/ugcpub/sitemap.xml";
@@ -323,12 +323,37 @@ export class YandexAdapter implements SiteAdapter {
       throw new ParserChangedError(`Yandex model ${listingId} has no JSON-LD Product`);
     }
     const canonicalUrl = extractAndValidateCanonical(html, page.responseUrl, listingId);
+    if (!canonicalUrl) {
+      // A removed/redirected sitemap candidate may still render an aggregate,
+      // but without a canonical URL that binds it to the requested model those
+      // numbers are not publishable. Reuse the proven missing-candidate path so
+      // one stale model does not block every other current Yandex card.
+      return this.emptyObservation(
+        ref,
+        listingId,
+        page.responseUrl,
+        "not_found",
+        "yandex_reviews_missing_candidate"
+      );
+    }
     const product = selectJsonLdProduct(products, listingId);
     const title = nonEmptyString(product.name);
     if (!title) throw new ParserChangedError(`Yandex model ${listingId} JSON-LD Product has no name`);
 
     const description = nonEmptyString(product.description);
     const reviewedProductTitles = extractReviewedProductTitles(html, ref.brand);
+    // When no individual review exposes its bought variant, the canonical
+    // JSON-LD Product name is still first-party evidence for the model-level
+    // aggregate. If that name does not prove a complete sellable variant,
+    // represent it honestly as the model family instead of asking an employee
+    // to invent a dosage or pack.
+    const modelTitleIsFamily = matchesBrand(title, ref.brand) && !titleProvesProductVariant(title, ref.brand);
+    const expandedModelTitle = expandYandexProductTitle(title);
+    const sourceBoundFamilyTitles = reviewedProductTitles.length > 0
+      ? reviewedProductTitles
+      : modelTitleIsFamily
+        ? [expandedModelTitle]
+        : [];
     const productEvidence = extractPageProductEvidence(html, canonicalUrl, ref.brand, {
       // Yandex's page-level Product name is sometimes abbreviated to the
       // dosage form (for example, "Хондрофен мазь д/нар.прим.").  The
@@ -337,11 +362,18 @@ export class YandexAdapter implements SiteAdapter {
       // variant set, though: two slightly different pharmacy spellings must
       // not become two unrelated products, while genuinely different packs
       // must remain visible under the one model-level aggregate rating.
-      forceFamily: reviewedProductTitles.length > 0,
-      extraVariants: reviewedProductTitles,
+      forceFamily: sourceBoundFamilyTitles.length > 0,
+      extraVariants: sourceBoundFamilyTitles,
       structuredSignals: [title, description]
         .filter((value): value is string => Boolean(value))
     });
+    if (modelTitleIsFamily && reviewedProductTitles.length === 0 && !productEvidence.variants.includes(expandedModelTitle)) {
+      // `extractPageProductEvidence` deliberately accepts only common retail
+      // spellings as variants. Yandex also abbreviates dosage forms (for
+      // example "р-р д/вн. приема"). The source-bound JSON-LD name is safe to
+      // retain even when that generic filter does not recognize the spelling.
+      productEvidence.variants.unshift(expandedModelTitle);
+    }
     productEvidence.identifiers.push({ type: "model_id", value: listingId });
     const aggregate = isObject(product.aggregateRating) ? product.aggregateRating : undefined;
     const structuredBrandNames = extractBrandNames(product);
@@ -974,6 +1006,19 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function expandYandexProductTitle(value: string): string {
+  // Yandex's Product.name frequently abbreviates dosage forms. Expand only
+  // literal pharmaceutical abbreviations already present in the source; this
+  // makes the shared product parser understand the same meaning without
+  // adding a dosage, volume or pack that the page did not prove.
+  return value
+    .replace(/(?<![\p{L}\p{N}])р[.\s-]*р(?=\s|$)/giu, "раствор")
+    .replace(/(?<![\p{L}\p{N}])д\s*\/\s*вн\.?\s*при[её]ма(?![\p{L}\p{N}])/giu, "для приема внутрь")
+    .replace(/(?<![\p{L}\p{N}])капс\.?(?![\p{L}\p{N}])/giu, "капсулы")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function extractReviewedProductTitles(html: string, brand: string): string[] {
   const result = new Set<string>();
   const accept = (value: string | undefined): void => {
@@ -1025,7 +1070,7 @@ function collectNames(value: unknown, names: string[]): void {
   }
 }
 
-function extractAndValidateCanonical(html: string, responseUrl: string, listingId: string): string {
+function extractAndValidateCanonical(html: string, responseUrl: string, listingId: string): string | undefined {
   let candidate: string | undefined;
   for (const tag of html.match(/<link\b[^>]*>/gi) ?? []) {
     const rel = htmlAttribute(tag, "rel");
@@ -1036,13 +1081,29 @@ function extractAndValidateCanonical(html: string, responseUrl: string, listingI
   }
   candidate ??= responseUrl;
 
+  // A small set of retired Yandex models currently returns this exact broken
+  // first-party canonical shape: the requested numeric ID is concatenated to
+  // the host. It proves neither a different product nor the requested model,
+  // so exclude the single candidate fail-closed instead of treating the whole
+  // adapter as structurally changed.
+  const concatenatedModel = candidate.match(/^https:\/\/reviews\.yandex\.ru(\d+)\/?(?:[?#].*)?$/i)?.[1];
+  if (concatenatedModel === listingId) return undefined;
+
   let url: URL;
   try {
     url = new URL(candidate, REVIEWS_ORIGIN);
   } catch {
     throw new ParserChangedError(`Yandex model ${listingId} has an invalid canonical URL`);
   }
-  if (url.protocol !== "https:" || url.hostname !== "reviews.yandex.ru" || extractModelId(url.toString()) !== listingId) {
+  if (url.protocol !== "https:" || url.hostname !== "reviews.yandex.ru") {
+    throw new ParserChangedError(`Yandex model ${listingId} canonical URL does not identify the requested model`);
+  }
+  const canonicalModelId = extractModelId(url.toString());
+  // A valid same-origin canonical for another model is an explicit redirect
+  // away from this discovery candidate. Never collect the replacement model
+  // under the stale ID, and do not block unrelated current cards.
+  if (canonicalModelId && canonicalModelId !== listingId) return undefined;
+  if (canonicalModelId !== listingId) {
     throw new ParserChangedError(`Yandex model ${listingId} canonical URL does not identify the requested model`);
   }
   return canonicalizeUrl(url.toString());
