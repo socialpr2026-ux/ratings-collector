@@ -32,6 +32,8 @@ export function shouldAutoRetryInitialCollection(
   return initialStatus === "queued" && partitions.some(({ status }) => status === "blocked" || status === "error");
 }
 
+const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);
+
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
     status,
@@ -120,6 +122,17 @@ export function browserFetch(
       body: JSON.stringify({ url: url.toString() }),
       signal
     });
+  };
+  const fetchWildberriesViaStaticProxy = async (url: URL, signal: AbortSignal) => {
+    const first = await fetchViaStaticProxy(url, signal);
+    if (!TRANSIENT_STATIC_PROXY_STATUSES.has(first.status)) return first;
+    await first.body?.cancel().catch(() => undefined);
+    signal.throwIfAborted();
+    // One bounded retry absorbs a transient Function/upstream hand-off. The
+    // second response remains authoritative and can never become a fake zero.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    signal.throwIfAborted();
+    return fetchViaStaticProxy(url, signal);
   };
   const acquireSandbox = createLazySandboxAcquire(sandbox);
   const getBrowser = () => connected ??= acquireSandbox()
@@ -277,13 +290,22 @@ export function browserFetch(
       return fetchViaStaticProxy(url, request.signal);
     }
     if (staticProxy && fixedWildberriesTarget) {
+      let proxied: Response | undefined;
+      try {
+        // Agent egress is consistently throttled while the fixed Function
+        // egress succeeds for the same bounded buyer API request. Prefer the
+        // free fixed route so a healthy response never reaches Sandbox.
+        proxied = await fetchWildberriesViaStaticProxy(url, request.signal);
+        if (proxied.ok || !TRANSIENT_STATIC_PROXY_STATUSES.has(proxied.status)) return proxied;
+      } catch (error) {
+        if (request.signal.aborted) throw error;
+      }
       try {
         const direct = await fetch(request);
-        if (direct.ok) return direct;
-        const proxied = await fetchViaStaticProxy(url, request.signal);
-        return proxied.ok ? proxied : direct;
-      } catch {
-        return fetchViaStaticProxy(url, request.signal);
+        return direct.ok ? direct : proxied ?? direct;
+      } catch (error) {
+        if (proxied) return proxied;
+        throw error;
       }
     }
     if (staticProxy && (fixedYandexTarget || fixedZdravcityTarget)) {

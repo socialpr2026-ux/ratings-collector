@@ -99,11 +99,9 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("falls back from direct Wildberries buyer JSON to fixed function egress without acquiring Sandbox", async () => {
+  it("prefers fixed function egress for Wildberries buyer JSON without acquiring Sandbox", async () => {
     const run = vi.fn(async () => undefined);
-    const directFetch = vi.fn()
-      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
-      .mockResolvedValueOnce(new Response('{"products":[]}'));
+    const directFetch = vi.fn().mockResolvedValueOnce(new Response('{"products":[]}'));
     vi.stubGlobal("fetch", directFetch);
     const routedFetch = browserFetch(sandbox(run), {
       endpoint: "https://ratings.example/api/internal/static-review-fetch",
@@ -115,9 +113,29 @@ describe("ratings Agent lazy Sandbox routing", () => {
     );
 
     expect(await response.text()).toBe('{"products":[]}');
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(directFetch.mock.calls[0]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("retries one transient Wildberries function response before any direct or Sandbox route", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn()
+      .mockResolvedValueOnce(new Response("temporary upstream block", { status: 429 }))
+      .mockResolvedValueOnce(new Response('{"total":3,"products":[{"id":1}]}'));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(
+      "https://search.wb.ru/exactmatch/ru/common/v14/search?appType=64&query=Оциллококцинум"
+    );
+
+    expect(await response.text()).toContain('"total":3');
     expect(directFetch).toHaveBeenCalledTimes(2);
-    expect(directFetch.mock.calls[0]?.[0]).toBeInstanceOf(Request);
-    expect(directFetch.mock.calls[1]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+    expect(directFetch.mock.calls.every(([input]) => input === "https://ratings.example/api/internal/static-review-fetch")).toBe(true);
     expect(run).not.toHaveBeenCalled();
   });
 
