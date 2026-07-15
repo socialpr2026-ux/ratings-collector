@@ -100,6 +100,15 @@ function productPageMetrics(
     if (hiddenReviews === undefined) {
       throw new ParserChangedError(`${DOMAIN}:${listingId}: product page proved neither reviews nor their absence`);
     }
+    const emptySections = $(`
+      .sec-item__reviews-empty[data-entity-reviews='${listingId}'],
+      [data-empty-reviews][data-entity-reviews='${listingId}']
+    `);
+    const explicitEmpty = emptySections.length === 1 &&
+      /(?:отзывов\s+(?:пока\s+)?нет|нет\s+отзывов)/iu.test(compactText(emptySections.first().text()));
+    if (hiddenReviews > 0 && !explicitEmpty) {
+      throw new ParserChangedError(`${DOMAIN}:${listingId}: stale structured rating has no source-bound empty review proof`);
+    }
     return { reviews: 0, rating: null, ratingCount: 0, orphanedStructured: (hiddenReviews ?? 0) > 0 };
   }
   const section = exactSection as ReturnType<typeof $>;

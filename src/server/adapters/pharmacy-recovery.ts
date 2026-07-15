@@ -368,7 +368,11 @@ function polzaProductMetrics(
   const reviewBlocks = $("#review_block");
   const reviewBlock = reviewBlocks.first();
   const reviewItems = reviewBlock.find(".reviews__item.review-item");
-  if (!reviewBlocks.length && !reviewItems.length) return { reviews: 0, rating: null };
+  const explicitEmpty = reviewBlocks.length === 1 && reviewBlock.find(
+    ".reviews__empty, .reviews-empty, [data-empty-reviews]"
+  ).length === 1 && /(?:отзывов\s+(?:пока\s+)?нет|нет\s+отзывов)/iu.test(reviewBlock.text());
+  if (explicitEmpty) return { reviews: 0, rating: null };
+  if (!reviewBlocks.length && !reviewItems.length) return undefined;
   if (reviewBlocks.length !== 1) return undefined;
   const visibleTotal = exactInteger(reviewBlock.find(".reviews__amount").first().text());
   if (visibleTotal !== reviews || reviewItems.length === 0) return undefined;
@@ -560,7 +564,11 @@ function asnaProduct($: CheerioAPI): ParsedProduct | undefined {
     // positive total is accepted only with a source-bound list and review item.
     const feedbackList = root.find("#feedbackListContainer.product__feedbackList").first();
     const feedbackItems = feedbackList.find(".product__feedbackItem[itemtype*='Review']");
-    if (!feedbackList.length && !feedbackItems.length) return { ...parsedRef, reviews: 0, rating: null };
+    const explicitEmpty = feedbackList.length === 1 && feedbackList.find(
+      ".product__feedbackEmpty, .product__feedback-empty, [data-empty-reviews]"
+    ).length === 1 && /(?:отзывов\s+(?:пока\s+)?нет|нет\s+отзывов)/iu.test(feedbackList.text());
+    if (explicitEmpty) return { ...parsedRef, reviews: 0, rating: null };
+    if (!feedbackList.length && !feedbackItems.length) return undefined;
     const visibleTotal = exactInteger(root.find(".product__ratingText").first().text().match(/\((\d[\d\s\u00a0]*)\)/)?.[1]);
     if (visibleTotal !== reviews || feedbackItems.length === 0) return undefined;
   }

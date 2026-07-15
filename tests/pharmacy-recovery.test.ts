@@ -41,7 +41,7 @@ function polzaReviewProof(reviews: number): string {
     <div class="reviews__list"><div class="reviews__item review-item">Проверенный отзыв</div></div></div>`;
 }
 
-function asnaCard(source: string, sku: string, reviews: number, visibleReviews = true): string {
+function asnaCard(source: string, sku: string, reviews: number, visibleReviews = true, explicitEmpty = false): string {
   return translated(source, `
     <link rel="canonical" href="${source}">
     <div class="productPage__content product__item" itemscope itemtype="http://schema.org/Product">
@@ -52,6 +52,8 @@ function asnaCard(source: string, sku: string, reviews: number, visibleReviews =
       <p class="product__ratingText">отзывы (${reviews})</p>
       ${visibleReviews && reviews > 0 ? `<div id="feedbackListContainer" class="product__feedbackList">
         <div class="product__feedbackItem" itemtype="http://schema.org/Review">Проверенный отзыв</div></div>` : ""}
+      ${explicitEmpty ? `<div id="feedbackListContainer" class="product__feedbackList">
+        <div class="product__feedbackEmpty">Отзывов пока нет</div></div>` : ""}
     </div>
   `);
 }
@@ -104,6 +106,7 @@ describe("recovered first-party pharmacy adapters", () => {
       <main itemscope itemtype="https://schema.org/Product">
         <meta itemprop="sku" content="56071">
         <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5"></div>
+        <div id="review_block"><div class="reviews__empty">Отзывов пока нет</div></div>
       </main>`), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
     const adapter = new PolzaAdapter(new MemoryEvidenceStore(), fetchMock);
 
@@ -112,6 +115,18 @@ describe("recovered first-party pharmacy adapters", () => {
     }, { region: "Москва" });
 
     expect(result).toMatchObject({ listingId: "56071", reviews: 0, rating: null, status: "no_reviews" });
+  });
+
+  it("fails closed when a partial Polza page drops the source-bound review section", async () => {
+    const card = "https://polza.ru/catalog/tsereton-kapsuly-400-mg-112-sht_56071/";
+    const adapter = new PolzaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(translated(card, `
+      <main itemscope itemtype="https://schema.org/Product"><meta itemprop="sku" content="56071">
+        <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5"></div>
+      </main>`), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "polza.ru", platform: "polza.ru", listingId: "56071", brand: "Церетон", url: card, metadata: {}
+    }, { region: "Москва" })).rejects.toThrow(/product aggregate is incomplete/);
   });
 
   it("derives the exact human Polza variant from a source-bound product URL", async () => {
@@ -258,7 +273,7 @@ describe("recovered first-party pharmacy adapters", () => {
 
   it("does not publish ASNA's orphan AggregateRating when the feedback list is empty", async () => {
     const card = "https://www.asna.ru/cards/tsereton_400mg_n28_kaps_soteks.html";
-    const fetchMock = vi.fn(async () => new Response(asnaCard(card, "20046", 1, false), {
+    const fetchMock = vi.fn(async () => new Response(asnaCard(card, "20046", 1, false, true), {
       headers: { "content-type": "text/html" }
     })) as unknown as typeof fetch;
     const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock);
@@ -268,6 +283,17 @@ describe("recovered first-party pharmacy adapters", () => {
     }, { region: "Москва" });
 
     expect(result).toMatchObject({ listingId: "20046", reviews: 0, rating: null, status: "no_reviews" });
+  });
+
+  it("fails closed when a partial ASNA page drops the source-bound feedback section", async () => {
+    const card = "https://www.asna.ru/cards/tsereton_400mg_n28_kaps_soteks.html";
+    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(asnaCard(card, "20046", 1, false), { headers: { "content-type": "text/html" } })
+    ) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "asna.ru", platform: "asna.ru", listingId: "20046", brand: "Церетон", url: card, metadata: {}
+    }, { region: "Москва" })).rejects.toThrow(/product identity or aggregate changed/);
   });
 
   it("rejects an ASNA launcher response whose final renderer URL is not the requested source", async () => {

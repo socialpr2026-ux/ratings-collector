@@ -96,7 +96,8 @@ describe("EaptekaAdapter", () => {
   it("ignores Eapteka's stale dataLayer rating when the product has no visible review section", async () => {
     const productUrl = "https://www.eapteka.ru/goods/id217962/";
     const productBody = `<h1>Церетон капсулы 400 мг 14 шт</h1>
-      <script>dataLayer.push({item_reviews_count:2,item_rating:5});</script>`;
+      <script>dataLayer.push({item_reviews_count:2,item_rating:5});</script>
+      <section class="sec-item__reviews-empty" data-entity-reviews="217962">Отзывов пока нет</section>`;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = requestedUrl(input);
       if (url.hostname === "www.eapteka.ru") return new Response(`<html><body>${productBody}</body></html>`, { status: 200 });
@@ -126,7 +127,8 @@ describe("EaptekaAdapter", () => {
       if (url.hostname === "www.eapteka.ru") return new Response("Forbidden", { status: 403 });
       if (url.hostname === "www-eapteka-ru.translate.goog") {
         return new Response(translatedProduct(productUrl, `<h1>Церетон капсулы 400 мг 14 шт</h1>
-          <script>dataLayer.push({item_reviews_count:2,item_rating:5});</script>`), {
+          <script>dataLayer.push({item_reviews_count:2,item_rating:5});</script>
+          <section class="sec-item__reviews-empty" data-entity-reviews="217962">Отзывов пока нет</section>`), {
           headers: { "content-type": "text/html" }
         });
       }
@@ -140,6 +142,20 @@ describe("EaptekaAdapter", () => {
 
     expect(observation).toMatchObject({ reviews: 0, rating: null, ratingCount: 0, status: "no_reviews", source: "eapteka-visible-product-reviews:google-translate" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails closed when stale Eapteka metrics survive on a partial page without an exact empty state", async () => {
+    const productUrl = "https://www.eapteka.ru/goods/id217962/";
+    const body = `<h1>Церетон капсулы 400 мг 14 шт</h1>
+      <script>dataLayer.push({item_reviews_count:2,item_rating:5});</script>`;
+    const adapter = new EaptekaAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(translatedProduct(productUrl, body), { headers: { "content-type": "text/html" } })
+    ) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "eapteka.ru", platform: "eapteka.ru", listingId: "217962", brand: "Церетон",
+      url: productUrl, metadata: {}
+    }, context)).rejects.toThrow(/source-bound empty review proof/);
   });
 
   it("publishes a proved zero as no_reviews and leaves rating empty", async () => {
