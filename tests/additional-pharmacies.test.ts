@@ -15,6 +15,19 @@ function translated(source: string, body: string) {
   return `<!doctype html><html><head><base href="${source}"><script data-source-url="${source}"></script></head><body>${body}</body></html>`;
 }
 
+function aptekaSelectedVariant(url: string, title: string, count: number, rating: number) {
+  return `<div class="variantButton" aria-selected="true"><a class="variantButton__link" href="${url}" aria-label="${title}"></a>` +
+    `<div class="variantButton__rating"><div class="ItemRating"><span class="ItemRating__label">${rating}</span>` +
+    `<span class="caption3">(<span>${count}</span> reviews)</span></div></div></div>`;
+}
+
+function nfReviewList(title: string, ratings: number[]) {
+  return `<div id="review">${ratings.map((rating) =>
+    `<div class="testimonial" itemscope itemtype="https://schema.org/Review"><meta itemprop="itemReviewed" content="${title}">` +
+    `<div itemprop="reviewRating" itemscope itemtype="https://schema.org/Rating"><meta itemprop="ratingValue" content="${rating}"></div></div>`
+  ).join("")}</div>`;
+}
+
 describe("additional pharmacy adapters", () => {
   it("collects exact Apteka.ru variants from Product JSON-LD and keeps ratingCount separate", async () => {
     const id = "5e3268eaca7bdc000192d316";
@@ -25,7 +38,7 @@ describe("additional pharmacy adapters", () => {
       "@context": "https://schema.org", "@type": "Product", sku: id,
       name: "Оциллококцинум 30 шт. гранулы",
       aggregateRating: { "@type": "AggregateRating", reviewCount: 44, ratingCount: 57, ratingValue: 4.9 }
-    })}</script></head><body><h1>Оциллококцинум 30 шт. гранулы</h1></body></html>`;
+    })}</script></head><body><h1>Оциллококцинум 30 шт. гранулы</h1>${aptekaSelectedVariant(productUrl, "Оциллококцинум 30 шт. гранулы", 57, 4.9)}</body></html>`;
     const fetchSpy = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
       return new Response(url.pathname.startsWith("/preparation/") ? preparation : product, {
@@ -66,6 +79,19 @@ describe("additional pharmacy adapters", () => {
     }, context)).rejects.toBeInstanceOf(ParserChangedError);
   });
 
+  it("rejects Apteka.ru stale or cross-variant AggregateRating without selected-product proof", async () => {
+    const id = "5e3268eaca7bdc000192d316";
+    const productUrl = `https://apteka.ru/product/oczillokokczinum-30-sht-granuly-${id}/`;
+    const title = "Оциллококцинум 30 шт. гранулы";
+    const html = `<!doctype html><head><base href="${productUrl}"></head><script type="application/ld+json">${JSON.stringify({
+      "@type": "Product", sku: id, name: title, aggregateRating: { reviewCount: 2, ratingValue: 5 }
+    })}</script><h1>${title}</h1>${aptekaSelectedVariant("https://apteka.ru/product/analog-aaaaaaaaaaaaaaaaaaaaaaaa/", "Аналог", 2, 5)}`;
+    const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(html)) as unknown as typeof fetch);
+    await expect(adapter.collect({
+      domain: "apteka.ru", platform: "apteka.ru", listingId: id, brand: "Оциллококцинум", url: productUrl, metadata: {}
+    }, context)).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
   it("checks Apteka.ru health against a stable exact Product instead of brand discovery spelling", async () => {
     const id = "5e3268eaca7bdc000192d316";
     const canaryUrl = `https://apteka.ru/product/oczillokokczinum-30-sht-granuly-${id}/`;
@@ -88,7 +114,7 @@ describe("additional pharmacy adapters", () => {
     const product = `<!doctype html><html><head><base href="${productUrl}"><link rel="canonical" href="${productUrl}"><script type="application/ld+json">${JSON.stringify({
       "@type": "Product", sku: id, name: "Хондрофен мазь для наружного применения 30 гр",
       aggregateRating: { reviewCount: 157, ratingValue: 4.7 }
-    })}</script></head><body></body></html>`;
+    })}</script></head><body>${aptekaSelectedVariant(productUrl, "Хондрофен мазь для наружного применения 30 гр", 157, 4.7)}</body></html>`;
     const preparationStatuses = new Map([
       ["/preparation/hondrofen/", 502],
       ["/preparation/khondrofen/", 503],
@@ -120,7 +146,8 @@ describe("additional pharmacy adapters", () => {
     const searchSource = "https://nfapteka.ru/catalog/?q=%D0%9E%D1%86%D0%B8%D0%BB%D0%BB%D0%BE%D0%BA%D0%BE%D0%BA%D1%86%D0%B8%D0%BD%D1%83%D0%BC";
     const productSource = `https://nfapteka.ru${path}`;
     const search = translated(searchSource, `<main><h1>Результаты поиска по запросу Оциллококцинум</h1><div class="productOuter"><a href="https://nfapteka-ru.translate.goog${path}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en"><img src="image.jpg"></a><div class="productName"><a href="https://nfapteka-ru.translate.goog${path}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">Оциллококцинум гранулы 1 г №12</a></div><a data-id="97307"></a></div></main>`);
-    const product = translated(productSource, `<link rel="canonical" href="${productSource}"><h1>Оциллококцинум гранулы 1 г №12</h1><input name="productId" value="97307"><div itemprop="aggregateRating"><meta itemprop="ratingValue" content="4.3"><span itemprop="reviewCount">3</span></div>`);
+    const title = "Оциллококцинум гранулы 1 г №12";
+    const product = translated(productSource, `<link rel="canonical" href="${productSource}"><h1>${title}</h1><input name="productId" value="97307"><div itemprop="aggregateRating"><meta itemprop="ratingValue" content="4.3"><span itemprop="reviewCount">3</span></div>${nfReviewList(title, [4.3, 4.3, 4.3])}`);
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
       return new Response(url.pathname === "/catalog/" ? search : product, { status: 200, headers: { "content-type": "text/html" } });

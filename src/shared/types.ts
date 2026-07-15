@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { OzonCompanionSessionState } from "./companion.js";
+import { normalizeRatingToFive } from "./rating.js";
 
 export const MAX_RUN_PARTITIONS = 600;
 
@@ -77,7 +78,9 @@ export const observationSchema = z.object({
   reviews: z.number().int().nonnegative().nullable(),
   /** Raw written-review counter when `reviews` is promoted to unified feedback. */
   writtenReviewCount: z.number().int().nonnegative().nullable().optional(),
-  rating: z.number().min(0).max(5).nullable(),
+  rating: z.number().min(0).max(5).nullable().transform((value) =>
+    value === null ? null : normalizeRatingToFive(value)
+  ),
   rawRating: z.number().nonnegative().nullable().optional(),
   rawRatingScale: z.number().positive().optional(),
   /** The platform exposes reviews but has not calculated an aggregate rating. */

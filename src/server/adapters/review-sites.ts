@@ -188,9 +188,16 @@ function dedicatedFamilyEvidence(
 function jsonLdMetrics(html: string, pageUrl: string, brand: string): ParsedMetrics {
   const products = extractJsonLdProducts(html, pageUrl);
   const canonicalPageUrl = canonicalizeUrl(pageUrl);
-  const product = products.find((item) => item.url && canonicalizeUrl(item.url) === canonicalPageUrl)
-    ?? products.find((item) => matchesBrand(item.name ?? "", brand))
-    ?? products[0];
+  const exact = products.filter((item) => item.url && canonicalizeUrl(item.url) === canonicalPageUrl);
+  const branded = products.filter((item) => matchesBrand(item.name ?? "", brand));
+  // Recommendation and analogue widgets frequently expose their own Product
+  // JSON-LD. Never borrow the first same-brand aggregate: accept one exact
+  // canonical Product, or a single unambiguous Product when the site omits URL.
+  const product = exact.length === 1
+    ? exact[0]
+    : products.length === 1 && branded.length === 1
+      ? products[0]
+      : undefined;
   return product ? metricsFromProduct(product) : { source: "visible-dom" };
 }
 
@@ -270,9 +277,18 @@ function canonicalFromPage($: CheerioAPI, pageUrl: string, definition: ReviewSit
 function microdataMetrics(html: string, pageUrl: string, brand: string, definition: ReviewSiteDefinition): ParsedMetrics {
   const $ = load(html);
   const json = jsonLdMetrics(html, pageUrl, brand);
-  const rawRating = numberFrom($("[itemprop='ratingValue']").first().attr("content") ?? $("[itemprop='ratingValue']").first().text());
-  const bestRating = numberFrom($("[itemprop='bestRating']").first().attr("content") ?? $("[itemprop='bestRating']").first().text()) ?? 5;
-  const reviews = integerFrom($("[itemprop='reviewCount']").first().attr("content") ?? $("[itemprop='reviewCount']").first().text());
+  const aggregates = $("[itemprop='aggregateRating']");
+  const uniqueMetric = (property: string): string | undefined => {
+    if (aggregates.length > 1) return undefined;
+    const nodes = aggregates.length === 1
+      ? aggregates.first().find(`[itemprop='${property}']`)
+      : $(`[itemprop='${property}']`);
+    if (nodes.length !== 1) return undefined;
+    return nodes.first().attr("content") ?? nodes.first().text();
+  };
+  const rawRating = numberFrom(uniqueMetric("ratingValue"));
+  const bestRating = numberFrom(uniqueMetric("bestRating")) ?? 5;
+  const reviews = integerFrom(uniqueMetric("reviewCount"));
   const text = $.root().text().replace(/\s+/g, " ");
   const confirmedZero = /(?:отзывов пока нет|нет отзывов|0\s+отзыв)/i.test(text);
   return {

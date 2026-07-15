@@ -28,6 +28,13 @@ describe("generic site onboarding", () => {
     expect(result).toMatchObject({ product: "Анвифен капсулы 250 мг", reviews: 1234, rating: 4.3, status: "ok", source: "visible-dom" });
   });
 
+  it("keeps hundredths produced by a precise alternate-scale score", async () => {
+    const adapter = new GenericSiteAdapter(profile(), new MemoryEvidenceStore());
+    const fetchMock = async () => new Response(`<html><h1>Анвифен капсулы 250 мг</h1><b class="reviews">12 отзывов</b><i class="score">9,87 из 10</i></html>`, { status: 200 });
+    const result = await adapter.collect(ref, { region: "Москва", fetch: fetchMock as typeof fetch });
+    expect(result).toMatchObject({ reviews: 12, rating: 4.94, rawRating: 9.87, rawRatingScale: 10 });
+  });
+
   it("accepts a confirmed JSON-LD ratingCount-only profile", async () => {
     const adapter = new GenericSiteAdapter(profile({ reviewCountMeaning: "ratings" }), new MemoryEvidenceStore());
     const html = `<script type="application/ld+json">${JSON.stringify({
@@ -42,6 +49,76 @@ describe("generic site onboarding", () => {
     });
 
     expect(result).toMatchObject({ reviews: null, ratingCount: 55, rating: 4.8, status: "ok" });
+  });
+
+  it("binds JSON-LD metrics to the exact canonical product instead of the first same-brand analogue", async () => {
+    const exactRef: ProductRef = {
+      domain: "example.com",
+      platform: "example.com",
+      listingId: "anvifen-250",
+      brand: "Anvifen",
+      url: "https://example.com/products/anvifen-250",
+      metadata: {}
+    };
+    const html = [
+      { "@type": "Product", name: "Anvifen capsules 50 mg", url: "/products/anvifen-50", aggregateRating: { ratingValue: 2, reviewCount: 99 } },
+      { "@type": "Product", name: "Anvifen capsules 250 mg", url: exactRef.url, aggregateRating: { ratingValue: 4.8, reviewCount: 12 } }
+    ].map((value) => `<script type="application/ld+json">${JSON.stringify(value)}</script>`).join("");
+    const adapter = new GenericSiteAdapter(profile(), new MemoryEvidenceStore());
+
+    const result = await adapter.collect(exactRef, {
+      region: "Moscow",
+      fetch: (async () => new Response(html)) as typeof fetch
+    });
+
+    expect(result).toMatchObject({ product: "Anvifen capsules 250 mg", reviews: 12, rating: 4.8, status: "ok", source: "json-ld" });
+    expect(result.canonicalUrl).toBe(exactRef.url);
+  });
+
+  it("fails closed when multiple same-brand JSON-LD products are not bound to the current card", async () => {
+    const ambiguousRef: ProductRef = {
+      domain: "example.com",
+      platform: "example.com",
+      listingId: "anvifen",
+      brand: "Anvifen",
+      url: "https://example.com/products/anvifen",
+      metadata: {}
+    };
+    const html = [
+      { "@type": "Product", name: "Anvifen capsules 50 mg", url: "/products/anvifen-50", aggregateRating: { ratingValue: 4.9, reviewCount: 90 } },
+      { "@type": "Product", name: "Anvifen capsules 250 mg", url: "/products/anvifen-250", aggregateRating: { ratingValue: 4.7, reviewCount: 12 } }
+    ].map((value) => `<script type="application/ld+json">${JSON.stringify(value)}</script>`).join("") +
+      `<h1>Anvifen</h1><aside class="recommendations"><span class="reviews">90</span><span class="score">9.8</span></aside>`;
+    const adapter = new GenericSiteAdapter(profile(), new MemoryEvidenceStore());
+
+    const result = await adapter.collect(ambiguousRef, {
+      region: "Moscow",
+      fetch: (async () => new Response(html)) as typeof fetch
+    });
+
+    expect(result).toMatchObject({ reviews: null, rating: null, ratingCount: null, status: "needs_review" });
+  });
+
+  it("fails closed when page-wide selectors match multiple or recommendation-only metrics", async () => {
+    const visibleRef: ProductRef = {
+      domain: "example.com",
+      platform: "example.com",
+      listingId: "anvifen",
+      brand: "Anvifen",
+      url: "https://example.com/products/anvifen",
+      metadata: {}
+    };
+    const duplicateMetrics = `<h1>Anvifen capsules</h1><span class="reviews">0</span><span class="reviews">17</span><i class="score">9.6</i>`;
+    const recommendationOnly = `<h1>Anvifen capsules</h1><aside class="recommendations"><span class="reviews">17</span><i class="score">9.6</i></aside>`;
+    const adapter = new GenericSiteAdapter(profile(), new MemoryEvidenceStore());
+
+    for (const html of [duplicateMetrics, recommendationOnly]) {
+      const result = await adapter.collect(visibleRef, {
+        region: "Moscow",
+        fetch: (async () => new Response(html)) as typeof fetch
+      });
+      expect(result).toMatchObject({ reviews: null, rating: null, status: "needs_review" });
+    }
   });
 
   it("keeps an unapproved generated profile in needs_review", async () => {

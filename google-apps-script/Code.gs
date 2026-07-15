@@ -687,7 +687,7 @@ function applyFormatting_(sheet, rowKinds, rows, columns) {
       var rowKind = rowKinds[formatRow];
       if ((rowKind === "product" || rowKind === "summary") && column >= 4) {
         if (rowKind === "summary" && (column - 4) % 2 === 1) rowFormats.push("0%");
-        else if (rowKind === "product" && (column - 4) % 2 === 1) rowFormats.push("0.0");
+        else if (rowKind === "product" && (column - 4) % 2 === 1) rowFormats.push("0.##");
         else rowFormats.push("#,##0");
       } else {
         rowFormats.push("@");

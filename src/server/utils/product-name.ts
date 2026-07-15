@@ -25,8 +25,9 @@ export type ProductNameInput = {
 
 const FORM_RULES: Array<{ value: string; pattern: RegExp }> = [
   { value: "суппозитории вагинальные и ректальные", pattern: /(?<![\p{L}\p{N}])(?:суппозитор(?:ии|иев)|свечи)[^,.]{0,30}вагинальн[^,.]{0,30}ректальн/iu },
-  { value: "раствор для приема внутрь", pattern: /(?<![\p{L}\p{N}])(?:раствор(?:а|ом)?|р[.\s-]*р)[^,;]{0,60}(?:для\s+при[её]ма\s+внутрь|д\s*\/\s*пр\.?\s*\/?\s*внутр\.?)(?![\p{L}\p{N}])/iu },
+  { value: "раствор для приема внутрь", pattern: /(?<![\p{L}\p{N}])(?:раствор(?:а|ом)?|р[.\s-]*р)[^,;]{0,60}(?:для\s+при[её]ма\s+внутрь|д\s*\/\s*(?:пр\.?|при[её]ма)\s*\/?\s*внутр(?:ь|\.)?)(?![\p{L}\p{N}])/iu },
   { value: "раствор для внутривенного и внутримышечного введения", pattern: /(?<![\p{L}\p{N}])(?:раствор(?:а|ом)?|р[.\s-]*р)[^,;]{0,80}(?:(?:для\s+)?внутривенн[^,;]{0,35}внутримышечн|(?:для\s+)?в\s*\/\s*в[^,;]{0,25}в\s*\/\s*м)(?:[^,;]{0,20}введ(?:ения|ение|\.)?)?(?![\p{L}\p{N}])/iu },
+  { value: "раствор для инъекций", pattern: /(?<![\p{L}\p{N}])(?:раствор(?:а|ом)?|р[.\s-]*р)[^,;]{0,60}(?:(?:для|д\s*\/)\s*(?:инъекц|ин\.?)|(?:для\s+)?(?:внутримышечн|внутривенн|в\s*\/\s*м|в\s*\/\s*в))(?:[^,;]{0,20}введ(?:ения|ение|\.)?)?(?![\p{L}\p{N}])/iu },
   { value: "раствор в ампулах", pattern: /(?<![\p{L}\p{N}])раствор[^,.]{0,70}(?:ампул(?:а|ы|ах)?|амп\.?)(?![\p{L}\p{N}])/iu },
   { value: "таблетки для рассасывания", pattern: /(?<![\p{L}\p{N}])(?:табл?\.?|таблет(?:ка|ки|ок)|пастил(?:ки|ок)|леденц(?:ы|ов))(?![\p{L}\p{N}])[^,.]{0,24}(?:для\s+рассасывания|д\s*\/?\s*рассас|рассасывающ)/iu },
   { value: "таблетки", pattern: /(?<![\p{L}\p{N}])(?:табл?\.?|таблет(?:ка|ки|ок|ку|кой))(?![\p{L}\p{N}])/iu },
@@ -46,7 +47,9 @@ const FORM_RULES: Array<{ value: string; pattern: RegExp }> = [
   { value: "лиофилизат", pattern: /(?<![\p{L}\p{N}])лиоф(?:\.|ил(?:изат)?(?:а|ом)?)(?![\p{L}\p{N}])/iu },
   { value: "гель", pattern: /(?<![\p{L}\p{N}])гел(?:ь|я|ем)(?![\p{L}\p{N}])/iu },
   { value: "крем", pattern: /(?<![\p{L}\p{N}])крем(?:а|ом)?(?![\p{L}\p{N}])/iu },
-  { value: "мазь", pattern: /(?<![\p{L}\p{N}])маз(?:ь|и|ью)(?![\p{L}\p{N}])/iu }
+  { value: "мазь", pattern: /(?<![\p{L}\p{N}])маз(?:ь|и|ью)(?![\p{L}\p{N}])/iu },
+  { value: "эмульсия", pattern: /(?<![\p{L}\p{N}])эмульси(?:я|и|ю|ей)(?![\p{L}\p{N}])/iu },
+  { value: "бальзам", pattern: /(?<![\p{L}\p{N}])бальзам(?:а|ом)?(?![\p{L}\p{N}])/iu }
 ];
 
 const COUNT_UNIT = "(?:шт(?:ук[аи]?)?\\.?|таб(?:л(?:ет(?:ок|ки|ка)?)?)?\\.?|капс(?:ул(?:а|ы|ок)?)?\\.?|саше(?:[-\\s]?пакет(?:ов|а|ы)?)?|пакет(?:ов|а|ы)?|пастил(?:ок|ки)?|ампул(?:а|ы)?|фл\\.?|флакон(?:ов|а|ы)?|свеч(?:ей|и)|суппозитори(?:ев|и)|доз(?:а|ы)?)";
@@ -56,6 +59,8 @@ const MODIFIERS: Array<{ value: string; pattern: RegExp }> = [
   { value: "Максимум", pattern: /(?<![\p{L}\p{N}])максимум(?![\p{L}\p{N}])/iu },
   { value: "Плюс", pattern: /(?<![\p{L}\p{N}])плюс(?![\p{L}\p{N}])/iu },
   { value: "Дуо", pattern: /(?<![\p{L}\p{N}])дуо(?![\p{L}\p{N}])/iu },
+  { value: "Бэби", pattern: /(?<![\p{L}\p{N}])б[эе]би(?![\p{L}\p{N}])/iu },
+  { value: "Ретард", pattern: /(?<![\p{L}\p{N}])ретард(?![\p{L}\p{N}])/iu },
   { value: "Форте", pattern: /(?<![\p{L}\p{N}])форте(?![\p{L}\p{N}])/iu },
   { value: "Экспресс", pattern: /(?<![\p{L}\p{N}])экспресс(?![\p{L}\p{N}])/iu },
   { value: "Лайт", pattern: /(?<![\p{L}\p{N}])лайт(?![\p{L}\p{N}])/iu },
@@ -207,13 +212,25 @@ function formFromText(value: string): string | undefined {
 
 function extractDoses(brand: string, value: string, form: string | undefined, count: number | undefined): string[] {
   const doses: string[] = [];
+  const concentrationRanges: Array<[number, number]> = [];
   for (const match of value.matchAll(/(\d+(?:[.,]\d+)?)\s*(мкг|мг|г|ме)\s*\/\s*(мл|г|доз(?:а|у)?)(?![\p{L}\p{N}])/giu)) {
     const numerator = match[2].toLocaleLowerCase("ru-RU") === "ме" ? "МЕ" : match[2].toLocaleLowerCase("ru-RU");
     const denominator = match[3].toLocaleLowerCase("ru-RU").startsWith("доз") ? "доза" : match[3].toLocaleLowerCase("ru-RU");
     doses.push(`${prettyNumber(decimal(match[1]))} ${numerator}/${denominator}`);
+    concentrationRanges.push([match.index ?? 0, (match.index ?? 0) + match[0].length]);
+  }
+  // The same concentration is frequently written as "100 mg in 1 ml".
+  // Normalize only the explicit one-unit denominator; "250 mg in 4 ml" is a
+  // total ampoule strength and must not be silently converted or merged.
+  for (const match of value.matchAll(/(\d+(?:[.,]\d+)?)\s*(мкг|мг|г|ме)\s*(?:в|на|\/)\s*1\s*(мл|г|доз(?:а|у)?)(?![\p{L}\p{N}])/giu)) {
+    const numerator = match[2].toLocaleLowerCase("ru-RU") === "ме" ? "МЕ" : match[2].toLocaleLowerCase("ru-RU");
+    const denominator = match[3].toLocaleLowerCase("ru-RU").startsWith("доз") ? "доза" : match[3].toLocaleLowerCase("ru-RU");
+    doses.push(`${prettyNumber(decimal(match[1]))} ${numerator}/${denominator}`);
+    concentrationRanges.push([match.index ?? 0, (match.index ?? 0) + match[0].length]);
   }
   const massMatches = [...value.matchAll(/(\d+(?:[.,]\d+)?)\s*(мкг|мг|гр|г)\.?(?![\p{L}\p{N}])/giu)];
   for (const match of massMatches) {
+    if (concentrationRanges.some(([start, end]) => (match.index ?? 0) >= start && (match.index ?? 0) < end)) continue;
     if (isAdministrationContext(value, match.index ?? 0, match[0].length)) continue;
     const after = value.slice((match.index ?? 0) + match[0].length);
     if (/^\s*\/\s*(?:мл|г|доз)/iu.test(after)) continue;
@@ -243,6 +260,7 @@ function extractDoses(brand: string, value: string, form: string | undefined, co
     }
   }
   for (const match of value.matchAll(/(\d+(?:[.,]\d+)?)\s*(мл|%|ме|м\.\s*е\.)(?![\p{L}\p{N}])/giu)) {
+    if (concentrationRanges.some(([start, end]) => (match.index ?? 0) >= start && (match.index ?? 0) < end)) continue;
     if (isAdministrationContext(value, match.index ?? 0, match[0].length)) continue;
     const unit = match[2].replace(/\s|\./g, "").toLocaleLowerCase("ru-RU");
     doses.push(`${prettyNumber(decimal(match[1]))} ${unit === "ме" ? "МЕ" : unit}`);
@@ -383,7 +401,10 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
     .replace(/^[-—–,.:;\s]+|[-—–,.:;\s]+$/g, "")
     .trim();
   const count = countFromText(withoutBrand);
-  const extractedForm = formFromText(withoutBrand);
+  // Some configured brand labels intentionally include the dosage-form suffix
+  // (for example "Хондрогард р-р"). Keep that source-bound form after brand
+  // removal, but never infer one from an unrelated neighbouring listing.
+  const extractedForm = formFromText(withoutBrand) ?? formFromText(`${brand} ${withoutBrand}`);
   const extractedDoses = extractDoses(brand, withoutBrand, extractedForm, count);
   const equivalence = normalizeKnownProductEquivalence(brand, withoutBrand, {
     form: extractedForm,
@@ -442,8 +463,8 @@ function render(parts: ProductParts): string {
   return chunks.join(" ") || "Общая карточка бренда";
 }
 
-const LINE_NAMES = ["Максимум", "Дуо", "Форте", "Экспресс", "Лайт", "Интенс", "Нео", "Кидс", "Иммуно"];
-const PACK_MEASURE_FORMS = new Set(["порошок", "гранулы", "раствор", "сироп", "суспензия", "спрей", "капли", "гель", "крем", "мазь", "лиофилизат"]);
+const LINE_NAMES = ["Максимум", "Дуо", "Бэби", "Ретард", "Форте", "Экспресс", "Лайт", "Интенс", "Нео", "Кидс", "Иммуно"];
+const PACK_MEASURE_FORMS = new Set(["порошок", "гранулы", "раствор", "сироп", "суспензия", "спрей", "капли", "гель", "крем", "мазь", "эмульсия", "бальзам", "лиофилизат"]);
 
 function lineName(parts: ProductParts): string | undefined {
   return LINE_NAMES.find((name) => parts.modifier?.split(/\s+/u).includes(name));
@@ -926,6 +947,53 @@ function reconcileOralSolutionShorthand(
 }
 
 /**
+ * Catalogs often shorten the same parenteral product to "solution", "solution
+ * in ampoules" or "solution for injections". A route proven by another card
+ * may enrich only an otherwise identical strength and pack; conflicting
+ * strengths, volumes or counts remain in separate groups.
+ */
+function reconcileParenteralSolutionShorthand(
+  items: readonly ProductNameInput[],
+  parsed: readonly (ProductParts | undefined)[]
+): Array<ProductParts | undefined> {
+  const result = [...parsed];
+  const forms = new Set([
+    "раствор",
+    "раствор в ампулах",
+    "раствор для инъекций",
+    "раствор для внутривенного и внутримышечного введения"
+  ]);
+  const groups = new Map<string, number[]>();
+  parsed.forEach((parts, index) => {
+    if (!parts?.form || !forms.has(parts.form)) return;
+    const key = [
+      normalizeText(items[index].brand),
+      normalizeText(parts.modifier ?? ""),
+      canonicalCount(parts) ?? "",
+      parts.multipack ?? "",
+      doseKey(parts)
+    ].join("|");
+    const group = groups.get(key) ?? [];
+    group.push(index);
+    groups.set(key, group);
+  });
+
+  for (const indices of groups.values()) {
+    const observed = indices.map((index) => parsed[index]!.form!);
+    const proven = observed.includes("раствор для внутривенного и внутримышечного введения")
+      ? "раствор для внутривенного и внутримышечного введения"
+      : observed.includes("раствор для инъекций")
+        ? "раствор для инъекций"
+        : observed.includes("раствор в ампулах")
+          ? "раствор в ампулах"
+          : undefined;
+    if (!proven) continue;
+    for (const index of indices) result[index] = { ...parsed[index]!, form: proven };
+  }
+  return result;
+}
+
+/**
  * Reconciles equivalent variants across sites. If the same brand/form/pack is
  * observed both with and without one non-conflicting strength, the shorter
  * proven wording is canonical for both rows. A brand-wide aggregate may inherit
@@ -934,11 +1002,15 @@ function reconcileOralSolutionShorthand(
  */
 export function canonicalProductVariants(items: readonly ProductNameInput[]): CanonicalProductVariant[] {
   const identities = items.map(identityForReconciliation);
-  const parsed = reconcileOralSolutionShorthand(items, items.map((item, index) =>
+  const initialParsed = items.map((item, index) =>
     identities[index].granularity === "variant" && !CONSUMER_PRODUCT_NOUN.test(identities[index].label)
       ? exactParts(item)
       : undefined
-  ));
+  );
+  const parsed = reconcileParenteralSolutionShorthand(
+    items,
+    reconcileOralSolutionShorthand(items, initialParsed)
+  );
   const groups = new Map<string, number[]>();
 
   parsed.forEach((parts, index) => {

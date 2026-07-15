@@ -498,7 +498,7 @@ describe("OzonAdapter observations", () => {
       canonicalUrl: "https://www.ozon.ru/product/kagocel-tabletki-265149860/",
       product: "Кагоцел таблетки 12 мг 20 шт.",
       reviews: 321,
-      rating: 4.9,
+      rating: 4.86,
       rawRating: 4.86,
       rawRatingScale: 5,
       status: "ok",

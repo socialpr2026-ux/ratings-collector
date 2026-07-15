@@ -1,4 +1,5 @@
 import { BRAND_ALIASES } from "../../shared/constants.js";
+import { normalizeRatingToFive } from "../../shared/rating.js";
 
 export function normalizeText(value: string): string {
   return value
@@ -23,7 +24,6 @@ export function matchesBrand(title: string, brand: string): boolean {
 }
 
 export function normalizeRating(value: number, scale = 5): number {
-  const rating = (value / scale) * 5;
-  return Math.round(Math.max(0, Math.min(5, rating)) * 10) / 10;
+  return normalizeRatingToFive(value, scale);
 }
 

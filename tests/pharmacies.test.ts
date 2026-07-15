@@ -24,6 +24,7 @@ const fixtures = {
     <div itemprop="review" data-id="2678"><a href="https://okapteka-ru.translate.goog/kagotsyel-tab-12mg-20-529012/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en">Кагоцел №20</a><meta itemprop="ratingValue" content="5"></div>
     <div itemprop="review" data-id="2591"><a href="https://okapteka-ru.translate.goog/kagotsyel-tab-12mg-10-30687/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en">Кагоцел №10</a><meta itemprop="ratingValue" content="4"></div>
     <div itemprop="review" data-id="2509"><a href="https://okapteka-ru.translate.goog/kagotsyel-tab-12mg-10-30687/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en">Кагоцел №10</a><meta itemprop="ratingValue" content="5"></div>
+    <div itemprop="review" data-id="2510"><a href="https://okapteka-ru.translate.goog/kagotsyel-tab-12mg-10-30687/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en">Кагоцел №10</a><meta itemprop="ratingValue" content="4"></div>
   </body></html>`,
   riglaForms: `<!doctype html><html><body>
     <article class="product"><a href="/product/kagotsel-tab-12mg-no10-15027">Кагоцел таблетки 0,012г №10</a></article>
@@ -31,7 +32,7 @@ const fixtures = {
   </body></html>`,
   riglaProduct: `<!doctype html><html><head><link rel="canonical" href="https://www.rigla.ru/product/kagotsel-tab-12mg-no10-15027"></head><body>
     <h1>Кагоцел таблетки 0,012г №10</h1>
-    <script>window.__INITIAL_STATE__={"productView":{"reviews":[{"id":11,"ratings":[{"attribute_code":"Оценка","value":5}]},{"id":12,"ratings":[{"attribute_code":"Оценка","value":4}]}]}};(function(){})()</script>
+    <script>window.__INITIAL_STATE__={"productView":{"reviews":[{"id":11,"ratings":[{"attribute_code":"Оценка","value":5}]},{"id":12,"ratings":[{"attribute_code":"Оценка","value":4}]},{"id":13,"ratings":[{"attribute_code":"Оценка","value":4}]}]}};(function(){})()</script>
   </body></html>`,
   zdravGroup: `<!doctype html><html><body><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
     props: { pageProps: { products: [{
@@ -82,7 +83,7 @@ describe("OkaptekaAdapter", () => {
     const ten = await adapter.collect(refs.find((item) => item.listingId === "30687")!, context);
     const twenty = await adapter.collect(refs.find((item) => item.listingId === "529012")!, context);
     const thirty = await adapter.collect(refs.find((item) => item.listingId === "529011")!, context);
-    expect(ten).toMatchObject({ reviews: 2, rating: 4.5, ratingCount: 2, status: "ok" });
+    expect(ten).toMatchObject({ reviews: 3, rating: 4.33, ratingCount: 3, status: "ok" });
     expect(twenty).toMatchObject({ reviews: 1, rating: 5, ratingCount: 1, status: "ok" });
     expect(thirty).toMatchObject({ reviews: 0, rating: null, ratingCount: 0, status: "no_reviews" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -124,7 +125,7 @@ describe("RiglaAdapter", () => {
     const refs = await adapter.discover("Кагоцел", context);
     expect(refs.map((item) => item.listingId)).toEqual(["15027", "106662"]);
     const observation = await adapter.collect(refs[0], context);
-    expect(observation).toMatchObject({ reviews: 2, rating: 4.5, ratingCount: 2, status: "ok" });
+    expect(observation).toMatchObject({ reviews: 3, rating: 4.33, ratingCount: 3, status: "ok" });
   });
 
   it("fails closed when a written review has no single product rating", async () => {

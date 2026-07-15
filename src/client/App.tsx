@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MAX_RUN_PARTITIONS, type Observation, type RunActivityStage, type RunState, type SiteProfile } from "../shared/types.js";
 import type { OzonCompanionResult, OzonCompanionSession } from "../shared/companion.js";
+import { formatRatingValue } from "../shared/rating.js";
 import { analyzeProductIdentity, canonicalProductVariants } from "../server/utils/product-name.js";
 import { normalizeProductOverride, resolveProductOverride } from "../server/utils/product-override.js";
 import {
@@ -230,7 +231,7 @@ function formatReviews(value: number | null) {
 }
 
 function formatRating(value: number | null) {
-  return value === null ? "—" : value.toLocaleString("ru-RU", { maximumFractionDigits: 2 });
+  return formatRatingValue(value);
 }
 
 export function App() {

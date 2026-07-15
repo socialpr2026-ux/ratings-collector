@@ -3,6 +3,29 @@ import { extractPageProductEvidence } from "../src/server/utils/product-evidence
 import { analyzeProductIdentity } from "../src/server/utils/product-name.js";
 
 describe("product page evidence", () => {
+  it.each([
+    ["Стодаль", "Сироп 200 мл помог ребенку за три дня"],
+    ["Кагоцел", "Покупала таблетки №20, но эффекта не заметила"],
+    ["Хондрофен", "Мазь 30 г удобная, мой подробный отзыв"]
+  ] as const)("does not turn review prose into a %s product variant", (brand, reviewText) => {
+    const evidence = extractPageProductEvidence(`
+      <main itemscope itemtype="https://schema.org/Product">
+        <h1 itemprop="name">${brand} отзывы</h1>
+        <article itemprop="review" itemscope itemtype="https://schema.org/Review">
+          <h2 itemprop="name">${reviewText}</h2>
+          <p itemprop="reviewBody">${reviewText}. Личный опыт применения.</p>
+        </article>
+      </main>
+    `, `https://example.ru/${encodeURIComponent(brand)}/reviews`, brand, { forceFamily: true });
+
+    expect(evidence.variants).toEqual([]);
+    expect(evidence.signals).not.toContainEqual(expect.objectContaining({ text: reviewText }));
+    expect(analyzeProductIdentity({ brand, product: `${brand} отзывы`, evidence })).toMatchObject({
+      granularity: "family",
+      label: "Общий рейтинг бренда"
+    });
+  });
+
   it("extracts bounded product variants and safe page evidence without interpreting page instructions", () => {
     const evidence = extractPageProductEvidence(`
       <html><head>

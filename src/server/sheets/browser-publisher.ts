@@ -152,7 +152,7 @@ function cellCss(document: SheetDocument, row: number, column: number, cell: Exp
   if ((kind === "product" || kind === "summary") && metric) {
     const share = kind === "summary" && (column - 4) % 2 === 1;
     const rating = kind === "product" && (column - 4) % 2 === 1;
-    css.push(`mso-number-format:'${share ? "0%" : rating ? "0.0" : "#,##0"}'`);
+    css.push(`mso-number-format:'${share ? "0%" : rating ? "0.##" : "#,##0"}'`);
     if (kind === "product" && rating && typeof cell.value === "number") {
       css.push("font-weight:bold", `color:${cell.value >= 4 ? "#120755" : "#c83d00"}`);
     }
