@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MAX_RUN_PARTITIONS, type Observation, type RunState, type SiteProfile } from "../shared/types.js";
 import type { OzonCompanionResult, OzonCompanionSession } from "../shared/companion.js";
-import { analyzeProductIdentity } from "../server/utils/product-name.js";
+import { analyzeProductIdentity, canonicalProductVariants } from "../server/utils/product-name.js";
 import {
   canConfirmObservation,
   canRetryFailedPartitions,
@@ -603,12 +603,14 @@ export function App() {
   const visibleItems = normalizedListQuery ? unfilteredItems.filter((item) => observationMatchesQuery(item, normalizedListQuery)) : unfilteredItems;
   const canonicalProducts = useMemo(() => {
     const items = run?.observations ?? [];
-    const labels = items.map((item) => finalProductLabel(item.productIdentity?.label ?? analyzeProductIdentity({
+    const variants = canonicalProductVariants(items.map((item) => ({
       brand: item.brand,
       product: item.product,
       url: item.canonicalUrl,
-      evidence: item.productEvidence
-    }).label, item.product));
+      evidence: item.productEvidence,
+      productIdentity: item.productIdentity
+    })));
+    const labels = variants.map((variant, index) => finalProductLabel(variant.label, items[index].product));
     return new Map(items.map((item, index) => [productKey(item), labels[index]]));
   }, [run?.observations]);
   const publicationSummary = useMemo(() => {

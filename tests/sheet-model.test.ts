@@ -13,6 +13,45 @@ const observation = (listingId: string, monthReviews = 100): Observation => ({
 });
 
 describe("Google Sheets model", () => {
+  it("publishes one human product label for equivalent variants from different sites", () => {
+    const variants: Observation[] = [
+      ["megamarket.ru", "100024502669", "Оциллококцинум гранулы гомеопатические 1 г №30"],
+      ["apteka.ru", "5e3268eaca7bdc000192d316", "Оциллококцинум гранулы №30"],
+      ["otzyv.pro", "62074", "Оциллококцинум 30 доз гранулы гомеопатические"]
+    ].map(([domain, listingId, product]) => ({
+      domain,
+      platform: domain,
+      listingId,
+      brand: "Оциллококцинум",
+      canonicalUrl: `https://${domain}/product/${listingId}`,
+      product,
+      reviews: 1,
+      rating: 5,
+      status: "ok" as const,
+      capturedAt: "2026-07-15T00:00:00.000Z",
+      productIdentity: {
+        label: product.replace(/^Оциллококцинум\s+/u, ""),
+        granularity: "variant" as const,
+        confidence: "exact" as const,
+        missing: [],
+        reasons: []
+      }
+    }));
+    const variantRequest: RunRequest = {
+      ...request,
+      domains: [...new Set(variants.map((item) => item.domain))],
+      brands: ["Оциллококцинум"]
+    };
+    const document = buildSheetDocument({ values: [] }, variantRequest, [], {
+      "2026-07": Object.fromEntries(variants.map((item) => [`${item.domain}:${item.listingId}`, item]))
+    });
+
+    expect(document.values
+      .filter((_row, index) => document.rowKinds[index] === "product")
+      .map((row) => row[2]))
+      .toEqual(["гранулы №30", "гранулы №30", "гранулы №30"]);
+  });
+
   it("updates the existing July pair without duplicating the legacy Ozon SKU", () => {
     const existing = { values: [
       ["Сайты отзывов, интернет-аптеки", null, null, "Июль"],

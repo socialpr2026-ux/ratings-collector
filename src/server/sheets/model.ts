@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Observation, ProductRecord, RunRequest } from "../../shared/types.js";
 import { normalizeText } from "../utils/normalize.js";
-import { analyzeProductIdentity, canonicalProductDescriptors } from "../utils/product-name.js";
+import { analyzeProductIdentity, canonicalProductVariants } from "../utils/product-name.js";
 import { productKey } from "../repository.js";
 
 export type SheetScalar = string | number | null;
@@ -185,11 +185,13 @@ export function buildSheetDocument(
     }
     if (item.productIdentity.granularity === "not_product") deduplicated.splice(index, 1);
   }
-  const descriptors = canonicalProductDescriptors(deduplicated.map((item) => ({ brand: item.brand, product: item.product, url: item.canonicalUrl })));
-  deduplicated.forEach((item, index) => {
-    if (item.productIdentity?.label) descriptors[index] = item.productIdentity.label;
-  });
-  deduplicated.forEach((item, index) => { item.product = descriptors[index]; });
+  const variants = canonicalProductVariants(deduplicated.map((item) => ({
+    brand: item.brand,
+    product: item.product,
+    url: item.canonicalUrl,
+    productIdentity: item.productIdentity
+  })));
+  deduplicated.forEach((item, index) => { item.product = variants[index].label; });
   const domainOrder = [...new Set([...request.domains, ...deduplicated.map((item) => item.domain).filter((domain) => !request.domains.includes(domain)).sort()])];
   const brandOrder = [...new Set([...request.brands, ...deduplicated.map((item) => item.brand).filter((brand) => !request.brands.includes(brand)).sort((a, b) => a.localeCompare(b, "ru"))])];
   const ordered = deduplicated.sort((a, b) =>
