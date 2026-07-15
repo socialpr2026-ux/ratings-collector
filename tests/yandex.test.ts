@@ -15,7 +15,10 @@ describe("YandexAdapter discovery", () => {
   it("discovers model cards by Cyrillic brand transliteration and deduplicates modelId", async () => {
     const fetch = routeFetch({
       [INDEX]: xmlResponse(sitemapIndex([MAP_A, MAP_B, "https://evil.example/sitemap_model_1-2-0.xml"])),
-      [MAP_A]: xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/chasy-kagotsel--111"])),
+      [MAP_A]: xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/chasy-kagotsel--111",
+        "https://reviews.yandex.ru/product/--3252533"
+      ])),
       [MAP_B]: xmlResponse(
         modelSitemap([
           "https://reviews.yandex.ru/product/kagotsel-tabletki-12-mg-20-sht--265149860",
@@ -33,6 +36,7 @@ describe("YandexAdapter discovery", () => {
     expect(refs.find(({ listingId }) => listingId === "265149860")?.url).toBe(
       "https://reviews.yandex.ru/product/kagotsel--265149860"
     );
+    expect(refs.some(({ listingId }) => listingId === "3252533")).toBe(false);
     expect(refs.every((ref) => ref.platform === "yandex" && ref.domain === "market.yandex.ru")).toBe(true);
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining("evil.example"), expect.anything());
   });

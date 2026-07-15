@@ -872,7 +872,10 @@ describe("fixed first-party collection egress", () => {
     const source = "https://reviews.yandex.ru/ugcpub/sitemap_model_690000000-699999999-0.xml";
     const locations = [
       "https://reviews.yandex.ru/product/otsillokoktsinum--695940046",
-      "https://reviews.yandex.ru/product/otsillokoktsinum-granuly--695943742"
+      "https://reviews.yandex.ru/product/otsillokoktsinum-granuly--695943742",
+      // Live Yandex shards contain source-bound model URLs with an empty
+      // title slug. Dropping them would make the compact shard incomplete.
+      "https://reviews.yandex.ru/product/--695940047"
     ];
     const upstreamXml = `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${locations.map((url) =>
       `<url><loc>${url}</loc><lastmod>2026-07-15</lastmod><priority>0.001</priority></url>`

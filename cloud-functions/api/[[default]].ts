@@ -1483,7 +1483,12 @@ function compactYandexModelSitemap(xml: string, requested: URL): string | undefi
     let product: URL;
     try { product = new URL(raw); }
     catch { return undefined; }
-    const modelId = product.pathname.match(/^\/product\/[a-z0-9_-]+--(\d+)$/i)?.[1];
+    // Live shards contain a small number of canonical numeric routes without
+    // a title slug (`/product/--3252533`). They are valid members of the
+    // declared shard and must be preserved for completeness. The adapter
+    // cannot match an empty slug to a requested brand, so this does not widen
+    // discovery or turn an unrelated card into a candidate.
+    const modelId = product.pathname.match(/^\/product\/(?:[a-z0-9][a-z0-9_-]*)?--(\d+)$/i)?.[1];
     if (product.protocol !== "https:" || product.hostname !== "reviews.yandex.ru" || product.port ||
       product.username || product.password || product.search || product.hash || !modelId) return undefined;
     const numericId = BigInt(modelId);
