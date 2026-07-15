@@ -122,6 +122,45 @@ describe("YandexAdapter discovery", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it("isolates one brand candidate overflow without poisoning cached results for other brands", async () => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([MAP_A])),
+      [MAP_A]: xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/canpol-babies-a--101",
+        "https://reviews.yandex.ru/product/canpol-babies-b--102",
+        "https://reviews.yandex.ru/product/canpol-babies-c--103",
+        "https://reviews.yandex.ru/product/kagotsel-tabletki-10--201",
+        "https://reviews.yandex.ru/product/kagotsel-tabletki-20--202"
+      ]))
+    });
+    const adapter = new YandexAdapter({ fetch, maxCandidates: 2 });
+    const shared = { runId: "run-overflow-isolation", brands: ["Canpol Babies", "kagotsel"] } as const;
+
+    const [canpol, kagotsel] = await Promise.allSettled([
+      adapter.discover("Canpol Babies", context(shared)),
+      adapter.discover("kagotsel", context(shared))
+    ]);
+
+    expect(canpol).toMatchObject({
+      status: "rejected",
+      reason: expect.objectContaining({
+        message: "Yandex discovery for Canpol Babies found more than 2 distinct models"
+      })
+    });
+    expect(kagotsel).toMatchObject({
+      status: "fulfilled",
+      value: [
+        expect.objectContaining({ listingId: "201", brand: "kagotsel" }),
+        expect.objectContaining({ listingId: "202", brand: "kagotsel" })
+      ]
+    });
+    await expect(adapter.discover("kagotsel", context(shared))).resolves.toHaveLength(2);
+    await expect(adapter.discover("Canpol Babies", context(shared))).rejects.toThrow(
+      "Yandex discovery for Canpol Babies found more than 2 distinct models"
+    );
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it("fails the whole brand batch closed and retries it after one unreadable shard", async () => {
     let mapARequests = 0;
     let mapBRequests = 0;

@@ -29,7 +29,10 @@ type Cached<T> = {
 type BrandDiscovery = {
   brand: string;
   refs: Map<string, ProductRef>;
+  error?: AdapterBlockedError;
 };
+
+type DiscoveryBatch = Map<string, ProductRef[] | AdapterBlockedError>;
 
 type ProductPage =
   | { kind: "missing"; requestUrl: string }
@@ -120,7 +123,7 @@ export class YandexAdapter implements SiteAdapter {
    * one exhaustive sitemap pass and keep only the small matched-ref index.
    * Raw multi-megabyte sitemap XML is deliberately never cached here.
    */
-  private readonly discoveryBatches = new Map<string, Promise<Map<string, ProductRef[]>>>();
+  private readonly discoveryBatches = new Map<string, Promise<DiscoveryBatch>>();
 
   constructor(options: YandexAdapterOptions = {}) {
     this.fallbackFetch = options.fetch ?? globalThis.fetch;
@@ -176,7 +179,9 @@ export class YandexAdapter implements SiteAdapter {
     const discoveredByBrand = batchKey
       ? await this.loadDiscoveryBatch(batchKey, brands, context)
       : await this.scanDiscoveryBatch(brands, context);
-    for (const ref of discoveredByBrand.get(brandKey(brand)) ?? []) {
+    const discovered = discoveredByBrand.get(brandKey(brand));
+    if (discovered instanceof AdapterBlockedError) throw discovered;
+    for (const ref of discovered ?? []) {
       refs.set(ref.listingId, ref);
     }
 
@@ -194,7 +199,7 @@ export class YandexAdapter implements SiteAdapter {
     key: string,
     brands: string[],
     context: AdapterContext
-  ): Promise<Map<string, ProductRef[]>> {
+  ): Promise<DiscoveryBatch> {
     const cached = this.discoveryBatches.get(key);
     if (cached) return cached;
 
@@ -218,7 +223,7 @@ export class YandexAdapter implements SiteAdapter {
   private async scanDiscoveryBatch(
     brands: string[],
     context: AdapterContext
-  ): Promise<Map<string, ProductRef[]>> {
+  ): Promise<DiscoveryBatch> {
     const sitemapUrls = await this.loadSitemapIndex(context);
     if (sitemapUrls.length > this.maxSitemaps) {
       throw new AdapterBlockedError(
@@ -242,12 +247,14 @@ export class YandexAdapter implements SiteAdapter {
           const listingId = extractModelId(url);
           if (!listingId) continue;
           for (const discovery of discoveries.values()) {
+            if (discovery.error) continue;
             if (!urlMatchesBrand(url, discovery.brand)) continue;
             discovery.refs.set(listingId, productRefFromSitemap(listingId, url, discovery.brand, sitemapUrl));
             if (discovery.refs.size > this.maxCandidates) {
-              throw new AdapterBlockedError(
+              discovery.error = new AdapterBlockedError(
                 `Yandex discovery for ${discovery.brand} found more than ${this.maxCandidates} distinct models`
               );
+              discovery.refs.clear();
             }
           }
         }
@@ -256,7 +263,7 @@ export class YandexAdapter implements SiteAdapter {
 
     return new Map([...discoveries].map(([key, discovery]) => [
       key,
-      [...discovery.refs.values()].sort((a, b) =>
+      discovery.error ?? [...discovery.refs.values()].sort((a, b) =>
         (a.title ?? "").localeCompare(b.title ?? "", "ru") || compareIds(a.listingId, b.listingId)
       )
     ]));
