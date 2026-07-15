@@ -7,6 +7,26 @@ import {
 } from "../src/server/utils/product-name.js";
 
 describe("canonical product descriptors", () => {
+  it("keeps the intravenous and intramuscular route in Cereton family labels", () => {
+    for (const product of [
+      "Церетон раствор для внутривенного и внутримышечного введения",
+      "Церетон р-р для в/в и в/м введ."
+    ]) {
+      expect(analyzeProductIdentity({
+        brand: "Церетон",
+        product,
+        evidence: {
+          scope: "product_family",
+          signals: [{ source: "title", text: product }],
+          variants: [product],
+          identifiers: [],
+          imageUrls: [],
+          instructionUrls: []
+        }
+      }).label).toBe("Общий рейтинг: раствор для внутривенного и внутримышечного введения");
+    }
+  });
+
   it("resolves abbreviated Farmlend oral solutions as exact zero-review products", () => {
     for (const [product, expected] of [
       ["Церетон 120мг/мл 100мл р-р д/пр.внутр. фл. Сотекс фармфирма зао_2 в Уфе", "раствор для приема внутрь 120 мг/мл 100 мл"],

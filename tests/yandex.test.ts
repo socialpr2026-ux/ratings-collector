@@ -452,7 +452,7 @@ describe("YandexAdapter collection", () => {
     expect(observation.productEvidence).toMatchObject({ scope: "product_family" });
     expect(observation.productEvidence?.variants).toHaveLength(2);
     expect(identity).toMatchObject({
-      label: "раствор 2 мл №10",
+      label: "раствор для внутривенного и внутримышечного введения 2 мл №10",
       granularity: "variant",
       confidence: "exact"
     });
