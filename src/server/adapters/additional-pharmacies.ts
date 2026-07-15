@@ -263,7 +263,7 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
     const canaryId = "5e3268eaca7bdc000192d316";
     const canaryUrl = `https://${APTEKA_DOMAIN}/product/oczillokokczinum-30-sht-granuly-${canaryId}/`;
     try {
-      const page = await requestPage(new URL(canaryUrl), context, this.fetchImpl);
+      const page = await requestPage(new URL(canaryUrl), context, this.fetchImpl, "apteka-ru.translate.goog");
       const products = jsonLdProducts(page.$).filter((item) => String(item.sku ?? "") === canaryId);
       if (products.length !== 1 || !matchesBrand(compactText(String(products[0].name ?? "")), "Оциллококцинум")) {
         throw new ParserChangedError(`${this.id}: control Product JSON-LD is missing or ambiguous`);
@@ -331,7 +331,11 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
     const parsedRef = aptekaRef(ref.url, ref.listingId);
     if (!parsedRef) throw new ParserChangedError(`${APTEKA_DOMAIN}:${ref.listingId}: invalid product URL or ID`);
-    const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl);
+    // Direct Apteka product egress is intermittently rejected while the
+    // source-bound Translate SSR route returns the same canonical Product
+    // JSON-LD. Keep discovery on the first-party sitemap and collect the exact
+    // proven product through that bounded gateway.
+    const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl, "apteka-ru.translate.goog");
     const products = jsonLdProducts(page.$).filter((item) => String(item.sku ?? "") === ref.listingId);
     if (products.length !== 1) throw new ParserChangedError(`${APTEKA_DOMAIN}:${ref.listingId}: exact Product JSON-LD is missing or ambiguous`);
     const product = products[0];

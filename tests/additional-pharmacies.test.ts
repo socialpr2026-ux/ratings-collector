@@ -45,7 +45,10 @@ describe("additional pharmacy adapters", () => {
       rating: 4.9,
       status: "ok"
     });
-    expect(fetchSpy.mock.calls.every(([input]) => new URL(String(input)).hostname === "apteka.ru")).toBe(true);
+    expect(fetchSpy.mock.calls.map(([input]) => new URL(String(input)).hostname)).toEqual([
+      "apteka.ru",
+      "apteka-ru.translate.goog"
+    ]);
   });
 
   it("fails closed when Apteka.ru Product JSON-LD loses its feedback aggregate", async () => {
@@ -65,11 +68,12 @@ describe("additional pharmacy adapters", () => {
 
   it("checks Apteka.ru health against a stable exact Product instead of brand discovery spelling", async () => {
     const id = "5e3268eaca7bdc000192d316";
-    const canary = `<!doctype html><html><head><script type="application/ld+json">${JSON.stringify({
+    const canaryUrl = `https://apteka.ru/product/oczillokokczinum-30-sht-granuly-${id}/`;
+    const canary = `<!doctype html><html><head><base href="${canaryUrl}"><link rel="canonical" href="${canaryUrl}"><script type="application/ld+json">${JSON.stringify({
       "@type": "Product", sku: id, name: "Оциллококцинум 30 шт. гранулы"
     })}</script></head><body></body></html>`;
     const fetchSpy = vi.fn(async (input: string | URL | Request) => {
-      expect(String(input)).toBe(`https://apteka.ru/product/oczillokokczinum-30-sht-granuly-${id}/`);
+      expect(String(input)).toBe("https://apteka-ru.translate.goog/product/oczillokokczinum-30-sht-granuly-5e3268eaca7bdc000192d316/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en");
       return new Response(canary, { headers: { "content-type": "text/html" } });
     });
     const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
@@ -81,7 +85,7 @@ describe("additional pharmacy adapters", () => {
   it("discovers Хондрофен through the filtered sitemap when optional Agent gateway preparation routes fail", async () => {
     const id = "630e04ccbb7256f6b07f621f";
     const productUrl = `https://apteka.ru/product/xondrofen-maz-dlya-naruzhnogo-primeneniya-30-gr-${id}/`;
-    const product = `<!doctype html><html><head><script type="application/ld+json">${JSON.stringify({
+    const product = `<!doctype html><html><head><base href="${productUrl}"><link rel="canonical" href="${productUrl}"><script type="application/ld+json">${JSON.stringify({
       "@type": "Product", sku: id, name: "Хондрофен мазь для наружного применения 30 гр",
       aggregateRating: { reviewCount: 157, ratingValue: 4.7 }
     })}</script></head><body></body></html>`;
