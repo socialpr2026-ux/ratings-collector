@@ -193,7 +193,9 @@ describe("static iRecommend gateway", () => {
         status: 521, headers: { "content-type": "text/html; charset=utf-8" }
       });
       expect(url.hostname).toBe("r.jina.ai");
-      expect(new Headers(init?.headers).has("x-no-cache")).toBe(false);
+      const headers = new Headers(init?.headers);
+      expect(headers.has("x-no-cache")).toBe(false);
+      expect(headers.get("x-return-format")).toBe("markdown");
       return new Response(provedSearch, { headers: { "content-type": "text/html; charset=utf-8" } });
     });
     vi.stubGlobal("fetch", upstream);

@@ -2091,7 +2091,10 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       }
     } catch { /* fall back to the bounded cached reader */ }
 
-    const readerHeaders = { accept: "text/plain; charset=utf-8", "x-return-format": "html", dnt: "1" };
+    // Jina's HTML rendering intermittently preserves iRecommend's CAPTCHA
+    // shell. Markdown is source-bound, contains the same visible aggregate
+    // proof and remains consumable by the strict compact parser below.
+    const readerHeaders = { accept: "text/plain; charset=utf-8", "x-return-format": "markdown", dnt: "1" };
     const reader = await safeFetch(readerProxyUrl(target).toString(), {
       method: "GET",
       redirect: "follow",
