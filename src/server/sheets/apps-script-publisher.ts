@@ -48,6 +48,14 @@ export type AppsScriptPublicationResult = {
   readback: AppsScriptSheetReadback;
 };
 
+export type AppsScriptBatchPublicationResult = {
+  status: "published";
+  sheets: AppsScriptPublicationResult[];
+  attempts: number;
+  verifiedAt: string;
+  limitations: string[];
+};
+
 type AppsScriptPublisherOptions = {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
@@ -300,9 +308,10 @@ export class AppsScriptSheetsPublisher {
     this.timeoutMs = Math.max(5_000, Math.min(180_000, options.timeoutMs ?? 120_000));
   }
 
-  async read(sheetUrl: string): Promise<AppsScriptSheetReadback> {
+  async read(sheetUrl: string, tabName: RatingsTabName = RATINGS_TAB_NAME): Promise<AppsScriptSheetReadback> {
     const spreadsheetId = extractSpreadsheetId(sheetUrl);
-    const payload = await this.call({ action: "read", spreadsheetId, tabName: RATINGS_TAB_NAME });
+    if (!isRatingsTabName(tabName)) throw new Error(`Недопустимая вкладка ${tabName}`);
+    const payload = await this.call({ action: "read", spreadsheetId, tabName });
     const response = record(payload);
     if (response.action !== "read") throw new AppsScriptPublisherError("Web App вернул ответ другой операции", "invalid_response");
     const readback = parseAppsScriptReadback(response.readback);
@@ -310,6 +319,30 @@ export class AppsScriptSheetsPublisher {
       throw new AppsScriptPublisherError("Web App вернул данные другой таблицы", "invalid_response");
     }
     return readback;
+  }
+
+  async readMany(sheetUrl: string, tabNames: RatingsTabName[]): Promise<AppsScriptSheetReadback[]> {
+    const spreadsheetId = extractSpreadsheetId(sheetUrl);
+    if (!tabNames.length) throw new Error("Не указаны вкладки для чтения");
+    if (new Set(tabNames).size !== tabNames.length) throw new Error("Вкладки для чтения не должны повторяться");
+    tabNames.forEach((tabName) => {
+      if (!isRatingsTabName(tabName)) throw new Error(`Недопустимая вкладка ${tabName}`);
+    });
+    const payload = await this.call({ action: "readBatch", spreadsheetId, tabNames });
+    const response = record(payload);
+    if (response.action !== "readBatch" || !Array.isArray(response.readbacks)) {
+      throw new AppsScriptPublisherError("Web App вернул ответ другой операции", "invalid_response");
+    }
+    const readbacks = response.readbacks.map(parseAppsScriptReadback);
+    if (readbacks.length !== tabNames.length) {
+      throw new AppsScriptPublisherError("Web App вернул не все вкладки", "invalid_response");
+    }
+    readbacks.forEach((readback, index) => {
+      if (readback.spreadsheetId !== spreadsheetId || readback.tabName !== tabNames[index]) {
+        throw new AppsScriptPublisherError("Web App вернул данные другой таблицы или вкладки", "invalid_response");
+      }
+    });
+    return readbacks;
   }
 
   async publish(input: {
@@ -365,6 +398,92 @@ export class AppsScriptSheetsPublisher {
       readback,
       limitations: [
         "Запись выполнена Web App под LockService с проверкой revision, резервной копией, точным readback и внутренним rollback.",
+        "LockService сериализует вызовы Web App, но не блокирует одновременное ручное редактирование таблицы."
+      ]
+    };
+  }
+
+  async publishBatch(input: {
+    sheetUrl: string;
+    sheets: Array<{ tabName: RatingsTabName; document: SheetDocument; expectedRevision: string }>;
+  }): Promise<AppsScriptBatchPublicationResult> {
+    if (!input.sheets.length) throw new Error("Не указаны вкладки для публикации");
+    if (new Set(input.sheets.map((sheet) => sheet.tabName)).size !== input.sheets.length) {
+      throw new Error("Вкладки для публикации не должны повторяться");
+    }
+    let cells = 0;
+    input.sheets.forEach((sheet) => {
+      if (!isRatingsTabName(sheet.tabName)) throw new Error(`Недопустимая вкладка ${sheet.tabName}`);
+      validateAppsScriptDocument(sheet.document);
+      if (!/^[a-f0-9]{64}$/i.test(sheet.expectedRevision)) throw new Error("Некорректная expectedRevision");
+      cells += sheet.document.values.length * sheet.document.columnCount;
+    });
+    if (cells > MAX_CELLS) throw new Error(`Суммарная публикация превышает лимит ${MAX_CELLS} ячеек`);
+
+    const spreadsheetId = extractSpreadsheetId(input.sheetUrl);
+    const payload = await this.call({
+      action: "writeBatch",
+      spreadsheetId,
+      sheets: input.sheets.map((sheet) => ({
+        tabName: sheet.tabName,
+        expectedRevision: sheet.expectedRevision,
+        document: {
+          values: sheet.document.values,
+          formulas: sheet.document.formulas,
+          merges: sheet.document.merges,
+          rowKinds: sheet.document.rowKinds,
+          columnCount: sheet.document.columnCount
+        }
+      }))
+    });
+    const response = record(payload);
+    if (response.action !== "writeBatch" || !Array.isArray(response.results)) {
+      throw new AppsScriptPublisherError("Web App вернул ответ другой операции", "invalid_response");
+    }
+    if (response.results.length !== input.sheets.length) {
+      throw new AppsScriptPublisherError("Web App вернул не все результаты публикации", "invalid_response");
+    }
+    const verifiedAt = response.verifiedAt;
+    if (typeof verifiedAt !== "string" || !Number.isFinite(Date.parse(verifiedAt))) {
+      throw new AppsScriptPublisherError("Web App вернул некорректное время проверки", "invalid_response");
+    }
+    const sheets = response.results.map((raw, index): AppsScriptPublicationResult => {
+      const result = record(raw);
+      const expected = input.sheets[index]!;
+      const readback = parseAppsScriptReadback(result.readback);
+      if (readback.spreadsheetId !== spreadsheetId || readback.tabName !== expected.tabName) {
+        throw new AppsScriptPublisherError("Web App записал данные в другую таблицу или вкладку", "invalid_response");
+      }
+      const mismatches = verifyAppsScriptReadback(readback, expected.document);
+      if (mismatches.length) {
+        throw new AppsScriptSheetRollbackError(
+          `Apps Script не подтвердил точную запись ${expected.tabName}: ${mismatches.slice(0, 5).join("; ")}`,
+          "unverified_write"
+        );
+      }
+      if (typeof result.range !== "string" || !/^A1:[A-Z]+[1-9]\d*$/.test(result.range)) {
+        throw new AppsScriptPublisherError("Web App вернул некорректный диапазон", "invalid_response");
+      }
+      if (result.attempts !== 0 && result.attempts !== 1) {
+        throw new AppsScriptPublisherError("Web App вернул некорректное число попыток", "invalid_response");
+      }
+      return {
+        status: "published",
+        range: result.range,
+        attempts: result.attempts,
+        verifiedAt,
+        revision: readback.revision,
+        readback,
+        limitations: []
+      };
+    });
+    return {
+      status: "published",
+      sheets,
+      attempts: sheets.reduce((sum, sheet) => sum + sheet.attempts, 0),
+      verifiedAt,
+      limitations: [
+        "Все брендовые вкладки записаны под одним LockService с общей проверкой revision, readback и rollback.",
         "LockService сериализует вызовы Web App, но не блокирует одновременное ручное редактирование таблицы."
       ]
     };

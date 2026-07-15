@@ -137,8 +137,8 @@ function cellCss(document: SheetDocument, row: number, column: number, cell: Exp
   }
   if (kind === "product") {
     css.push(`background-color:${row % 2 === 0 ? "#ffffff" : "#fbfaff"}`, "border-bottom:1px solid #ebe9f4");
-    if (column === 0) css.push("font-weight:bold", "color:#120755");
-    if (column === 2) css.push("color:#4932a8", "text-decoration:underline");
+    if (column === 0) css.push("color:#4932a8", "text-decoration:underline");
+    if (column === 2) css.push("font-weight:bold", "color:#120755");
   }
   if (kind === "summaryHeader") css.push("background-color:#e7e5f7", "color:#120755", "font-weight:bold", "border-top:3px solid #ff4d00");
   if (kind === "summary") {
@@ -202,7 +202,7 @@ export function buildBrowserSheetClipboardPlan(document: SheetDocument, locale =
       }
       if (cell.formula) attributes.push(`data-sheets-formula="${html(cell.formula)}"`);
       attributes.push(`style="${cellCss(document, row, column, cell)}"`);
-      const content = document.rowKinds[row] === "product" && column === 2 && typeof cell.value === "string" && /^https:\/\//i.test(cell.value)
+      const content = document.rowKinds[row] === "product" && column === 0 && typeof cell.value === "string" && /^https:\/\//i.test(cell.value)
         ? `<a href="${html(cell.value)}">${html(value)}</a>`
         : html(value);
       htmlCells.push(`<td ${attributes.join(" ")}>${content}</td>`);
@@ -214,7 +214,7 @@ export function buildBrowserSheetClipboardPlan(document: SheetDocument, locale =
             : 30;
     htmlRows.push(`<tr style="height:${height}px">${htmlCells.join("")}</tr>`);
   }
-  const widths = [150, 150, 320, 310, ...Array.from(
+  const widths = [320, 150, 310, 24, ...Array.from(
     { length: Math.max(0, document.columnCount - 4) },
     (_, index) => index % 2 === 0 ? 110 : 82
   )];
@@ -329,6 +329,10 @@ export class BrowserSheetsPublisher {
       );
       backup = await this.driver.captureCurrentRegion();
     } else {
+      // Multi-brand publication captures every preimage before writing. The
+      // last captured tab remains active, so each supplied preimage must still
+      // re-select its own target before any clipboard mutation.
+      await this.driver.selectTab(tabName);
       await this.driver.assertEditable();
     }
     const oldSize = readbackDimensions(backup);

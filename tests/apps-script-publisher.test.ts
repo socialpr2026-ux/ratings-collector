@@ -71,6 +71,47 @@ describe("Apps Script Sheets publisher", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
+  it("reads and publishes every brand tab as one verified batch", async () => {
+    const tabNames = ["Ratings Кагоцел", "Ratings Бактоблис"];
+    const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body));
+      if (request.action === "readBatch") {
+        expect(request.tabNames).toEqual(tabNames);
+        return jsonResponse({
+          ok: true,
+          action: "readBatch",
+          readbacks: tabNames.map((tabName) => readback({ tabName }))
+        });
+      }
+      expect(request.action).toBe("writeBatch");
+      expect(request.sheets.map((sheet: { tabName: string }) => sheet.tabName)).toEqual(tabNames);
+      return jsonResponse({
+        ok: true,
+        action: "writeBatch",
+        verifiedAt: "2026-07-16T01:02:03.000Z",
+        results: tabNames.map((tabName, index) => ({
+          range: "A1:B2",
+          attempts: index,
+          readback: readback({ tabName, revision: String(index + 1).repeat(64) })
+        }))
+      });
+    }) as unknown as typeof fetch;
+    const publisher = new AppsScriptSheetsPublisher(endpoint, { fetchImpl });
+    const current = await publisher.readMany(sheetUrl, tabNames);
+    const result = await publisher.publishBatch({
+      sheetUrl,
+      sheets: current.map((sheet) => ({
+        tabName: sheet.tabName,
+        expectedRevision: sheet.revision,
+        document: document()
+      }))
+    });
+
+    expect(result.sheets.map((sheet) => sheet.readback.tabName)).toEqual(tabNames);
+    expect(result.attempts).toBe(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   it("writes with optimistic revision and performs its own exact readback", async () => {
     const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       const request = JSON.parse(String(init?.body));

@@ -53,11 +53,12 @@ describe("anonymous browser publication state", () => {
       range: "A1:E12",
       verifiedAt: "2026-07-13T01:00:00.000Z",
       attempts: 1,
-      limitations: ["UI publication"]
+      limitations: ["UI publication"],
+      tabs: [{ tabName: "Ratings Brand", range: "A1:E12" }]
     });
     expect(completed.status).toBe("published");
     expect(completed.publication?.verification?.method).toBe("anonymous-browser-readback");
-    expect(completed.publication?.updatedRange).toBe("'Ratings'!A1:E12");
+    expect(completed.publication?.updatedRange).toBe("'Ratings Brand'!A1:E12");
     expect(await repository.listProducts("test_sheet")).toHaveLength(1);
     expect(Object.keys((await repository.getSnapshots("test_sheet"))["2026-07"])).toEqual(["example.com:1"]);
     expect((await repository.getRun(current.id))?.status).toBe("published");
@@ -80,7 +81,8 @@ describe("anonymous browser publication state", () => {
       range: "A1:E12",
       verifiedAt: "2026-07-13T01:00:00.000Z",
       attempts: 1,
-      limitations: []
+      limitations: [],
+      tabs: [{ tabName: "Ratings Brand", range: "A1:E12" }]
     });
 
     const second = run();
@@ -93,7 +95,8 @@ describe("anonymous browser publication state", () => {
       range: "A1:E12",
       verifiedAt: "2026-07-13T02:00:00.000Z",
       attempts: 1,
-      limitations: []
+      limitations: [],
+      tabs: [{ tabName: "Ratings Brand", range: "A1:E12" }]
     });
 
     expect((await repository.getRun(first.id))?.status).toBe("published");
@@ -136,12 +139,12 @@ describe("anonymous browser publication state", () => {
       verifiedAt: "2026-07-13T01:00:00.000Z",
       attempts: 1,
       limitations: [],
-      tabName: "Рейтинги",
+      tabs: [{ tabName: "Ratings Brand", range: "A1:E12" }],
       verificationMethod: "apps-script-readback"
     });
 
     expect(completed.publication?.verification?.method).toBe("apps-script-readback");
-    expect(completed.publication?.updatedRange).toBe("'Рейтинги'!A1:E12");
+    expect(completed.publication?.updatedRange).toBe("'Ratings Brand'!A1:E12");
     expect((await repository.getPublication("test_sheet:2026-07"))?.payloadHash).toBe("payload-1");
   });
 

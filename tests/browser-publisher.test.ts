@@ -103,6 +103,22 @@ describe("browser-only Google Sheets publisher", () => {
     expect(driver.pasteAt).toHaveBeenCalledTimes(2);
   });
 
+  it("selects the requested brand tab before mutating when a preimage was captured earlier", async () => {
+    const document = sheetDocument();
+    const driver = mockDriver({ readbacks: [readbackFromDocument(document)] });
+
+    await new BrowserSheetsPublisher(driver).publish({
+      sheetUrl: request.sheetUrl,
+      document,
+      tabName: "Ratings Бренд",
+      preimage: backup("исходный брендовый лист")
+    });
+
+    expect(driver.selectTab).toHaveBeenNthCalledWith(1, "Ratings Бренд");
+    expect(vi.mocked(driver.selectTab).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(driver.clearRange).mock.invocationCallOrder[0]);
+  });
+
   it("commits an exact replay without mutating an already matching sheet", async () => {
     const document = sheetDocument();
     const existing = readbackFromDocument(document);
@@ -179,7 +195,8 @@ describe("browser-only Google Sheets publisher", () => {
     expect(plan.payload.htmlText).toContain('href="https://example.com/p/1"');
     const productCells = plan.cells.find((_row, index) => document.rowKinds[index] === "product")!;
     expect(productCells[1].value).toBe("example.com");
-    expect(productCells[2].value).toBe("https://example.com/p/1");
+    expect(productCells[0].value).toBe("https://example.com/p/1");
+    expect(productCells[2].value).toBe("Упаковка");
   });
 
   it("rejects non-Google targets before opening a browser page", async () => {

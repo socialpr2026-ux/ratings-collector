@@ -236,22 +236,21 @@ function collapseSharedAggregateRows(products: readonly RowProduct[], months: re
 
 function parseLegacy(existing: ExistingSheet, request: RunRequest): { products: RowProduct[]; months: string[] } {
   const values = existing.values;
-  const secondHeader = normalizeText(String(values[1]?.[1] ?? ""));
-  const thirdHeader = normalizeText(String(values[1]?.[2] ?? ""));
-  const brandedLayout = normalizeText(String(values[0]?.[0] ?? "")) === "interfox ratings" &&
-    normalizeText(String(values[1]?.[0] ?? "")) === "бренд" &&
-    (secondHeader === "ссылка" || secondHeader === "площадка" && thirdHeader === "ссылка");
+  const reportTitle = normalizeText(String(values[0]?.[0] ?? ""));
+  const brandedLayout = reportTitle === "interfox ratings" || reportTitle === "рейтинги" || reportTitle.startsWith("рейтинги ");
   const headerRow = brandedLayout ? 1 : 0;
+  const headerFirst = normalizeText(String(values[headerRow]?.[0] ?? ""));
   const headerSecond = normalizeText(String(values[headerRow]?.[1] ?? ""));
   const headerThird = normalizeText(String(values[headerRow]?.[2] ?? ""));
-  const platformFirstLayout = normalizeText(String(values[headerRow]?.[0] ?? "")) === "бренд" &&
+  const platformFirstLayout = headerFirst === "бренд" &&
     headerSecond === "площадка" && headerThird === "ссылка";
-  const linkFirstLayout = normalizeText(String(values[headerRow]?.[0] ?? "")) === "бренд" &&
+  const linkFirstLayout = headerFirst === "бренд" &&
     headerSecond === "ссылка";
-  const currentLayout = platformFirstLayout || linkFirstLayout;
+  const brandSheetLayout = headerFirst === "ссылка" && headerSecond === "площадка" && headerThird === "продукт";
+  const structuredLayout = platformFirstLayout || linkFirstLayout || brandSheetLayout;
   const urlColumn = platformFirstLayout ? 2 : linkFirstLayout ? 1 : 0;
-  const productColumn = platformFirstLayout ? 3 : linkFirstLayout ? 2 : 1;
-  const metricStartColumn = currentLayout ? 4 : 3;
+  const productColumn = platformFirstLayout ? 3 : linkFirstLayout || brandSheetLayout ? 2 : 1;
+  const metricStartColumn = structuredLayout ? 4 : 3;
   const months: string[] = [];
   for (let column = metricStartColumn; column < (values[headerRow]?.length ?? 0); column += 2) {
     const key = legacyMonthKey(values[headerRow]?.[column], Number(request.month.slice(0, 4)));
@@ -263,7 +262,11 @@ function parseLegacy(existing: ExistingSheet, request: RunRequest): { products: 
     if (typeof url !== "string" || !/^https:\/\//i.test(url)) continue;
     const rawProduct = String(values[row]?.[productColumn] ?? "").trim();
     const { domain, listingId } = inferListing(url);
-    const storedBrand = currentLayout ? String(values[row]?.[0] ?? "").trim() : "";
+    const storedBrand = platformFirstLayout || linkFirstLayout
+      ? String(values[row]?.[0] ?? "").trim()
+      : brandSheetLayout && request.brands.length === 1
+        ? request.brands[0]!
+        : "";
     const brand = storedBrand || inferBrand(url, rawProduct, request.brands);
     const metrics: RowProduct["metrics"] = {};
     months.forEach((month, index) => {
@@ -284,11 +287,16 @@ export function buildSheetDocument(
   existing: ExistingSheet,
   request: RunRequest,
   registry: ProductRecord[],
-  snapshots: Record<string, Record<string, Observation>>
+  snapshots: Record<string, Record<string, Observation>>,
+  brandScope?: string
 ): SheetDocument {
   const legacy = parseLegacy(existing, request);
   const months = [...new Set([...legacy.months, ...Object.keys(snapshots), request.month])].sort();
-  const productMap = new Map<string, RowProduct>(legacy.products.map((item) => [item.key, item]));
+  const normalizedBrandScope = brandScope ? normalizeText(brandScope) : undefined;
+  const legacyProducts = normalizedBrandScope
+    ? legacy.products.filter((item) => normalizeText(item.brand) === normalizedBrandScope)
+    : legacy.products;
+  const productMap = new Map<string, RowProduct>(legacyProducts.map((item) => [item.key, item]));
   for (const item of registry) {
     const previous = productMap.get(item.key);
     productMap.set(item.key, { ...item, metrics: previous?.metrics ?? {} });
@@ -367,12 +375,13 @@ export function buildSheetDocument(
     ));
     rowKinds.push(kind);
   };
-  const brandRow: SheetScalar[] = ["Interfox Ratings", null, null, null, `Рейтинги товаров · ${request.region}`];
+  const reportBrand = request.brands.length === 1 ? request.brands[0] : request.brands.join(", ");
+  const brandRow: SheetScalar[] = [`Рейтинги: ${reportBrand}`, null, null, null, `Рейтинги товаров · ${request.region}`];
   add("brand", brandRow);
   merges.push({ startRow: 0, endRow: 1, startColumn: 0, endColumn: 4 });
   if (columnCount > 4) merges.push({ startRow: 0, endRow: 1, startColumn: 4, endColumn: columnCount });
 
-  const title: SheetScalar[] = ["Бренд", "Площадка", "Ссылка", "Продукт"];
+  const title: SheetScalar[] = ["Ссылка", "Площадка", "Продукт", null];
   const subheader: SheetScalar[] = [null, null, null, null];
   for (let column = 0; column < 4; column += 1) {
     merges.push({ startRow: 1, endRow: 3, startColumn: column, endColumn: column + 1 });
@@ -394,7 +403,7 @@ export function buildSheetDocument(
       null
     ]);
     for (const item of inCategory) {
-      const row: SheetScalar[] = [item.brand, platformLabel(item.domain), item.canonicalUrl, item.product];
+      const row: SheetScalar[] = [item.canonicalUrl, platformLabel(item.domain), item.product, null];
       months.forEach((month, index) => {
         const metric = item.metrics[month]; row[4 + index * 2] = metric?.reviews ?? null; row[5 + index * 2] = metric?.rating ?? null;
       });
@@ -436,6 +445,28 @@ export function buildSheetDocument(
   add("footnote", ["*Публичные агрегаты отзывов, оценок и голосов; ошибки и блокировки не подменяются нулевыми значениями."]);
   merges.push({ startRow: values.length - 1, endRow: values.length, startColumn: 0, endColumn: 3 });
   return { values, formulas, rowKinds, months, productStartRow, productEndRow, summaryStartRow, columnCount, merges };
+}
+
+export function buildBrandSheetDocument(
+  existing: ExistingSheet,
+  request: RunRequest,
+  brand: string,
+  registry: ProductRecord[],
+  snapshots: Record<string, Record<string, Observation>>
+): SheetDocument {
+  const normalizedBrand = normalizeText(brand);
+  const scopedRegistry = registry.filter((item) => normalizeText(item.brand) === normalizedBrand);
+  const scopedSnapshots = Object.fromEntries(Object.entries(snapshots).map(([month, observations]) => [
+    month,
+    Object.fromEntries(Object.entries(observations).filter(([, item]) => normalizeText(item.brand) === normalizedBrand))
+  ]));
+  return buildSheetDocument(
+    existing,
+    { ...request, brands: [brand] },
+    scopedRegistry,
+    scopedSnapshots,
+    brand
+  );
 }
 
 export function columnLetter(oneBased: number): string {

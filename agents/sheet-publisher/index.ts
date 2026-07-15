@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import type { BrowserContext, Page, Route } from "playwright-core";
 import { RatingsService } from "../../src/server/orchestrator.js";
 import { RemoteEvidenceStore, RemoteRepository } from "../../src/server/remote-repository.js";
-import { BrowserSheetRollbackError, BrowserSheetsPublisher } from "../../src/server/sheets/browser-publisher.js";
+import {
+  BrowserSheetRollbackError,
+  BrowserSheetsPublisher,
+  type BrowserSheetPublication
+} from "../../src/server/sheets/browser-publisher.js";
 import { PlaywrightSheetsUiDriver, type PlaywrightPageLike } from "../../src/server/sheets/browser-ui-driver.js";
 import type { BrowserSheetReadback } from "../../src/server/sheets/browser-ui-driver.js";
 import {
@@ -10,10 +14,9 @@ import {
   AppsScriptSheetsPublisher,
   type AppsScriptSheetReadback
 } from "../../src/server/sheets/apps-script-publisher.js";
-import { buildSheetDocument } from "../../src/server/sheets/model.js";
+import { buildBrandSheetDocument } from "../../src/server/sheets/model.js";
 import {
-  LEGACY_RATINGS_TAB_NAME,
-  RATINGS_TAB_NAME,
+  ratingsTabNameForBrand,
   type RatingsTabName
 } from "../../src/server/sheets/tab-name.js";
 import {
@@ -133,7 +136,7 @@ function appsScriptReadbackEvidence(readback: AppsScriptSheetReadback) {
 async function withSheetBrowser<T>(
   context: AgentContext,
   sheetUrl: string,
-  action: (driver: PlaywrightSheetsUiDriver, page: Page, tabName: RatingsTabName) => Promise<T>
+  action: (driver: PlaywrightSheetsUiDriver, page: Page) => Promise<T>
 ): Promise<T> {
   // EdgeOne initializes Sandbox lazily; cdpUrl is unavailable before one async call.
   await context.sandbox.commands.run("true");
@@ -159,12 +162,38 @@ async function withSheetBrowser<T>(
     });
     await driver.open(sheetUrl);
     await driver.assertEditable();
-    const tabName = await driver.ensureTab(RATINGS_TAB_NAME, [LEGACY_RATINGS_TAB_NAME]) as RatingsTabName;
-    return await action(driver, page, tabName);
+    return await action(driver, page);
   } finally {
     await page?.close().catch(() => undefined);
     if (ownsContext) await browserContext?.close().catch(() => undefined);
   }
+}
+
+export function brandTabNames(brands: string[]): RatingsTabName[] {
+  const tabNames = brands.map(ratingsTabNameForBrand);
+  const identities = tabNames.map((tabName) => tabName.normalize("NFKC").toLocaleLowerCase("ru-RU"));
+  if (new Set(identities).size !== tabNames.length) {
+    throw new Error("Названия брендов дают одинаковые имена вкладок Google Sheets");
+  }
+  return tabNames;
+}
+
+export async function rollbackBrowserTabs(
+  publisher: BrowserSheetsPublisher,
+  publications: BrowserSheetPublication[],
+  publishedCount: number,
+  publicationError: unknown
+): Promise<string[]> {
+  const failures: string[] = [];
+  for (let index = publishedCount - 1; index >= 0; index -= 1) {
+    try {
+      await publisher.rollbackVerifiedPublication(publications[index]!, publicationError);
+    } catch (rollbackError) {
+      if (rollbackError instanceof BrowserSheetRollbackError) failures.push(...rollbackError.rollbackMismatches);
+      else failures.push(`${publications[index]!.tabName}: ${safeErrorMessage(rollbackError)}`);
+    }
+  }
+  return failures;
 }
 
 export async function onRequest(context: AgentContext): Promise<Response> {
@@ -217,19 +246,29 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     if (!run) throw new Error("Запуск не найден");
     if (run.ownerEmail && run.ownerEmail !== user.email) throw new Error("Владелец запуска изменился");
     if (operation === "preflight") {
+      const tabNames = brandTabNames(run.request.brands);
       const result = appsScriptUrl
-        ? await new AppsScriptSheetsPublisher(appsScriptUrl).read(run.request.sheetUrl).then((current) => ({
-            rows: current.rows,
-            columns: current.columns,
-            tabName: current.tabName,
+        ? await new AppsScriptSheetsPublisher(appsScriptUrl).readMany(run.request.sheetUrl, tabNames).then((current) => ({
+            rows: current.reduce((sum, sheet) => sum + sheet.rows, 0),
+            columns: Math.max(0, ...current.map((sheet) => sheet.columns)),
+            tabName: current[0]!.tabName,
+            tabNames: current.map((sheet) => sheet.tabName),
             publisher: "apps-script" as const
           }))
-        : await withSheetBrowser(context, run.request.sheetUrl, async (driver, _page, tabName) => {
-            const current = await driver.captureCurrentRegion();
-            const rows = current.cells.length;
-            const columns = Math.max(0, ...current.cells.map((row) => row.length));
-            if (rows * columns > 50_000) throw new Error(`Лист слишком велик для безопасной браузерной публикации: ${rows * columns} ячеек`);
-            return { rows, columns, tabName, publisher: "browser" as const };
+        : await withSheetBrowser(context, run.request.sheetUrl, async (driver) => {
+            let rows = 0;
+            let columns = 0;
+            for (const tabName of tabNames) {
+              await driver.ensureTab(tabName, []);
+              const current = await driver.captureCurrentRegion();
+              const currentColumns = Math.max(0, ...current.cells.map((row) => row.length));
+              rows += current.cells.length;
+              columns = Math.max(columns, currentColumns);
+              if (rows * Math.max(columns, 1) > 50_000) {
+                throw new Error(`Листы слишком велики для безопасной браузерной публикации: более 50000 ячеек`);
+              }
+            }
+            return { rows, columns, tabName: tabNames[0]!, tabNames, publisher: "browser" as const };
           });
       const refreshed = await repository.getRun(run.id);
       if (refreshed && refreshed.status !== "published") {
@@ -280,8 +319,19 @@ export async function onRequest(context: AgentContext): Promise<Response> {
 
     if (appsScriptUrl) {
       const publisher = new AppsScriptSheetsPublisher(appsScriptUrl);
-      const current = await publisher.read(run.request.sheetUrl);
-      const document = buildSheetDocument({ values: current.values }, run.request, registry, snapshots);
+      const tabNames = brandTabNames(run.request.brands);
+      const current = await publisher.readMany(run.request.sheetUrl, tabNames);
+      const sheets = current.map((readback, index) => ({
+        tabName: tabNames[index]!,
+        expectedRevision: readback.revision,
+        document: buildBrandSheetDocument(
+          { values: readback.values },
+          run.request,
+          run.request.brands[index]!,
+          registry,
+          snapshots
+        )
+      }));
       const evidence = new RemoteEvidenceStore(publicationRepository);
       const preimageEvidenceRef = await evidence.put({
         kind: "apps-script-google-sheets-preimage",
@@ -289,29 +339,30 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         spreadsheetId,
         month: run.request.month,
         capturedAt: new Date().toISOString(),
-        readback: appsScriptReadbackEvidence(current)
+        readbacks: current.map(appsScriptReadbackEvidence)
       });
-      const published = await publisher.publish({
+      const published = await publisher.publishBatch({
         sheetUrl: run.request.sheetUrl,
-        document,
-        expectedRevision: current.revision,
-        tabName: current.tabName
+        sheets
       });
       const evidenceRef = await evidence.put({
         kind: "apps-script-google-sheets-publication",
         runId: run.id,
         spreadsheetId,
         month: run.request.month,
-        range: published.range,
+        ranges: published.sheets.map((sheet) => ({ tabName: sheet.readback.tabName, range: sheet.range })),
         attempts: published.attempts,
         verifiedAt: published.verifiedAt,
         limitations: published.limitations,
         preimageEvidenceRef,
-        postimage: appsScriptReadbackEvidence(published.readback)
+        postimages: published.sheets.map((sheet) => appsScriptReadbackEvidence(sheet.readback))
       });
       const completed = await completeBrowserPublication(publicationRepository, service, intent, {
-        ...published,
-        tabName: published.readback.tabName,
+        range: published.sheets[0]!.range,
+        attempts: published.attempts,
+        verifiedAt: published.verifiedAt,
+        limitations: published.limitations,
+        tabs: published.sheets.map((sheet) => ({ tabName: sheet.readback.tabName, range: sheet.range })),
         evidenceRef,
         verificationMethod: "apps-script-readback"
       });
@@ -323,9 +374,22 @@ export async function onRequest(context: AgentContext): Promise<Response> {
       });
     }
 
-    return await withSheetBrowser(context, run.request.sheetUrl, async (driver, page, tabName) => {
-      const current = await driver.captureCurrentRegion();
-      const document = buildSheetDocument({ values: existingValues(current) }, run.request, registry, snapshots);
+    return await withSheetBrowser(context, run.request.sheetUrl, async (driver, page) => {
+      const tabNames = brandTabNames(run.request.brands);
+      const publications: BrowserSheetPublication[] = [];
+      for (let index = 0; index < tabNames.length; index += 1) {
+        const tabName = tabNames[index]!;
+        await driver.ensureTab(tabName, []);
+        const current = await driver.captureCurrentRegion();
+        const document = buildBrandSheetDocument(
+          { values: existingValues(current) },
+          run.request,
+          run.request.brands[index]!,
+          registry,
+          snapshots
+        );
+        publications.push({ sheetUrl: run.request.sheetUrl, document, tabName, preimage: current });
+      }
       const evidence = new RemoteEvidenceStore(publicationRepository);
       const preimageEvidenceRef = await evidence.put({
         kind: "anonymous-google-sheets-preimage",
@@ -333,15 +397,24 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         spreadsheetId,
         month: run.request.month,
         capturedAt: new Date().toISOString(),
-        readback: readbackEvidence(current)
+        readbacks: publications.map((publication) => ({
+          tabName: publication.tabName!,
+          ...readbackEvidence(publication.preimage!)
+        }))
       });
       const browserPublisher = new BrowserSheetsPublisher(driver, {
         locale: "ru-RU",
         maxAttempts: 2,
         maxBackupCells: 50_000
       });
-      const publication = { sheetUrl: run.request.sheetUrl, document, tabName, preimage: current };
-      const published = await browserPublisher.publish(publication);
+      const published: Array<Awaited<ReturnType<BrowserSheetsPublisher["publish"]>>> = [];
+      try {
+        for (const publication of publications) published.push(await browserPublisher.publish(publication));
+      } catch (publishError) {
+        const rollbackFailures = await rollbackBrowserTabs(browserPublisher, publications, published.length, publishError);
+        if (rollbackFailures.length) throw new BrowserSheetRollbackError(publishError, rollbackFailures);
+        throw publishError;
+      }
 
       try {
         const screenshotBase64 = await page.screenshot({ type: "png" })
@@ -352,16 +425,23 @@ export async function onRequest(context: AgentContext): Promise<Response> {
           runId: run.id,
           spreadsheetId,
           month: run.request.month,
-          range: published.range,
-          attempts: published.attempts,
-          verifiedAt: published.verifiedAt,
-          limitations: published.limitations,
+          ranges: published.map((item, index) => ({ tabName: publications[index]!.tabName!, range: item.range })),
+          attempts: published.reduce((sum, item) => sum + item.attempts, 0),
+          verifiedAt: published[0]!.verifiedAt,
+          limitations: published.flatMap((item) => item.limitations),
           preimageEvidenceRef,
-          postimage: readbackEvidence(published.readback),
+          postimages: published.map((item, index) => ({
+            tabName: publications[index]!.tabName!,
+            ...readbackEvidence(item.readback)
+          })),
           screenshotPngBase64: screenshotBase64
         });
         const completed = await completeBrowserPublication(publicationRepository, service, intent, {
-          ...published,
+          range: published[0]!.range,
+          attempts: published.reduce((sum, item) => sum + item.attempts, 0),
+          verifiedAt: published[0]!.verifiedAt,
+          limitations: published.flatMap((item) => item.limitations),
+          tabs: published.map((item, index) => ({ tabName: publications[index]!.tabName!, range: item.range })),
           evidenceRef
         });
         return json({
@@ -372,15 +452,18 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         });
       } catch (postPublicationError) {
         if (postPublicationError instanceof PublicationCommitUncertainError) throw postPublicationError;
-        try {
-          await browserPublisher.rollbackVerifiedPublication(publication, postPublicationError);
-          await publicationRepository.replaceProducts(spreadsheetId, registryBeforePublication);
-          await publicationRepository.replaceSnapshots(spreadsheetId, snapshotsBeforePublication);
-        } catch (compensationError) {
-          if (compensationError instanceof BrowserSheetRollbackError) throw compensationError;
-          throw new BrowserSheetRollbackError(postPublicationError, [
-            `техническое состояние не восстановлено: ${(compensationError as Error).message}`
-          ]);
+        const compensationFailures = await rollbackBrowserTabs(
+          browserPublisher,
+          publications,
+          published.length,
+          postPublicationError
+        );
+        try { await publicationRepository.replaceProducts(spreadsheetId, registryBeforePublication); }
+        catch (error) { compensationFailures.push(`реестр не восстановлен: ${safeErrorMessage(error)}`); }
+        try { await publicationRepository.replaceSnapshots(spreadsheetId, snapshotsBeforePublication); }
+        catch (error) { compensationFailures.push(`снимки не восстановлены: ${safeErrorMessage(error)}`); }
+        if (compensationFailures.length) {
+          throw new BrowserSheetRollbackError(postPublicationError, compensationFailures);
         }
         throw postPublicationError;
       }

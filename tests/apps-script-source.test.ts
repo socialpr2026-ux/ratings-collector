@@ -8,7 +8,7 @@ describe("Google Apps Script bridge source", () => {
     expect(source).toContain('var RATINGS_TAB = "Ratings";');
     expect(source).toContain('var LEGACY_RATINGS_TAB = "Рейтинги";');
     expect(source).toContain("spreadsheet.getSheetByName(RATINGS_TAB) || spreadsheet.getSheetByName(LEGACY_RATINGS_TAB)");
-    expect(source).toContain("spreadsheet.insertSheet(RATINGS_TAB)");
+    expect(source).toContain("spreadsheet.insertSheet(payload.tabName)");
     expect(source).toContain("tabName: sheet.getName()");
     expect(source).not.toContain('serviceError_("tab_not_found"');
   });
@@ -32,12 +32,23 @@ describe("Google Apps Script bridge source", () => {
     expect(source).toContain("sheet.setHiddenGridlines(true);");
     expect(source).toContain('sheet.setTabColor("#ff4d00");');
     expect(source).toContain("sheet.setColumnWidth(2, 150);");
-    expect(source).toContain("sheet.setColumnWidth(3, 320);");
-    expect(source).toContain("sheet.setColumnWidth(4, 310);");
-    expect(source).toContain("sheet.getRange(productBlockStart + 1, 3, productCount, 1).setFontColor");
+    expect(source).toContain("sheet.setColumnWidth(1, 320);");
+    expect(source).toContain("sheet.setColumnWidth(3, 310);");
+    expect(source).toContain("sheet.setColumnWidth(4, 24);");
+    expect(source).toContain("sheet.getRange(productBlockStart + 1, 1, productCount, 1).setFontColor");
     expect(source).not.toContain("sheet.getRange(productBlockStart + 1, 2, productCount, 1).setFontColor");
     expect(source).toContain("sheet.setColumnWidth(metricColumn, 110);");
     expect(source).toContain("sheet.setColumnWidth(metricColumn + 1, 82);");
+  });
+
+  it("publishes all brand tabs under one lock and rolls the batch back together", () => {
+    expect(source).toContain('payload.action === "readBatch"');
+    expect(source).toContain('payload.action === "writeBatch"');
+    expect(source).toContain("function writeBatchAction_(payload)");
+    expect(source).toContain("entries.forEach(function (entry)");
+    expect(source).toContain("restoreBackup_(");
+    expect(source).toContain('"rollback_failed"');
+    expect(source).toContain('/^Ratings [^\\[\\]*?:\\\\/]+$/');
   });
 
   it("applies the Interfox visual system to brand, section and summary rows", () => {

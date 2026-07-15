@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSheetDocument } from "../src/server/sheets/model.js";
+import { buildBrandSheetDocument, buildSheetDocument } from "../src/server/sheets/model.js";
 import type { Observation, ProductRecord, RunRequest } from "../src/shared/types.js";
 
 const request: RunRequest = {
@@ -47,7 +47,7 @@ describe("Google Sheets model", () => {
 
     expect(document.values
       .filter((_row, index) => document.rowKinds[index] === "product")
-      .map((row) => [row[3], row[1]]))
+      .map((row) => [row[2], row[1]]))
       .toEqual([
         ["мазь 30 г", "iRecommend"],
         ["мазь 30 г", "Мед-отзыв"],
@@ -91,7 +91,7 @@ describe("Google Sheets model", () => {
 
     expect(document.values
       .filter((_row, index) => document.rowKinds[index] === "product")
-      .map((row) => row[3]))
+      .map((row) => row[2]))
       .toEqual(["гранулы №30", "гранулы №30", "гранулы №30"]);
   });
 
@@ -107,9 +107,9 @@ describe("Google Sheets model", () => {
     expect(document.months).toEqual(["2026-07"]);
     expect(document.values.filter((_, index) => document.rowKinds[index] === "product")).toHaveLength(1);
     const row = document.values.find((_, index) => document.rowKinds[index] === "product")!;
-    expect(row.slice(0, 6)).toEqual(["Кагоцел", "Ozon", current.canonicalUrl, "таблетки 12 мг №20", 5800, 4.7]);
-    expect(document.values[0].slice(0, 5)).toEqual(["Interfox Ratings", null, null, null, "Рейтинги товаров · Москва"]);
-    expect(document.values[1].slice(0, 5)).toEqual(["Бренд", "Площадка", "Ссылка", "Продукт", "Июль 2026"]);
+    expect(row.slice(0, 6)).toEqual([current.canonicalUrl, "Ozon", "таблетки 12 мг №20", null, 5800, 4.7]);
+    expect(document.values[0].slice(0, 5)).toEqual(["Рейтинги: Кагоцел", null, null, null, "Рейтинги товаров · Москва"]);
+    expect(document.values[1].slice(0, 5)).toEqual(["Ссылка", "Площадка", "Продукт", null, "Июль 2026"]);
     expect(document.values[2].slice(4, 6)).toEqual(["Отзывы / оценки", "Рейтинг"]);
     expect(document.merges).toContainEqual({ startRow: 0, endRow: 1, startColumn: 0, endColumn: 4 });
     expect(document.merges).toContainEqual({ startRow: 1, endRow: 3, startColumn: 0, endColumn: 1 });
@@ -156,7 +156,7 @@ describe("Google Sheets model", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0].slice(0, 8)).toEqual([
-      "Анвифен", "iRecommend", `${url}/`, "Общая карточка бренда", 5, 3.6, 6, 3.7
+      `${url}/`, "iRecommend", "Общая карточка бренда", null, 5, 3.6, 6, 3.7
     ]);
   });
 
@@ -166,8 +166,8 @@ describe("Google Sheets model", () => {
       "2026-07": { "ozon.ru:149024615": noisy }
     });
     const row = document.values.find((_, index) => document.rowKinds[index] === "product")!;
-    expect(row[0]).toBe("Кагоцел");
-    expect(row[3]).toBe("таблетки 12 мг №20");
+    expect(row[0]).toBe("https://www.ozon.ru/product/kagotsel-149024615/");
+    expect(row[2]).toBe("таблетки 12 мг №20");
   });
 
   it("densifies sparse summary rows into explicit nulls for JSON publication", () => {
@@ -237,10 +237,9 @@ describe("Google Sheets model", () => {
     const summary = document.formulas.filter((_row, index) => document.rowKinds[index] === "summary");
 
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.slice(1, 6)).toEqual([
-      "Ozon",
+    expect(rows[0]!.slice(0, 6)).toEqual([
       "https://www.ozon.ru/product/otsillokoktsinum-148170210/",
-      "гранулы 1 г №12 и №30", 2454, 4.9
+      "Ozon", "гранулы 1 г №12 и №30", null, 2454, 4.9
     ]);
     expect(summary[0][4]).toBe("=SUM(E5)");
     expect(summary[1][4]).toBe('=COUNTIFS({F5};">=4";{E5};">0")');
@@ -278,7 +277,7 @@ describe("Google Sheets model", () => {
     expect(row.slice(4, 6)).toEqual([null, null]);
   });
 
-  it("preserves out-of-scope brands and their metrics during a partial-brand run", () => {
+  it("keeps an out-of-scope brand out of a dedicated brand sheet", () => {
     const existing = { values: [
       [null, null, null, "Июль 2026"], [null, null, null, "Отзывы", "Рейтинг"],
       ["ozon.ru", "Продукт"],
@@ -286,10 +285,8 @@ describe("Google Sheets model", () => {
     ] };
     const partialRequest = { ...request, brands: ["Бактоблис"] };
 
-    const document = buildSheetDocument(existing, partialRequest, [], { "2026-07": {} });
-    const row = document.values.find((value) => value[2] === "https://www.ozon.ru/product/kagotsel-99/")!;
-
-    expect(row.slice(0, 6)).toEqual(["Кагоцел", "Ozon", "https://www.ozon.ru/product/kagotsel-99/", "таблетки №20", 10, 4.9]);
+    const document = buildBrandSheetDocument(existing, partialRequest, "Бактоблис", [], { "2026-07": {} });
+    expect(document.values.filter((_row, index) => document.rowKinds[index] === "product")).toEqual([]);
   });
 
   it("migrates a stored draft identity to a final human product label", () => {
@@ -305,7 +302,7 @@ describe("Google Sheets model", () => {
     };
     const document = buildSheetDocument({ values: [] }, request, [record], {});
     const row = document.values.find((_, index) => document.rowKinds[index] === "product")!;
-    expect(row.slice(0, 4)).toEqual(["Кагоцел", "Ozon", record.canonicalUrl, "таблетки №20"]);
+    expect(row.slice(0, 4)).toEqual([record.canonicalUrl, "Ozon", "таблетки №20", null]);
   });
 
   it("emits one section and one row per historical product when a domain or brand repeats", () => {
@@ -347,10 +344,10 @@ describe("Google Sheets model", () => {
       .map((row) => row[0]);
     const productDomains = document.values
       .filter((_row, index) => document.rowKinds[index] === "product")
-      .map((row) => new URL(String(row[2])).hostname);
+      .map((row) => new URL(String(row[0])).hostname);
     const reviewRows = document.values
       .filter((_row, index) => document.rowKinds[index] === "product")
-      .filter((row) => String(row[2]).includes("otzovik.com"));
+      .filter((row) => String(row[0]).includes("otzovik.com"));
 
     expect(sections).toEqual(["Отзовики", "Аптеки", "Маркетплейсы"]);
     expect(productDomains).toEqual([
@@ -358,7 +355,7 @@ describe("Google Sheets model", () => {
       "uteka.ru", "eapteka.ru",
       "wildberries.ru", "ozon.ru"
     ]);
-    expect(reviewRows.map((row) => row[0])).toEqual(["Альфа", "Бета"]);
+    expect(reviewRows.map((row) => row[2])).toEqual(["таблетки №10", "таблетки №10"]);
   });
 
   it("classifies 4.9, 4.0, 3.9, rating zero, no reviews and blank errors without overlap", () => {
@@ -408,7 +405,7 @@ describe("Google Sheets model", () => {
     expect(document.months).toEqual(["2026-06", "2026-07"]);
     expect(document.values[2].slice(4, 8)).toEqual(["Отзывы / оценки", "Рейтинг", "Отзывы / оценки", "Рейтинг"]);
     expect(row.slice(0, 8)).toEqual([
-      "Кагоцел", "Ozon", "https://www.ozon.ru/product/kagotsel-99/", "таблетки 12 мг №20", 9, 4.8, null, null
+      "https://www.ozon.ru/product/kagotsel-99/", "Ozon", "таблетки 12 мг №20", null, 9, 4.8, null, null
     ]);
   });
 
@@ -443,6 +440,31 @@ describe("Google Sheets model", () => {
     ]);
     expect(footnote).toContain("отзывов, оценок и голосов");
     expect(document.formulas.flat().filter(Boolean).join("\n")).toContain("=SUM(E");
+  });
+
+  it("builds an isolated brand report without a repeated brand column", () => {
+    const beta: Observation = {
+      ...observation("2", 17),
+      brand: "Бета",
+      canonicalUrl: "https://www.ozon.ru/product/beta-2/",
+      product: "Бета таблетки №20"
+    };
+    const multiBrandRequest = { ...request, brands: ["Кагоцел", "Бета"] };
+    const snapshots = {
+      "2026-07": {
+        "ozon.ru:149024614": observation("149024614", 91),
+        "ozon.ru:2": beta
+      }
+    };
+
+    const kagocel = buildBrandSheetDocument({ values: [] }, multiBrandRequest, "Кагоцел", [], snapshots);
+    const betaSheet = buildBrandSheetDocument({ values: [] }, multiBrandRequest, "Бета", [], snapshots);
+
+    expect(kagocel.values[0][0]).toBe("Рейтинги: Кагоцел");
+    expect(betaSheet.values[0][0]).toBe("Рейтинги: Бета");
+    expect(kagocel.values[1].slice(0, 4)).toEqual(["Ссылка", "Площадка", "Продукт", null]);
+    expect(kagocel.values.filter((_row, index) => kagocel.rowKinds[index] === "product")).toHaveLength(1);
+    expect(betaSheet.values.filter((_row, index) => betaSheet.rowKinds[index] === "product")).toHaveLength(1);
   });
 
   it("does not publish a medical article as a product row", () => {

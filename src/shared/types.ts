@@ -294,7 +294,7 @@ export type RunState = {
   qa?: { ok: boolean; blockers: string[]; warnings: string[] };
   publication?: PublicationRecord;
   /** Ratings sheet resolved during preflight; legacy Russian tabs remain supported. */
-  sheetTabName?: "Ratings" | "Рейтинги";
+  sheetTabName?: string;
   /** Recent runtime work for the live process map. Backward-compatible. */
   activity?: RunActivityTrace;
   /** One-time browser-companion sessions. Existing stored runs omit this field. */
