@@ -255,11 +255,13 @@ function normalizeKnownProductEquivalence(
   value: string,
   parts: Pick<ProductParts, "form" | "doses" | "count">
 ): Pick<ProductParts, "form" | "doses"> {
+  const normalizedBrand = normalizeText(brand);
+
   // Oscillococcinum's sellable tube dose is consistently catalogued as either
   // "1 dose", "1 g" or "1000 mg".  Normalize only when one of those values is
   // present on the current listing. A bare "granules No.12" remains bare: this
   // rule must not manufacture a strength from the brand name alone.
-  if (normalizeText(brand) !== "оциллококцинум" || !parts.count) {
+  if (normalizedBrand !== "оциллококцинум" || !parts.count) {
     return { form: parts.form, doses: parts.doses };
   }
   const explicitDose = /(?<![\p{L}\p{N}])1\s*(?:доз(?:а|ы|у)?|dose)(?![\p{L}\p{N}])/iu.test(value);
@@ -853,6 +855,76 @@ function doseKey(parts: ProductParts): string {
   return [...parts.doses].map(normalizeText).sort().join("+");
 }
 
+type OralSolutionCandidate = {
+  key: string;
+  concentration?: string;
+  otherDoses: string[];
+  oral: boolean;
+};
+
+function oralSolutionCandidate(parts: ProductParts): OralSolutionCandidate | undefined {
+  if (parts.form !== "раствор" && parts.form !== "раствор для приема внутрь") return undefined;
+  const concentration = parts.doses.find((dose) => /^\d+(?:[.,]\d+)?\s+(?:мкг|мг|г)\/мл$/iu.test(dose));
+  const standaloneStrength = parts.doses.find((dose) => /^\d+(?:[.,]\d+)?\s+(?:мкг|мг|г)$/iu.test(dose));
+  if (Boolean(concentration) === Boolean(standaloneStrength)) return undefined;
+
+  const strength = concentration ?? standaloneStrength!;
+  const strengthKey = normalizeText(strength.replace(/\/мл$/iu, ""));
+  const otherDoses = parts.doses.filter((dose) => dose !== concentration && dose !== standaloneStrength);
+  // Only reconcile a measured retail bottle. Without a shared pack volume,
+  // a bare strength may describe a dose rather than a concentration.
+  if (!otherDoses.some((dose) => /^\d+(?:[.,]\d+)?\s+мл$/iu.test(dose))) return undefined;
+  return {
+    key: [
+      normalizeText(parts.modifier ?? ""),
+      canonicalCount(parts) ?? "",
+      parts.multipack ?? "",
+      strengthKey,
+      ...otherDoses.map(normalizeText).sort()
+    ].join("|"),
+    concentration,
+    otherDoses,
+    oral: parts.form === "раствор для приема внутрь"
+  };
+}
+
+/**
+ * A pharmacy may shorten "120 mg/ml oral solution, 30 ml" to either
+ * "solution 120 mg/ml 30 ml" or "oral solution 120 mg 30 ml". Reconcile that
+ * omission only when another card for the same brand proves the concentration,
+ * route and identical measured bottle. Explicit injectable forms never enter
+ * this candidate set, while different strengths and volumes get different keys.
+ */
+function reconcileOralSolutionShorthand(
+  items: readonly ProductNameInput[],
+  parsed: readonly (ProductParts | undefined)[]
+): Array<ProductParts | undefined> {
+  const result = [...parsed];
+  const groups = new Map<string, Array<{ index: number; candidate: OralSolutionCandidate }>>();
+  parsed.forEach((parts, index) => {
+    if (!parts) return;
+    const candidate = oralSolutionCandidate(parts);
+    if (!candidate) return;
+    const key = `${normalizeText(items[index].brand)}|${candidate.key}`;
+    const group = groups.get(key) ?? [];
+    group.push({ index, candidate });
+    groups.set(key, group);
+  });
+
+  for (const group of groups.values()) {
+    const proof = group.find(({ candidate }) => candidate.concentration);
+    if (!proof || !group.some(({ candidate }) => candidate.oral)) continue;
+    for (const { index, candidate } of group) {
+      result[index] = {
+        ...parsed[index]!,
+        form: "раствор для приема внутрь",
+        doses: [proof.candidate.concentration!, ...candidate.otherDoses]
+      };
+    }
+  }
+  return result;
+}
+
 /**
  * Reconciles equivalent variants across sites. If the same brand/form/pack is
  * observed both with and without one non-conflicting strength, the shorter
@@ -862,11 +934,11 @@ function doseKey(parts: ProductParts): string {
  */
 export function canonicalProductVariants(items: readonly ProductNameInput[]): CanonicalProductVariant[] {
   const identities = items.map(identityForReconciliation);
-  const parsed = items.map((item, index) =>
+  const parsed = reconcileOralSolutionShorthand(items, items.map((item, index) =>
     identities[index].granularity === "variant" && !CONSUMER_PRODUCT_NOUN.test(identities[index].label)
       ? exactParts(item)
       : undefined
-  );
+  ));
   const groups = new Map<string, number[]>();
 
   parsed.forEach((parts, index) => {

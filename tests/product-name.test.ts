@@ -42,6 +42,26 @@ describe("canonical product descriptors", () => {
     }
   });
 
+  it("unifies Cereton oral-solution shorthand without merging injections or real variants", () => {
+    const variants = canonicalProductVariants([
+      { brand: "Церетон", product: "Церетон раствор 120 мг/мл 30 мл" },
+      { brand: "Церетон", product: "Церетон раствор для приема внутрь 120 мг 30 мл" },
+      { brand: "Церетон", product: "Церетон раствор 120 мг/мл 100 мл" },
+      { brand: "Церетон", product: "Церетон раствор для в/в и в/м введения 120 мг/мл 30 мл" },
+      { brand: "Церетон", product: "Церетон раствор для приема внутрь 60 мг/мл 30 мл" }
+    ]);
+
+    expect(variants.map((item) => item.label)).toEqual([
+      "раствор для приема внутрь 120 мг/мл 30 мл",
+      "раствор для приема внутрь 120 мг/мл 30 мл",
+      "раствор 120 мг/мл 100 мл",
+      "раствор для внутривенного и внутримышечного введения 120 мг/мл 30 мл",
+      "раствор для приема внутрь 60 мг/мл 30 мл"
+    ]);
+    expect(variants[0].variantKey).toBe(variants[1].variantKey);
+    expect(new Set(variants.map((item) => item.variantKey)).size).toBe(4);
+  });
+
   it("normalizes form, strength and count independently of wording and order", () => {
     const values = canonicalProductDescriptors([
       { brand: "Кагоцел", product: "Кагоцел табл. 100мг 10 шт" },
