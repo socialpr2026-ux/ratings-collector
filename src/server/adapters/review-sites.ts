@@ -843,6 +843,16 @@ export class ReviewSiteAdapter implements SiteAdapter {
     const $ = load(html);
     const refs = new Map<string, ProductRef>();
     const candidates: ProductRef[] = [];
+    const historicalIdByUrl = new Map<string, string>();
+    for (const previous of context.previousRefs ?? []) {
+      try {
+        const canonical = canonicalizeUrl(previous.url);
+        const target = new URL(canonical);
+        if (sameSite(target, "irecommend.ru") && this.definition.isProductUrl(target)) {
+          historicalIdByUrl.set(canonical, previous.listingId);
+        }
+      } catch { /* malformed historical URL */ }
+    }
     $("ul.srch-result-nodes > li .ProductTizer[data-type='2'][data-nid]").each((_index, node) => {
       const card = $(node);
       const nid = card.attr("data-nid")?.trim();
@@ -869,7 +879,10 @@ export class ReviewSiteAdapter implements SiteAdapter {
         candidates.push({
           domain: this.definition.domain,
           platform: this.definition.domain,
-          listingId: nid,
+          // Cached reader Markdown exposes a product-image id instead of the
+          // DOM node id. Preserve the registered id for the same canonical
+          // product across direct/reader route changes.
+          listingId: historicalIdByUrl.get(canonical) ?? nid,
           brand,
           url: canonical,
           title,

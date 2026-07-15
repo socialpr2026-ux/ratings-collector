@@ -448,6 +448,24 @@ describe("first-party review-site adapters", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("preserves a registered iRecommend id when the reader exposes an image id", async () => {
+    const canonical = "https://irecommend.ru/content/lekarstvennyi-preparat-biosintez-khondrofen-maz-dlya-naruzhnogo-primeneniya";
+    const adapter = adapterFor("irecommend.ru", (async () => new Response(`<html><body>
+      <ul class="srch-result-nodes"><li><div class="ProductTizer" data-type="2" data-nid="577131">
+        <div class="title"><a href="${canonical}">Лекарственный препарат Биосинтез Хондрофен мазь для наружного применения</a></div>
+        <a class="read-all-reviews-link"><span class="counter">4</span></a><span class="reviewsLink">4 отзыва</span>
+        <div class="fivestar-summary"><span class="average-rating"><span>4.8</span></span></div>
+      </div></li></ul></body></html>`)) as typeof fetch);
+
+    const refs = await adapter.discover("Хондрофен", {
+      ...context,
+      previousRefs: [{ listingId: "3232715", url: canonical }]
+    });
+
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toMatchObject({ listingId: "3232715", url: canonical });
+  });
+
   it("collects a proven Baktoblis search aggregate without a second CAPTCHA-prone request", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = urlOf(input);
