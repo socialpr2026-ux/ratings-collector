@@ -836,6 +836,51 @@ describe("fixed first-party collection egress", () => {
     { INTERNAL_AGENT_TOKEN: token }
   );
 
+  it("compacts a complete exact Yandex model shard without dropping product URLs", async () => {
+    const source = "https://reviews.yandex.ru/ugcpub/sitemap_model_690000000-699999999-0.xml";
+    const locations = [
+      "https://reviews.yandex.ru/product/otsillokoktsinum--695940046",
+      "https://reviews.yandex.ru/product/otsillokoktsinum-granuly--695943742"
+    ];
+    const upstreamXml = `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${locations.map((url) =>
+      `<url><loc>${url}</loc><lastmod>2026-07-15</lastmod><priority>0.001</priority></url>`
+    ).join("")}</urlset>`;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(upstreamXml, {
+      headers: { "content-type": "application/xml" }
+    })));
+
+    const response = await callGateway(source);
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("yandex-model-sitemap-compact");
+    expect(Number(response.headers.get("x-ratings-proof-bytes"))).toBeLessThan(
+      Number(response.headers.get("x-ratings-original-bytes"))
+    );
+    expect(proof.match(/<loc>/g)).toHaveLength(locations.length);
+    for (const location of locations) expect(proof).toContain(`<loc>${location}</loc>`);
+    expect(proof).not.toContain("lastmod");
+    expect(proof).not.toContain("priority");
+    expect(proof).toMatch(/<\/urlset>$/);
+  });
+
+  it("rejects incomplete or cross-shard Yandex sitemap proofs", async () => {
+    const source = "https://reviews.yandex.ru/ugcpub/sitemap_model_690000000-699999999-0.xml";
+    const bodies = [
+      `<urlset><url><loc>https://reviews.yandex.ru/product/otsillokoktsinum--695940046</loc></url>`,
+      `<urlset><url><loc>https://reviews.yandex.ru/product/otsillokoktsinum--186502056</loc></url></urlset>`,
+      `<urlset><url><loc>https://evil.example/product/otsillokoktsinum--695940046</loc></url></urlset>`
+    ];
+    for (const body of bodies) {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(body, {
+        headers: { "content-type": "application/xml" }
+      })));
+      const response = await callGateway(source);
+      expect(response.status).toBe(502);
+      expect(await response.text()).toContain("did not prove a complete exact shard");
+    }
+  });
+
   it("routes bounded Zdravcity paths through source-bound translated SSR", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(input.toString());

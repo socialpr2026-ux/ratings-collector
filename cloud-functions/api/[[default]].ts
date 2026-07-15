@@ -46,6 +46,7 @@ const APTEKA_TRANSLATE_HOST = "apteka-ru.translate.goog";
 const NFAPTEKA_TRANSLATE_HOST = "nfapteka-ru.translate.goog";
 const BUDZDOROV_TRANSLATE_HOST = "www-budzdorov-ru.translate.goog";
 const ETABL_TRANSLATE_HOST = "etabl-ru.translate.goog";
+const YANDEX_MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_(\d+)-(\d+)-\d+\.xml$/i;
 
 type PharmacyTranslateTarget = {
   kind: "farmlend-search" | "farmlend-product" | "okapteka-group" | "okapteka-reviews" | "asna-product" |
@@ -1418,6 +1419,43 @@ function compactAptekaRuHtml(html: string, requested: AptekaRuTarget): string | 
     `</head><body><h1>${escapeHtml(String(product.name))}</h1></body></html>`;
 }
 
+/**
+ * EdgeOne's cross-runtime hand-off can truncate multi-megabyte sitemap
+ * responses even though the first-party XML itself is complete. Keep every
+ * product URL (discovery remains exhaustive) while dropping lastmod/priority
+ * fields that the adapter never reads. The complete upstream document and
+ * exact shard range are verified before any compact proof is returned.
+ */
+function compactYandexModelSitemap(xml: string, requested: URL): string | undefined {
+  const range = requested.pathname.match(YANDEX_MODEL_SITEMAP_PATH);
+  if (!range || !/<urlset\b/i.test(xml) || !/<\/urlset\s*>\s*$/i.test(xml)) return undefined;
+  const minimumId = BigInt(range[1]);
+  const maximumId = BigInt(range[2]);
+  const $ = load(xml, { xmlMode: true });
+  const roots = $("urlset");
+  if (roots.length !== 1) return undefined;
+  const urls = roots.first().children("url");
+  const locations: string[] = [];
+  for (const node of urls.toArray()) {
+    const locs = $(node).children("loc");
+    if (locs.length !== 1) return undefined;
+    const raw = locs.first().text().trim();
+    let product: URL;
+    try { product = new URL(raw); }
+    catch { return undefined; }
+    const modelId = product.pathname.match(/^\/product\/[a-z0-9_-]+--(\d+)$/i)?.[1];
+    if (product.protocol !== "https:" || product.hostname !== "reviews.yandex.ru" || product.port ||
+      product.username || product.password || product.search || product.hash || !modelId) return undefined;
+    const numericId = BigInt(modelId);
+    if (numericId < minimumId || numericId > maximumId) return undefined;
+    locations.push(product.toString());
+  }
+  if (locations.length !== $("url").length) return undefined;
+  return `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` +
+    locations.map((location) => `<url><loc>${escapeHtml(location)}</loc></url>`).join("") +
+    `</urlset>`;
+}
+
 function assertOwner(run: RunState, user: AuthUser): void {
   if (run.ownerEmail && run.ownerEmail !== user.email) throw new Error("Этот запуск принадлежит другому сотруднику");
 }
@@ -1930,6 +1968,20 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     }
   });
   const text = await readTextBounded(upstream, 12_000_000, 60_000);
+  if (upstream.ok && yandexTarget && YANDEX_MODEL_SITEMAP_PATH.test(target.pathname)) {
+    const compact = compactYandexModelSitemap(text, target);
+    if (!compact) return json({ error: "Yandex model sitemap did not prove a complete exact shard" }, 502);
+    return new Response(compact, {
+      status: 200,
+      headers: {
+        "content-type": "application/xml; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "yandex-model-sitemap-compact",
+        "x-ratings-original-bytes": String(new TextEncoder().encode(text).byteLength),
+        "x-ratings-proof-bytes": String(new TextEncoder().encode(compact).byteLength)
+      }
+    });
+  }
   return new Response(text, {
     status: upstream.status,
     headers: {
