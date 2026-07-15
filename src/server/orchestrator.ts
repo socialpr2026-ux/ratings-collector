@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
+  AdapterActivityEvent,
   Observation,
   ProductRecord,
   ProductRef,
@@ -22,6 +23,7 @@ import { assertSafePublicUrl, extractSpreadsheetId } from "./utils/urls.js";
 import { analyzeProductIdentity } from "./utils/product-name.js";
 import { titleProductEvidence } from "./utils/product-evidence.js";
 import { normalizeObservationFeedback } from "./feedback-count.js";
+import { RunActivityTracker, runtimeSignals } from "./runtime-activity.js";
 
 const RUN_SOFT_DEADLINE_MS = 26 * 60 * 1000;
 
@@ -273,6 +275,12 @@ export class RatingsService {
     run.progress.totalPartitions = expectedPartitions.length;
     run.progress.completedPartitions = preservedPartitions.length;
     delete run.progress.current;
+    const activity = new RunActivityTracker(run);
+    activity.instant({
+      stage: "prepare",
+      label: "Подготовка запуска",
+      detail: `${retryTargets.length} разделов в очереди`
+    });
     await this.touch(run);
     const deadline = new AbortController();
     const deadlineTimer = setTimeout(
@@ -287,6 +295,7 @@ export class RatingsService {
         observation
       ]));
       let progressWrites = Promise.resolve();
+      let lastActivityWrite = 0;
       const saveProgress = async () => {
         // Persist observations together with their completed partition. This
         // makes a checkpoint self-contained if the Agent is interrupted before
@@ -297,6 +306,55 @@ export class RatingsService {
         progressWrites = progressWrites.then(() => this.repository.saveRun(snapshot));
         await progressWrites;
       };
+      const saveActivityProgress = async (force = false) => {
+        const now = Date.now();
+        if (!force && now - lastActivityWrite < 750) return;
+        lastActivityWrite = now;
+        await saveProgress();
+      };
+      const createAdapterActivityReporter = (base: { domain: string; brand?: string }) => {
+        const activeOperations = new Map<string, string>();
+        return {
+          report: async (event: AdapterActivityEvent) => {
+            const input = {
+              stage: event.stage,
+              label: event.label,
+              domain: base.domain,
+              brand: base.brand,
+              listingId: event.listingId,
+              channels: event.channels,
+              parsers: event.parsers,
+              detail: event.detail
+            } as const;
+            const existing = activeOperations.get(event.operationId);
+            if (event.status === "active") {
+              if (existing) activity.warn(existing, { detail: "Операция перезапущена" });
+              const id = activity.start(input);
+              activeOperations.set(event.operationId, id);
+              // Persist the first active nested operation immediately. Parallel
+              // product checks then share the same snapshot without flooding
+              // the repository with one write per request.
+              await saveActivityProgress(activeOperations.size === 1);
+              return;
+            }
+            if (existing) {
+              activity.finish(existing, event.status, {
+                channels: event.channels,
+                parsers: event.parsers,
+                detail: event.detail
+              });
+              activeOperations.delete(event.operationId);
+            } else {
+              activity.instant(input, event.status);
+            }
+            await saveActivityProgress();
+          },
+          warnActive: (message: string) => {
+            for (const id of activeOperations.values()) activity.warn(id, { detail: message });
+            activeOperations.clear();
+          }
+        };
+      };
       const retryBrandsByDomain = new Map<string, string[]>();
       for (const { domain, brand } of retryTargets) {
         const brands = retryBrandsByDomain.get(domain) ?? [];
@@ -306,6 +364,13 @@ export class RatingsService {
       await Promise.all(run.request.domains.filter((domain) => retryBrandsByDomain.has(domain)).map(async (domain) => {
         const retryBrands = retryBrandsByDomain.get(domain)!;
         let adapter: SiteAdapter;
+        const healthReporter = createAdapterActivityReporter({ domain });
+        const healthActivity = activity.start({
+          stage: "health_check",
+          label: "Проверка канала сбора",
+          domain
+        });
+        await saveActivityProgress();
         try {
           deadline.signal.throwIfAborted();
           adapter = await this.resolveAdapter(domain, run.request);
@@ -314,7 +379,8 @@ export class RatingsService {
             brands: retryBrands,
             region: run.request.region,
             month: run.request.month,
-            signal: deadline.signal
+            signal: deadline.signal,
+            activity: healthReporter.report
           });
           deadline.signal.throwIfAborted();
           if (!health.ok) {
@@ -333,9 +399,18 @@ export class RatingsService {
             }
             throw failure;
           }
+          activity.complete(healthActivity, {
+            ...runtimeSignals(health.message),
+            detail: health.message ?? "Контрольная проверка пройдена"
+          });
         } catch (error) {
           const kind = errorStatus(error);
           const message = safeErrorMessage(error);
+          healthReporter.warnActive(message);
+          activity.warn(healthActivity, {
+            ...runtimeSignals(message),
+            detail: message
+          });
           for (const brand of retryBrands) {
             this.addPartition(
               run,
@@ -355,6 +430,19 @@ export class RatingsService {
           const previousRecords = products.filter((item) => item.domain === domain && item.brand === brand);
           const previousIds = previousRecords.map((item) => item.listingId);
           const previousRefs = previousRecords.map((item) => ({ listingId: item.listingId, url: item.canonicalUrl }));
+          const discoveryActivity = activity.start({
+            stage: "discovery",
+            label: "Поиск карточек",
+            domain,
+            brand
+          });
+          let activeCollection: string | undefined;
+          let activeNormalization: string | undefined;
+          const adapterReporter = createAdapterActivityReporter({ domain, brand });
+          // Discovery is frequently the longest operation (sitemaps, search
+          // pagination and exact product proof), so always expose its start to
+          // polling clients instead of leaving a stale health-check visible.
+          await saveActivityProgress(true);
           try {
             deadline.signal.throwIfAborted();
             const discovered = validateDiscoveredRefs(await adapter.discover(brand, {
@@ -364,8 +452,14 @@ export class RatingsService {
               month: run.request.month,
               previousIds,
               previousRefs,
-              signal: deadline.signal
+              signal: deadline.signal,
+              activity: adapterReporter.report
             }), domain, brand);
+            const discoverySignals = runtimeSignals(discovered.map((ref) => ref.metadata));
+            activity.complete(discoveryActivity, {
+              ...discoverySignals,
+              detail: discovered.length ? `Найдено карточек: ${discovered.length}` : "Поиск завершён без карточек"
+            });
             if (!discovered.length) {
               this.addPartition(run, domain, brand, "no_results", 0, 0, "Поиск исчерпан, карточек нет");
               await saveProgress();
@@ -376,6 +470,14 @@ export class RatingsService {
             const previousById = new Map(previousRecords.map((item) => [item.listingId, item]));
             for (const ref of discovered) {
               deadline.signal.throwIfAborted();
+              activeCollection = activity.start({
+                stage: "collection",
+                label: "Чтение карточки",
+                domain,
+                brand,
+                listingId: ref.listingId
+              });
+              await saveActivityProgress();
               const observation = validateCollectedObservation(await adapter.collect(ref, {
                 runId: run.id,
                 brands: retryBrands,
@@ -383,8 +485,23 @@ export class RatingsService {
                 month: run.request.month,
                 previousIds,
                 previousRefs,
-                signal: deadline.signal
+                signal: deadline.signal,
+                activity: adapterReporter.report
               }), ref, domain, brand);
+              const observedSignals = runtimeSignals(ref.metadata, observation.source, observation.evidenceRef);
+              activity.complete(activeCollection, {
+                ...observedSignals,
+                detail: "Отзывы и рейтинг извлечены"
+              });
+              activeCollection = undefined;
+              activeNormalization = activity.start({
+                stage: "normalization",
+                label: "Нормализация продукта",
+                domain,
+                brand,
+                listingId: ref.listingId,
+                ...observedSignals
+              });
               normalizeObservationFeedback(observation);
               if (observation.status === "not_found") {
                 const historical = previousById.get(observation.listingId);
@@ -402,6 +519,8 @@ export class RatingsService {
                   // candidate. Its exact missing-page proof means it is not a
                   // current card and must not enter the sheet or review queue.
                   viableDiscovered -= 1;
+                  activity.complete(activeNormalization, { detail: "Удалённая карточка исключена" });
+                  activeNormalization = undefined;
                   continue;
                 } else {
                   // A 404/410 is only a valid empty monthly value for a card
@@ -451,6 +570,10 @@ export class RatingsService {
                 seen.set(key, observation);
                 collected += 1;
               }
+              activity.complete(activeNormalization, {
+                detail: observation.productIdentity?.label ?? observation.product
+              });
+              activeNormalization = undefined;
             }
             this.addPartition(
               run,
@@ -464,6 +587,10 @@ export class RatingsService {
           } catch (error) {
             const kind = errorStatus(error);
             const message = safeErrorMessage(error);
+            adapterReporter.warnActive(message);
+            activity.warn(discoveryActivity, { ...runtimeSignals(message), detail: message });
+            if (activeCollection) activity.warn(activeCollection, { ...runtimeSignals(message), detail: message });
+            if (activeNormalization) activity.warn(activeNormalization, { detail: message });
             run.errors.push({ partition: `${domain}/${brand}`, message: `${kind}: ${message}` });
             this.addPartition(run, domain, brand, kind === "error" ? "error" : "blocked", 0, 0, `${kind}: ${message}`);
           }
@@ -484,7 +611,16 @@ export class RatingsService {
       await this.refreshDraftProfileExamples(run);
       run.payloadHash = stableHash({ request: run.request, observations: run.observations });
       run.status = "review";
+      const qaActivity = activity.start({
+        stage: "qa",
+        label: "Проверка целостности"
+      });
       run.qa = validateRun(run);
+      if (run.qa.ok) {
+        activity.complete(qaActivity, { detail: "Снимок готов к публикации" });
+      } else {
+        activity.warn(qaActivity, { detail: `Требует внимания: ${run.qa.blockers.length}` });
+      }
       await this.touch(run);
       return run;
     } finally {

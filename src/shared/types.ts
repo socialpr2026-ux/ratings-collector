@@ -110,6 +110,18 @@ export const productRefSchema = z.object({
 
 export type ProductRef = z.infer<typeof productRefSchema>;
 
+/** Optional fine-grained adapter signal for the live runtime trace. */
+export type AdapterActivityEvent = {
+  operationId: string;
+  stage: "health_check" | "discovery" | "collection" | "parsing";
+  status: "active" | "complete" | "warning";
+  label: string;
+  listingId?: string;
+  channels?: RunActivityChannel[];
+  parsers?: RunActivityParser[];
+  detail?: string;
+};
+
 export type AdapterContext = {
   /** Stable execution scope used to coalesce run-wide work such as quota checks. */
   runId?: string;
@@ -121,6 +133,8 @@ export type AdapterContext = {
   previousIds?: string[];
   previousRefs?: Array<{ listingId: string; url: string }>;
   fetch?: typeof globalThis.fetch;
+  /** Collector-reported operations; absent for older adapters and callers. */
+  activity?: (event: AdapterActivityEvent) => void | Promise<void>;
 };
 
 export type AdapterHealth = {
@@ -212,6 +226,57 @@ export type RunProgress = {
   current?: string;
 };
 
+/**
+ * A bounded, evidence-backed trace of work that is really happening during a
+ * run.  Stored runs created before this contract simply omit `activity`.
+ */
+export type RunActivityStage =
+  | "prepare"
+  | "health_check"
+  | "discovery"
+  | "collection"
+  | "parsing"
+  | "normalization"
+  | "qa";
+
+export type RunActivityStatus = "active" | "complete" | "warning";
+
+export type RunActivityChannel =
+  | "direct"
+  | "first_party_api"
+  | "google_translate"
+  | "reader_proxy"
+  | "gateway"
+  | "browser"
+  | "sandbox"
+  | "registry";
+
+export type RunActivityParser = "json_ld" | "dom" | "api_json" | "embedded_state";
+
+export type RunActivity = {
+  id: string;
+  sequence: number;
+  stage: RunActivityStage;
+  status: RunActivityStatus;
+  label: string;
+  startedAt: string;
+  finishedAt?: string;
+  domain?: string;
+  brand?: string;
+  listingId?: string;
+  /** Actual transport evidence reported by returned refs/observations. */
+  channels?: RunActivityChannel[];
+  /** Actual parser evidence reported by the observation source. */
+  parsers?: RunActivityParser[];
+  detail?: string;
+};
+
+export type RunActivityTrace = {
+  sequence: number;
+  active: RunActivity[];
+  recent: RunActivity[];
+};
+
 export type RunState = {
   id: string;
   ownerEmail?: string;
@@ -226,6 +291,8 @@ export type RunState = {
   payloadHash?: string;
   qa?: { ok: boolean; blockers: string[]; warnings: string[] };
   publication?: PublicationRecord;
+  /** Recent runtime work for the live process map. Backward-compatible. */
+  activity?: RunActivityTrace;
   /** One-time browser-companion sessions. Existing stored runs omit this field. */
   companionSessions?: { ozon?: OzonCompanionSessionState };
 };

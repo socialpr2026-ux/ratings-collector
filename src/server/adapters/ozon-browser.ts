@@ -1,5 +1,6 @@
 import { load } from "cheerio";
 import type {
+  AdapterActivityEvent,
   AdapterContext,
   AdapterHealth,
   Observation,
@@ -22,6 +23,33 @@ const MAX_TRANSLATE_REDIRECTS = 2;
 const EXACT_TRANSLATE_PROOF = "ozon:product-json-ld:google-translate";
 
 type JsonObject = Record<string, unknown>;
+
+type ActivityInput = Omit<AdapterActivityEvent, "status">;
+
+async function reportActivity(context: AdapterContext, event: AdapterActivityEvent): Promise<void> {
+  try { await context.activity?.(event); }
+  catch { /* progress telemetry must never change collector semantics */ }
+}
+
+async function withActivity<T>(
+  context: AdapterContext,
+  input: ActivityInput,
+  work: () => Promise<T>
+): Promise<T> {
+  await reportActivity(context, { ...input, status: "active" });
+  try {
+    const value = await work();
+    await reportActivity(context, { ...input, status: "complete" });
+    return value;
+  } catch (error) {
+    await reportActivity(context, {
+      ...input,
+      status: "warning",
+      detail: error instanceof Error ? error.message : String(error)
+    });
+    throw error;
+  }
+}
 
 type SearchTile = {
   listingId: string;
@@ -569,7 +597,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
   async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
     const checkedAt = this.now().toISOString();
     try {
-      const page = await this.fetchSearchPage("Арбидол", 1, context);
+      const page = await this.fetchSearchPage("Арбидол", 1, context, "health_check");
       if (page.rawItemCount === 0) throw new ParserChangedError("Ozon canary search returned no tiles");
       return { ok: true, checkedAt, message: "Ozon composer search schema is valid" };
     } catch (error) {
@@ -743,6 +771,13 @@ export class OzonBrowserAdapter implements SiteAdapter {
     listingId: string,
     context: AdapterContext
   ): Promise<ExactProductMetrics> {
+    return withActivity(context, {
+      operationId: `ozon:translate-product:${listingId}`,
+      stage: "collection",
+      label: "Google Translate · карточка Ozon",
+      listingId,
+      channels: ["google_translate"]
+    }, async () => {
     const target = new URL(canonicalUrl(ref.url, listingId));
     if (
       target.protocol !== "https:" || target.hostname !== "www.ozon.ru" || target.search || target.hash ||
@@ -782,14 +817,27 @@ export class OzonBrowserAdapter implements SiteAdapter {
       throw new ParserChangedError("Ozon translated product returned non-HTML data");
     }
     if (translatedRedirect(body)) throw new ParserChangedError("Ozon translated product returned an unexpected client redirect");
-    return parseExactProductMetrics(body, target, listingId);
+    return withActivity(context, {
+      operationId: `ozon:parse-product-jsonld:${listingId}`,
+      stage: "parsing",
+      label: "JSON-LD · рейтинг и отзывы",
+      listingId,
+      channels: ["google_translate"],
+      parsers: ["json_ld"]
+    }, async () => parseExactProductMetrics(body, target, listingId));
+    });
   }
 
-  private async fetchSearchPage(brand: string, page: number, context: AdapterContext): Promise<SearchPage> {
+  private async fetchSearchPage(
+    brand: string,
+    page: number,
+    context: AdapterContext,
+    stage: "health_check" | "discovery" = "discovery"
+  ): Promise<SearchPage> {
     let translateFailure: AdapterBlockedError | ParserChangedError | undefined;
     if (this.translateEnabled) {
       try {
-        return await this.fetchTranslatedSearchPage(brand, page, context);
+        return await this.fetchTranslatedSearchPage(brand, page, context, stage);
       } catch (error) {
         if (context.signal?.aborted) throw error;
         translateFailure = error instanceof ParserChangedError || error instanceof AdapterBlockedError
@@ -799,7 +847,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
     }
 
     try {
-      return await this.fetchComposerSearchPage(brand, page, context);
+      return await this.fetchComposerSearchPage(brand, page, context, stage);
     } catch (composerFailure) {
       if (!translateFailure) throw composerFailure;
       const message = `Ozon translated search: ${translateFailure.message}; composer browser: ${composerFailure instanceof Error ? composerFailure.message : String(composerFailure)}`;
@@ -810,7 +858,19 @@ export class OzonBrowserAdapter implements SiteAdapter {
     }
   }
 
-  private async fetchTranslatedSearchPage(brand: string, page: number, context: AdapterContext): Promise<SearchPage> {
+  private async fetchTranslatedSearchPage(
+    brand: string,
+    page: number,
+    context: AdapterContext,
+    stage: "health_check" | "discovery"
+  ): Promise<SearchPage> {
+    return withActivity(context, {
+      operationId: `ozon:translate-search:${page}`,
+      stage,
+      label: "Google Translate · выдача Ozon",
+      channels: ["google_translate"],
+      detail: `Страница ${page}`
+    }, async () => {
     const search = new URL("https://www.ozon.ru/search/");
     search.searchParams.set("text", brand);
     search.searchParams.set("from_global", "true");
@@ -854,7 +914,16 @@ export class OzonBrowserAdapter implements SiteAdapter {
       }
 
       const redirected = translatedRedirect(body);
-      if (!redirected) return parseTranslatedSearchPage(body, target, page);
+      if (!redirected) {
+        return withActivity(context, {
+          operationId: `ozon:parse-search-dom:${page}`,
+          stage: "parsing",
+          label: "DOM · карточки выдачи",
+          channels: ["google_translate"],
+          parsers: ["dom"],
+          detail: `Страница ${page}`
+        }, async () => parseTranslatedSearchPage(body, target, page));
+      }
       if (redirectCount >= MAX_TRANSLATE_REDIRECTS) {
         throw new ParserChangedError("Ozon translated search exceeded the redirect safety limit");
       }
@@ -862,9 +931,22 @@ export class OzonBrowserAdapter implements SiteAdapter {
       target = redirected;
     }
     throw new ParserChangedError("Ozon translated search did not reach a product page");
+    });
   }
 
-  private async fetchComposerSearchPage(brand: string, page: number, context: AdapterContext): Promise<SearchPage> {
+  private async fetchComposerSearchPage(
+    brand: string,
+    page: number,
+    context: AdapterContext,
+    stage: "health_check" | "discovery"
+  ): Promise<SearchPage> {
+    return withActivity(context, {
+      operationId: `ozon:composer-browser:${page}`,
+      stage,
+      label: "Sandbox Chromium · Ozon API",
+      channels: ["sandbox", "browser", "first_party_api"],
+      detail: `Резервный канал · страница ${page}`
+    }, async () => {
     const search = new URL("https://www.ozon.ru/search/");
     search.searchParams.set("text", brand);
     search.searchParams.set("from_global", "true");
@@ -897,12 +979,22 @@ export class OzonBrowserAdapter implements SiteAdapter {
       throw new AdapterBlockedError(`Ozon blocked the browser collector (HTTP ${response.status})`);
     }
     if (!response.ok) throw new AdapterBlockedError(`Ozon composer returned HTTP ${response.status}`);
-    try {
-      return parseSearchPage(JSON.parse(body) as unknown);
-    } catch (error) {
-      if (error instanceof ParserChangedError) throw error;
-      throw new ParserChangedError("Ozon composer returned invalid JSON");
-    }
+    return withActivity(context, {
+      operationId: `ozon:parse-composer-json:${page}`,
+      stage: "parsing",
+      label: "JSON API · карточки выдачи",
+      channels: ["sandbox", "browser", "first_party_api"],
+      parsers: ["api_json"],
+      detail: `Страница ${page}`
+    }, async () => {
+      try {
+        return parseSearchPage(JSON.parse(body) as unknown);
+      } catch (error) {
+        if (error instanceof ParserChangedError) throw error;
+        throw new ParserChangedError("Ozon composer returned invalid JSON");
+      }
+    });
+    });
   }
 }
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { MAX_RUN_PARTITIONS, type Observation, type RunState, type SiteProfile } from "../shared/types.js";
+import { MAX_RUN_PARTITIONS, type Observation, type RunActivityStage, type RunState, type SiteProfile } from "../shared/types.js";
 import type { OzonCompanionResult, OzonCompanionSession } from "../shared/companion.js";
 import { analyzeProductIdentity, canonicalProductVariants } from "../server/utils/product-name.js";
 import {
@@ -16,7 +16,6 @@ import {
   summarizeIssues
 } from "./review-copy.js";
 import {
-  CATALOG_DOMAINS,
   SELECTABLE_CATALOG_DOMAINS,
   SITE_CATALOG,
   countCustomDomains,
@@ -107,11 +106,39 @@ const observationStatusLabels: Record<Observation["status"], string> = {
   parser_changed: "Площадка изменилась"
 };
 
+const activityStageLabels: Record<RunActivityStage, string> = {
+  prepare: "Доступ",
+  health_check: "Доступ",
+  discovery: "Поиск",
+  collection: "Источник данных",
+  parsing: "Извлечение",
+  normalization: "Определение продукта",
+  qa: "Контроль качества"
+};
+
+const activityChannelLabels = {
+  direct: "Прямой запрос",
+  first_party_api: "API площадки",
+  google_translate: "Google Translate SSR",
+  reader_proxy: "Reader proxy",
+  gateway: "Cloud gateway",
+  browser: "Chromium",
+  sandbox: "EdgeOne Sandbox",
+  registry: "Реестр прошлых запусков"
+} as const;
+
+const activityParserLabels = {
+  json_ld: "JSON-LD",
+  dom: "Разметка страницы",
+  api_json: "API JSON",
+  embedded_state: "Данные приложения"
+} as const;
+
 const productIdentityLabels = {
-  variant: "Точный продукт",
-  family: "Агрегат бренда",
-  line: "Агрегат линейки",
-  unresolved: "Продукт по доступным данным",
+  variant: "Точный вариант",
+  family: "Общий рейтинг продукта",
+  line: "Общий рейтинг линейки",
+  unresolved: "Определено по карточке",
   not_product: "Не товар"
 } as const;
 
@@ -218,6 +245,10 @@ export function App() {
   const [confirmedProfileExamples, setConfirmedProfileExamples] = useState<Record<string, string[]>>({});
   const [reviewOnly, setReviewOnly] = useState(true);
   const [listQuery, setListQuery] = useState("");
+  const [brandQuery, setBrandQuery] = useState("");
+  const [brandEditorOpen, setBrandEditorOpen] = useState(false);
+  const [brandPickerOpen, setBrandPickerOpen] = useState(false);
+  const [activeSiteGroup, setActiveSiteGroup] = useState<(typeof SITE_CATALOG)[number]["id"]>("review-sites");
   const [busyAction, setBusyAction] = useState<BusyAction>();
   const [automaticContinuation, setAutomaticContinuation] = useState<AutomaticContinuationNotice>();
   const [error, setError] = useState("");
@@ -291,6 +322,13 @@ export function App() {
   const temporarilyBlockedDomains = useMemo(() => parseTemporarilyBlockedDomainList(domains), [domains]);
   const normalizedBrands = useMemo(() => uniqueLines(brands), [brands]);
   const selectedDomainSet = useMemo(() => new Set(normalizedDomains), [normalizedDomains]);
+  const selectedBrandSet = useMemo(() => new Set(normalizedBrands), [normalizedBrands]);
+  const brandCatalog = useMemo(() => uniqueLines([...(config?.companyBrands ?? []), ...normalizedBrands].join("\n")), [config?.companyBrands, normalizedBrands]);
+  const filteredBrandCatalog = useMemo(() => {
+    const query = brandQuery.trim().toLocaleLowerCase("ru-RU");
+    const candidates = query ? brandCatalog.filter((brand) => brand.toLocaleLowerCase("ru-RU").includes(query)) : brandCatalog;
+    return [...candidates].sort((left, right) => Number(selectedBrandSet.has(right)) - Number(selectedBrandSet.has(left)));
+  }, [brandCatalog, brandQuery, selectedBrandSet]);
   const customDomainCount = useMemo(() => countCustomDomains(domains), [domains]);
   const checkCount = normalizedDomains.length * normalizedBrands.length;
   const sheetIsValid = isGoogleSheetUrl(sheetUrl);
@@ -710,13 +748,45 @@ export function App() {
   const progress = run
     ? Math.round(100 * run.progress.completedPartitions / Math.max(1, run.progress.totalPartitions))
     : 0;
-  const currentStep = !run
-    ? 1
-    : ["queued", "running"].includes(run.status)
-      ? 2
-      : ["publishing", "published"].includes(run.status)
-        ? 4
-        : 3;
+  const orderedSiteGroups = (["review-sites", "pharmacies", "marketplaces"] as const).map((groupId) => SITE_CATALOG.find((item) => item.id === groupId)!);
+  const activityEvents = [...(run?.activity?.recent ?? []), ...(run?.activity?.active ?? [])].sort((left, right) => left.sequence - right.sequence);
+  const liveActivity = [...(run?.activity?.active ?? [])].sort((left, right) => left.sequence - right.sequence).slice(-1)[0];
+  const technicalActivityEvents = activityEvents.filter((event) => (event.channels?.length ?? 0) > 0 || (event.parsers?.length ?? 0) > 0);
+  const latestTechnicalActivity = technicalActivityEvents.slice(-1)[0];
+  const currentTechnicalLane = latestTechnicalActivity
+    ? technicalActivityEvents.filter((event) =>
+      event.domain === latestTechnicalActivity.domain &&
+      (!latestTechnicalActivity.brand || event.brand === latestTechnicalActivity.brand)
+    )
+    : [];
+  const technicalRouteBySignature = new Map<string, (typeof technicalActivityEvents)[number]>();
+  for (const event of currentTechnicalLane) {
+    const signature = [
+      event.stage,
+      event.status === "warning" ? "warning" : "normal",
+      ...(event.channels ?? []),
+      ...(event.parsers ?? [])
+    ].join(":");
+    technicalRouteBySignature.set(signature, event);
+  }
+  const visibleTechnicalRoute = [...technicalRouteBySignature.values()].slice(-6);
+  const technicalLabelsFor = (event: (typeof activityEvents)[number]) => {
+    const channels = (event.channels ?? []).map((channel) => activityChannelLabels[channel]);
+    const parsers = (event.parsers ?? []).map((parser) => activityParserLabels[parser]);
+    return event.stage === "parsing" ? [...parsers, ...channels] : [...channels, ...parsers];
+  };
+  const focusedActivity = liveActivity ?? activityEvents.slice(-1)[0];
+  const runtimeRouteLabels = visibleTechnicalRoute
+    .map((event) => technicalLabelsFor(event)[0])
+    .filter((label, index, labels) => Boolean(label) && labels.indexOf(label) === index);
+  const runtimeStageLabel = activityStageLabels[focusedActivity?.stage ?? "prepare"];
+  const runtimeStateLabel = focusedActivity?.status === "warning"
+    ? "Нужен резерв"
+    : focusedActivity?.status === "active"
+      ? "Сейчас"
+      : pendingStatuses.has(run?.status ?? "queued")
+        ? "В работе"
+        : "Готово";
 
   useEffect(() => {
     if (!run || pendingStatuses.has(run.status)) return;
@@ -765,34 +835,32 @@ export function App() {
     setDomains((current) => updateDomainSelection(current, targetDomains, selected));
   }
 
+  function setBrandSelection(target: string, selected: boolean) {
+    setBrands((current) => {
+      const currentBrands = uniqueLines(current);
+      if (!selected) return currentBrands.filter((brand) => brand !== target).join("\n");
+      return currentBrands.includes(target) ? currentBrands.join("\n") : [...currentBrands, target].join("\n");
+    });
+  }
+
   return <div className="app-shell">
     <a className="skip-link" href="#setup">Перейти к настройке</a>
     <header className="topbar">
-      <a className="logo" href="#top" aria-label="Сбор рейтингов — в начало">
-        <span className="logo-mark" aria-hidden="true">Р</span>
-        <span><strong>Сбор рейтингов</strong><small>Ежемесячное обновление таблицы</small></span>
+      <a className="logo" href="#top" aria-label="Interfox Ratings — в начало">
+        <span className="interfox-wordmark">Interfox</span>
+        <span className="logo-divider" aria-hidden="true" />
+        <span className="ratings-wordmark">Ratings</span>
       </a>
-      <div className="access-note"><span aria-hidden="true">●</span> Без Google API-ключей</div>
+      <div className="product-context"><span aria-hidden="true">●</span> Репутационная аналитика</div>
     </header>
 
     <main id="top" aria-busy={busy}>
       <section className="intro" aria-labelledby="page-title">
         <div>
-          <p className="eyebrow">Отзывы, оценки и рейтинги с площадок</p>
-          <h1 id="page-title">Соберите рейтинги<br />и обновите таблицу</h1>
-          <p className="intro-copy">Выберите площадки и бренды. Сервис найдёт карточки, покажет спорные результаты и запишет только проверенные данные.</p>
-          <ul className="intro-benefits" aria-label="Преимущества сервиса">
-            <li>Без ключей Google</li>
-            <li>Проверка до записи</li>
-            <li>История по месяцам</li>
-          </ul>
+          <p className="eyebrow">Interfox Ratings</p>
+          <h1 id="page-title">Рейтинги брендов.<br /><span>Собраны и готовы.</span></h1>
+          <p className="intro-copy">Площадки, бренды и одна аккуратная таблица.</p>
         </div>
-        <ol className="workflow" aria-label="Этапы работы">
-          <li className={currentStep >= 1 ? "active" : ""} aria-current={currentStep === 1 ? "step" : undefined}><span>1</span><div><strong>Настройка</strong><small>Таблица, месяц и список</small></div></li>
-          <li className={currentStep >= 2 ? "active" : ""} aria-current={currentStep === 2 ? "step" : undefined}><span>2</span><div><strong>Сбор</strong><small>Поиск карточек и данных</small></div></li>
-          <li className={currentStep >= 3 ? "active" : ""} aria-current={currentStep === 3 ? "step" : undefined}><span>3</span><div><strong>Проверка</strong><small>Только спорные находки</small></div></li>
-          <li className={currentStep >= 4 ? "active" : ""} aria-current={currentStep === 4 ? "step" : undefined}><span>4</span><div><strong>Готово</strong><small>Запись в исходный лист</small></div></li>
-        </ol>
       </section>
 
       {config?.authRequired && <section className="notice notice-error" role="alert">
@@ -802,8 +870,8 @@ export function App() {
 
       <form id="setup" className="card setup-card" onSubmit={start} ref={formRef} noValidate>
         <div className="card-heading">
-          <div><p className="section-number">Шаг 1</p><h2>Настройте сбор</h2><p>Укажите таблицу, затем выберите площадки и бренды.</p></div>
-          {savedConfiguration && <button className="text-button" type="button" onClick={useSavedConfiguration}>Заполнить как в прошлый раз</button>}
+          <div><p className="section-number">Новый сбор</p><h2>Что собираем</h2><p>Выберите источники и бренды.</p></div>
+          {savedConfiguration && <button className="text-button" type="button" onClick={useSavedConfiguration}>Повторить прошлый запуск</button>}
         </div>
 
         <div className="sheet-field">
@@ -827,10 +895,10 @@ export function App() {
             />
           </div>
           <p id="sheet-help" className={sheetUrl && !sheetIsValid ? "field-help field-error" : "field-help"}>
-            {sheetUrl && !sheetIsValid ? "Вставьте ссылку вида docs.google.com/spreadsheets/…" : "В таблице включите «Доступ по ссылке → Редактор», затем вставьте ссылку. Новая таблица создаётся в вашем Google-аккаунте."}
+            {sheetUrl && !sheetIsValid ? "Вставьте ссылку вида docs.google.com/spreadsheets/…" : "Откройте доступ по ссылке с ролью «Редактор»."}
           </p>
           <details className="sheet-guide">
-            <summary>Как подготовить новую таблицу</summary>
+            <summary>Подготовить таблицу</summary>
             <ol><li>Нажмите «Создать новую» и дождитесь открытия Google Таблиц.</li><li>Включите общий доступ по ссылке с ролью «Редактор».</li><li>Скопируйте адрес таблицы и вставьте его выше.</li></ol>
           </details>
         </div>
@@ -850,15 +918,45 @@ export function App() {
               </div>
             </div>
 
-            <div className="site-groups">
-              {SITE_CATALOG.map((group) => {
+            <div className="site-category-tabs" role="tablist" aria-label="Категории площадок">
+              {orderedSiteGroups.map((group, index) => {
+                const groupDomains = group.sites.filter((site) => site.availability !== "temporarily_blocked").map((site) => site.domain);
+                const selectedCount = groupDomains.filter((domain) => selectedDomainSet.has(domain)).length;
+                return <button
+                  key={group.id}
+                  type="button"
+                  role="tab"
+                  id={`site-tab-${group.id}`}
+                  aria-selected={activeSiteGroup === group.id}
+                  aria-controls={`site-panel-${group.id}`}
+                  tabIndex={activeSiteGroup === group.id ? 0 : -1}
+                  className={activeSiteGroup === group.id ? "active" : ""}
+                  onClick={() => setActiveSiteGroup(group.id)}
+                  onKeyDown={(event) => {
+                    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+                    event.preventDefault();
+                    const currentIndex = orderedSiteGroups.findIndex((item) => item.id === group.id);
+                    const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? orderedSiteGroups.length - 1 : event.key === "ArrowRight" ? (currentIndex + 1) % orderedSiteGroups.length : (currentIndex - 1 + orderedSiteGroups.length) % orderedSiteGroups.length;
+                    const nextGroup = orderedSiteGroups[nextIndex];
+                    setActiveSiteGroup(nextGroup.id);
+                    requestAnimationFrame(() => document.getElementById(`site-tab-${nextGroup.id}`)?.focus());
+                  }}
+                >
+                  <span className="site-tab-index" aria-hidden="true">0{index + 1}</span>
+                  <span><strong>{group.label}</strong><small>{selectedCount} из {groupDomains.length}</small></span>
+                </button>;
+              })}
+            </div>
+
+            <div className="site-group-panel-wrap">
+              {orderedSiteGroups.map((group) => {
                 const groupDomains = group.sites.filter((site) => site.availability !== "temporarily_blocked").map((site) => site.domain);
                 const selectedCount = groupDomains.filter((domain) => selectedDomainSet.has(domain)).length;
                 const allSelected = selectedCount === groupDomains.length;
-                return <div className="site-group" key={group.id}>
+                return <div className="site-group-panel" id={`site-panel-${group.id}`} role="tabpanel" aria-labelledby={`site-tab-${group.id}`} hidden={group.id !== activeSiteGroup} key={group.id}>
                   <div className="site-group-heading">
                     <div><h3>{group.label}</h3><p>{group.description}</p></div>
-                    <button type="button" onClick={() => setPresetSites(groupDomains, !allSelected)} aria-label={`${allSelected ? "Снять выбор" : "Выбрать все"}: ${group.label}`}>{allSelected ? "Снять" : `Все · ${selectedCount}/${groupDomains.length}`}</button>
+                    <button type="button" onClick={() => setPresetSites(groupDomains, !allSelected)} aria-label={`${allSelected ? "Снять выбор" : "Выбрать все"}: ${group.label}`}>{allSelected ? "Снять все" : "Выбрать все"}</button>
                   </div>
                   <div className="site-options">
                     {group.sites.map((site) => {
@@ -886,15 +984,48 @@ export function App() {
           </section>
 
           <section className="brand-field" aria-labelledby="brands-label">
-            <span className="label-row"><label id="brands-label" htmlFor="brands-list">Бренды</label><small>{normalizedBrands.length}</small></span>
-            {config?.companyBrands?.length ? <button
-              className="brand-preset"
-              type="button"
-              onClick={() => setBrands(config.companyBrands!.join("\n"))}
-            >Наши бренды · {config.companyBrands.length}</button> : null}
-            <textarea id="brands-list" value={brands} onChange={(event) => setBrands(event.target.value)} rows={12} placeholder={"Кагоцел\nАрбидол\nИнгавирин"} required />
-            <small className="field-help">По одному бренду в строке. Повторы будут убраны автоматически.</small>
-            <span className="brand-hint"><span aria-hidden="true">✓</span><span>Название бренда и уточнение продукта будут записаны в разные столбцы.</span></span>
+            <span className="label-row"><span id="brands-label">Бренды</span><small>{normalizedBrands.length}</small></span>
+            <div className="brand-toolbar">
+              <button
+                className="brand-picker-button"
+                type="button"
+                aria-expanded={brandPickerOpen}
+                onClick={() => { setBrandPickerOpen((current) => !current); setBrandEditorOpen(false); setBrandQuery(""); }}
+              >{brandPickerOpen ? "Готово" : `Выбрать бренды · ${normalizedBrands.length}`}</button>
+              <button className="brand-edit-button" type="button" onClick={() => { setBrandEditorOpen((current) => !current); setBrandPickerOpen(false); setBrandQuery(""); }}>
+                {brandEditorOpen ? "Готово" : "Вставить списком"}
+              </button>
+            </div>
+
+            {brandEditorOpen ? <div className="brand-raw-editor">
+              <textarea id="brands-list" aria-labelledby="brands-label" value={brands} onChange={(event) => setBrands(event.target.value)} rows={7} placeholder={"Кагоцел\nАрбидол\nИнгавирин"} required />
+              <small className="field-help">По одному бренду в строке. Повторы удаляются автоматически.</small>
+            </div> : brandPickerOpen ? <div className="brand-manager">
+              <div className="brand-picker-head">
+                <div className="brand-search"><span aria-hidden="true">⌕</span><input type="search" value={brandQuery} onChange={(event) => setBrandQuery(event.target.value)} placeholder="Найти бренд" aria-label="Поиск по доступным брендам" /></div>
+                <div className="brand-picker-actions">
+                  {config?.companyBrands?.length ? <button type="button" onClick={() => {
+                    setBrands(uniqueLines([...normalizedBrands, ...config.companyBrands!].join("\n")).join("\n"));
+                    setBrandQuery("");
+                  }}>Все наши · {config.companyBrands.length}</button> : null}
+                  <button type="button" onClick={() => { setBrands(""); setBrandQuery(""); }} disabled={normalizedBrands.length === 0}>Очистить</button>
+                </div>
+              </div>
+              <div className="brand-choice-list" aria-label="Каталог брендов">
+                {filteredBrandCatalog.map((brand) => {
+                  const checked = selectedBrandSet.has(brand);
+                  return <label className={`brand-choice ${checked ? "selected" : ""}`} key={brand}>
+                    <input type="checkbox" checked={checked} onChange={(event) => setBrandSelection(brand, event.target.checked)} />
+                    <span>{brand}</span>
+                  </label>;
+                })}
+                {filteredBrandCatalog.length === 0 && <span className="brand-empty">Ничего не найдено</span>}
+              </div>
+            </div> : <div className="brand-summary" aria-label="Выбранные бренды">
+              {normalizedBrands.slice(0, 6).map((brand) => <span key={brand}>{brand}</span>)}
+              {normalizedBrands.length > 6 && <span className="brand-summary-more">ещё {normalizedBrands.length - 6}</span>}
+              {normalizedBrands.length === 0 && <span className="brand-summary-empty">Бренды пока не выбраны</span>}
+            </div>}
           </section>
         </div>
 
@@ -904,27 +1035,53 @@ export function App() {
             <span id="setup-status">{setupStatus}</span>
           </div>
           <button className="button button-primary button-large" type="submit" disabled={!formIsReady || busy || config?.authRequired} aria-describedby="setup-status">
-            <span>{busyAction === "resume" ? "Восстанавливаем…" : busyAction === "continue" ? "Продолжаем сбор…" : busyAction === "start" ? "Собираем данные…" : "Запустить сбор"}</span><span aria-hidden="true">→</span>
+            <span>{busyAction === "resume" ? "Восстанавливаем…" : busyAction === "continue" ? "Продолжаем сбор…" : busyAction === "start" ? "Собираем данные…" : "Начать сбор"}</span><span aria-hidden="true">→</span>
           </button>
         </div>
       </form>
 
-      {(busy || run) && <section className={`card progress-card ${run && (pendingStatuses.has(run.status) || collectionIsContinuing) ? "progress-active" : ""}`} aria-labelledby="progress-title" aria-live="polite" aria-busy={Boolean(run && (pendingStatuses.has(run.status) || collectionIsContinuing))}>
+      {(busy || run) && <section className={`card progress-card ${run && (pendingStatuses.has(run.status) || collectionIsContinuing) ? "progress-active" : ""}`} aria-labelledby="progress-title" aria-busy={Boolean(run && (pendingStatuses.has(run.status) || collectionIsContinuing))}>
         <div className="card-heading compact">
-          <div><p className="section-number">Шаг 2</p><h2 id="progress-title">{busyAction === "resume" ? "Восстанавливаем последний запуск" : busyAction === "continue" ? `Автоматически продолжаем сбор · ${automaticContinuation?.attempt ?? 1}/${automaticContinuation?.maxAttempts ?? 3}` : busyAction === "retry" ? "Повторяем неуспешные площадки" : run ? runStatusLabels[run.status] : "Создаём запуск"}</h2><p>{busyAction === "resume" ? "Загружаем сохранённый результат и актуальный статус площадок." : busyAction === "continue" ? `Сохранено ${automaticContinuation?.completedPartitions ?? run?.progress.completedPartitions ?? 0} из ${automaticContinuation?.totalPartitions ?? run?.progress.totalPartitions ?? 0} проверок. Готовые площадки остаются на месте; продолжаются только незавершённые.` : busyAction === "retry" ? (run?.progress.current ? `Повторная проверка: ${run.progress.current}` : "Уже собранные данные сохранены. Обновляем только площадки с ошибками.") : run?.progress.current ? `Сейчас проверяем: ${run.progress.current}` : pendingStatuses.has(run?.status ?? "queued") ? "Можно перейти в другую вкладку — этот экран обновится автоматически." : "Сбор завершён. Ниже можно проверить результат."}</p></div>
+          <div><p className="section-number">Шаг 2</p><h2 id="progress-title">{busyAction === "resume" ? "Восстанавливаем последний запуск" : busyAction === "continue" ? `Автоматически продолжаем сбор · ${automaticContinuation?.attempt ?? 1}/${automaticContinuation?.maxAttempts ?? 3}` : busyAction === "retry" ? "Повторяем неуспешные площадки" : run ? runStatusLabels[run.status] : "Создаём запуск"}</h2><p>{busyAction === "resume" ? "Загружаем сохранённый результат и актуальный статус площадок." : busyAction === "continue" ? `Сохранено ${automaticContinuation?.completedPartitions ?? run?.progress.completedPartitions ?? 0} из ${automaticContinuation?.totalPartitions ?? run?.progress.totalPartitions ?? 0} проверок. Готовые площадки остаются на месте; продолжаются только незавершённые.` : busyAction === "retry" ? "Уже собранные данные сохранены. Обновляем только площадки с ошибками." : run?.progress.current ? "Получаем страницы, извлекаем рейтинг и сверяем продукт." : pendingStatuses.has(run?.status ?? "queued") ? "Можно перейти в другую вкладку — этот экран обновится автоматически." : "Сбор завершён. Ниже можно проверить результат."}</p></div>
           <div className="progress-value"><strong>{run ? `${progress}%` : "…"}</strong><small>{run ? `${run.progress.completedPartitions} из ${run.progress.totalPartitions}` : "подготовка"}</small></div>
         </div>
         <div className="progress-track" role="progressbar" aria-label="Ход сбора" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
           <span style={{ width: `${progress}%` }} />
         </div>
+        <div className="runtime-map" aria-label="Живая карта реальных процессов сбора">
+          <div className={`runtime-live-field state-${focusedActivity?.status ?? "pending"}`}>
+            <span className="runtime-live-pulse" aria-hidden="true" />
+            <div className="runtime-live-copy">
+              <span>{runtimeStageLabel}</span>
+              <strong>{focusedActivity?.label ?? "Определяем технический маршрут"}</strong>
+              <small>{focusedActivity?.detail ?? "Первый подтверждённый канал появится здесь автоматически."}</small>
+            </div>
+            <span className="runtime-live-state">{runtimeStateLabel}</span>
+            <div className="runtime-route-line">
+              <span>Фактический путь</span>
+              <strong>{runtimeRouteLabels.length > 0 ? runtimeRouteLabels.join(" → ") : "Ожидаем первый ответ"}</strong>
+            </div>
+          </div>
+
+          {activityEvents.length > 0 && <details className="runtime-history">
+            <summary><span>Технический журнал · {activityEvents.length}</span><span>{run?.activity?.active.length ? `${run.activity.active.length} ${plural(run.activity.active.length, "процесс", "процесса", "процессов")} параллельно` : "Открыть"}</span></summary>
+            <ol>
+              {activityEvents.slice(-10).reverse().map((event) => <li className={`state-${event.status}`} key={event.id}>
+                <span className="runtime-history-dot" aria-hidden="true" />
+                <span><strong>{event.label}</strong><small>{[event.domain, event.brand, event.detail].filter(Boolean).join(" · ")}</small></span>
+                <span>{event.status === "active" ? "сейчас" : event.status === "warning" ? "внимание" : "готово"}</span>
+              </li>)}
+            </ol>
+          </details>}
+          <span className="sr-only" aria-live="polite">{focusedActivity ? `${focusedActivity.label}. ${focusedActivity.detail ?? ""}` : "Подготавливаем маршрут сбора"}</span>
+        </div>
         {busyAction === "continue" && automaticContinuation && <div className="continuation-status" role="status">
           <span aria-hidden="true">↻</span>
           <p><strong>Продолжение {automaticContinuation.attempt} из {automaticContinuation.maxAttempts}</strong><small>Ни одна завершённая проверка не запускается повторно.</small></p>
         </div>}
-        {run && <div className="metrics">
+        {run && <div className="metrics metrics-compact">
           <article><strong>{run.observations.length.toLocaleString("ru-RU")}</strong><span>карточек найдено</span></article>
-          <article><strong>{partitionSummary?.complete ?? 0}</strong><span>проверок завершено</span></article>
-          <article><strong>{partitionSummary?.empty ?? 0}</strong><span>ничего не найдено</span></article>
+          <article><strong>{run.progress.completedPartitions} / {run.progress.totalPartitions}</strong><span>проверок завершено</span></article>
           <article className={(partitionSummary?.failed ?? 0) > 0 ? "metric-warning" : ""}><strong>{partitionSummary?.failed ?? 0}</strong><span>требуют внимания</span></article>
         </div>}
       </section>}
@@ -954,7 +1111,7 @@ export function App() {
             <p>{companionState.message ?? `Облачный сбор не завершился для ${companionBrands.length} ${plural(companionBrands.length, "бренда", "брендов", "брендов")}. Локальный помощник использует обычное подключение этого компьютера и вернёт только карточки, отзывы / оценки и рейтинг.`}</p>
             <small>{companionState.status === "unavailable"
               ? "Откройте скачанный файл, оставьте его окно открытым и нажмите «Проверить после запуска»."
-              : "При первом использовании скачайте и запустите помощник один раз; Google‑ключ и Apify не используются."}</small>
+              : "При первом использовании скачайте и запустите помощник один раз."}</small>
           </div>
           <div className="companion-actions">
             <a className="button button-quiet" href="/ratings-ozon-helper.cmd" download>Скачать помощник</a>
@@ -1034,7 +1191,7 @@ export function App() {
                     : <span className="check-unavailable" aria-label="Карточку нельзя подтвердить без полных метрик">—</span>)}</td>
                   <td data-label="Площадка"><span className="domain-name">{item.domain}</span></td>
                   <td className="brand-cell" data-label="Бренд"><strong>{item.brand}</strong></td>
-                  <td className="product-cell" data-label="Продукт"><a href={item.canonicalUrl} target="_blank" rel="noreferrer" aria-label={`Открыть карточку «${item.product}» на ${item.domain} в новой вкладке`}>{canonicalProduct}<span aria-hidden="true">↗</span></a><div className={`identity-badge identity-${identity.granularity}`}>{productIdentityLabels[identity.granularity]}</div><small>Название на площадке: {item.product} · ID {item.listingId}</small>{proofLines.length > 0 && <details className="product-proof"><summary>На основании каких данных</summary><ul>{proofLines.map((line) => <li key={line}>{line}</li>)}</ul></details>}</td>
+                  <td className="product-cell" data-label="Продукт"><a href={item.canonicalUrl} target="_blank" rel="noreferrer" aria-label={`Открыть карточку «${item.product}» на ${item.domain} в новой вкладке`}>{canonicalProduct}<span aria-hidden="true">↗</span></a><div className={`identity-badge identity-${identity.granularity}`}>{productIdentityLabels[identity.granularity]}</div><details className="product-proof"><summary>Как определён продукт</summary><p>Название на площадке: {item.product}</p><p>ID карточки: {item.listingId}</p>{proofLines.length > 0 && <ul>{proofLines.map((line) => <li key={line}>{line}</li>)}</ul>}</details></td>
                   <td className="number-cell" data-label="Отзывы / оценки">{formatReviews(item.reviews)}</td>
                   <td className="number-cell" data-label="Рейтинг">{formatRating(item.rating)}</td>
                   <td data-label="Результат"><span className={`result-badge result-${item.status}`}>{observationStatusLabels[item.status]}</span>{item.status === "needs_review" && !confirmable && <small className={`result-note ${identity.granularity === "not_product" ? "result-note-error" : ""}`}>{observationIssueText(item)}</small>}</td>
@@ -1071,6 +1228,6 @@ export function App() {
       <button type="button" onClick={() => setError("")} aria-label="Закрыть сообщение">×</button>
     </div>}
 
-    <footer><span>Сбор рейтингов</span><span>Данные публикуются только после проверки</span></footer>
+    <footer><span className="footer-brand"><strong>Interfox</strong> Ratings</span><span>Репутационные данные — в порядке</span></footer>
   </div>;
 }

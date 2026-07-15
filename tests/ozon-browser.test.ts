@@ -98,6 +98,57 @@ function translatedProductHtml(
 }
 
 describe("Ozon browser collector", () => {
+  it("reports the real Google Translate, DOM and JSON-LD operations while they run", async () => {
+    const activity = vi.fn(async (
+      _event: Parameters<NonNullable<AdapterContext["activity"]>>[0]
+    ) => undefined);
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      const source = sourceUrlFromTranslate(new URL(String(input)));
+      if (source.pathname.startsWith("/product/")) {
+        return new Response(translatedProductHtml(
+          source,
+          "303003",
+          "Кагоцел таблетки 12 мг 20 шт",
+          4.9,
+          25
+        ), { headers: { "content-type": "text/html" } });
+      }
+      return new Response(translatedHtml(source, [
+        translatedTile("303003", "Кагоцел таблетки 12 мг 20 шт", "4.9", 25)
+      ], 1), { headers: { "content-type": "text/html" } });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({ fetch });
+
+    await adapter.discover("Кагоцел", { ...context, activity });
+
+    const events = activity.mock.calls.map(([event]) => event);
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        operationId: "ozon:translate-search:1",
+        status: "active",
+        channels: ["google_translate"]
+      }),
+      expect.objectContaining({
+        operationId: "ozon:parse-search-dom:1",
+        status: "complete",
+        parsers: ["dom"]
+      }),
+      expect.objectContaining({
+        operationId: "ozon:translate-product:303003",
+        status: "active",
+        listingId: "303003",
+        channels: ["google_translate"]
+      }),
+      expect.objectContaining({
+        operationId: "ozon:parse-product-jsonld:303003",
+        status: "complete",
+        listingId: "303003",
+        parsers: ["json_ld"]
+      })
+    ]));
+    expect(events.filter((event) => event.status === "warning")).toEqual([]);
+  });
+
   it("uses the fixed translate render path, exhausts pages and deduplicates SKU", async () => {
     const fetch = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
       const proxy = new URL(String(input));
