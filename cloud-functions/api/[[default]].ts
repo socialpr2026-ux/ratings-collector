@@ -612,10 +612,22 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
     const productId = $("input[name='productId']").first().attr("value")?.trim() ?? $("[data-id]").first().attr("data-id")?.trim();
     const heading = $("h1").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
     const aggregate = $("[itemprop='aggregateRating']").first();
-    const reviews = aggregate.find("[itemprop='reviewCount']").first().attr("content")?.trim() ??
+    let reviews = aggregate.find("[itemprop='reviewCount']").first().attr("content")?.trim() ??
       aggregate.find("[itemprop='reviewCount']").first().text().replace(/[\s\u00a0]+/g, "");
     const rating = aggregate.find("[itemprop='ratingValue']").first().attr("content")?.trim() ??
       aggregate.find("[itemprop='ratingValue']").first().text().trim();
+    const reviewSection = $("#review");
+    if (!/^\d+$/.test(reviews) && reviewSection.length === 1 && reviewSection.children().length === 2 &&
+      reviewSection.children("h2").length === 1 &&
+      !reviewSection.find("[itemprop='review'], [data-review-id], .review-item, [itemprop='ratingValue']").length) {
+      const headingText = reviewSection.children("h2").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+      const links = reviewSection.find("a[href]");
+      let exactEmpty = /^Отзывы\s+\S/iu.test(headingText) && links.length === 1 &&
+        links.first().text().normalize("NFKC").replace(/\s+/g, " ").trim() === "Оставить отзыв";
+      try { exactEmpty &&= new URL(links.first().attr("href") ?? "", requested.source).hash === "#testimonialModal"; }
+      catch { exactEmpty = false; }
+      if (exactEmpty) reviews = "0";
+    }
     if (!translatedSourceMatches(canonicalValue, requested.source) || !productId || !/^\d+$/.test(productId) || !heading ||
       !/^\d+$/.test(reviews) || Number(reviews) > 0 && !/^\d(?:[.,]\d+)?$/.test(rating)) return undefined;
     return `<html><head>${base}<link rel="canonical" href="${escapeHtml(requested.source.toString())}"></head><body>` +

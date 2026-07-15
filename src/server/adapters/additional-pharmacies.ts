@@ -358,6 +358,22 @@ function nfRef(value: string, expectedId?: string): { id: string; url: string } 
   return { id, url: `https://${NF_DOMAIN}${url.pathname}` };
 }
 
+function nfExplicitEmptyProductReviews($: CheerioAPI): boolean {
+  const sections = $("#review");
+  if (sections.length !== 1) return false;
+  const section = sections.first();
+  if (section.children().length !== 2 || section.children("h2").length !== 1 ||
+    section.find("[itemprop='review'], [data-review-id], .review-item, [itemprop='ratingValue']").length) return false;
+  const heading = compactText(section.children("h2").first().text());
+  const links = section.find("a[href]");
+  if (!/^Отзывы\s+\S/iu.test(heading) || links.length !== 1 || compactText(links.first().text()) !== "Оставить отзыв") return false;
+  try {
+    return new URL(links.first().attr("href") ?? "", "https://nfapteka.ru/").hash === "#testimonialModal";
+  } catch {
+    return false;
+  }
+}
+
 export class NfAptekaAdapter extends AdditionalPharmacyAdapter {
   readonly id = "nfapteka.ru:translated-microdata-v1";
   readonly supportedDomains = [NF_DOMAIN, `www.${NF_DOMAIN}`] as const;
@@ -414,7 +430,8 @@ export class NfAptekaAdapter extends AdditionalPharmacyAdapter {
       throw new ParserChangedError(`${NF_DOMAIN}:${ref.listingId}: exact product identity changed`);
     }
     const aggregate = page.$("[itemprop='aggregateRating']").first();
-    const reviews = exactInteger(aggregate.find("[itemprop='reviewCount']").first().attr("content") ?? aggregate.find("[itemprop='reviewCount']").first().text());
+    const reviews = exactInteger(aggregate.find("[itemprop='reviewCount']").first().attr("content") ?? aggregate.find("[itemprop='reviewCount']").first().text())
+      ?? (nfExplicitEmptyProductReviews(page.$) ? 0 : undefined);
     const value = exactRating(aggregate.find("[itemprop='ratingValue']").first().attr("content") ?? aggregate.find("[itemprop='ratingValue']").first().text());
     if (reviews === undefined || reviews > 0 && value === undefined) {
       throw new ParserChangedError(`${NF_DOMAIN}:${ref.listingId}: complete product feedback microdata is missing`);
@@ -425,7 +442,7 @@ export class NfAptekaAdapter extends AdditionalPharmacyAdapter {
       canonicalUrl: parsedRef.url,
       reviews,
       rating: reviews === 0 ? null : value!,
-      source: "nfapteka-product-microdata:google-translate"
+      source: "nfapteka-product-feedback:google-translate"
     });
   }
 }

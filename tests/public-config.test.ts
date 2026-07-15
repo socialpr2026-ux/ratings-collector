@@ -776,6 +776,20 @@ describe("static pharmacy Translate gateway", () => {
     expect((await callGateway("https://apteka.ru/search?q=Оциллококцинум")).status).toBe(400);
   });
 
+  it("preserves an exact empty NFapteka product review section as zero", async () => {
+    const path = "/tambov/catalog/lekarstva/khondrofen-maz-30-g.html";
+    const source = `https://nfapteka.ru${path}`;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"><link rel="canonical" href="${source}"></head><body>
+      <h1>Хондрофен мазь 30 г</h1><input name="productId" value="127010"><div id="review"><h2>Отзывы хондрофен</h2>
+      <div class="uk-text-left"><a href="${source}#testimonialModal">Оставить отзыв</a></div></div></body></html>`, {
+      headers: { "content-type": "text/html" }
+    })));
+
+    const response = await callGateway(translated("nfapteka-ru.translate.goog", path).toString());
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('itemprop="reviewCount" content="0"');
+  });
+
   it("filters the first-party Apteka.ru product sitemap by bounded transliteration candidates", async () => {
     const match = "https://apteka.ru/product/xondrofen-maz-30-gr-630e04ccbb7256f6b07f621f/";
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {

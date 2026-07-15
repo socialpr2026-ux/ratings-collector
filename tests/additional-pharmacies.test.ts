@@ -104,6 +104,29 @@ describe("additional pharmacy adapters", () => {
     await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({ reviews: 3, rating: 4.3, status: "ok" });
   });
 
+  it("accepts only the exact empty NFapteka product review section as zero feedback", async () => {
+    const path = "/tambov/catalog/lekarstva/khondrofen-maz-30-g.html";
+    const productSource = `https://nfapteka.ru${path}`;
+    const product = translated(productSource, `<link rel="canonical" href="${productSource}"><h1>Хондрофен мазь 30 г</h1>
+      <input name="productId" value="127010"><div id="review"><h2>Отзывы хондрофен</h2>
+      <div class="uk-text-left"><a href="${productSource}#testimonialModal">Оставить отзыв</a></div></div>`);
+    const adapter = new NfAptekaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(product, {
+      headers: { "content-type": "text/html" }
+    })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "nfapteka.ru", platform: "nfapteka.ru", listingId: "127010", brand: "Хондрофен",
+      url: productSource, metadata: {}
+    }, context)).resolves.toMatchObject({ reviews: 0, rating: null, status: "no_reviews" });
+
+    const ambiguous = product.replace("<h2>Отзывы хондрофен</h2>", "<h2>Отзывы хондрофен</h2><div class=\"loading\"></div>");
+    const blocked = new NfAptekaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(ambiguous)) as unknown as typeof fetch);
+    await expect(blocked.collect({
+      domain: "nfapteka.ru", platform: "nfapteka.ru", listingId: "127010", brand: "Хондрофен",
+      url: productSource, metadata: {}
+    }, context)).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
   it("uses complete Bud Zdorov reviews and their scores instead of a partial visible list", async () => {
     const formSource = "https://www.budzdorov.ru/forms/ocillokokcinum";
     const productPath = "/product/otsillokoktsinum-granuly-6doz-2511";
