@@ -56,6 +56,58 @@ describe("new static collector gateways", () => {
     const escaped = await callGateway("https://megamarket-ru.translate.goog/personal/orders/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en");
     expect(escaped.status).toBe(400);
   });
+
+  it("compacts large Megamarket pages into exact source-bound search and aggregate proofs", async () => {
+    const searchSource = "https://megamarket.ru/catalog/?q=%D0%9E%D1%86%D0%B8%D0%BB%D0%BB%D0%BE%D0%BA%D0%BE%D0%BA%D1%86%D0%B8%D0%BD%D1%83%D0%BC";
+    const productSource = "https://megamarket.ru/catalog/details/ocillokokcinum-granuly-1-g-1-doz-12-sht-100024501619/";
+    const padding = "irrelevant-storefront-state".repeat(30_000);
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const target = new URL(String(input));
+      if (target.pathname === "/catalog/") return new Response(`<!doctype html><html><head><base href="${searchSource}"></head><body>
+        <div data-test="product-item" data-product-id="100024501619_68334"><a data-test="product-name-link"
+          title="ะัะธะปะปะพะบะพะบัะธะฝัะผ ะณั€ะฐะฝัะปั 1 ะณ 12 ัั."
+          href="/catalog/details/ocillokokcinum-granuly-1-g-1-doz-12-sht-100024501619_68334/">product</a></div>
+        <div data-test="product-item" data-product-id="100024501619_999"><a data-test="product-name-link"
+          title="ะัะธะปะปะพะบะพะบัะธะฝัะผ ะณั€ะฐะฝัะปั 1 ะณ 12 ัั."
+          href="/catalog/details/ocillokokcinum-granuly-1-g-1-doz-12-sht-100024501619_999/">seller duplicate</a></div>
+        <button class="pui-pagination-control">1</button>${padding}</body></html>`, {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+      return new Response(`<!doctype html><html><head><base href="${productSource}"></head><body>
+        <main itemscope itemtype="http://schema.org/Product"><meta itemprop="sku" content="100024501619">
+          <h1 itemprop="name">ะัะธะปะปะพะบะพะบัะธะฝัะผ ะณั€ะฐะฝัะปั 1 ะณ 12 ัั.</h1></main>
+        <script>window.__APP__={state:{ProductStore:{"reviewInfo":{"reviewsCount":25,"mainReviews":[{"comment":"remove-me"}],"rating":4.8}}}}</script>
+        ${padding}</body></html>`, { headers: { "content-type": "text/html; charset=utf-8" } });
+    }));
+
+    const search = await callGateway(`https://megamarket-ru.translate.goog/catalog/?q=${encodeURIComponent("Оциллококцинум")}&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en`);
+    const searchProof = await search.text();
+    expect(search.status).toBe(200);
+    expect(search.headers.get("x-ratings-source")).toBe("google-translate-megamarket-compact");
+    expect(searchProof.match(/data-product-id=/g)).toHaveLength(1);
+    expect(searchProof).toContain("100024501619");
+    expect(searchProof).not.toContain("irrelevant-storefront-state");
+    expect(searchProof.length).toBeLessThan(10_000);
+
+    const product = await callGateway("https://megamarket-ru.translate.goog/catalog/details/ocillokokcinum-granuly-1-g-1-doz-12-sht-100024501619/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en");
+    const productProof = await product.text();
+    expect(product.status).toBe(200);
+    expect(productProof).toContain('<meta itemprop="sku" content="100024501619">');
+    expect(productProof).toContain('"reviewsCount":25');
+    expect(productProof).toContain('"rating":4.8');
+    expect(productProof).not.toContain("remove-me");
+    expect(productProof).not.toContain("irrelevant-storefront-state");
+    expect(productProof.length).toBeLessThan(10_000);
+  });
+
+  it("rejects a Megamarket gateway page whose base source does not match the request", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      '<!doctype html><html><head><base href="https://megamarket.ru/catalog/?q=other"></head><body></body></html>',
+      { headers: { "content-type": "text/html" } }
+    )));
+    const response = await callGateway("https://megamarket-ru.translate.goog/catalog/?q=%D0%9E%D1%86%D0%B8%D0%BB%D0%BB%D0%BE%D0%BA%D0%BE%D0%BA%D1%86%D0%B8%D0%BD%D1%83%D0%BC&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en");
+    expect(response.status).toBe(502);
+  });
 });
 
 describe("static iRecommend gateway", () => {

@@ -265,6 +265,103 @@ function translatedSourceMatches(value: string | undefined, requested: URL): boo
   }
 }
 
+function megamarketSource(target: URL): URL {
+  const source = new URL(target.pathname, "https://megamarket.ru");
+  for (const key of ["q", "page"] as const) {
+    const value = target.searchParams.get(key);
+    if (value !== null) source.searchParams.set(key, value);
+  }
+  return source;
+}
+
+function balancedJsonAfterMarker(text: string, marker: string): string | undefined {
+  const markerIndex = text.indexOf(marker);
+  if (markerIndex < 0) return undefined;
+  const start = text.indexOf("{", markerIndex + marker.length);
+  if (start < 0) return undefined;
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const character = text[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = "";
+      continue;
+    }
+    if (character === '"' || character === "'") quote = character;
+    else if (character === "{") depth += 1;
+    else if (character === "}" && --depth === 0) return text.slice(start, index + 1);
+  }
+  return undefined;
+}
+
+function compactMegamarketTranslateHtml(html: string, target: URL): string | undefined {
+  if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
+  const $ = load(html);
+  const requested = megamarketSource(target);
+  const baseValue = $("base[href]").first().attr("href");
+  if (!translatedSourceMatches(baseValue, requested)) return undefined;
+  const title = $("title").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+  if (/(?:captcha|access denied|unusual traffic|Target URL returned error)/i.test(title) ||
+    /js-challenge-loader|id_captcha_frame_div|servicepipe\.ru\/static\/checkjs/i.test(html.slice(0, 150_000))) {
+    return undefined;
+  }
+  const base = `<base href="${escapeHtml(requested.toString())}">`;
+
+  if (requested.pathname === "/catalog/") {
+    const cards: string[] = [];
+    const seen = new Set<string>();
+    $("[data-test='product-item'][data-product-id]").each((_index, node) => {
+      const card = $(node);
+      const rawId = card.attr("data-product-id")?.trim() ?? "";
+      const id = rawId.match(/^(\d{6,18})(?:_\d+)?$/)?.[1];
+      const link = card.find("a[data-test='product-name-link'][href]").first();
+      const titleText = (link.attr("title") || link.text()).normalize("NFKC").replace(/\s+/g, " ").trim();
+      if (!id || !titleText || seen.has(id)) return;
+      let product: URL;
+      try { product = new URL(link.attr("href")!, target); }
+      catch { return; }
+      const match = product.pathname.match(/^\/catalog\/details\/[a-z0-9-]+-(\d{6,18})(?:_\d+)?\/?$/i);
+      if (!match || match[1] !== id || !["megamarket.ru", "megamarket-ru.translate.goog"].includes(product.hostname)) return;
+      seen.add(id);
+      cards.push(`<div data-test="product-item" data-product-id="${escapeHtml(rawId)}">` +
+        `<a data-test="product-name-link" title="${escapeHtml(titleText)}" href="${escapeHtml(product.pathname)}">` +
+        `${escapeHtml(titleText)}</a></div>`);
+    });
+    const pages = $(".pui-pagination-control").toArray()
+      .map((node) => Number($(node).text().trim()))
+      .filter((value) => Number.isSafeInteger(value) && value > 0 && value <= 20);
+    const pagination = [...new Set(pages)].map((page) =>
+      `<button class="pui-pagination-control">${page}</button>`
+    ).join("");
+    if ($("[data-test='product-item']").length > 0 && cards.length === 0) return undefined;
+    return `<html><head>${base}</head><body>${cards.join("")}${pagination}</body></html>`;
+  }
+
+  const product = $("[itemscope][itemtype$='/Product']").first();
+  const sku = product.find("meta[itemprop='sku']").first().attr("content")?.trim() ?? "";
+  const productTitle = product.find("h1[itemprop='name']").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+  const expectedId = requested.pathname.match(/-(\d{6,18})\/?$/)?.[1];
+  if (!expectedId || sku !== expectedId || !productTitle) return undefined;
+  const app = $("script").toArray().map((node) => $(node).text()).find((text) => text.includes("window.__APP__="));
+  const reviewInfo = app ? balancedJsonAfterMarker(app, '"reviewInfo":') : undefined;
+  if (!reviewInfo || reviewInfo.length > 100_000) return undefined;
+  let aggregate: { reviewsCount?: unknown; rating?: unknown };
+  try { aggregate = JSON.parse(reviewInfo) as typeof aggregate; }
+  catch { return undefined; }
+  const reviews = Number(aggregate.reviewsCount);
+  const rating = Number(aggregate.rating);
+  if (!Number.isSafeInteger(reviews) || reviews < 0 || reviews > 0 && (!Number.isFinite(rating) || rating <= 0 || rating > 5)) {
+    return undefined;
+  }
+  const compactAggregate = JSON.stringify({ reviewsCount: reviews, rating: reviews > 0 ? rating : 0 });
+  return `<html><head>${base}</head><body><main itemscope itemtype="http://schema.org/Product">` +
+    `<meta itemprop="sku" content="${expectedId}"><h1 itemprop="name">${escapeHtml(productTitle)}</h1></main>` +
+    `<script>window.__APP__={"reviewInfo":${compactAggregate}}</script></body></html>`;
+}
+
 function compactZdravcityTranslateHtml(html: string, requested: URL): string | undefined {
   if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
   const $ = load(html);
@@ -1450,6 +1547,37 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
         "x-ratings-source": "duckduckgo-exact-med-otzyv-index"
+      }
+    });
+  }
+  if (megamarketTranslatedTarget) {
+    const upstream = await safeFetch(target.toString(), {
+      method: "GET",
+      redirect: "manual",
+      headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+    }, fetch, 0, 60_000);
+    const html = await readTextBounded(upstream, 12_000_000, 60_000);
+    if (!upstream.ok) {
+      return new Response(html, {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "text/html; charset=utf-8" }
+      });
+    }
+    if (!/(?:text\/html|application\/xhtml\+xml)/i.test(upstream.headers.get("content-type") ?? "")) {
+      return json({ error: "Megamarket translated response is not HTML" }, 502);
+    }
+    const compactHtml = compactMegamarketTranslateHtml(html, target);
+    if (!compactHtml || compactHtml.length > 350_000) {
+      return json({ error: "Megamarket page did not prove the exact requested source and aggregate" }, 502);
+    }
+    return new Response(compactHtml, {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "google-translate-megamarket-compact",
+        "x-ratings-original-bytes": String(new TextEncoder().encode(html).byteLength),
+        "x-ratings-proof-bytes": String(new TextEncoder().encode(compactHtml).byteLength)
       }
     });
   }
