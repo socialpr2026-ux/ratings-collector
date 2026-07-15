@@ -64,7 +64,14 @@ export function validateRun(run: RunState): QaResult {
       item.reviews === null ||
       item.reviews <= 0 ||
       (item.rating === null && item.ratingUnavailable !== true) ||
-      (item.ratingUnavailable === true && (item.rating !== null || item.rawRating !== 0))
+      // `null` is the canonical raw value when a platform explicitly does not
+      // calculate an aggregate score. Some APIs expose the same state as a
+      // numeric zero sentinel. Missing raw data remains invalid, as does any
+      // positive raw score paired with `ratingUnavailable`.
+      (item.ratingUnavailable === true && (
+        item.rating !== null ||
+        (item.rawRating !== null && item.rawRating !== 0)
+      ))
     )) {
       blockers.push(`${key}: неполные метрики успешной карточки`);
     }

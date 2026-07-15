@@ -86,6 +86,50 @@ describe("partition completeness QA", () => {
     expect(qa.warnings.join(" ")).toContain("не рассчитала общий рейтинг");
   });
 
+  it("accepts an explicit null raw rating when the platform does not calculate an aggregate", () => {
+    const run = runWithCounts(1, 1);
+    run.observations[0] = {
+      ...run.observations[0],
+      rating: null,
+      rawRating: null,
+      ratingUnavailable: true
+    };
+
+    expect(validateRun(run)).toMatchObject({
+      ok: true,
+      blockers: [],
+      warnings: [expect.stringContaining("не рассчитала общий рейтинг")]
+    });
+  });
+
+  it("blocks an unknown or contradictory missing aggregate rating", () => {
+    const missingProof = runWithCounts(1, 1);
+    missingProof.observations[0] = {
+      ...missingProof.observations[0],
+      rating: null,
+      rawRating: null
+    };
+
+    const missingRawValue = runWithCounts(1, 1);
+    missingRawValue.observations[0] = {
+      ...missingRawValue.observations[0],
+      rating: null,
+      ratingUnavailable: true
+    };
+
+    const contradictory = runWithCounts(1, 1);
+    contradictory.observations[0] = {
+      ...contradictory.observations[0],
+      rating: null,
+      rawRating: 4.5,
+      ratingUnavailable: true
+    };
+
+    expect(validateRun(missingProof).ok).toBe(false);
+    expect(validateRun(missingRawValue).ok).toBe(false);
+    expect(validateRun(contradictory).ok).toBe(false);
+  });
+
   it("does not warn when ratings outnumber written reviews", () => {
     const run = runWithCounts(1, 1);
     run.observations[0] = {

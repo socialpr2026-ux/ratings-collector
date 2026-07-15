@@ -802,6 +802,81 @@ describe("run orchestration and fail-closed QA", () => {
     expect(run.qa?.ok).toBe(true);
   });
 
+  it("publishes a proven review aggregate when the platform explicitly has no rating", async () => {
+    const domain = "med-otzyv.ru";
+    const repository = new MemoryRepository();
+    const service = new RatingsService(repository, async () => ({
+      id: "med-otzyv-explicit-rating-unavailable",
+      supportedDomains: [domain],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand: string): Promise<ProductRef[]> {
+        return [{
+          domain,
+          platform: domain,
+          listingId: "751",
+          brand,
+          url: "https://med-otzyv.ru/lekarstva/143-kh/751-khondrofen",
+          metadata: {}
+        }];
+      },
+      async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain,
+          platform: domain,
+          listingId: ref.listingId,
+          brand: ref.brand,
+          canonicalUrl: ref.url,
+          product: `${ref.brand} мазь для наружного применения 30 г`,
+          reviews: 1,
+          rating: null,
+          rawRating: null,
+          ratingUnavailable: true,
+          status: "ok",
+          capturedAt: new Date().toISOString(),
+          evidenceRef: "blob://med-otzyv/751",
+          source: "med-otzyv-exact-index",
+          productEvidence: {
+            scope: "product_family",
+            signals: [{ source: "title", text: `${ref.brand} мазь для наружного применения 30 г` }],
+            variants: [],
+            identifiers: [{ type: "product_id", value: ref.listingId }],
+            imageUrls: [],
+            instructionUrls: []
+          }
+        };
+      }
+    }));
+
+    const run = await service.executeRun((await service.createRun({
+      ...request,
+      domains: [domain],
+      brands: ["Хондрофен"]
+    })).id);
+
+    expect(run.observations).toMatchObject([{
+      listingId: "751",
+      reviews: 1,
+      rating: null,
+      rawRating: null,
+      ratingUnavailable: true,
+      status: "ok"
+    }]);
+    expect(run.qa).toMatchObject({
+      ok: true,
+      blockers: [],
+      warnings: [expect.stringContaining("не рассчитала общий рейтинг")]
+    });
+
+    await expect(service.commitSuccessfulRun(run)).resolves.toBeUndefined();
+    expect((await repository.getSnapshots("test_sheet"))["2026-07"][`${domain}:751`]).toMatchObject({
+      reviews: 1,
+      rating: null,
+      rawRating: null,
+      ratingUnavailable: true,
+      status: "ok"
+    });
+  });
+
   it("normalizes ratings and reviews into one feedback count before QA", async () => {
     class SplitFeedbackAdapter extends FakeAdapter {
       override async collect(ref: ProductRef): Promise<Observation> {
