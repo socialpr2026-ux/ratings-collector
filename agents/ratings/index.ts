@@ -27,10 +27,19 @@ type AgentContext = {
 
 export function shouldAutoRetryInitialCollection(
   initialStatus: "queued" | "running" | "review" | "publishing" | "published" | "failed",
-  partitions: Array<{ status: string }>
+  partitions: Array<{ status: string; message?: string }>
 ): boolean {
-  return initialStatus === "queued" && partitions.some(({ status }) => status === "blocked" || status === "error");
+  if (initialStatus !== "queued" || partitions.length > 50) return false;
+  const failures = partitions.filter(({ status }) => status !== "complete" && status !== "no_results");
+  if (failures.length === 0 || failures.length > 10) return false;
+  return failures.every(({ status, message = "" }) =>
+    (status === "blocked" || status === "error") &&
+    !/^(?:quota_exceeded|parser_changed)\s*:/i.test(message.trim()) &&
+    /\bcaptcha\b|капч|HTTP\s+(?:408|425|429|498|499|5\d{2})\b/i.test(message)
+  );
 }
+
+export const MAX_INITIAL_TRANSIENT_RECOVERY_PASSES = 2;
 
 const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);
 
@@ -656,10 +665,15 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         let runtime = await createCollectorRuntime(runtimeOptions());
         try {
           let completed = await runtime.service.executeRun(run.id);
-          if (shouldAutoRetryInitialCollection(run.status, completed.partitions)) {
+          for (
+            let recoveryPass = 0;
+            recoveryPass < MAX_INITIAL_TRANSIENT_RECOVERY_PASSES &&
+              shouldAutoRetryInitialCollection(run.status, completed.partitions);
+            recoveryPass += 1
+          ) {
             // A fresh runtime clears per-adapter cooldowns and transient route
             // state. Successful partitions are checkpointed, so the second
-            // pass touches only failed domain/brand pairs and can never create
+            // and third passes touch only failed domain/brand pairs and cannot create
             // duplicate observations.
             runtime = await createCollectorRuntime(runtimeOptions());
             completed = await runtime.service.executeRun(run.id);

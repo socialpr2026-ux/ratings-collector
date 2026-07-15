@@ -409,17 +409,56 @@ describe("ratings Agent lazy Sandbox routing", () => {
 });
 
 describe("ratings Agent initial recovery pass", () => {
-  it("retries a failed partition once only on the initial collection", () => {
+  it.each([408, 425, 429, 498, 499, 500, 502, 599])(
+    "retries a proven transient HTTP %i failure on the initial collection",
+    (statusCode) => {
+      expect(shouldAutoRetryInitialCollection("queued", [
+        { status: "complete" },
+        { status: "blocked", message: `blocked: upstream returned HTTP ${statusCode}` }
+      ])).toBe(true);
+    }
+  );
+
+  it("retries a CAPTCHA failure and keeps non-transient states manual", () => {
     expect(shouldAutoRetryInitialCollection("queued", [
-      { status: "complete" },
-      { status: "blocked" }
+      { status: "error", message: "CAPTCHA challenge interrupted collection" }
     ])).toBe(true);
     expect(shouldAutoRetryInitialCollection("queued", [
       { status: "complete" },
       { status: "no_results" }
     ])).toBe(false);
+    expect(shouldAutoRetryInitialCollection("queued", [
+      { status: "blocked", message: "blocked: upstream returned HTTP 403" }
+    ])).toBe(false);
+    expect(shouldAutoRetryInitialCollection("queued", [
+      { status: "blocked", message: "blocked: blocked_free_mode" }
+    ])).toBe(false);
+    expect(shouldAutoRetryInitialCollection("queued", [
+      { status: "blocked", message: "quota_exceeded: HTTP 429; monthly limit reached" }
+    ])).toBe(false);
+    expect(shouldAutoRetryInitialCollection("queued", [
+      { status: "blocked", message: "parser_changed: HTTP 502 appeared in malformed evidence" }
+    ])).toBe(false);
     expect(shouldAutoRetryInitialCollection("review", [
-      { status: "error" }
+      { status: "error", message: "HTTP 502" }
+    ])).toBe(false);
+  });
+
+  it("does not repeat a mixed transient and permanent failure set", () => {
+    expect(shouldAutoRetryInitialCollection("queued", [
+      { status: "blocked", message: "blocked: HTTP 502" },
+      { status: "blocked", message: "quota_exceeded: monthly limit reached" }
+    ])).toBe(false);
+  });
+
+  it("bounds automatic recovery by run and failure size", () => {
+    const complete = Array.from({ length: 40 }, () => ({ status: "complete" }));
+    const failures = Array.from({ length: 10 }, () => ({ status: "blocked", message: "blocked: HTTP 502" }));
+    expect(shouldAutoRetryInitialCollection("queued", [...complete, ...failures])).toBe(true);
+    expect(shouldAutoRetryInitialCollection("queued", [...complete, ...failures, { status: "complete" }])).toBe(false);
+    expect(shouldAutoRetryInitialCollection("queued", [
+      ...failures,
+      { status: "blocked", message: "blocked: HTTP 502" }
     ])).toBe(false);
   });
 });
