@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { analyzeProductIdentity, canonicalProductDescriptor, canonicalProductDescriptors } from "../src/server/utils/product-name.js";
+import {
+  analyzeProductIdentity,
+  canonicalProductDescriptor,
+  canonicalProductDescriptors,
+  canonicalProductVariants
+} from "../src/server/utils/product-name.js";
 
 describe("canonical product descriptors", () => {
   it("normalizes form, strength and count independently of wording and order", () => {
@@ -73,6 +78,53 @@ describe("canonical product descriptors", () => {
       { brand: "Анвифен", product: "Анвифен капсулы 250 мг 10 шт" }
     ]);
     expect(new Set(values).size).toBe(3);
+  });
+
+  it("uses one short label and semantic key for the same real product across sites", () => {
+    const richIdentity = analyzeProductIdentity({
+      brand: "Оциллококцинум",
+      product: "Оциллококцинум гранулы гомеопатические 1 г №30"
+    });
+    const oscillococcinum = canonicalProductVariants([
+      { brand: "Оциллококцинум", product: "Оциллококцинум", productIdentity: richIdentity },
+      { brand: "Оциллококцинум", product: "Оциллококцинум гранулы №30" }
+    ]);
+    expect(oscillococcinum.map((item) => item.label)).toEqual(["гранулы №30", "гранулы №30"]);
+    expect(new Set(oscillococcinum.map((item) => item.variantKey)).size).toBe(1);
+
+    const anvifen = canonicalProductVariants([
+      { brand: "Анвифен", product: "Анвифен капсулы 50 мг №20" },
+      { brand: "Анвифен", product: "Анвифен капсулы №20" }
+    ]);
+    expect(anvifen.map((item) => item.label)).toEqual(["капсулы №20", "капсулы №20"]);
+    expect(new Set(anvifen.map((item) => item.variantKey)).size).toBe(1);
+  });
+
+  it("uses the physical pack instead of a per-item dose in marketplace titles", () => {
+    const marketplaceTitle = "Оциллококцинум гранулы 1 г 1 доза 30 шт";
+    expect(analyzeProductIdentity({ brand: "Оциллококцинум", product: marketplaceTitle })).toMatchObject({
+      label: "гранулы 1 г №30",
+      granularity: "variant",
+      confidence: "exact"
+    });
+    expect(canonicalProductDescriptors([
+      { brand: "Оциллококцинум", product: marketplaceTitle },
+      { brand: "Оциллококцинум", product: "Оциллококцинум гранулы №30" }
+    ])).toEqual(["гранулы №30", "гранулы №30"]);
+  });
+
+  it("never hides conflicting strengths while reconciling a shorter title", () => {
+    const variants = canonicalProductVariants([
+      { brand: "Анвифен", product: "Анвифен капсулы 50 мг №20" },
+      { brand: "Анвифен", product: "Анвифен капсулы 250 мг №20" },
+      { brand: "Анвифен", product: "Анвифен капсулы №20" }
+    ]);
+    expect(variants.map((item) => item.label)).toEqual([
+      "капсулы 50 мг №20",
+      "капсулы 250 мг №20",
+      "капсулы №20"
+    ]);
+    expect(new Set(variants.map((item) => item.variantKey)).size).toBe(3);
   });
 
   it("uses a canonical URL slug when a marketplace stored only a model label", () => {
@@ -215,7 +267,7 @@ describe("canonical product descriptors", () => {
     })).toMatchObject({
       granularity: "variant",
       confidence: "exact",
-      label: "гранулы гомеопатические №12"
+      label: "гранулы №12"
     });
   });
 
@@ -230,7 +282,7 @@ describe("canonical product descriptors", () => {
       expect(analyzeProductIdentity({ brand: "Оциллококцинум", product })).toMatchObject({
         granularity: "variant",
         confidence: "exact",
-        label: "гранулы гомеопатические 1 г №12"
+        label: "гранулы 1 г №12"
       });
     }
 
@@ -253,10 +305,30 @@ describe("canonical product descriptors", () => {
       brand: "Оциллококцинум",
       product: `Оциллококцинум гранулы гомеопатические 1 доза №${count}`
     }).label)).toEqual([
-      "гранулы гомеопатические 1 г №6",
-      "гранулы гомеопатические 1 г №12",
-      "гранулы гомеопатические 1 г №30"
+      "гранулы 1 г №6",
+      "гранулы 1 г №12",
+      "гранулы 1 г №30"
     ]);
+  });
+
+  it("keeps a one-variant review page as a variant even when the rating scope is aggregate", () => {
+    const identity = analyzeProductIdentity({
+      brand: "Оциллококцинум",
+      product: "Оциллококцинум 30 доз гранулы гомеопатические",
+      url: "https://otzyv.pro/category/badyi/62074-ocillokokcinum-30-doz-grangomeopaticheskie.html",
+      evidence: {
+        scope: "product_family",
+        signals: [{ source: "title", text: "Оциллококцинум 30 доз гранулы гомеопатические" }],
+        variants: [], identifiers: [], imageUrls: [], instructionUrls: []
+      }
+    });
+
+    expect(identity).toMatchObject({
+      label: "гранулы №30",
+      granularity: "variant",
+      confidence: "exact"
+    });
+    expect(identity.label).not.toContain("Общий рейтинг");
   });
 
   it("never exposes draft wording in product labels", () => {
@@ -270,7 +342,7 @@ describe("canonical product descriptors", () => {
   });
 
   it("represents a review page with several variants as a family aggregate", () => {
-    const identity = analyzeProductIdentity({
+    const input = {
       brand: "Бактоблис",
       product: "Бактоблис Плюс отзывы",
       evidence: {
@@ -279,13 +351,15 @@ describe("canonical product descriptors", () => {
         variants: ["1500 мг, порошок, 15 саше", "таблетки для рассасывания без сахара, 30 шт"],
         identifiers: [], imageUrls: [], instructionUrls: []
       }
-    });
+    } satisfies Parameters<typeof analyzeProductIdentity>[0];
+    const identity = analyzeProductIdentity(input);
     expect(identity).toMatchObject({ granularity: "family", variantCount: 2 });
     expect(identity.label).toContain("порошок");
     expect(identity.label).toContain("1500 мг");
     expect(identity.label).toContain("№15");
     expect(identity.label).toContain("таблетки для рассасывания");
     expect(identity.label).toContain("№30");
+    expect(canonicalProductVariants([input])).toEqual([{ label: identity.label }]);
   });
 
   it("does not invent one unnamed variant for a brand aggregate", () => {
