@@ -111,6 +111,51 @@ describe("first-party review-site adapters", () => {
     expect(refs.map((item) => item.listingId)).toEqual(["823845", "823846"]);
   });
 
+  it("treats the Otzyv.pro 30-dose page as one product variant and excludes user reviews from proof", async () => {
+    const productPath = "/category/badyi/62074-ocillokokcinum-30-doz-grangomeopaticheskie.html";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/") return new Response(
+        `<article><h2>Оциллококцинум 30 доз</h2><a href="${productPath}">Оциллококцинум 30 доз гран.гомеопатические</a></article>`
+      );
+      if (url.pathname === productPath) return new Response(`
+        <main itemscope itemtype="https://schema.org/Product">
+          <h1 itemprop="name">Оциллококцинум 30 доз гран.гомеопатические - отзыв</h1>
+          <meta itemprop="ratingValue" content="2">
+          <meta itemprop="bestRating" content="5">
+          <meta itemprop="reviewCount" content="1">
+          <article itemprop="review" itemscope itemtype="https://schema.org/Review">
+            <h2 itemprop="name">Гранулы или плацебо?</h2>
+            <span itemprop="description">6 грамм сахара за 400 рублей. Брала упаковку из 30 доз.</span>
+          </article>
+          <article class="review-card"><h2 itemprop="name">Супер препарат, помогает 100%!</h2></article>
+        </main>
+      `);
+      throw new Error(`Unexpected URL ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("otzyv.pro", fetchMock);
+
+    const refs = await adapter.discover("Оциллококцинум", context);
+    const result = await adapter.collect(refs[0], context);
+    const identity = analyzeProductIdentity({
+      brand: result.brand,
+      product: result.product,
+      url: result.canonicalUrl,
+      evidence: result.productEvidence
+    });
+
+    expect(result).toMatchObject({ listingId: "62074", reviews: 1, rating: 2, status: "ok" });
+    expect(result.productEvidence?.scope).toBe("listing");
+    expect(result.productEvidence?.variants).toEqual([]);
+    expect(JSON.stringify(result.productEvidence)).not.toMatch(/Гранулы или плацебо|6 грамм сахара|Супер препарат/iu);
+    expect(identity).toMatchObject({
+      label: "гранулы гомеопатические №30",
+      granularity: "variant",
+      confidence: "exact"
+    });
+    expect(identity.label).not.toContain("Общий рейтинг");
+  });
+
   it.each(["Тикализис", "Даксабрис"])("requires visible no-results proof for empty iRecommend search: %s", async (brand) => {
     const proved = adapterFor("irecommend.ru", (async () => new Response(
       `<main><h1>${brand}</h1><p>Не нашли? Попробуйте поиск по сайту через Google или Яндекс</p></main>`
