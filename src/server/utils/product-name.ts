@@ -14,17 +14,27 @@ type ProductParts = {
   unknownModel?: boolean;
 };
 
-export type ProductNameInput = { brand: string; product: string; url?: string; evidence?: ProductEvidence };
+export type ProductNameInput = {
+  brand: string;
+  product: string;
+  url?: string;
+  evidence?: ProductEvidence;
+  /** Reuse the run-time decision when a caller already calculated it. */
+  productIdentity?: ProductIdentity;
+};
 
 const FORM_RULES: Array<{ value: string; pattern: RegExp }> = [
   { value: "суппозитории вагинальные и ректальные", pattern: /(?<![\p{L}\p{N}])(?:суппозитор(?:ии|иев)|свечи)[^,.]{0,30}вагинальн[^,.]{0,30}ректальн/iu },
+  { value: "раствор для приема внутрь", pattern: /(?<![\p{L}\p{N}])(?:раствор(?:а|ом)?|р[.\s-]*р)[^,;]{0,60}(?:для\s+при[её]ма\s+внутрь|д\s*\/\s*пр\.?\s*\/?\s*внутр\.?)(?![\p{L}\p{N}])/iu },
+  { value: "раствор для внутривенного и внутримышечного введения", pattern: /(?<![\p{L}\p{N}])(?:раствор(?:а|ом)?|р[.\s-]*р)[^,;]{0,80}(?:(?:для\s+)?внутривенн[^,;]{0,35}внутримышечн|(?:для\s+)?в\s*\/\s*в[^,;]{0,25}в\s*\/\s*м)(?:[^,;]{0,20}введ(?:ения|ение|\.)?)?(?![\p{L}\p{N}])/iu },
   { value: "раствор в ампулах", pattern: /(?<![\p{L}\p{N}])раствор[^,.]{0,70}(?:ампул(?:а|ы|ах)?|амп\.?)(?![\p{L}\p{N}])/iu },
   { value: "таблетки для рассасывания", pattern: /(?<![\p{L}\p{N}])(?:табл?\.?|таблет(?:ка|ки|ок)|пастил(?:ки|ок)|леденц(?:ы|ов))(?![\p{L}\p{N}])[^,.]{0,24}(?:для\s+рассасывания|д\s*\/?\s*рассас|рассасывающ)/iu },
   { value: "таблетки", pattern: /(?<![\p{L}\p{N}])(?:табл?\.?|таблет(?:ка|ки|ок|ку|кой))(?![\p{L}\p{N}])/iu },
   { value: "капсулы", pattern: /(?<![\p{L}\p{N}])(?:капс?\.?|капсул(?:а|ы|у|ой|ок)?)(?![\p{L}\p{N}])/iu },
   { value: "саше", pattern: /(?<![\p{L}\p{N}])(?:саше(?:[-\s]?пакет(?:ы|ов|а)?)?|пакетик(?:и|ов)?|стик(?:и|ов)?)(?![\p{L}\p{N}])/iu },
   { value: "порошок", pattern: /(?<![\p{L}\p{N}])(?:пор(?:ошок|ошка)?\.?)(?![\p{L}\p{N}])/iu },
-  { value: "гранулы", pattern: /(?<![\p{L}\p{N}])гранул(?:ы|а|ах)?(?![\p{L}\p{N}])/iu },
+  { value: "гранулы гомеопатические", pattern: /(?<![\p{L}\p{N}])гран(?:\.|ул(?:ы|а|ах)?)\s*гомеопатическ(?:ие|их|ими)?(?![\p{L}\p{N}])/iu },
+  { value: "гранулы", pattern: /(?<![\p{L}\p{N}])гран(?:\.|ул(?:ы|а|ах)?)(?![\p{L}\p{N}])/iu },
   { value: "раствор", pattern: /(?<![\p{L}\p{N}])раствор(?:а|ом)?(?![\p{L}\p{N}])/iu },
   { value: "сироп", pattern: /(?<![\p{L}\p{N}])сироп(?:а|ом)?(?![\p{L}\p{N}])/iu },
   { value: "суспензия", pattern: /(?<![\p{L}\p{N}])суспензи(?:я|и|ю|ей)(?![\p{L}\p{N}])/iu },
@@ -56,7 +66,6 @@ const MODIFIERS: Array<{ value: string; pattern: RegExp }> = [
   { value: "Нео", pattern: /(?<![\p{L}\p{N}])нео(?![\p{L}\p{N}])/iu },
   { value: "Кидс", pattern: /(?<![\p{L}\p{N}])кидс(?![\p{L}\p{N}])/iu },
   { value: "Иммуно", pattern: /(?<![\p{L}\p{N}])иммуно(?![\p{L}\p{N}])/iu },
-  { value: "Про", pattern: /(?<![\p{L}\p{N}])про(?![\p{L}\p{N}])/iu },
   { value: "с лоратадином", pattern: /(?<![\p{L}\p{N}])с\s+лоратадином(?![\p{L}\p{N}])/iu },
   { value: "пролонгированные", pattern: /(?<![\p{L}\p{N}])(?:пролонгированн(?:ого|ые|ая|ый)|пролонг)(?![\p{L}\p{N}])/iu },
   { value: "кишечнорастворимые", pattern: /(?<![\p{L}\p{N}])кишечнорастворим(?:ые|ая|ый|ого)(?![\p{L}\p{N}])/iu },
@@ -67,6 +76,22 @@ const MODIFIERS: Array<{ value: string; pattern: RegExp }> = [
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hasExactRequestedBrand(value: string, brand: string): boolean {
+  const requested = brand.normalize("NFKC").trim();
+  if (!requested) return false;
+  const flexible = escapeRegExp(requested)
+    .replace(/[\s‐‑‒–—−-]+/g, "[\\s‐‑‒–—−-]*");
+  return new RegExp(`(^|[^\\p{L}\\p{N}])${flexible}(?=$|[^\\p{L}\\p{N}])`, "iu").test(value);
+}
+
+function removeForeignVendorAfterBrandMatch(value: string, brand: string): string {
+  // SANOFI is a manufacturer token in source titles, not a Cogitum product
+  // modifier. Never strip it from an unverified title: the exact requested
+  // brand must be present in the same source-bound text first.
+  if (!hasExactRequestedBrand(value, brand)) return value;
+  return value.replace(/(?<![\p{L}\p{N}])SANOFI(?![\p{L}\p{N}])/giu, " ");
 }
 
 const LATIN: Record<string, string> = {
@@ -153,9 +178,19 @@ function countFromText(value: string): number | undefined {
   const labelled = value.match(/(?:кол(?:ичество|-?во)(?:\s+в\s+упаковке)?|фасовка|комплектация)\s*[:—-]?\s*(\d{1,4})(?!\d)/iu);
   if (labelled) return Number(labelled[1]);
   const afterPattern = new RegExp(`(?<!\\d)${NUMBER}\\s*${COUNT_UNIT}(?![\\p{L}\\p{N}])`, "giu");
+  let doseCount: number | undefined;
   for (const after of value.matchAll(afterPattern)) {
-    if (!isAdministrationContext(value, after.index ?? 0, after[0].length)) return Number(after[1]);
+    if (isAdministrationContext(value, after.index ?? 0, after[0].length)) continue;
+    // Marketplace titles often contain both the unit composition and the
+    // package size: "1 доза, 30 шт".  A physical pack unit is the SKU count;
+    // the dose count is only a fallback for titles such as "6 доз".
+    if (/доз/iu.test(after[0])) {
+      doseCount ??= Number(after[1]);
+      continue;
+    }
+    return Number(after[1]);
   }
+  if (doseCount !== undefined) return doseCount;
   const beforePattern = new RegExp(`(?<![\\p{L}\\p{N}])(?:табл?\\.?|таблет(?:ка|ки)?|капс?\\.?|капсул(?:а|ы)?|саше|пастилки)\\s*${NUMBER}(?!\\d)(?!\\s*(?:мкг|мг|гр?|г|мл|%|ме))`, "giu");
   for (const before of value.matchAll(beforePattern)) {
     if (!isAdministrationContext(value, before.index ?? 0, before[0].length)) return Number(before[1]);
@@ -215,6 +250,68 @@ function extractDoses(brand: string, value: string, form: string | undefined, co
   return [...new Set(doses)];
 }
 
+function normalizeKnownProductEquivalence(
+  brand: string,
+  value: string,
+  parts: Pick<ProductParts, "form" | "doses" | "count">
+): Pick<ProductParts, "form" | "doses"> {
+  const normalizedBrand = normalizeText(brand);
+
+  // Oscillococcinum's sellable tube dose is consistently catalogued as either
+  // "1 dose", "1 g" or "1000 mg".  Normalize only when one of those values is
+  // present on the current listing. A bare "granules No.12" remains bare: this
+  // rule must not manufacture a strength from the brand name alone.
+  if (normalizedBrand !== "оциллококцинум" || !parts.count) {
+    return { form: parts.form, doses: parts.doses };
+  }
+  const explicitDose = /(?<![\p{L}\p{N}])1\s*(?:доз(?:а|ы|у)?|dose)(?![\p{L}\p{N}])/iu.test(value);
+  const explicitOneGram = parts.doses.some((dose) => normalizeText(dose) === "1000 мг");
+  if (!explicitDose && !explicitOneGram) return { form: parts.form, doses: parts.doses };
+
+  return {
+    form: !parts.form || parts.form === "гранулы" ? "гранулы" : parts.form,
+    doses: ["1 г", ...parts.doses.filter((dose) => normalizeText(dose) !== "1000 мг")]
+  };
+}
+
+/**
+ * Descriptions on pharmacy sites mix the dosage form with therapeutic
+ * classification.  "Гранулы" and "гранулы гомеопатические" are the same
+ * physical dosage form, so the extra adjective must not create another
+ * product.  Keep truly different forms (for example ordinary tablets and
+ * lozenges) separate.
+ */
+function canonicalForm(form: string | undefined): string | undefined {
+  return form === "гранулы гомеопатические" ? "гранулы" : form;
+}
+
+/**
+ * Catalogs often omit the ampoule container from an otherwise identical
+ * injectable solution title.  Treat that omission as a difference in title
+ * richness, not as a second dosage form.  Rendering still keeps the richer
+ * human label when the source provides it.
+ */
+function comparableForm(form: string | undefined): string | undefined {
+  const canonical = canonicalForm(form);
+  return canonical === "раствор в ампулах" ? "раствор" : canonical;
+}
+
+function formSubsumes(richer: string | undefined, poorer: string | undefined): boolean {
+  if (!poorer) return true;
+  if (!richer || comparableForm(richer) !== comparableForm(poorer)) return false;
+  return canonicalForm(richer) === canonicalForm(poorer)
+    || canonicalForm(richer) === "раствор в ампулах" && canonicalForm(poorer) === "раствор";
+}
+
+/**
+ * A measured single container does not become a different product merely
+ * because one catalog spells out "1 шт".  The physical pack is already
+ * identified by "30 г"/"100 мл"; real multi-packs remain distinct.
+ */
+function canonicalCount(parts: Pick<ProductParts, "form" | "doses" | "count">): number | undefined {
+  return parts.count === 1 && hasPackMeasure(parts) ? undefined : parts.count;
+}
+
 function cleanFallback(value: string): string {
   const cleaned = value
     .replace(/(?<![\p{L}\p{N}])(?:detail(?:\.aspx)?|index(?:\.html?))(?![\p{L}\p{N}])/giu, " ")
@@ -247,7 +344,6 @@ function productHintFromUrl(url: string | undefined): string {
       .replace(/\bgranuly\b/giu, " гранулы ")
       .replace(/\b(?:d rassas|dlia rassasyvaniia)\b/giu, " для рассасывания ")
       .replace(/\b(?:plyus|plius)\b/giu, " плюс ")
-      .replace(/\bpro\b/giu, " про ")
       .replace(/\bdetyam\b/giu, " детский ")
       .replace(/\bs loratadinom\b/giu, " с лоратадином ")
       .replace(/\bsupp vag i rekt\b/giu, " суппозитории вагинальные и ректальные ")
@@ -272,25 +368,41 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
     .replace(/[\t\r\n\u00a0\u202f]+/g, " ")
     .replace(/\s{2,}/g, " ")
     .trim();
-  const rawWithoutBrand = removeBrand(normalized, brand);
+  const sourceWithoutVendor = removeForeignVendorAfterBrandMatch(normalized, brand);
+  const rawWithoutBrand = removeBrand(sourceWithoutVendor, brand);
   const hasStrongDetail = countFromText(rawWithoutBrand) !== undefined || /\d+(?:[.,]\d+)?\s*(?:мкг|мг|г|мл|ме|%)(?:\s*\/\s*(?:мл|г|доз(?:а|у)?))?/iu.test(rawWithoutBrand);
   const isFinalAggregateLabel = /^(?:Общая карточка|Линейка «)/iu.test(normalized);
-  const withUrlHint = hasStrongDetail || isFinalAggregateLabel ? normalized : `${normalized} ${productHintFromUrl(url)}`.trim();
+  const withUrlHint = hasStrongDetail || isFinalAggregateLabel ? sourceWithoutVendor : `${sourceWithoutVendor} ${productHintFromUrl(url)}`.trim();
   const withoutStoredPrefix = withUrlHint.replace(/^(.{1,160}?)\s+[—–]\s+/, (full, prefix: string) =>
     normalizeText(prefix) === normalizeText(brand) ? "" : full
   );
   const withoutBrand = removeBrand(withoutStoredPrefix, brand)
+    // "Ниармедик Плюс" is a company name seen in marketplace
+    // titles, not a Кагоцел product line or sellable variant.
+    .replace(/(?<![\p{L}\p{N}])ниармедик\s+плюс(?![\p{L}\p{N}])/giu, " ")
     .replace(/^[-—–,.:;\s]+|[-—–,.:;\s]+$/g, "")
     .trim();
   const count = countFromText(withoutBrand);
-  const form = formFromText(withoutBrand);
-  const doses = extractDoses(brand, withoutBrand, form, count);
+  const extractedForm = formFromText(withoutBrand);
+  const extractedDoses = extractDoses(brand, withoutBrand, extractedForm, count);
+  const equivalence = normalizeKnownProductEquivalence(brand, withoutBrand, {
+    form: extractedForm,
+    doses: extractedDoses,
+    count
+  });
+  const form = equivalence.form;
+  const doses = equivalence.doses;
   const multipackMatch = withoutBrand.match(/(?:[xх×]\s*|(?<![\p{L}\p{N}]))(\d+)\s*(?:уп(?:аковк)?\.?|упаков(?:ки|ок|ка))(?![\p{L}\p{N}])/iu);
   const multipack = multipackMatch ? Number(multipackMatch[1]) : undefined;
-  const modifiers = MODIFIERS.filter((item) => item.pattern.test(withoutBrand)).map((item) => item.value);
+  const modifiers = MODIFIERS.filter((item) => item.pattern.test(withoutBrand))
+    .map((item) => item.value)
+    // "Плюс" can qualify a concrete dosage form, but by itself it does
+    // not prove a product or a separate line.
+    .filter((value) => value !== "Плюс" || Boolean(form || doses.length));
   const modifier = modifiers.length ? modifiers.join(" ") : undefined;
   const generic = !form && !count && doses.length === 0 && !modifier;
-  const genericPage = /(?:отзыв|инструкц|цен[аы]|аналог|лекарственн|ноотропн|препарат|средство)/iu.test(withoutBrand);
+  const fallbackText = generic ? withoutBrand.replace(/^плюс(?:\s+отзывы?)?$/iu, "").trim() : withoutBrand;
+  const genericPage = !fallbackText || /(?:отзыв|инструкц|цен[аы]|аналог|лекарственн|ноотропн|препарат|средство)/iu.test(fallbackText);
   const contentPage = /(?:пародонтолог|стать[яи]|книг[аи]|методическ|исследован|применение\s+.{0,100}\s+в\s+)/iu.test(withoutBrand);
   const unknownModel = /^\s*(?:модель\s*)?\d{5,}\s*$/iu.test(withoutBrand) || /^\s*модель\s+\d+/iu.test(withoutBrand);
   return {
@@ -300,7 +412,7 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
     count,
     multipack,
     fallback: generic
-      ? unknownModel ? "Общая карточка бренда" : genericPage ? "Общая карточка отзывов" : cleanFallback(withoutBrand)
+      ? unknownModel ? "Общая карточка бренда" : genericPage ? "Общая карточка отзывов" : cleanFallback(fallbackText)
       : undefined,
     generic,
     genericPage,
@@ -310,7 +422,7 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
 }
 
 function partsKey(parts: ProductParts): string {
-  return [parts.modifier, parts.form, parts.doses.join("+"), parts.count, parts.multipack].map((item) => item ?? "").join("|");
+  return [parts.modifier, comparableForm(parts.form), parts.doses.join("+"), canonicalCount(parts), parts.multipack].map((item) => item ?? "").join("|");
 }
 
 function specificity(parts: ProductParts): number {
@@ -321,22 +433,25 @@ function render(parts: ProductParts): string {
   if (parts.generic) return parts.fallback ?? "Общая карточка отзывов";
   const chunks: string[] = [];
   if (parts.modifier) chunks.push(parts.modifier);
-  if (parts.form) chunks.push(parts.form);
+  const form = canonicalForm(parts.form);
+  if (form) chunks.push(form);
   chunks.push(...parts.doses);
-  if (parts.count) chunks.push(`№${parts.count}`);
+  const count = canonicalCount(parts);
+  if (count) chunks.push(`№${count}`);
   if (parts.multipack && parts.multipack > 1) chunks.push(`×${parts.multipack} упаковки`);
   return chunks.join(" ") || "Общая карточка бренда";
 }
 
-const LINE_NAMES = ["Максимум", "Плюс", "Дуо", "Форте", "Экспресс", "Лайт", "Интенс", "Нео", "Кидс", "Иммуно", "Про"];
+const LINE_NAMES = ["Максимум", "Дуо", "Форте", "Экспресс", "Лайт", "Интенс", "Нео", "Кидс", "Иммуно"];
 const PACK_MEASURE_FORMS = new Set(["порошок", "гранулы", "раствор", "сироп", "суспензия", "спрей", "капли", "гель", "крем", "мазь", "лиофилизат"]);
 
 function lineName(parts: ProductParts): string | undefined {
   return LINE_NAMES.find((name) => parts.modifier?.split(/\s+/u).includes(name));
 }
 
-function hasPackMeasure(parts: ProductParts): boolean {
-  return Boolean(parts.form && PACK_MEASURE_FORMS.has(parts.form) && parts.doses.some((dose) => /\s(?:мл|г)$/u.test(dose)));
+function hasPackMeasure(parts: Pick<ProductParts, "form" | "doses">): boolean {
+  const form = canonicalForm(parts.form);
+  return Boolean(form && (PACK_MEASURE_FORMS.has(form) || form.startsWith("раствор")) && parts.doses.some((dose) => /\s(?:мл|г)$/u.test(dose)));
 }
 
 function missingFields(parts: ProductParts): ProductIdentity["missing"] {
@@ -353,11 +468,15 @@ function missingFields(parts: ProductParts): ProductIdentity["missing"] {
 
 function isExactVariant(parts: ProductParts): boolean {
   const hasPack = Boolean(parts.count || parts.multipack || hasPackMeasure(parts));
+  const concentratedOralSolution = parts.form === "раствор для приема внутрь"
+    && parts.doses.some((dose) => /\/мл$/u.test(dose));
   // Either the pharmaceutical form or a concrete strength/detail together
   // with a pack is enough to identify a human product.  Thus both
   // "таблетки №20" and "100 мг №10" are publishable, while a bare
-  // "таблетки"/"капсулы" remains a review-only aggregate.
-  return !parts.generic && hasPack && Boolean(parts.form || parts.doses.length);
+  // "таблетки"/"капсулы" remains a review-only aggregate. A source-bound
+  // oral solution plus its concentration also identifies the reviewed product
+  // even when that review page does not publish the bottle size.
+  return !parts.generic && (hasPack && Boolean(parts.form || parts.doses.length) || concentratedOralSolution);
 }
 
 function setIsSubset(left: readonly string[], right: readonly string[]): boolean {
@@ -366,8 +485,10 @@ function setIsSubset(left: readonly string[], right: readonly string[]): boolean
 }
 
 function partsCompatible(left: ProductParts, right: ProductParts): boolean {
-  if (left.form && right.form && left.form !== right.form) return false;
-  if (left.count && right.count && left.count !== right.count) return false;
+  if (left.form && right.form && comparableForm(left.form) !== comparableForm(right.form)) return false;
+  const leftCount = canonicalCount(left);
+  const rightCount = canonicalCount(right);
+  if (leftCount && rightCount && leftCount !== rightCount) return false;
   if (left.multipack && right.multipack && left.multipack !== right.multipack) return false;
   if (left.modifier && right.modifier) {
     const leftModifiers = left.modifier.split(/\s+/u);
@@ -380,8 +501,9 @@ function partsCompatible(left: ProductParts, right: ProductParts): boolean {
 
 function partsSubsumes(richer: ProductParts, poorer: ProductParts): boolean {
   if (!partsCompatible(richer, poorer)) return false;
-  if (poorer.form && richer.form !== poorer.form) return false;
-  if (poorer.count && richer.count !== poorer.count) return false;
+  if (!formSubsumes(richer.form, poorer.form)) return false;
+  const poorerCount = canonicalCount(poorer);
+  if (poorerCount && canonicalCount(richer) !== poorerCount) return false;
   if (poorer.multipack && richer.multipack !== poorer.multipack) return false;
   if (poorer.modifier && (!richer.modifier || !setIsSubset(poorer.modifier.split(/\s+/u), richer.modifier.split(/\s+/u)))) return false;
   if (!setIsSubset(poorer.doses, richer.doses)) return false;
@@ -404,10 +526,10 @@ function uniqueParsedCandidates(item: ProductNameInput): ProductParts[] {
   const strongTexts = [
     item.product,
     ...(item.evidence?.variants ?? []),
-    ...(item.evidence?.signals.filter((signal) => !["url", "instruction", "image_alt"].includes(signal.source)).map((signal) => signal.text) ?? [])
+    ...(item.evidence?.signals.filter((signal) => ["title", "json_ld", "variant"].includes(signal.source)).map((signal) => signal.text) ?? [])
   ];
   const fallbackTexts = item.evidence?.signals
-    .filter((signal) => signal.source === "instruction" || signal.source === "image_alt")
+    .filter((signal) => signal.source === "description" || signal.source === "instruction" || signal.source === "image_alt")
     .map((signal) => signal.text) ?? [];
   const byKey = new Map<string, ProductParts>();
   for (const [index, text] of strongTexts.entries()) {
@@ -421,7 +543,14 @@ function uniqueParsedCandidates(item: ProductNameInput): ProductParts[] {
     const parsed = parseProduct(item.brand, text);
     // Instruction text and image metadata are valuable fallbacks, but must not
     // overturn a concrete title/JSON-LD/variant with incompatible attributes.
-    if (isExactVariant(parsed) && strongExact.length && !strongExact.every((candidate) => partsCompatible(candidate, parsed))) continue;
+    if (isExactVariant(parsed) && strongExact.length) {
+      if (!strongExact.every((candidate) => partsCompatible(candidate, parsed))) continue;
+      // A listing title/JSON-LD/variant already proves an exact sellable item.
+      // Descriptions and instructions may contain ingredient concentrations,
+      // administration doses and neighbouring packs.  They can corroborate
+      // the exact item, but must not enrich it into a second artificial SKU.
+      if (!strongExact.some((candidate) => partsSubsumes(candidate, parsed))) continue;
+    }
     const key = partsKey(parsed);
     const previous = byKey.get(key);
     if (!previous || specificity(parsed) > specificity(previous)) byKey.set(key, parsed);
@@ -436,6 +565,86 @@ function variantWord(count: number): string {
   if (modulo10 === 1) return "вариант";
   if (modulo10 >= 2 && modulo10 <= 4) return "варианта";
   return "вариантов";
+}
+
+const CONSUMER_PRODUCT_NOUN = /(?<!\p{L})(?:погремушк\p{L}*|бутылочк\p{L}*|клеенк\p{L}*|накладк\p{L}*|насадк\p{L}*|трусик\p{L}*|пустышк\p{L}*|ниблер\p{L}*|молокоотсос\p{L}*|соск\p{L}*|поильник\p{L}*|игрушк\p{L}*|щетк\p{L}*|контейнер\p{L}*|термометр\p{L}*|прорезывател\p{L}*)(?!\p{L})/iu;
+
+const CONSUMER_NOUNS: Array<{ value: string; pattern: RegExp }> = [
+  { value: "погремушка", pattern: /(?<!\p{L})погремушк\p{L}*(?!\p{L})/giu },
+  { value: "бутылочка", pattern: /(?<!\p{L})бутылочк\p{L}*(?!\p{L})/giu },
+  { value: "клеенка", pattern: /(?<!\p{L})клеенк\p{L}*(?!\p{L})/giu },
+  { value: "накладка", pattern: /(?<!\p{L})накладк\p{L}*(?!\p{L})/giu },
+  { value: "насадка", pattern: /(?<!\p{L})насадк\p{L}*(?!\p{L})/giu },
+  { value: "трусики", pattern: /(?<!\p{L})трусик\p{L}*(?!\p{L})/giu },
+  { value: "пустышка", pattern: /(?<!\p{L})пустышк\p{L}*(?!\p{L})/giu },
+  { value: "ниблер", pattern: /(?<!\p{L})ниблер\p{L}*(?!\p{L})/giu },
+  { value: "молокоотсос", pattern: /(?<!\p{L})молокоотсос\p{L}*(?!\p{L})/giu },
+  { value: "соска", pattern: /(?<!\p{L})соск\p{L}*(?!\p{L})/giu },
+  { value: "поильник", pattern: /(?<!\p{L})поильник\p{L}*(?!\p{L})/giu },
+  { value: "игрушка", pattern: /(?<!\p{L})игрушк\p{L}*(?!\p{L})/giu },
+  { value: "щетка", pattern: /(?<!\p{L})щетк\p{L}*(?!\p{L})/giu },
+  { value: "контейнер", pattern: /(?<!\p{L})контейнер\p{L}*(?!\p{L})/giu },
+  { value: "термометр", pattern: /(?<!\p{L})термометр\p{L}*(?!\p{L})/giu },
+  { value: "прорезыватель", pattern: /(?<!\p{L})прорезывател\p{L}*(?!\p{L})/giu }
+];
+
+function canonicalConsumerLabel(value: string): string {
+  const cleaned = value
+    .normalize("NFKC")
+    .replace(/(?<![\p{L}\p{N}])1\s*(?:шт(?:ук[аи]?)?\.?)(?![\p{L}\p{N}])/giu, " ")
+    .replace(/(\d+(?:[.,]\d+)?)\s*(мл|мг|г|см)(?!\p{L})/giu, "$1 $2")
+    .replace(/\s*[,;|]+\s*/gu, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[-–—:\s]+|[-–—:\s]+$/gu, "")
+    .trim();
+  return cleaned ? cleaned[0].toLocaleLowerCase("ru-RU") + cleaned.slice(1) : cleaned;
+}
+
+function consumerVariantKey(brand: string, value: string): string | undefined {
+  if (!CONSUMER_PRODUCT_NOUN.test(value)) return undefined;
+  let normalized = normalizeText(canonicalConsumerLabel(value))
+    .replace(/(?<!\p{L})(\d+)\s*(?:месяц\p{L}*|мес)(?!\p{L})/giu, "$1 мес")
+    .replace(/(?<!\p{L})(\d+)\s*(?:год\p{L}*|лет)(?!\p{L})/giu, "$1 лет");
+  let primaryNoun: { value: string; index: number } | undefined;
+  for (const noun of CONSUMER_NOUNS) {
+    noun.pattern.lastIndex = 0;
+    const match = noun.pattern.exec(normalized);
+    noun.pattern.lastIndex = 0;
+    if (match && (!primaryNoun || match.index < primaryNoun.index)) {
+      primaryNoun = { value: noun.value, index: match.index };
+    }
+  }
+  if (!primaryNoun) return undefined;
+  for (const noun of CONSUMER_NOUNS) normalized = normalized.replace(noun.pattern, noun.value);
+  const tokens = normalized.split(/\s+/u)
+    .filter((token) => token && !/^(?:для|от|с|со|и|на)$/u.test(token))
+    .sort((left, right) => left.localeCompare(right, "ru"));
+  return tokens.length ? `${normalizeText(brand)}|consumer|${primaryNoun.value}|${tokens.join("|")}` : undefined;
+}
+
+function consumerProductIdentity(item: ProductNameInput): ProductIdentity | undefined {
+  const evidence = item.evidence;
+  if (evidence?.scope !== "product_family") return undefined;
+  const stableProduct = evidence.identifiers.some((identifier) =>
+    identifier.type === "product_id" && identifier.value.trim().length > 0
+  );
+  if (!stableProduct) return undefined;
+  const sourceTitle = evidence.signals.find((signal) => signal.source === "title")?.text ?? item.product;
+  const withoutBrand = removeBrand(sourceTitle, item.brand)
+    .replace(/^\s*[-–—,:;|]+\s*/u, "")
+    .replace(/\s+в\s+[А-ЯЁ][\p{L}-]+(?:\s+[А-ЯЁ][\p{L}-]+)?\s*$/u, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!withoutBrand || normalizeText(withoutBrand) === normalizeText(sourceTitle) || !CONSUMER_PRODUCT_NOUN.test(withoutBrand)) {
+    return undefined;
+  }
+  return {
+    label: withoutBrand,
+    granularity: "variant",
+    confidence: "exact",
+    missing: [],
+    reasons: ["Отдельная товарная страница и стабильный ID подтверждают потребительский вариант"]
+  };
 }
 
 function unresolvedIdentity(parts: ProductParts, reason: string): ProductIdentity {
@@ -471,14 +680,50 @@ export function analyzeProductIdentity(item: ProductNameInput): ProductIdentity 
     const variantGroups = new Map<string, ProductParts>();
     for (const text of evidenceVariants) {
       const parts = parseProduct(item.brand, text);
-      const baseKey = [parts.modifier, parts.form, [...parts.doses].sort().join("+"), parts.count, parts.multipack].map((value) => value ?? "").join("|");
+      // A bare counter such as "№30" is not a product. It used to leak into
+      // the employee-facing label as "Общий рейтинг: №30" when a review
+      // control was mistaken for a variant selector.
+      if (parts.generic || !parts.form && !parts.doses.length && !parts.modifier) continue;
+      const baseKey = [parts.modifier, comparableForm(parts.form), [...parts.doses].sort().join("+"), canonicalCount(parts), parts.multipack].map((value) => value ?? "").join("|");
       const previous = variantGroups.get(baseKey);
-      if (!previous || specificity(parts) > specificity(previous)) variantGroups.set(baseKey, parts);
+      if (
+        !previous
+        || (partsSubsumes(parts, previous) && !partsSubsumes(previous, parts))
+        || specificity(parts) > specificity(previous)
+      ) variantGroups.set(baseKey, parts);
     }
-    const count = Math.max(variantGroups.size || evidenceVariants.length, 1);
+    // A review site may mark every page as an aggregate because one rating is
+    // shared by all reviews on that page.  That does not make a page such as
+    // "Оциллококцинум гранулы 30 доз" a brand aggregate: the page itself still
+    // proves one sellable variant.  Preserve a single unambiguous exact variant
+    // and use family/line only when several variants are actually evidenced.
+    const consumerProduct = consumerProductIdentity(item);
+    if (consumerProduct) return consumerProduct;
+    const exactPageVariants = collapseDominatedVariants(candidates.filter(isExactVariant));
+    if (exactPageVariants.length === 1 && variantGroups.size <= 1) {
+      const resolved = exactPageVariants[0];
+      return { label: render(resolved), granularity: "variant", confidence: "exact", missing: [], reasons: [] };
+    }
+    if (variantGroups.size === 0) {
+      const line = lineName(primary);
+      return {
+        label: line ? `Общий рейтинг линейки «${line}»` : "Общий рейтинг бренда",
+        granularity: line ? "line" : "family",
+        confidence: "partial",
+        missing: [],
+        reasons: ["Площадка публикует единый рейтинг без списка товарных вариантов"]
+      };
+    }
+    const count = variantGroups.size;
     const line = lineName(primary);
+    const humanVariants = [...variantGroups.values()].map(render);
+    const visibleVariants = humanVariants.slice(0, 3);
+    const hiddenVariantCount = Math.max(0, humanVariants.length - visibleVariants.length);
+    const variantDetails = visibleVariants.length
+      ? `${visibleVariants.join("; ")}${hiddenVariantCount ? `; ещё ${hiddenVariantCount}` : ""}`
+      : `${count} ${variantWord(count)}`;
     return {
-      label: line ? `Общая карточка линейки «${line}» (${count} ${variantWord(count)})` : `Общая карточка бренда (${count} ${variantWord(count)})`,
+      label: line ? `Общий рейтинг линейки «${line}»: ${variantDetails}` : `Общий рейтинг: ${variantDetails}`,
       granularity: line ? "line" : "family",
       confidence: evidenceVariants.length ? "exact" : "partial",
       missing: [],
@@ -492,6 +737,13 @@ export function analyzeProductIdentity(item: ProductNameInput): ProductIdentity 
   const storedLine = item.product.trim().match(/^Общая карточка линейки «([^»]+)»(?:\s*\((\d+)\s+вариант(?:а|ов)?\))?$/iu);
   if (storedLine) {
     const variantCount = storedLine[2] ? Number(storedLine[2]) : undefined;
+    if (normalizeText(storedLine[1]) === "плюс") {
+      return {
+        label: `Общая карточка бренда${variantCount ? ` (${variantCount} ${variantWord(variantCount)})` : ""}`,
+        granularity: "family", confidence: variantCount ? "exact" : "partial",
+        missing: [], reasons: ["Метка «Плюс» не считается отдельной товарной линейкой"], variantCount
+      };
+    }
     return {
       label: item.product.trim(), granularity: "line", confidence: variantCount ? "exact" : "partial",
       missing: [], reasons: ["Сохранённая общая карточка линейки"], variantCount
@@ -551,7 +803,210 @@ export function analyzeProductIdentity(item: ProductNameInput): ProductIdentity 
  * attributes from neighbouring listings: incomplete evidence remains explicit.
  */
 export function canonicalProductDescriptors(items: readonly ProductNameInput[]): string[] {
-  return items.map((item) => analyzeProductIdentity(item).label);
+  return canonicalProductVariants(items).map((item) => item.label);
+}
+
+export type CanonicalProductVariant = {
+  label: string;
+  /** Stable semantic key. Platform listing IDs remain the row identity. */
+  variantKey?: string;
+};
+
+function isLegacyBareCounterAggregate(identity: ProductIdentity): boolean {
+  return identity.granularity !== "variant"
+    && /^Общий рейтинг\s*:\s*(?:№|#|N(?:o)?\.?)\s*\d+\s*$/iu.test(identity.label);
+}
+
+function identityForReconciliation(item: ProductNameInput): ProductIdentity {
+  if (!item.productIdentity || !isLegacyBareCounterAggregate(item.productIdentity)) {
+    return item.productIdentity ?? analyzeProductIdentity(item);
+  }
+  const rebuilt = analyzeProductIdentity({ ...item, productIdentity: undefined });
+  if (rebuilt.granularity === "variant") return rebuilt;
+  return {
+    label: "Общий рейтинг бренда",
+    granularity: "family",
+    confidence: "partial",
+    missing: [],
+    reasons: ["Сохранённый счётчик не является названием товарного варианта"]
+  };
+}
+
+function exactParts(item: ProductNameInput): ProductParts | undefined {
+  const candidates = uniqueParsedCandidates(item);
+  if (item.productIdentity?.granularity === "variant") {
+    candidates.push(parseProduct(item.brand, item.productIdentity.label));
+  }
+  const exact = collapseDominatedVariants(candidates.filter(isExactVariant));
+  return exact.length === 1 ? exact[0] : undefined;
+}
+
+function variantCoreKey(brand: string, parts: ProductParts): string {
+  return [
+    normalizeText(brand),
+    normalizeText(parts.modifier ?? ""),
+    normalizeText(canonicalForm(parts.form) ?? ""),
+    canonicalCount(parts) ?? "",
+    parts.multipack ?? ""
+  ].join("|");
+}
+
+function doseKey(parts: ProductParts): string {
+  return [...parts.doses].map(normalizeText).sort().join("+");
+}
+
+type OralSolutionCandidate = {
+  key: string;
+  concentration?: string;
+  otherDoses: string[];
+  oral: boolean;
+};
+
+function oralSolutionCandidate(parts: ProductParts): OralSolutionCandidate | undefined {
+  if (parts.form !== "раствор" && parts.form !== "раствор для приема внутрь") return undefined;
+  const concentration = parts.doses.find((dose) => /^\d+(?:[.,]\d+)?\s+(?:мкг|мг|г)\/мл$/iu.test(dose));
+  const standaloneStrength = parts.doses.find((dose) => /^\d+(?:[.,]\d+)?\s+(?:мкг|мг|г)$/iu.test(dose));
+  if (Boolean(concentration) === Boolean(standaloneStrength)) return undefined;
+
+  const strength = concentration ?? standaloneStrength!;
+  const strengthKey = normalizeText(strength.replace(/\/мл$/iu, ""));
+  const otherDoses = parts.doses.filter((dose) => dose !== concentration && dose !== standaloneStrength);
+  // Only reconcile a measured retail bottle. Without a shared pack volume,
+  // a bare strength may describe a dose rather than a concentration.
+  if (!otherDoses.some((dose) => /^\d+(?:[.,]\d+)?\s+мл$/iu.test(dose))) return undefined;
+  return {
+    key: [
+      normalizeText(parts.modifier ?? ""),
+      canonicalCount(parts) ?? "",
+      parts.multipack ?? "",
+      strengthKey,
+      ...otherDoses.map(normalizeText).sort()
+    ].join("|"),
+    concentration,
+    otherDoses,
+    oral: parts.form === "раствор для приема внутрь"
+  };
+}
+
+/**
+ * A pharmacy may shorten "120 mg/ml oral solution, 30 ml" to either
+ * "solution 120 mg/ml 30 ml" or "oral solution 120 mg 30 ml". Reconcile that
+ * omission only when another card for the same brand proves the concentration,
+ * route and identical measured bottle. Explicit injectable forms never enter
+ * this candidate set, while different strengths and volumes get different keys.
+ */
+function reconcileOralSolutionShorthand(
+  items: readonly ProductNameInput[],
+  parsed: readonly (ProductParts | undefined)[]
+): Array<ProductParts | undefined> {
+  const result = [...parsed];
+  const groups = new Map<string, Array<{ index: number; candidate: OralSolutionCandidate }>>();
+  parsed.forEach((parts, index) => {
+    if (!parts) return;
+    const candidate = oralSolutionCandidate(parts);
+    if (!candidate) return;
+    const key = `${normalizeText(items[index].brand)}|${candidate.key}`;
+    const group = groups.get(key) ?? [];
+    group.push({ index, candidate });
+    groups.set(key, group);
+  });
+
+  for (const group of groups.values()) {
+    const proof = group.find(({ candidate }) => candidate.concentration);
+    if (!proof || !group.some(({ candidate }) => candidate.oral)) continue;
+    for (const { index, candidate } of group) {
+      result[index] = {
+        ...parsed[index]!,
+        form: "раствор для приема внутрь",
+        doses: [proof.candidate.concentration!, ...candidate.otherDoses]
+      };
+    }
+  }
+  return result;
+}
+
+/**
+ * Reconciles equivalent variants across sites. If the same brand/form/pack is
+ * observed both with and without one non-conflicting strength, the shorter
+ * proven wording is canonical for both rows. A brand-wide aggregate may inherit
+ * the label only when the complete input proves exactly one semantic variant;
+ * conflicting variants are always kept separate.
+ */
+export function canonicalProductVariants(items: readonly ProductNameInput[]): CanonicalProductVariant[] {
+  const identities = items.map(identityForReconciliation);
+  const parsed = reconcileOralSolutionShorthand(items, items.map((item, index) =>
+    identities[index].granularity === "variant" && !CONSUMER_PRODUCT_NOUN.test(identities[index].label)
+      ? exactParts(item)
+      : undefined
+  ));
+  const groups = new Map<string, number[]>();
+
+  parsed.forEach((parts, index) => {
+    if (!parts) return;
+    const key = variantCoreKey(items[index].brand, parts);
+    const group = groups.get(key) ?? [];
+    group.push(index);
+    groups.set(key, group);
+  });
+
+  const result = identities.map((identity): CanonicalProductVariant => ({ label: identity.label }));
+  for (const [coreKey, indices] of groups) {
+    const doseKeys = new Set(indices.map((index) => doseKey(parsed[index]!)).filter(Boolean));
+    const hasShortEquivalent = indices.some((index) => parsed[index]!.doses.length === 0);
+    const omitNonDiscriminatingDose = hasShortEquivalent && doseKeys.size <= 1;
+
+    for (const index of indices) {
+      const parts = parsed[index]!;
+      const canonicalParts: ProductParts = {
+        ...parts,
+        form: canonicalForm(parts.form),
+        doses: omitNonDiscriminatingDose ? [] : parts.doses,
+        count: canonicalCount(parts)
+      };
+      const canonicalDose = doseKey(canonicalParts);
+      result[index] = {
+        label: render(canonicalParts),
+        variantKey: canonicalDose ? `${coreKey}|${canonicalDose}` : coreKey
+      };
+    }
+  }
+
+  const consumerGroups = new Map<string, number[]>();
+  identities.forEach((identity, index) => {
+    if (identity.granularity !== "variant" || parsed[index]) return;
+    const key = consumerVariantKey(items[index].brand, identity.label);
+    if (!key) return;
+    const group = consumerGroups.get(key) ?? [];
+    group.push(index);
+    consumerGroups.set(key, group);
+  });
+  for (const [key, indices] of consumerGroups) {
+    const label = indices
+      .map((index) => canonicalConsumerLabel(identities[index].label))
+      .sort((left, right) => left.length - right.length || left.localeCompare(right, "ru"))[0];
+    for (const index of indices) result[index] = { label, variantKey: key };
+  }
+
+  // Review sites often publish a brand-wide aggregate without pack details.
+  // When every exact marketplace/pharmacy card in the same snapshot resolves
+  // to one semantic product, attach those aggregates to that one product. If
+  // even two different variants are present, keep the aggregate explicit.
+  const exactVariantsByBrand = new Map<string, Map<string, string>>();
+  result.forEach((variant, index) => {
+    if (identities[index].granularity !== "variant" || !variant.variantKey) return;
+    const brand = normalizeText(items[index].brand);
+    const variants = exactVariantsByBrand.get(brand) ?? new Map<string, string>();
+    variants.set(variant.variantKey, variant.label);
+    exactVariantsByBrand.set(brand, variants);
+  });
+  identities.forEach((identity, index) => {
+    if (identity.granularity !== "family" || (identity.variantCount ?? 0) > 1) return;
+    const variants = exactVariantsByBrand.get(normalizeText(items[index].brand));
+    if (variants?.size !== 1) return;
+    const [variantKey, label] = variants.entries().next().value!;
+    result[index] = { label, variantKey };
+  });
+  return result;
 }
 
 export function canonicalProductDescriptor(brand: string, product: string): string {

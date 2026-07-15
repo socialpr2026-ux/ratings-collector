@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { OzonCompanionSessionState } from "./companion.js";
 
 export const MAX_RUN_PARTITIONS = 600;
 
@@ -74,6 +75,8 @@ export const observationSchema = z.object({
   canonicalUrl: httpsUrlSchema,
   product: z.string().trim().min(1).max(2000),
   reviews: z.number().int().nonnegative().nullable(),
+  /** Raw written-review counter when `reviews` is promoted to unified feedback. */
+  writtenReviewCount: z.number().int().nonnegative().nullable().optional(),
   rating: z.number().min(0).max(5).nullable(),
   rawRating: z.number().nonnegative().nullable().optional(),
   rawRatingScale: z.number().positive().optional(),
@@ -84,9 +87,13 @@ export const observationSchema = z.object({
   capturedAt: z.string().datetime(),
   evidenceRef: z.string().optional(),
   groupId: z.string().optional(),
+  /** Proven platform aggregate shared by several distinct product variants. */
+  aggregateGroupId: z.string().optional(),
   source: z.string().optional(),
   productEvidence: productEvidenceSchema.optional(),
   productIdentity: productIdentitySchema.optional(),
+  /** Human variant label confirmed during review; source title stays in `product`. */
+  productOverride: z.string().trim().min(1).max(240).optional(),
   historical: z.boolean().optional(),
   profileVersion: z.number().int().positive().optional()
 });
@@ -105,6 +112,18 @@ export const productRefSchema = z.object({
 
 export type ProductRef = z.infer<typeof productRefSchema>;
 
+/** Optional fine-grained adapter signal for the live runtime trace. */
+export type AdapterActivityEvent = {
+  operationId: string;
+  stage: "health_check" | "discovery" | "collection" | "parsing";
+  status: "active" | "complete" | "warning";
+  label: string;
+  listingId?: string;
+  channels?: RunActivityChannel[];
+  parsers?: RunActivityParser[];
+  detail?: string;
+};
+
 export type AdapterContext = {
   /** Stable execution scope used to coalesce run-wide work such as quota checks. */
   runId?: string;
@@ -116,6 +135,8 @@ export type AdapterContext = {
   previousIds?: string[];
   previousRefs?: Array<{ listingId: string; url: string }>;
   fetch?: typeof globalThis.fetch;
+  /** Collector-reported operations; absent for older adapters and callers. */
+  activity?: (event: AdapterActivityEvent) => void | Promise<void>;
 };
 
 export type AdapterHealth = {
@@ -172,6 +193,7 @@ export type ProductRecord = {
   product: string;
   platform: string;
   groupId?: string;
+  aggregateGroupId?: string;
   productIdentity?: ProductIdentity;
   firstSeenMonth: string;
   lastSeenMonth: string;
@@ -206,6 +228,57 @@ export type RunProgress = {
   current?: string;
 };
 
+/**
+ * A bounded, evidence-backed trace of work that is really happening during a
+ * run.  Stored runs created before this contract simply omit `activity`.
+ */
+export type RunActivityStage =
+  | "prepare"
+  | "health_check"
+  | "discovery"
+  | "collection"
+  | "parsing"
+  | "normalization"
+  | "qa";
+
+export type RunActivityStatus = "active" | "complete" | "warning";
+
+export type RunActivityChannel =
+  | "direct"
+  | "first_party_api"
+  | "google_translate"
+  | "reader_proxy"
+  | "gateway"
+  | "browser"
+  | "sandbox"
+  | "registry";
+
+export type RunActivityParser = "json_ld" | "dom" | "api_json" | "embedded_state";
+
+export type RunActivity = {
+  id: string;
+  sequence: number;
+  stage: RunActivityStage;
+  status: RunActivityStatus;
+  label: string;
+  startedAt: string;
+  finishedAt?: string;
+  domain?: string;
+  brand?: string;
+  listingId?: string;
+  /** Actual transport evidence reported by returned refs/observations. */
+  channels?: RunActivityChannel[];
+  /** Actual parser evidence reported by the observation source. */
+  parsers?: RunActivityParser[];
+  detail?: string;
+};
+
+export type RunActivityTrace = {
+  sequence: number;
+  active: RunActivity[];
+  recent: RunActivity[];
+};
+
 export type RunState = {
   id: string;
   ownerEmail?: string;
@@ -220,4 +293,10 @@ export type RunState = {
   payloadHash?: string;
   qa?: { ok: boolean; blockers: string[]; warnings: string[] };
   publication?: PublicationRecord;
+  /** Ratings sheet resolved during preflight; legacy Russian tabs remain supported. */
+  sheetTabName?: string;
+  /** Recent runtime work for the live process map. Backward-compatible. */
+  activity?: RunActivityTrace;
+  /** One-time browser-companion sessions. Existing stored runs omit this field. */
+  companionSessions?: { ozon?: OzonCompanionSessionState };
 };

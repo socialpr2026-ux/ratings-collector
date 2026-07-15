@@ -9,6 +9,13 @@ import { AdapterBlockedError, AdapterQuotaError, ParserChangedError } from "./er
 
 export type ResilientAdapterOptions = {
   isFallbackRef: (ref: ProductRef) => boolean;
+  /**
+   * Keep a blocked primary disabled for the rest of the runtime. This is the
+   * safe default for deterministic parser drift and stable cloud-IP blocks.
+   * Transiently throttled public APIs can opt out so one brand does not force
+   * every later brand onto a paid fallback.
+   */
+  stickyPrimaryFailure?: boolean;
 };
 
 /**
@@ -51,7 +58,7 @@ export class ResilientAdapter implements SiteAdapter {
   }
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
-    if (!this.primaryFailure) {
+    if (!this.primaryFailure || this.options.stickyPrimaryFailure === false) {
       try {
         return await this.primary.discover(brand, context);
       } catch (error) {

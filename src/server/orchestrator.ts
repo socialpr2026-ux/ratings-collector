@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
+  AdapterActivityEvent,
   Observation,
   ProductRecord,
   ProductRef,
@@ -9,7 +10,7 @@ import type {
   SiteProfile
 } from "../shared/types.js";
 import { observationSchema, productRefSchema, runRequestSchema } from "../shared/types.js";
-import { isKnownReviewAggregateDomain } from "../shared/review-aggregates.js";
+import { hasDeterministicAggregateProof, isKnownReviewAggregateDomain } from "../shared/review-aggregates.js";
 import type { EvidenceStore } from "./evidence.js";
 import { GenericSiteAdapter } from "./generic/adapter.js";
 import { profileSite } from "./generic/profiler.js";
@@ -21,6 +22,9 @@ import { normalizeText } from "./utils/normalize.js";
 import { assertSafePublicUrl, extractSpreadsheetId } from "./utils/urls.js";
 import { analyzeProductIdentity } from "./utils/product-name.js";
 import { titleProductEvidence } from "./utils/product-evidence.js";
+import { normalizeObservationFeedback } from "./feedback-count.js";
+import { RunActivityTracker, runtimeSignals } from "./runtime-activity.js";
+import { normalizeProductOverride, resolveProductOverride } from "./utils/product-override.js";
 
 const RUN_SOFT_DEADLINE_MS = 26 * 60 * 1000;
 
@@ -113,7 +117,7 @@ function healthCheckFailure(message: string): AdapterBlockedError | AdapterQuota
     return new AdapterQuotaError(message);
   }
   if (
-    /blocked[_\s-]*free[_\s-]*mode|captcha|капч|\bpow\b|заблокирован|блокирует|access\s*denied|forbidden|HTTP\s+(?:401|403|429|498)\b/i.test(message)
+    /^\s*blocked\s*:|blocked[_\s-]*free[_\s-]*mode|captcha|капч|\bpow\b|заблокирован|блокирует|access\s*denied|forbidden|HTTP\s+(?:401|403|408|425|429|498|499|5\d\d)\b/i.test(message)
   ) {
     return new AdapterBlockedError(message);
   }
@@ -147,23 +151,30 @@ function brandConcurrency(domain: string): number {
   return domain === "wildberries.ru" || domain === "market.yandex.ru" ? 4 : 1;
 }
 
-/**
- * Keep the sheet-facing metric contract independent from marketplace quirks.
- * Some product pages expose a default AggregateRating even when there are no
- * written reviews. The raw value remains available for technical evidence,
- * but a zero-review card must publish an empty rating.
- */
-function normalizeCollectedObservation(observation: Observation): void {
-  if (observation.reviews !== 0) return;
-  observation.rating = null;
-  delete observation.ratingUnavailable;
-  if (observation.status === "ok") observation.status = "no_reviews";
-}
-
 const SUCCESSFUL_PARTITION_STATUSES = new Set(["complete", "no_results"]);
+const GENERIC_AGGREGATE_TITLE_TOKENS = new Set([
+  "отзыв", "отзывы", "рейтинг", "оценка", "оценки", "препарат", "лекарство", "средство", "продукт", "бренд"
+]);
 
 function partitionKey(domain: string, brand: string): string {
   return `${domain}\u0000${brand}`;
+}
+
+function collapsesDistinctProductPages(
+  identity: Observation["productIdentity"],
+  evidence: Observation["productEvidence"],
+  discoveredCount: number,
+  brand: string,
+  product: string
+): boolean {
+  if (discoveredCount <= 1 || !identity || !["family", "line"].includes(identity.granularity)) return false;
+  if (identity.confidence === "exact" || (identity.variantCount ?? 0) > 1) return false;
+  if (evidence?.scope !== "product_family" || (evidence.variants?.length ?? 0) > 0) return false;
+  const brandTokens = new Set(normalizeText(brand).split(" ").filter(Boolean));
+  const specificTokens = normalizeText(product).split(" ").filter((token) =>
+    token && !brandTokens.has(token) && !GENERIC_AGGREGATE_TITLE_TOKENS.has(token)
+  );
+  return specificTokens.length > 0;
 }
 
 export class RatingsService {
@@ -265,6 +276,12 @@ export class RatingsService {
     run.progress.totalPartitions = expectedPartitions.length;
     run.progress.completedPartitions = preservedPartitions.length;
     delete run.progress.current;
+    const activity = new RunActivityTracker(run);
+    activity.instant({
+      stage: "prepare",
+      label: "Подготовка запуска",
+      detail: `${retryTargets.length} разделов в очереди`
+    });
     await this.touch(run);
     const deadline = new AbortController();
     const deadlineTimer = setTimeout(
@@ -279,6 +296,7 @@ export class RatingsService {
         observation
       ]));
       let progressWrites = Promise.resolve();
+      let lastActivityWrite = 0;
       const saveProgress = async () => {
         // Persist observations together with their completed partition. This
         // makes a checkpoint self-contained if the Agent is interrupted before
@@ -289,6 +307,55 @@ export class RatingsService {
         progressWrites = progressWrites.then(() => this.repository.saveRun(snapshot));
         await progressWrites;
       };
+      const saveActivityProgress = async (force = false) => {
+        const now = Date.now();
+        if (!force && now - lastActivityWrite < 750) return;
+        lastActivityWrite = now;
+        await saveProgress();
+      };
+      const createAdapterActivityReporter = (base: { domain: string; brand?: string }) => {
+        const activeOperations = new Map<string, string>();
+        return {
+          report: async (event: AdapterActivityEvent) => {
+            const input = {
+              stage: event.stage,
+              label: event.label,
+              domain: base.domain,
+              brand: base.brand,
+              listingId: event.listingId,
+              channels: event.channels,
+              parsers: event.parsers,
+              detail: event.detail
+            } as const;
+            const existing = activeOperations.get(event.operationId);
+            if (event.status === "active") {
+              if (existing) activity.warn(existing, { detail: "Операция перезапущена" });
+              const id = activity.start(input);
+              activeOperations.set(event.operationId, id);
+              // Persist the first active nested operation immediately. Parallel
+              // product checks then share the same snapshot without flooding
+              // the repository with one write per request.
+              await saveActivityProgress(activeOperations.size === 1);
+              return;
+            }
+            if (existing) {
+              activity.finish(existing, event.status, {
+                channels: event.channels,
+                parsers: event.parsers,
+                detail: event.detail
+              });
+              activeOperations.delete(event.operationId);
+            } else {
+              activity.instant(input, event.status);
+            }
+            await saveActivityProgress();
+          },
+          warnActive: (message: string) => {
+            for (const id of activeOperations.values()) activity.warn(id, { detail: message });
+            activeOperations.clear();
+          }
+        };
+      };
       const retryBrandsByDomain = new Map<string, string[]>();
       for (const { domain, brand } of retryTargets) {
         const brands = retryBrandsByDomain.get(domain) ?? [];
@@ -298,6 +365,13 @@ export class RatingsService {
       await Promise.all(run.request.domains.filter((domain) => retryBrandsByDomain.has(domain)).map(async (domain) => {
         const retryBrands = retryBrandsByDomain.get(domain)!;
         let adapter: SiteAdapter;
+        const healthReporter = createAdapterActivityReporter({ domain });
+        const healthActivity = activity.start({
+          stage: "health_check",
+          label: "Проверка канала сбора",
+          domain
+        });
+        await saveActivityProgress();
         try {
           deadline.signal.throwIfAborted();
           adapter = await this.resolveAdapter(domain, run.request);
@@ -306,7 +380,8 @@ export class RatingsService {
             brands: retryBrands,
             region: run.request.region,
             month: run.request.month,
-            signal: deadline.signal
+            signal: deadline.signal,
+            activity: healthReporter.report
           });
           deadline.signal.throwIfAborted();
           if (!health.ok) {
@@ -325,9 +400,18 @@ export class RatingsService {
             }
             throw failure;
           }
+          activity.complete(healthActivity, {
+            ...runtimeSignals(health.message),
+            detail: health.message ?? "Контрольная проверка пройдена"
+          });
         } catch (error) {
           const kind = errorStatus(error);
           const message = safeErrorMessage(error);
+          healthReporter.warnActive(message);
+          activity.warn(healthActivity, {
+            ...runtimeSignals(message),
+            detail: message
+          });
           for (const brand of retryBrands) {
             this.addPartition(
               run,
@@ -347,6 +431,19 @@ export class RatingsService {
           const previousRecords = products.filter((item) => item.domain === domain && item.brand === brand);
           const previousIds = previousRecords.map((item) => item.listingId);
           const previousRefs = previousRecords.map((item) => ({ listingId: item.listingId, url: item.canonicalUrl }));
+          const discoveryActivity = activity.start({
+            stage: "discovery",
+            label: "Поиск карточек",
+            domain,
+            brand
+          });
+          let activeCollection: string | undefined;
+          let activeNormalization: string | undefined;
+          const adapterReporter = createAdapterActivityReporter({ domain, brand });
+          // Discovery is frequently the longest operation (sitemaps, search
+          // pagination and exact product proof), so always expose its start to
+          // polling clients instead of leaving a stale health-check visible.
+          await saveActivityProgress(true);
           try {
             deadline.signal.throwIfAborted();
             const discovered = validateDiscoveredRefs(await adapter.discover(brand, {
@@ -356,8 +453,14 @@ export class RatingsService {
               month: run.request.month,
               previousIds,
               previousRefs,
-              signal: deadline.signal
+              signal: deadline.signal,
+              activity: adapterReporter.report
             }), domain, brand);
+            const discoverySignals = runtimeSignals(discovered.map((ref) => ref.metadata));
+            activity.complete(discoveryActivity, {
+              ...discoverySignals,
+              detail: discovered.length ? `Найдено карточек: ${discovered.length}` : "Поиск завершён без карточек"
+            });
             if (!discovered.length) {
               this.addPartition(run, domain, brand, "no_results", 0, 0, "Поиск исчерпан, карточек нет");
               await saveProgress();
@@ -368,6 +471,14 @@ export class RatingsService {
             const previousById = new Map(previousRecords.map((item) => [item.listingId, item]));
             for (const ref of discovered) {
               deadline.signal.throwIfAborted();
+              activeCollection = activity.start({
+                stage: "collection",
+                label: "Чтение карточки",
+                domain,
+                brand,
+                listingId: ref.listingId
+              });
+              await saveActivityProgress();
               const observation = validateCollectedObservation(await adapter.collect(ref, {
                 runId: run.id,
                 brands: retryBrands,
@@ -375,9 +486,24 @@ export class RatingsService {
                 month: run.request.month,
                 previousIds,
                 previousRefs,
-                signal: deadline.signal
+                signal: deadline.signal,
+                activity: adapterReporter.report
               }), ref, domain, brand);
-              normalizeCollectedObservation(observation);
+              const observedSignals = runtimeSignals(ref.metadata, observation.source, observation.evidenceRef);
+              activity.complete(activeCollection, {
+                ...observedSignals,
+                detail: "Отзывы и рейтинг извлечены"
+              });
+              activeCollection = undefined;
+              activeNormalization = activity.start({
+                stage: "normalization",
+                label: "Нормализация продукта",
+                domain,
+                brand,
+                listingId: ref.listingId,
+                ...observedSignals
+              });
+              normalizeObservationFeedback(observation);
               if (observation.status === "not_found") {
                 const historical = previousById.get(observation.listingId);
                 if (historical && observation.reviews === null && observation.rating === null) {
@@ -386,11 +512,17 @@ export class RatingsService {
                   observation.product = historical.product;
                   observation.productIdentity = historical.productIdentity;
                   observation.brand = historical.brand;
-                } else if (observation.source === "yandex_reviews_missing_candidate") {
-                  // The search actor can occasionally return a stale modelId.
-                  // An explicit Yandex missing-page screen proves that this is
-                  // not a current product card and it must not enter the sheet.
+                } else if ([
+                  "yandex_reviews_missing_candidate",
+                  "otzovik_missing_candidate",
+                  "review_site_non_product_candidate"
+                ].includes(observation.source ?? "")) {
+                  // A first-party search may retain an explicitly removed
+                  // candidate. Its exact missing-page proof means it is not a
+                  // current card and must not enter the sheet or review queue.
                   viableDiscovered -= 1;
+                  activity.complete(activeNormalization, { detail: "Удалённая карточка исключена" });
+                  activeNormalization = undefined;
                   continue;
                 } else {
                   // A 404/410 is only a valid empty monthly value for a card
@@ -414,7 +546,19 @@ export class RatingsService {
                   url: observation.canonicalUrl,
                   evidence: observation.productEvidence
                 });
-                if (["ok", "no_reviews"].includes(observation.status) && observation.productIdentity.granularity !== "variant") {
+                const collapsedDistinctProducts = collapsesDistinctProductPages(
+                  observation.productIdentity,
+                  observation.productEvidence,
+                  discovered.length,
+                  observation.brand,
+                  observation.product
+                );
+                if (
+                  ["ok", "no_reviews"].includes(observation.status) &&
+                  (collapsedDistinctProducts ||
+                    observation.productIdentity.granularity !== "variant" &&
+                    !hasDeterministicAggregateProof(observation))
+                ) {
                   observation.status = "needs_review";
                 }
               }
@@ -428,6 +572,10 @@ export class RatingsService {
                 seen.set(key, observation);
                 collected += 1;
               }
+              activity.complete(activeNormalization, {
+                detail: observation.productIdentity?.label ?? observation.product
+              });
+              activeNormalization = undefined;
             }
             this.addPartition(
               run,
@@ -441,6 +589,10 @@ export class RatingsService {
           } catch (error) {
             const kind = errorStatus(error);
             const message = safeErrorMessage(error);
+            adapterReporter.warnActive(message);
+            activity.warn(discoveryActivity, { ...runtimeSignals(message), detail: message });
+            if (activeCollection) activity.warn(activeCollection, { ...runtimeSignals(message), detail: message });
+            if (activeNormalization) activity.warn(activeNormalization, { detail: message });
             run.errors.push({ partition: `${domain}/${brand}`, message: `${kind}: ${message}` });
             this.addPartition(run, domain, brand, kind === "error" ? "error" : "blocked", 0, 0, `${kind}: ${message}`);
           }
@@ -457,10 +609,20 @@ export class RatingsService {
         run.request.brands.indexOf(a.brand) - run.request.brands.indexOf(b.brand) ||
         a.product.localeCompare(b.product, "ru") || a.listingId.localeCompare(b.listingId)
       );
+      delete run.progress.current;
       await this.refreshDraftProfileExamples(run);
       run.payloadHash = stableHash({ request: run.request, observations: run.observations });
       run.status = "review";
+      const qaActivity = activity.start({
+        stage: "qa",
+        label: "Проверка целостности"
+      });
       run.qa = validateRun(run);
+      if (run.qa.ok) {
+        activity.complete(qaActivity, { detail: "Снимок готов к публикации" });
+      } else {
+        activity.warn(qaActivity, { detail: `Требует внимания: ${run.qa.blockers.length}` });
+      }
       await this.touch(run);
       return run;
     } finally {
@@ -468,29 +630,55 @@ export class RatingsService {
     }
   }
 
-  async approveObservations(id: string, keys: string[]): Promise<RunState> {
+  async approveObservations(id: string, keys: string[], productLabels: Record<string, string> = {}): Promise<RunState> {
     const run = await this.requireRun(id);
     if (run.status !== "review") {
       throw new Error(`Нельзя подтверждать карточки из статуса ${run.status}`);
     }
     const accepted = new Set(keys);
+    const reviewKeys = new Set(run.observations
+      .filter((item) => item.status === "needs_review")
+      .map((item) => productKey(item.domain, item.listingId)));
+    for (const [key, value] of Object.entries(productLabels)) {
+      if (!accepted.has(key)) throw new Error(`Уточнение продукта передано для невыбранной карточки ${key}`);
+      if (!reviewKeys.has(key)) throw new Error(`Карточка для уточнения не найдена: ${key}`);
+      if (typeof value !== "string" || !normalizeProductOverride(value) || normalizeProductOverride(value).length > 240) {
+        throw new Error(`Некорректное уточнение продукта для карточки ${key}`);
+      }
+    }
     const profiles = new Map<string, SiteProfile | undefined>();
     for (const item of run.observations) {
       if (item.status !== "needs_review" || !accepted.has(productKey(item.domain, item.listingId))) continue;
-      if (!profiles.has(item.domain)) profiles.set(item.domain, await this.repository.getProfile(item.domain));
-      const profile = profiles.get(item.domain);
-      if (profile && profile.status !== "approved") {
-        throw new Error(`Сначала подтвердите профиль площадки ${item.domain} по трём контрольным карточкам`);
+      // Dedicated adapters do not carry a generated profile version. A stale
+      // generic profile left in the repository must not gate their evidence.
+      if (item.profileVersion !== undefined) {
+        if (!profiles.has(item.domain)) profiles.set(item.domain, await this.repository.getProfile(item.domain));
+        const profile = profiles.get(item.domain);
+        if (!profile || profile.status !== "approved") {
+          throw new Error(`Сначала подтвердите профиль площадки ${item.domain} по трём контрольным карточкам`);
+        }
+        if (item.profileVersion !== profile.version) {
+          throw new Error(`Карточка ${item.domain}:${item.listingId} собрана профилем другой версии; повторите запуск`);
+        }
       }
-      if (profile && item.profileVersion !== profile.version) {
-        throw new Error(`Карточка ${item.domain}:${item.listingId} собрана профилем другой версии; повторите запуск`);
+      const key = productKey(item.domain, item.listingId);
+      const productLabel = productLabels[key];
+      if (productLabel !== undefined) {
+        const manualIdentity = resolveProductOverride(item, productLabel);
+        if (!manualIdentity) {
+          throw new Error(`Уточните форму, дозировку или упаковку товара для карточки ${key}`);
+        }
+        item.productOverride = manualIdentity.label;
+        item.productIdentity = manualIdentity;
       }
       const identity = item.productIdentity;
       const exactVariant = identity?.granularity === "variant" && identity.confidence === "exact";
+      const knownReviewAggregate = Boolean(identity && isKnownReviewAggregateDomain(item.domain) &&
+        identity.granularity !== "not_product" && identity.confidence !== "ambiguous");
       const provenAggregate = Boolean(identity && ["family", "line"].includes(identity.granularity) &&
         identity.confidence !== "ambiguous" &&
         (identity.confidence === "exact" || item.productEvidence?.scope === "product_family" || isKnownReviewAggregateDomain(item.domain)));
-      if (!exactVariant && !provenAggregate) {
+      if (!exactVariant && !provenAggregate && !knownReviewAggregate) {
         throw new Error(`Карточка ${item.domain}:${item.listingId} не содержит доказанного товарного варианта`);
       }
       item.status = item.reviews === 0 ? "no_reviews" : "ok";
@@ -546,6 +734,7 @@ export class RatingsService {
       key: productKey(item.domain, item.listingId), domain: item.domain, listingId: item.listingId,
       brand: item.brand, canonicalUrl: item.canonicalUrl, product: item.product, platform: item.platform,
       groupId: item.groupId,
+      aggregateGroupId: item.aggregateGroupId,
       productIdentity: item.productIdentity,
       firstSeenMonth: earlierMonth(
         existing.get(productKey(item.domain, item.listingId))?.firstSeenMonth,

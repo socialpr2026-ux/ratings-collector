@@ -7,6 +7,7 @@ import {
   friendlyIssueText,
   observationIssueText,
   observationMatchesQuery,
+  productProofLines,
   reviewIntroText,
   setupReadinessText,
   summarizeIssues
@@ -21,7 +22,7 @@ describe("review summary copy", () => {
 
   it("keeps the normal clean-run message when every partition completed", () => {
     expect(reviewIntroText(0, 0)).toBe(
-      "Проверять ничего не нужно — спорных карточек нет. При желании можно открыть весь список."
+      "Все карточки определены. Результат готов к записи в таблицу."
     );
   });
 
@@ -67,6 +68,21 @@ describe("plain-language feedback", () => {
     expect(friendlyErrorMessage("permission denied", "publish")).toContain("доступ «Редактор»");
   });
 
+  it("does not misreport a Sheets layout failure as missing edit access", () => {
+    const message = friendlyErrorMessage(
+      "Sorry, you can't freeze columns which contain only part of a merged cell.",
+      "publish"
+    );
+    expect(message).toBe("Не удалось применить оформление таблицы. Результат сбора сохранён — повторите запись.");
+    expect(message).not.toContain("Редактор");
+  });
+
+  it("keeps unknown publication failures retryable without blaming permissions", () => {
+    const message = friendlyErrorMessage("Неожиданная ошибка оформления", "publish");
+    expect(message).toBe("Не удалось записать данные в Google Таблицу. Результат сбора сохранён — повторите запись.");
+    expect(message).not.toContain("Редактор");
+  });
+
   it("keeps the affected site while simplifying QA blockers", () => {
     expect(friendlyIssueText("ozon.ru / Анвифен: quota_exceeded: квота исчерпана")).toBe("ozon.ru / Анвифен: исчерпан доступный лимит сбора.");
     expect(friendlyIssueText("wildberries.ru: HTTP 429 blocked")).toBe("wildberries.ru: площадка временно ограничила сбор. Повторите позже.");
@@ -86,6 +102,8 @@ describe("plain-language feedback", () => {
 
   it("explains why a card cannot be confirmed", () => {
     const exact = { label: "таблетки №20", granularity: "variant" as const, confidence: "exact" as const, missing: [], reasons: [] };
+    expect(observationIssueText({ reviews: null, rating: null, productIdentity: exact })).toBe("Отзывы / оценки не получены");
+    expect(observationIssueText({ reviews: 0, rating: 4.8, productIdentity: exact })).toBe("Проверьте число отзывов / оценок");
     expect(observationIssueText({ reviews: 12, rating: null, productIdentity: exact })).toBe("Рейтинг не получен");
     expect(observationIssueText({ reviews: 12, rating: 4.8, productIdentity: { ...exact, granularity: "unresolved", confidence: "partial" } })).toBe("Не хватает данных о варианте");
   });
@@ -121,6 +139,13 @@ describe("review confirmation eligibility", () => {
       productIdentity: { ...exact, label: "Общая карточка бренда", granularity: "family", confidence: "partial" },
       productEvidence: { scope: "listing", signals: [], variants: [], identifiers: [], imageUrls: [], instructionUrls: [] }
     })).toBe(true);
+    expect(canConfirmObservation({
+      domain: "market.yandex.ru",
+      reviews: 3,
+      rating: 4.9,
+      productIdentity: { ...exact, label: "Общая карточка бренда", granularity: "unresolved", confidence: "partial" },
+      productEvidence: { scope: "listing", signals: [], variants: [], identifiers: [], imageUrls: [], instructionUrls: [] }
+    })).toBe(true);
     expect(canConfirmObservation({ reviews: 12, rating: 4.8, productIdentity: { ...exact, label: "Не товарная карточка", granularity: "not_product", confidence: "ambiguous" } })).toBe(false);
   });
 });
@@ -133,6 +158,21 @@ describe("final product labels", () => {
 
   it("keeps already final product labels unchanged", () => {
     expect(finalProductLabel("таблетки №20", "Кагоцел таблетки №20")).toBe("таблетки №20");
+  });
+
+  it("shows semantic product proof without leaking raw review-page fragments", () => {
+    const productIdentity = {
+      label: "гранулы №30",
+      granularity: "variant" as const,
+      confidence: "exact" as const,
+      missing: [],
+      reasons: ["Единственный товарный вариант подтверждён названием карточки"]
+    };
+    expect(productProofLines({ productIdentity })).toEqual([
+      "Определён товарный вариант: гранулы №30",
+      "Единственный товарный вариант подтверждён названием карточки"
+    ]);
+    expect(productProofLines({ productIdentity }).join(" ")).not.toContain("Гранулы или плацебо?");
   });
 });
 

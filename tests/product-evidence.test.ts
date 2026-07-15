@@ -103,6 +103,27 @@ describe("product page evidence", () => {
     expect(evidence.variants).toEqual(["таблетки для рассасывания №20", "таблетки для рассасывания №40"]);
   });
 
+  it("reads child options only from product-local variant controls", () => {
+    const evidence = extractPageProductEvidence(`
+      <html><body>
+        <h1>Оциллококцинум отзывы</h1>
+        <select data-testid="review-variant">
+          <option>Гранулы или плацебо?</option>
+          <option>6 грамм сахара за 400 рублей</option>
+        </select>
+        <div data-testid="product-variant-picker" role="listbox">
+          <div role="option">гранулы №6</div>
+          <div role="option">гранулы №12</div>
+          <div role="option">гранулы №30</div>
+        </div>
+      </body></html>
+    `, "https://example.ru/oscillococcinum/reviews", "Оциллококцинум", { forceFamily: true });
+
+    expect(evidence.variants).toEqual(["гранулы №6", "гранулы №12", "гранулы №30"]);
+    expect(evidence.variants).not.toContain("гранулы №6 гранулы №12 гранулы №30");
+    expect(JSON.stringify(evidence)).not.toMatch(/Гранулы или плацебо|6 грамм сахара/iu);
+  });
+
   it("extracts only actual hasVariant products from nested JSON-LD", () => {
     const evidence = extractPageProductEvidence(`
       <script type="application/ld+json">{
@@ -164,6 +185,36 @@ describe("product page evidence", () => {
     });
     expect(analyzeProductIdentity({ brand: "Циклоферон", product: "Циклоферон", evidence })).toMatchObject({
       granularity: "variant", confidence: "exact", label: "таблетки 150 мг №20"
+    });
+  });
+
+  it("keeps review titles and bodies out of product proof and recognizes a concrete review-page variant", () => {
+    const product = "Оциллококцинум 30 доз гран.гомеопатические - отзыв";
+    const evidence = extractPageProductEvidence(`
+      <html><head>
+        <meta name="description" content="Отзывы об Оциллококцинуме 30 доз">
+      </head><body>
+        <main itemscope itemtype="https://schema.org/Product">
+          <h1 itemprop="name">${product}</h1>
+          <article itemprop="review" itemscope itemtype="https://schema.org/Review">
+            <h2 itemprop="name">Гранулы или плацебо?</h2>
+            <span itemprop="description">6 грамм сахара за 400 рублей. Купила упаковку 30 доз.</span>
+          </article>
+          <article class="review-item">
+            <h2 itemprop="name">Супер препарат, мне и ребёнку помогает 100%!</h2>
+            <select><option>30 таблеток из соседней рекомендации</option></select>
+          </article>
+        </main>
+      </body></html>
+    `, "https://otzyv.pro/category/badyi/62074-ocillokokcinum-30-doz-grangomeopaticheskie.html", "Оциллококцинум", { forceFamily: true });
+
+    expect(evidence.scope).toBe("listing");
+    expect(evidence.variants).toEqual([]);
+    expect(JSON.stringify(evidence)).not.toMatch(/Гранулы или плацебо|6 грамм сахара|Супер препарат|соседней рекомендации/iu);
+    expect(analyzeProductIdentity({ brand: "Оциллококцинум", product, evidence })).toMatchObject({
+      granularity: "variant",
+      confidence: "exact",
+      label: "гранулы №30"
     });
   });
 });

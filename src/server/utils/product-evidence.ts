@@ -2,13 +2,28 @@ import { load } from "cheerio";
 import type { ProductEvidence } from "../../shared/types.js";
 import { matchesBrand, normalizeText } from "./normalize.js";
 
-const PRODUCT_FORM = /(?:табл(?:ет(?:ка|ки|ок)?)?\.?|капс(?:ул(?:а|ы|ок)?)?\.?|саше|пакетик|стик|порош|гранул|сироп|суспенз|раствор|спрей|капли|суппозитор|свеч|ампул|флакон|лиоф|гель|крем|мазь)/iu;
-const PRODUCT_DETAIL = /(?:\d+(?:[.,]\d+)?\s*(?:мкг|мг|гр?\.?|мл|ме|%)|(?:№|#|\bN(?:o)?\.?)\s*\d+|\d+\s*(?:шт|таблет|капсул|саше|пакет|стик|ампул|флакон|доз)|(?:количеств|фасовк|в\s+упаковк)[^\d]{0,24}\d+|таблет|капсул|саше|порош|гранул|сироп|суспенз|раствор|спрей|капли|лиоф)/iu;
+const PRODUCT_FORM = /(?:табл(?:ет(?:ка|ки|ок)?)?\.?|капс(?:ул(?:а|ы|ок)?)?\.?|саше|пакетик|стик|порош|гран(?:\.|ул)|сироп|суспенз|раствор|спрей|капли|суппозитор|свеч|ампул|флакон|лиоф|гель|крем|мазь)/iu;
+const PRODUCT_DETAIL = /(?:\d+(?:[.,]\d+)?\s*(?:мкг|мг|гр?\.?|мл|ме|%)|(?:№|#|\bN(?:o)?\.?)\s*\d+|\d+\s*(?:шт|таблет|капсул|саше|пакет|стик|ампул|флакон|доз)|(?:количеств|фасовк|в\s+упаковк)[^\d]{0,24}\d+|таблет|капсул|саше|порош|гран(?:\.|ул)|сироп|суспенз|раствор|спрей|капли|лиоф)/iu;
 const VARIANT_DETAIL = /(?:\d+(?:[.,]\d+)?\s*(?:мкг|мг|гр?\.?|мл|ме|%)|(?:№|#|\bN(?:o)?\.?)\s*\d+|\d+\s*(?:шт|таблет|капсул|саше|пакет|стик|ампул|флакон|доз)|(?:количеств|фасовк|в\s+упаковк)[^\d]{0,24}\d+)/iu;
 const ATTRIBUTE_LABEL = /(?:лекарственн(?:ая|ой)\s+форм|форм[аы]\s+выпуск|дозиров|концентрац|фасовк|кол(?:ичество|-?во)(?:\s+в\s+упаковке)?|упаковк|об[ъь]ем|масса|вес|размер|комплектац|вкус|содержание|strength|dosage|dose|form|quantity|pack(?:age)?|size|volume|weight)/iu;
 const ATTRIBUTE_EXCLUDE = /(?:способ\s+применения|режим\s+дозирования|суточн(?:ая|ой)\s+доз|курс\s+лечения|условия\s+хранения)/iu;
 const INSTRUCTION_LINK = /(?:инструк|состав|форм[аы][-_\s]+выпуск|instruction|composition|dosage-form)/iu;
 const PRODUCT_JSON_FIELDS = ["name", "model", "dosageForm", "strength", "packageSize", "size", "weight"] as const;
+const REVIEW_CONTENT_SELECTOR = [
+  "[itemprop='review']",
+  "[itemprop='reviewBody']",
+  "[itemtype*='schema.org/Review']",
+  "[itemtype*='/Review']",
+  "[data-review-id]",
+  "[data-reviewid]",
+  "article[class*='review']",
+  "li[class*='review']",
+  "[class*='review-item']",
+  "[class*='review_item']",
+  "[class*='review-card']",
+  "[class*='comment-item']",
+  "[class*='comment_item']"
+].join(",");
 
 type JsonObject = Record<string, unknown>;
 type JsonLdEvidence = {
@@ -150,10 +165,8 @@ function extractJsonLdEvidence($: ReturnType<typeof load>, pageUrl: string, bran
       const pairs = jsonPropertyPairs(object);
       const composed = clean(pairs.join("; "), 1200);
       const name = stringValue(object.name);
-      const description = stringValue(object.description);
       if (composed) result.signals.push(composed);
       if (name && !composed) result.signals.push(name);
-      if (description && (PRODUCT_FORM.test(description) || VARIANT_DETAIL.test(description))) result.signals.push(description);
       if (variantContext && (name || composed)) result.variants.push(composed ?? name!);
       for (const identifier of identifierKeys) {
         const id = stringValue(object[identifier.key]);
@@ -185,21 +198,8 @@ function extractJsonLdEvidence($: ReturnType<typeof load>, pageUrl: string, bran
   };
 }
 
-function embeddedProductVariants($: ReturnType<typeof load>, brand: string): string[] {
-  const result: string[] = [];
-  const normalizedBrand = normalizeText(brand);
-  const scripts = $("script:not([src]):not([type='application/ld+json'])").map((_index, node) => $(node).text().slice(0, 2_000_000)).get().join("\n");
-  for (const match of scripts.matchAll(/"((?:\\.|[^"\\]){3,1000})"/g)) {
-    let decoded: string;
-    try { decoded = JSON.parse(`"${match[1]}"`) as string; }
-    catch { continue; }
-    const text = clean(decoded, 700);
-    if (!text || text.includes("<") || /^https?:/iu.test(text)) continue;
-    if (!normalizeText(text).includes(normalizedBrand) || !VARIANT_DETAIL.test(text) || !PRODUCT_FORM.test(text)) continue;
-    result.push(text);
-    if (result.length >= 60) break;
-  }
-  return unique(result, 30, 1000);
+function isReviewContent($: ReturnType<typeof load>, node: Parameters<ReturnType<typeof load>>[0]): boolean {
+  return $(node).is(REVIEW_CONTENT_SELECTOR) || $(node).closest(REVIEW_CONTENT_SELECTOR).length > 0;
 }
 
 function relevantPair(label: string | undefined, value: string | undefined): string | undefined {
@@ -213,6 +213,7 @@ function relevantPair(label: string | undefined, value: string | undefined): str
 function structuredAttributeSignals($: ReturnType<typeof load>): string[] {
   const blocks: string[] = [];
   $("table").each((_index, table) => {
+    if (isReviewContent($, table)) return;
     const pairs: string[] = [];
     $(table).find("tr").each((_rowIndex, row) => {
       const cells = $(row).children("th,td");
@@ -224,6 +225,7 @@ function structuredAttributeSignals($: ReturnType<typeof load>): string[] {
     if (block) blocks.push(block);
   });
   $("dl").each((_index, list) => {
+    if (isReviewContent($, list)) return;
     const pairs: string[] = [];
     $(list).children("dt").each((_termIndex, term) => {
       const value = $(term).next("dd").first().text();
@@ -239,14 +241,21 @@ function structuredAttributeSignals($: ReturnType<typeof load>): string[] {
 function visibleVariantTexts($: ReturnType<typeof load>): string[] {
   const selectors = [
     "[data-test='release-form-badge']",
-    "[data-testid*='variant']",
-    "[data-test*='variant']",
-    "[class*='variant'] option",
-    "[class*='variant'] [role='option']",
-    "select option",
-    "[itemtype*='Product'] [itemprop='name']"
+    "[data-testid*='product-variant'][role='option']",
+    "[data-testid*='product-variant'] [role='option']",
+    "[data-test*='product-variant'][role='option']",
+    "[data-test*='product-variant'] [role='option']",
+    "[class*='product-variant'] option",
+    "[class*='product-variant'] [role='option']",
+    "[class*='product__variant'] option",
+    "[class*='product__variant'] [role='option']",
+    "select[aria-label*='вариант' i] option",
+    "select[aria-label*='упаков' i] option",
+    "select[name*='variant' i] option",
+    "select[name*='product' i] option"
   ];
   return unique($(selectors.join(",")).map((_index, node) => {
+    if (isReviewContent($, node)) return undefined;
     const value = $(node).attr("content") ?? $(node).attr("aria-label") ?? $(node).attr("title") ?? $(node).text();
     const text = clean(value, 1000);
     return text && PRODUCT_DETAIL.test(text) ? text : undefined;
@@ -256,12 +265,14 @@ function visibleVariantTexts($: ReturnType<typeof load>): string[] {
 function instructionSectionSignals($: ReturnType<typeof load>): string[] {
   const signals: Array<string | undefined> = [];
   $("h2,h3,h4,summary,[role='tab']").each((_index, heading) => {
+    if (isReviewContent($, heading)) return;
     const label = clean($(heading).text(), 160);
     if (!label || !ATTRIBUTE_LABEL.test(label) || ATTRIBUTE_EXCLUDE.test(label)) return;
     const value = clean($(heading).next().first().text(), 700);
     if (value && (PRODUCT_DETAIL.test(value) || PRODUCT_FORM.test(value))) signals.push(`${label}: ${value}`);
   });
   $("a[href]").each((_index, node) => {
+    if (isReviewContent($, node)) return;
     const href = $(node).attr("href");
     const anchor = clean($(node).text(), 500);
     if (href && anchor && INSTRUCTION_LINK.test(`${href} ${anchor}`) && PRODUCT_DETAIL.test(anchor)) signals.push(anchor);
@@ -276,6 +287,7 @@ function imageTextSignals($: ReturnType<typeof load>, brand: string): string[] {
     if (text && PRODUCT_DETAIL.test(text) && (matchesBrand(text, brand) || PRODUCT_FORM.test(text))) values.push(text);
   });
   $("img[alt], img[title], img[aria-label], figure figcaption").each((_index, node) => {
+    if (isReviewContent($, node)) return;
     const text = clean($(node).attr("alt") ?? $(node).attr("title") ?? $(node).attr("aria-label") ?? $(node).text(), 1000);
     if (!text || !PRODUCT_DETAIL.test(text)) return;
     const semanticProductArea = $(node).closest("[itemtype*='Product'],[data-product-id],[data-testid*='product-card'],[data-test*='product-card'],figure").length > 0;
@@ -287,6 +299,7 @@ function imageTextSignals($: ReturnType<typeof load>, brand: string): string[] {
 function imageUrls($: ReturnType<typeof load>, pageUrl: string, brand: string): string[] {
   const values: Array<string | undefined> = [];
   $("meta[property='og:image'], meta[name='twitter:image'], [itemprop='image'], img").each((_index, node) => {
+    if (isReviewContent($, node)) return;
     const tag = (node as { tagName?: string }).tagName?.toLocaleLowerCase("en-US");
     const isMeta = tag === "meta";
     const isMicrodataImage = $(node).is("[itemprop='image']");
@@ -311,6 +324,7 @@ function visibleDescriptionSignals($: ReturnType<typeof load>, brand: string): s
     "[class*='product__description']"
   ];
   return unique($(selectors.join(",")).map((_index, node) => {
+    if (isReviewContent($, node)) return undefined;
     const text = clean($(node).attr("content") ?? $(node).text(), 1400);
     if (!text || ATTRIBUTE_EXCLUDE.test(text) || !PRODUCT_FORM.test(text)) return undefined;
     return VARIANT_DETAIL.test(text) || matchesBrand(text, brand) ? text : undefined;
@@ -335,6 +349,11 @@ export function titleProductEvidence(
   };
 }
 
+export function titleProvesProductVariant(title: string | undefined, brand: string): boolean {
+  const text = clean(title);
+  return Boolean(text && matchesBrand(text, brand) && PRODUCT_FORM.test(text) && VARIANT_DETAIL.test(text));
+}
+
 export function extractPageProductEvidence(
   html: string,
   pageUrl: string,
@@ -343,26 +362,21 @@ export function extractPageProductEvidence(
 ): ProductEvidence {
   const $ = load(html);
   const title = clean($("h1").first().text()) ?? clean($("meta[property='og:title']").attr("content")) ?? clean($("title").text());
-  const description = clean(
-    $("meta[name='description']").attr("content") ??
-    $("meta[property='og:description']").attr("content") ??
-    $("[itemprop='description']").first().attr("content") ??
-    $("[itemprop='description']").first().text()
+  // On review pages both meta descriptions and Product.description are often
+  // populated from a user's review. They are not product identity evidence.
+  const description = options.forceFamily ? undefined : clean(
+    $("meta[name='description']").attr("content") ?? $("meta[property='og:description']").attr("content")
   );
   const jsonLd = extractJsonLdEvidence($, pageUrl, brand);
-  const embeddedVariants = embeddedProductVariants($, brand);
   const visibleVariants = visibleVariantTexts($);
-  const titleLooksLikeVariant = Boolean(title && PRODUCT_FORM.test(title) && VARIANT_DETAIL.test(title));
-  const pageLooksAggregate = /(?:отзыв|вариант|форм[аы]\s+выпуска|линейк|все\s+формы)/iu.test(`${title ?? ""} ${description ?? ""}`);
-  const usableEmbeddedVariants = titleLooksLikeVariant && !options.forceFamily ? [] : embeddedVariants;
+  const titleLooksLikeVariant = titleProvesProductVariant(title, brand);
   const variants = unique([
     ...(options.extraVariants ?? []),
     ...jsonLd.variants,
-    ...visibleVariants,
-    ...usableEmbeddedVariants
+    ...visibleVariants
   ].filter((value) => PRODUCT_DETAIL.test(value)), 30, 1000);
   const attributes = structuredAttributeSignals($);
-  const visibleDescriptions = visibleDescriptionSignals($, brand);
+  const visibleDescriptions = options.forceFamily ? [] : visibleDescriptionSignals($, brand);
   const imageAlts = imageTextSignals($, brand);
   const pageImageUrls = imageUrls($, pageUrl, brand);
 
@@ -385,11 +399,10 @@ export function extractPageProductEvidence(
   signals.push({ source: "url", text: pageUrl });
 
   return {
-    scope: options.forceFamily
+    scope: options.forceFamily && !titleLooksLikeVariant
       || jsonLd.variants.length > 1
       || visibleVariants.length > 1
       || (options.extraVariants?.length ?? 0) > 1
-      || (pageLooksAggregate && usableEmbeddedVariants.length > 1)
       ? "product_family"
       : "listing",
     signals: signals.slice(0, 40),

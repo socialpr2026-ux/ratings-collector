@@ -1,14 +1,20 @@
-import { OzonAdapter } from "./adapters/ozon.js";
+import type { SiteAdapter } from "../shared/types.js";
 import { OzonBrowserAdapter } from "./adapters/ozon-browser.js";
 import { ResilientOzonAdapter } from "./adapters/ozon-resilient.js";
 import { WildberriesAdapter } from "./adapters/wildberries.js";
 import { YandexAdapter } from "./adapters/yandex.js";
-import { WildberriesApifyAdapter, isWildberriesApifyRef } from "./adapters/wildberries-apify.js";
-import { YandexApifyAdapter, isYandexApifyRef } from "./adapters/yandex-apify.js";
+import type { OzonAdapter } from "./adapters/ozon.js";
+import type { WildberriesApifyAdapter } from "./adapters/wildberries-apify.js";
+import type { YandexApifyAdapter } from "./adapters/yandex-apify.js";
 import { BudgetedAdapter, createSerialExecutor, type AsyncExclusive } from "./adapters/budgeted.js";
 import { ResilientAdapter } from "./adapters/resilient.js";
 import { createReviewSiteAdapters } from "./adapters/review-sites.js";
 import { EaptekaAdapter } from "./adapters/eapteka.js";
+import { AsnaAdapter, PolzaAdapter } from "./adapters/pharmacy-recovery.js";
+import { createPharmacyAdapters } from "./adapters/pharmacies.js";
+import { createAdditionalPharmacyAdapters } from "./adapters/additional-pharmacies.js";
+import { MedOtzyvAdapter } from "./adapters/med-otzyv.js";
+import { MegamarketAdapter } from "./adapters/megamarket.js";
 import { FileEvidenceStore, type EvidenceStore } from "./evidence.js";
 import { createAdapterResolver, RatingsService } from "./orchestrator.js";
 import { FileRepository, type Repository } from "./repository.js";
@@ -23,6 +29,10 @@ export function apifyMonthlyBudget(value: string | undefined): number {
     throw new Error("APIFY_MONTHLY_BUDGET_USD должен быть числом больше 0 и не выше 4.50");
   }
   return parsed;
+}
+
+export function apifyFallbackEnabled(value: string | undefined): boolean {
+  return value === "true";
 }
 
 async function apifyMonthlyUsageUsd(token: string | undefined, fetchImpl: typeof fetch): Promise<number> {
@@ -58,73 +68,109 @@ export async function createCollectorRuntime(options: {
   const repository = options.repository ?? await FileRepository.open();
   const evidence = options.evidence ?? new FileEvidenceStore();
   const fetchImpl = options.fetch ?? fetch;
-  const monthlyLimit = apifyMonthlyBudget(env.APIFY_MONTHLY_BUDGET_USD);
-  // Every paid Actor request is capped to the exact amount reserved below.
-  // Keeping these values coupled prevents a platform-specific environment
-  // override from making a call more expensive than the shared budget gate
-  // accounted for.
-  const reservePerDiscovery = Math.min(0.25, monthlyLimit);
-  // One run-wide batch covers all requested brands. At the current Actor's
-  // $0.50/1,000-result price, $0.75 safely covers up to 80 cards per brand for
-  // the full primary 17-brand set while the shared monthly gate remains hard.
-  const ozonReservePerDiscovery = Math.min(0.75, monthlyLimit);
-  const externalUsageUsd = () => apifyMonthlyUsageUsd(env.APIFY_TOKEN, fetchImpl);
-  const usageMonth = new Date().toISOString().slice(0, 7);
-  const reserveCapacityUsd = async (amount: number) => {
-    // v2 starts from the authoritative live account usage and intentionally
-    // drops conservative reservations left by completed/failed v1 Actor calls.
-    const usageKey = `apify:v2:${usageMonth}`;
-    const recordedFloor = await repository.reserveUsage(usageKey, 0, monthlyLimit);
-    const actual = await externalUsageUsd();
-    if (!Number.isFinite(actual) || actual < 0) {
-      throw new Error("Apify returned an invalid current-usage value");
-    }
-    // Bring the persistent floor up to live account usage, then reserve the
-    // maximum charge of the next Actor call. If the live endpoint is delayed,
-    // the already-reserved floor still prevents a later call overspending.
-    const increment = Math.max(0, actual - recordedFloor) + amount;
-    await repository.reserveUsage(usageKey, increment, monthlyLimit);
-  };
-  const apifyExclusive = options.apifyExclusive ?? createSerialExecutor();
-  const cappedFallback = (
-    adapter: OzonAdapter | WildberriesApifyAdapter | YandexApifyAdapter,
-    reserveUsd = reservePerDiscovery
-  ) =>
-    new BudgetedAdapter(adapter, {
+  const freeOzon = new OzonBrowserAdapter({ fetch: options.fetch });
+  const freeWildberries = new WildberriesAdapter({ fetch: options.fetch });
+  const freeYandex = new YandexAdapter({ fetch: options.reviewsFetch ?? options.fetch });
+  let ozon: SiteAdapter = freeOzon;
+  let wildberries: SiteAdapter = freeWildberries;
+  let yandex: SiteAdapter = freeYandex;
+
+  // Paid marketplace routing is deliberately absent from a normal runtime.
+  // Dynamic imports also avoid constructing the legacy module-level paid
+  // adapter singletons unless an operator explicitly opts in.
+  if (apifyFallbackEnabled(env.APIFY_FALLBACK_ENABLED)) {
+    const [ozonModule, wildberriesModule, yandexModule] = await Promise.all([
+      import("./adapters/ozon.js"),
+      import("./adapters/wildberries-apify.js"),
+      import("./adapters/yandex-apify.js")
+    ]);
+    const monthlyLimit = apifyMonthlyBudget(env.APIFY_MONTHLY_BUDGET_USD);
+    // Every paid Actor request is capped to the exact amount reserved below.
+    const reservePerDiscovery = Math.min(0.25, monthlyLimit);
+    const ozonReservePerDiscovery = Math.min(0.25, monthlyLimit);
+    const externalUsageUsd = () => apifyMonthlyUsageUsd(env.APIFY_TOKEN, fetchImpl);
+    const usageMonth = new Date().toISOString().slice(0, 7);
+    const reserveCapacityUsd = async (amount: number) => {
+      const actual = await externalUsageUsd();
+      if (!Number.isFinite(actual) || actual < 0) {
+        throw new Error("Apify returned an invalid current-usage value");
+      }
+      const windowMs = 30 * 60 * 1000;
+      const bucket = Math.floor(Date.now() / windowMs);
+      // v4 ignores settled legacy holds while still overlapping two short
+      // buckets to protect against delayed live-usage reporting.
+      const currentKey = `apify:v4:${usageMonth}:${bucket}`;
+      const previousKey = `apify:v4:${usageMonth}:${bucket - 1}`;
+      const [currentReserved, previousReserved] = await Promise.all([
+        repository.reserveUsage(currentKey, 0, monthlyLimit),
+        repository.reserveUsage(previousKey, 0, monthlyLimit)
+      ]);
+      const available = monthlyLimit - actual;
+      const pending = currentReserved + previousReserved + amount;
+      if (available <= 0 || pending > available + Number.EPSILON) {
+        throw new Error(`Квота ${monthlyLimit.toFixed(2)} исчерпана: использовано ${actual.toFixed(2)}, временно зарезервировано ${(currentReserved + previousReserved).toFixed(2)}`);
+      }
+      await repository.reserveUsage(currentKey, amount, available - previousReserved);
+      const emptyActorFloorUsd = Math.min(amount, 0.01);
+      let released = false;
+      return {
+        release: async () => {
+          if (released) return;
+          released = true;
+          const releasable = amount - emptyActorFloorUsd;
+          if (releasable > 0) await repository.releaseUsage(currentKey, releasable);
+        }
+      };
+    };
+    const apifyExclusive = options.apifyExclusive ?? createSerialExecutor();
+    const cappedFallback = (
+      adapter: OzonAdapter | WildberriesApifyAdapter | YandexApifyAdapter,
+      reserveUsd = reservePerDiscovery
+    ) => new BudgetedAdapter(adapter, {
       reservePerDiscovery: reserveUsd,
       monthlyLimit,
       reserveCapacityUsd,
       runExclusive: apifyExclusive
     });
-  const apifyOzon = cappedFallback(new OzonAdapter({
-    fetch: options.fetch,
-    token: env.APIFY_TOKEN,
-    maxTotalChargeUsd: ozonReservePerDiscovery
-  }), ozonReservePerDiscovery);
-  const ozon = new ResilientOzonAdapter(
-    new OzonBrowserAdapter({ fetch: options.fetch }),
-    apifyOzon
-  );
-  const wildberries = new ResilientAdapter(
-    new WildberriesAdapter({ fetch: options.fetch }),
-    cappedFallback(new WildberriesApifyAdapter({
+    const apifyOzon = cappedFallback(new ozonModule.OzonAdapter({
       fetch: options.fetch,
       token: env.APIFY_TOKEN,
-      maxTotalChargeUsd: reservePerDiscovery
-    })),
-    { isFallbackRef: isWildberriesApifyRef }
-  );
-  const yandex = new ResilientAdapter(
-    new YandexAdapter({ fetch: options.fetch }),
-    cappedFallback(new YandexApifyAdapter({
-      fetch: options.fetch,
-      reviewsFetch: options.reviewsFetch,
-      token: env.APIFY_TOKEN,
-      maxTotalChargeUsd: reservePerDiscovery
-    })),
-    { isFallbackRef: isYandexApifyRef }
-  );
-  const known = [ozon, wildberries, yandex, new EaptekaAdapter(evidence, options.fetch), ...createReviewSiteAdapters(evidence, options.fetch)];
+      maxTotalChargeUsd: ozonReservePerDiscovery
+    }), ozonReservePerDiscovery);
+    ozon = new ResilientOzonAdapter(freeOzon, apifyOzon);
+    wildberries = new ResilientAdapter(
+      freeWildberries,
+      cappedFallback(new wildberriesModule.WildberriesApifyAdapter({
+        fetch: options.fetch,
+        token: env.APIFY_TOKEN,
+        maxTotalChargeUsd: reservePerDiscovery
+      })),
+      { isFallbackRef: wildberriesModule.isWildberriesApifyRef, stickyPrimaryFailure: false }
+    );
+    yandex = new ResilientAdapter(
+      freeYandex,
+      cappedFallback(new yandexModule.YandexApifyAdapter({
+        fetch: options.fetch,
+        reviewsFetch: options.reviewsFetch,
+        token: env.APIFY_TOKEN,
+        maxTotalChargeUsd: reservePerDiscovery
+      })),
+      { isFallbackRef: yandexModule.isYandexApifyRef, stickyPrimaryFailure: false }
+    );
+  }
+  const known = [
+    ozon,
+    wildberries,
+    yandex,
+    new MegamarketAdapter(evidence, options.fetch),
+    new MedOtzyvAdapter(evidence, options.fetch),
+    new EaptekaAdapter(evidence, options.fetch),
+    new PolzaAdapter(evidence, options.fetch),
+    new AsnaAdapter(evidence, options.fetch),
+    ...createPharmacyAdapters(evidence, options.fetch),
+    ...createAdditionalPharmacyAdapters(evidence, options.fetch),
+    ...createReviewSiteAdapters(evidence, options.fetch)
+  ];
   const service = new RatingsService(repository, createAdapterResolver(known, repository, evidence, options.fetch));
   return { repository, service };
 }

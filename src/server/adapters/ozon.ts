@@ -26,6 +26,7 @@ const DEFAULT_TIMEOUT_SECONDS = 300;
 const MAX_ACTOR_RESULTS = 10_000;
 const ABSOLUTE_MAX_TOTAL_CHARGE_USD = 4.5;
 const MAX_SYNC_TIMEOUT_SECONDS = 300;
+const ACTOR_RESULT_COST_USD = 0.5 / 1_000;
 
 // The tiles-only mode already exposes SKU, title, rating and reviewCount and is
 // materially faster/cheaper than opening every product page.
@@ -51,6 +52,7 @@ type DiscoveryBatch = Map<string, ProductRef[]>;
 type DiscoveryCacheEntry = {
   brandKeys: Set<string>;
   promise: Promise<DiscoveryBatch>;
+  exhaustivelyEmpty?: boolean;
 };
 
 export type OzonAdapterOptions = {
@@ -398,6 +400,7 @@ export class OzonAdapter implements SiteAdapter {
   private readonly fetchImpl?: typeof globalThis.fetch;
   private readonly now: () => Date;
   private readonly discoveryCache = new Map<string, DiscoveryCacheEntry>();
+  private readonly emptyActorBatches = new WeakSet<DiscoveryBatch>();
 
   constructor(options: OzonAdapterOptions = {}) {
     this.token = options.token?.trim() || envValue("APIFY_TOKEN");
@@ -484,6 +487,11 @@ export class OzonAdapter implements SiteAdapter {
     return this.discoveryCache.get(cacheKey)?.brandKeys.has(brandKey(brand)) === true;
   }
 
+  isDiscoveryBatchExhaustivelyEmpty(_brand: string, context: AdapterContext): boolean {
+    const cacheKey = context.runId?.trim();
+    return !!cacheKey && this.discoveryCache.get(cacheKey)?.exhaustivelyEmpty === true;
+  }
+
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const requestedBrand = normalizedBrand(brand);
     if (!requestedBrand) throw new TypeError("brand must not be empty");
@@ -495,11 +503,16 @@ export class OzonAdapter implements SiteAdapter {
       return (await existing.promise).get(requestedKey) ?? [];
     }
 
-    const promise = this.discoverBatch(brands, context);
+    const rawPromise = this.discoverBatch(brands, context);
     const entry: DiscoveryCacheEntry = {
       brandKeys: new Set(brands.map(brandKey)),
-      promise
+      promise: rawPromise
     };
+    const promise = rawPromise.then((batch) => {
+      entry.exhaustivelyEmpty = this.emptyActorBatches.has(batch);
+      return batch;
+    });
+    entry.promise = promise;
     if (cacheKey) {
       this.discoveryCache.set(cacheKey, entry);
       // Agent runtimes may be reused. Keep only a small run-local cache instead
@@ -524,7 +537,8 @@ export class OzonAdapter implements SiteAdapter {
   }
 
   private async discoverBatch(brands: string[], context: AdapterContext): Promise<DiscoveryBatch> {
-    const batchResultLimit = Math.min(MAX_ACTOR_RESULTS, this.maxResults * brands.length);
+    const paidResultLimit = Math.max(1, Math.floor(this.maxTotalChargeUsd / ACTOR_RESULT_COST_USD));
+    const batchResultLimit = Math.min(MAX_ACTOR_RESULTS, this.maxResults * brands.length, paidResultLimit);
 
     const endpoint = new URL(
       `${this.apiBaseUrl}/v2/acts/${this.actorId}/run-sync-get-dataset-items`
@@ -621,7 +635,7 @@ export class OzonAdapter implements SiteAdapter {
       );
     }
 
-    return new Map(brands.map((requestedBrand) => [
+    const batch = new Map(brands.map((requestedBrand) => [
       brandKey(requestedBrand),
       [...products.get(brandKey(requestedBrand))!.values()].map((product): ProductRef => ({
         domain: "ozon.ru",
@@ -645,6 +659,11 @@ export class OzonAdapter implements SiteAdapter {
         }
       }))
     ]));
+    // Only the Actor's exact successful [] response is used to settle the
+    // maximum reservation. A non-empty response containing only search noise
+    // remains a valid no-results classification but keeps the conservative cap.
+    if (payload.length === 0) this.emptyActorBatches.add(batch);
+    return batch;
   }
 
   async collect(ref: ProductRef, _context: AdapterContext): Promise<Observation> {

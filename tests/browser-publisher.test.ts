@@ -63,6 +63,7 @@ function mockDriver(options: {
   return {
     open: vi.fn(async () => undefined),
     selectTab: vi.fn(async () => undefined),
+    ensureTab: vi.fn(async (preferredTitle: string) => preferredTitle),
     assertEditable: vi.fn(async () => undefined),
     captureCurrentRegion: vi.fn(async () => options.current ?? backup()),
     clearRange: vi.fn(async () => undefined),
@@ -83,7 +84,8 @@ describe("browser-only Google Sheets publisher", () => {
     expect(result.status).toBe("published");
     expect(result.attempts).toBe(1);
     expect(result.range).toBe(`A1:F${document.values.length}`);
-    expect(driver.selectTab).toHaveBeenCalledWith("Рейтинги");
+    expect(driver.ensureTab).toHaveBeenCalledWith("Ratings", ["Рейтинги"]);
+    expect(result.tabName).toBe("Ratings");
     expect(driver.writeClipboard).toHaveBeenCalledTimes(1);
     expect(driver.clearRange).toHaveBeenCalledTimes(1);
     expect(driver.readRange).toHaveBeenCalledWith(result.range, document.values.length, document.columnCount);
@@ -99,6 +101,22 @@ describe("browser-only Google Sheets publisher", () => {
     expect(driver.writeClipboard).toHaveBeenCalledTimes(2);
     expect(driver.clearRange).toHaveBeenCalledTimes(2);
     expect(driver.pasteAt).toHaveBeenCalledTimes(2);
+  });
+
+  it("selects the requested brand tab before mutating when a preimage was captured earlier", async () => {
+    const document = sheetDocument();
+    const driver = mockDriver({ readbacks: [readbackFromDocument(document)] });
+
+    await new BrowserSheetsPublisher(driver).publish({
+      sheetUrl: request.sheetUrl,
+      document,
+      tabName: "Ratings Бренд",
+      preimage: backup("исходный брендовый лист")
+    });
+
+    expect(driver.selectTab).toHaveBeenNthCalledWith(1, "Ratings Бренд");
+    expect(vi.mocked(driver.selectTab).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(driver.clearRange).mock.invocationCallOrder[0]);
   });
 
   it("commits an exact replay without mutating an already matching sheet", async () => {
@@ -168,10 +186,17 @@ describe("browser-only Google Sheets publisher", () => {
     expect(plan.payload.htmlText).toContain("data-sheets-formula=");
     expect(plan.payload.htmlText).toContain("colspan=\"2\"");
     expect(plan.payload.htmlText).toContain("rowspan=\"2\"");
-    expect(plan.payload.htmlText).toContain("background-color:#20124d");
+    expect(plan.payload.htmlText).toContain("background-color:#120755");
+    expect(plan.payload.htmlText).toContain("border-bottom:3px solid #ff4d00");
+    expect(plan.payload.htmlText).toContain("background-color:#f0effa");
+    expect(plan.payload.htmlText).toContain("font-family:Inter,Arial,sans-serif");
     expect(plan.payload.htmlText).toContain('<col width="150">');
-    expect(plan.payload.htmlText).toContain('<col width="430">');
+    expect(plan.payload.htmlText).toContain('<col width="320">');
     expect(plan.payload.htmlText).toContain('href="https://example.com/p/1"');
+    const productCells = plan.cells.find((_row, index) => document.rowKinds[index] === "product")!;
+    expect(productCells[1].value).toBe("example.com");
+    expect(productCells[0].value).toBe("https://example.com/p/1");
+    expect(productCells[2].value).toBe("Упаковка");
   });
 
   it("rejects non-Google targets before opening a browser page", async () => {

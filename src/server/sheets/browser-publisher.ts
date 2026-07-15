@@ -6,6 +6,7 @@ import type {
   BrowserSheetReadback,
   SheetsUiDriver
 } from "./browser-ui-driver.js";
+import { LEGACY_RATINGS_TAB_NAME, RATINGS_TAB_NAME } from "./tab-name.js";
 
 export type BrowserSheetPublication = {
   sheetUrl: string;
@@ -16,6 +17,7 @@ export type BrowserSheetPublication = {
 
 export type BrowserSheetPublicationResult = {
   status: "published";
+  tabName: string;
   range: string;
   attempts: number;
   verifiedAt: string;
@@ -112,31 +114,48 @@ function cellCss(document: SheetDocument, row: number, column: number, cell: Exp
   const metric = column >= 4;
   const css = [
     "overflow:hidden",
-    "padding:2px 3px",
+    "padding:7px 10px",
     "vertical-align:middle",
-    "font-family:Arial",
-    `font-size:${kind === "section" ? 11 : 9}pt`,
-    "white-space:normal"
+    "font-family:Inter,Arial,sans-serif",
+    `font-size:${kind === "footnote" ? 9 : 10}pt`,
+    "white-space:normal",
+    "color:#241f35"
   ];
-  if (kind === "title" || kind === "subheader" && column > 0) {
-    css.push("background-color:#20124d", "color:#ffffff");
+  if (kind === "brand") {
+    css.push("background-color:#120755", "color:#ffffff", "border-bottom:3px solid #ff4d00");
+    if (column === 0) css.push("font-size:16pt", "font-weight:bold", "letter-spacing:0.4px");
+    if (metric) css.push("color:#aeade5", "font-weight:bold", "text-align:right");
+  }
+  if (kind === "title" || kind === "subheader" && metric) {
+    css.push("background-color:#120755", "color:#ffffff");
     if (kind === "title" || metric) css.push("font-weight:bold");
   }
   if (kind === "section") {
-    css.push("background-color:#d0e0e3", "border:1px dotted #000000");
-    if (column === 0) css.push("font-weight:bold", "color:#1155cc", "text-decoration:underline");
+    css.push("background-color:#f0effa", "border-top:1px solid #aeade5", "border-bottom:1px solid #dcd9f1");
+    if (column === 0) css.push("font-size:12pt", "font-weight:bold", "color:#120755", "border-left:4px solid #ff4d00");
+    if (column === 1 || column === 2) css.push("font-weight:bold", "color:#625b85");
   }
-  if (kind === "summaryHeader") css.push("background-color:#d9ead3", "font-weight:bold");
-  if (kind === "summary" && column === 0) css.push("font-weight:bold");
-  if (kind === "footnote") css.push("font-style:italic", "color:#666666");
-  if (kind === "product" && column === 1) css.push("color:#1155cc", "text-decoration:underline");
+  if (kind === "product") {
+    css.push(`background-color:${row % 2 === 0 ? "#ffffff" : "#fbfaff"}`, "border-bottom:1px solid #ebe9f4");
+    if (column === 0) css.push("color:#4932a8", "text-decoration:underline");
+    if (column === 2) css.push("font-weight:bold", "color:#120755");
+  }
+  if (kind === "summaryHeader") css.push("background-color:#e7e5f7", "color:#120755", "font-weight:bold", "border-top:3px solid #ff4d00");
+  if (kind === "summary") {
+    css.push("background-color:#fbfaff", "border-bottom:1px solid #e3e0f1");
+    if (column === 0) css.push("font-weight:bold", "color:#120755");
+  }
+  if (kind === "footnote") css.push("font-style:italic", "color:#746f86", "background-color:#fbfaff");
   if (metric && ["title", "subheader", "section", "product", "summaryHeader", "summary"].includes(kind)) {
-    css.push("border-left:1px dotted #000000", "border-right:1px dotted #000000", "text-align:center");
+    css.push("border-left:1px solid #e3e0f1", "border-right:1px solid #e3e0f1", "text-align:center");
   }
   if ((kind === "product" || kind === "summary") && metric) {
     const share = kind === "summary" && (column - 4) % 2 === 1;
     const rating = kind === "product" && (column - 4) % 2 === 1;
     css.push(`mso-number-format:'${share ? "0%" : rating ? "0.0" : "#,##0"}'`);
+    if (kind === "product" && rating && typeof cell.value === "number") {
+      css.push("font-weight:bold", `color:${cell.value >= 4 ? "#120755" : "#c83d00"}`);
+    }
   }
   if (typeof cell.value === "string" && !cell.formula) css.push("mso-number-format:'\\@'");
   return css.join(";");
@@ -183,16 +202,24 @@ export function buildBrowserSheetClipboardPlan(document: SheetDocument, locale =
       }
       if (cell.formula) attributes.push(`data-sheets-formula="${html(cell.formula)}"`);
       attributes.push(`style="${cellCss(document, row, column, cell)}"`);
-      const content = document.rowKinds[row] === "product" && column === 1 && typeof cell.value === "string" && /^https:\/\//i.test(cell.value)
+      const content = document.rowKinds[row] === "product" && column === 0 && typeof cell.value === "string" && /^https:\/\//i.test(cell.value)
         ? `<a href="${html(cell.value)}">${html(value)}</a>`
         : html(value);
       htmlCells.push(`<td ${attributes.join(" ")}>${content}</td>`);
     }
-    htmlRows.push(`<tr style="height:24px">${htmlCells.join("")}</tr>`);
+    const height = document.rowKinds[row] === "brand" ? 44
+      : document.rowKinds[row] === "section" ? 36
+        : document.rowKinds[row] === "blank" ? 16
+          : document.rowKinds[row] === "product" ? 32
+            : 30;
+    htmlRows.push(`<tr style="height:${height}px">${htmlCells.join("")}</tr>`);
   }
-  const widths = [150, 430, 330, 24, ...Array(Math.max(0, document.columnCount - 4)).fill(92)];
+  const widths = [320, 150, 310, 24, ...Array.from(
+    { length: Math.max(0, document.columnCount - 4) },
+    (_, index) => index % 2 === 0 ? 110 : 82
+  )];
   const colgroup = `<colgroup>${widths.map((width) => `<col width="${width}">`).join("")}</colgroup>`;
-  const htmlText = `<google-sheets-html-origin><table xmlns="http://www.w3.org/1999/xhtml" cellspacing="0" cellpadding="0" dir="ltr" data-sheets-root="1" style="table-layout:fixed;font-size:9pt;font-family:Arial;width:0px">${colgroup}<tbody>${htmlRows.join("")}</tbody></table></google-sheets-html-origin>`;
+  const htmlText = `<google-sheets-html-origin><table xmlns="http://www.w3.org/1999/xhtml" cellspacing="0" cellpadding="0" dir="ltr" data-sheets-root="1" style="table-layout:fixed;font-size:10pt;font-family:Inter,Arial,sans-serif;width:0px">${colgroup}<tbody>${htmlRows.join("")}</tbody></table></google-sheets-html-origin>`;
   return {
     payload: { plainText, htmlText }, cells, merges,
     range: `A1:${columnLetter(document.columnCount)}${document.values.length}`
@@ -290,15 +317,22 @@ export class BrowserSheetsPublisher {
 
   async publish(publication: BrowserSheetPublication): Promise<BrowserSheetPublicationResult> {
     const sheetUrl = validateSheetUrl(publication.sheetUrl);
-    const tabName = publication.tabName ?? "Рейтинги";
+    let tabName = publication.tabName ?? RATINGS_TAB_NAME;
     const plan = buildBrowserSheetClipboardPlan(publication.document, this.locale);
     let backup = publication.preimage;
     if (!backup) {
       await this.driver.open(sheetUrl);
-      await this.driver.selectTab(tabName);
       await this.driver.assertEditable();
+      tabName = await this.driver.ensureTab(
+        tabName,
+        publication.tabName ? [] : [LEGACY_RATINGS_TAB_NAME]
+      );
       backup = await this.driver.captureCurrentRegion();
     } else {
+      // Multi-brand publication captures every preimage before writing. The
+      // last captured tab remains active, so each supplied preimage must still
+      // re-select its own target before any clipboard mutation.
+      await this.driver.selectTab(tabName);
       await this.driver.assertEditable();
     }
     const oldSize = readbackDimensions(backup);
@@ -325,6 +359,7 @@ export class BrowserSheetsPublisher {
     if (!existingMismatches.length) {
       return {
         status: "published",
+        tabName,
         range: plan.range,
         attempts: 0,
         verifiedAt: new Date().toISOString(),
@@ -357,7 +392,7 @@ export class BrowserSheetsPublisher {
         lastMismatches = verifyBrowserSheetReadback(readback, expected, plan.merges);
         if (!lastMismatches.length) {
           return {
-            status: "published", range: plan.range, attempts: attempt, verifiedAt: new Date().toISOString(),
+            status: "published", tabName, range: plan.range, attempts: attempt, verifiedAt: new Date().toISOString(),
             limitations: ["Браузерный путь проверяет сохранённые значения, формулы и объединения после перезагрузки; точное воспроизведение каждого параметра форматирования не гарантируется."],
             readback
           };
@@ -385,7 +420,7 @@ export class BrowserSheetsPublisher {
     const backup = publication.preimage;
     if (!backup) throw new Error("Для компенсирующего rollback отсутствует preimage листа");
     const sheetUrl = validateSheetUrl(publication.sheetUrl);
-    const tabName = publication.tabName ?? "Рейтинги";
+    const tabName = publication.tabName ?? RATINGS_TAB_NAME;
     buildBrowserSheetClipboardPlan(publication.document, this.locale);
     const oldSize = readbackDimensions(backup);
     const cleanupRows = Math.max(oldSize.rows, publication.document.values.length, 1);

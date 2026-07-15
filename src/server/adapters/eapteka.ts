@@ -3,13 +3,15 @@ import { load } from "cheerio";
 import type { AdapterContext, AdapterHealth, Observation, ProductRef, SiteAdapter } from "../../shared/types.js";
 import type { EvidenceStore } from "../evidence.js";
 import { matchesBrand } from "../utils/normalize.js";
-import { extractPageProductEvidence } from "../utils/product-evidence.js";
+import { extractPageProductEvidence, titleProductEvidence } from "../utils/product-evidence.js";
+import { readerProxyUrl } from "../utils/reader-proxy.js";
 import { readTextBounded, safeFetch } from "../utils/safe-fetch.js";
 import { canonicalizeUrl } from "../utils/urls.js";
 import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 
 const DOMAIN = "eapteka.ru";
 const ORIGIN = "https://www.eapteka.ru";
+const TRANSLATE_ORIGIN = "https://www-eapteka-ru.translate.goog";
 const HEALTH_URL = `${ORIGIN}/search/?q=${encodeURIComponent("Кагоцел")}`;
 const MAX_DOCUMENT_BYTES = 8_000_000;
 const PRODUCT_PATH = /^\/goods\/id(\d+)(?:\/|$)/i;
@@ -73,6 +75,77 @@ function isBlockedPage(html: string): boolean {
   return BLOCK_MARKERS.test(title) || /<(?:iframe|input)\b[^>]*(?:captcha|challenge)/i.test(html.slice(0, 150_000));
 }
 
+function translatedUrl(source: URL): URL {
+  const result = new URL(`${source.pathname}${source.search}`, TRANSLATE_ORIGIN);
+  result.searchParams.set("_x_tr_sl", "ru");
+  result.searchParams.set("_x_tr_tl", "en");
+  result.searchParams.set("_x_tr_hl", "en");
+  return result;
+}
+
+function sameSource(left: URL, right: URL): boolean {
+  if (left.protocol !== "https:" || right.protocol !== "https:") return false;
+  if (normalizeHost(left.hostname) !== normalizeHost(right.hostname) || left.pathname !== right.pathname) return false;
+  return JSON.stringify([...left.searchParams.entries()].sort()) === JSON.stringify([...right.searchParams.entries()].sort());
+}
+
+function translatedSource(html: string, source: URL): ReturnType<typeof load> {
+  const $ = load(html);
+  try {
+    const base = new URL($("base[href]").first().attr("href") ?? "");
+    const proof = new URL($("[data-source-url]").first().attr("data-source-url") ?? "");
+    if (!sameSource(base, source) || !sameSource(proof, source)) throw new Error("source mismatch");
+  } catch {
+    throw new ParserChangedError(`${DOMAIN}: translated page returned a different source URL`);
+  }
+  return $;
+}
+
+function readerMetrics(markdown: string, source: URL): { title: string; reviews: number; rating: number | null; ratingCount: number } {
+  const titleLine = markdown.match(/^Title:\s*(.+)$/m)?.[1]?.trim();
+  const sourceLine = markdown.match(/^URL Source:\s*(\S+)\s*$/m)?.[1];
+  if (!titleLine || !sourceLine) throw new ParserChangedError(`${DOMAIN}: reader response has no title or source proof`);
+  let returnedSource: URL;
+  try { returnedSource = new URL(sourceLine); }
+  catch { throw new ParserChangedError(`${DOMAIN}: reader response has an invalid source proof`); }
+  if (!sameSource(returnedSource, source)) throw new ParserChangedError(`${DOMAIN}: reader returned a different product page`);
+  if (/доступ к сервису запрещ[её]н|requiring captcha|проверяет, что вы не бот/i.test(markdown)) {
+    throw new AdapterBlockedError(`${DOMAIN}: product reader is blocked`);
+  }
+  const metric = markdown.match(/####[^\r\n]{1,320}:\s*([\d\s\u00a0]+)\s+[^\d\r\n][^\r\n]*\r?\n\r?\n([0-5](?:[.,]\d+)?)\r?\n\r?\n[^\r\n]*?([\d\s\u00a0]+)\s+[^\d\r\n][^\r\n]*/);
+  const reviews = parseNonNegativeInteger(metric?.[1]);
+  const rating = parseRating(metric?.[2]);
+  const ratingCount = parseNonNegativeInteger(metric?.[3]);
+  if (reviews === undefined || ratingCount === undefined) {
+    throw new ParserChangedError(`${DOMAIN}: reader did not prove a written-review and rating total`);
+  }
+  const feedbackCount = Math.max(reviews, ratingCount);
+  if (feedbackCount > 0 && (rating === undefined || rating <= 0 || rating > 5)) {
+    throw new ParserChangedError(`${DOMAIN}: reader returned feedback without a valid rating`);
+  }
+  const title = titleLine.replace(/\s+-\s+(?:купить|цена|отзывы).*$/iu, "").trim();
+  return { title, reviews, rating: feedbackCount === 0 ? null : rating!, ratingCount };
+}
+
+function hasExactListingCanary(html: string): boolean {
+  const $ = load(html);
+  let proved = false;
+  $(".listing-card[itemscope]").each((_index, node) => {
+    if (proved) return;
+    const root = $(node);
+    const link = root.find("link[itemprop='url']").first().attr("content") ?? root.find("link[itemprop='url']").first().attr("href");
+    let listingId: string | undefined;
+    try { listingId = link ? listingIdFromUrl(new URL(link, ORIGIN)) : undefined; }
+    catch { listingId = undefined; }
+    const aggregate = root.find("[itemprop='aggregateRating']").first();
+    const metricScope = aggregate.length ? aggregate : root;
+    const reviews = parseNonNegativeInteger(metricScope.find("meta[itemprop='reviewCount']").first().attr("content"));
+    const rating = parseRating(metricScope.find("meta[itemprop='ratingValue']").first().attr("content"));
+    if (listingId && reviews !== undefined && (reviews === 0 || rating !== undefined && rating > 0 && rating <= 5)) proved = true;
+  });
+  return proved;
+}
+
 function previousRefs(brand: string, context: AdapterContext): ProductRef[] {
   const refs = new Map<string, ProductRef>();
   for (const previous of context.previousRefs ?? []) {
@@ -108,37 +181,59 @@ export class EaptekaAdapter implements SiteAdapter {
   async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
     const checkedAt = new Date().toISOString();
     try {
-      const { response, html } = await this.request(HEALTH_URL, context);
-      if (!response.ok || isBlockedPage(html)) {
-        return {
-          ok: false,
-          checkedAt,
-          message: `blocked_free_mode: ${DOMAIN} не допускает бесплатный HTTP-сбор (HTTP ${response.status})`
-        };
+      const direct = await this.request(HEALTH_URL, context);
+      if (direct.response.ok && !isBlockedPage(direct.html)) {
+        if (!hasExactListingCanary(direct.html)) {
+          return { ok: false, checkedAt, message: `parser_changed: ${DOMAIN} direct canary has no exact aggregate listing card` };
+        }
+        return { ok: true, checkedAt, message: `${DOMAIN}: direct search is healthy` };
       }
-      return { ok: true, checkedAt, message: `${DOMAIN}: HTTP-поиск доступен` };
+      const { html } = await this.requestTranslated(HEALTH_URL, context);
+      translatedSource(html, new URL(HEALTH_URL));
+      if (!hasExactListingCanary(html)) {
+        return { ok: false, checkedAt, message: `parser_changed: ${DOMAIN} translated canary has no exact listing cards` };
+      }
+      return { ok: true, checkedAt, message: `${DOMAIN}: fixed translated search is healthy` };
     } catch (error) {
-      return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ok: false,
+        checkedAt,
+        message: error instanceof ParserChangedError ? `parser_changed: ${message}` : `blocked_free_mode: ${message}`
+      };
     }
   }
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = new Map(previousRefs(brand, context).map((ref) => [ref.listingId, ref]));
     const searchUrl = `${ORIGIN}/search/?q=${encodeURIComponent(brand)}`;
-    const { response, html } = await this.request(searchUrl, context);
-    this.assertUsable(response, html, searchUrl);
+    let { response, html } = await this.request(searchUrl, context);
+    let translated = false;
+    if (!response.ok || isBlockedPage(html)) {
+      ({ response, html } = await this.requestTranslated(searchUrl, context));
+      translatedSource(html, new URL(searchUrl));
+      translated = true;
+    } else {
+      this.assertUsable(response, html, searchUrl);
+    }
 
     const $ = load(html);
-    $("a[href]").each((_index, node) => {
-      const href = $(node).attr("href");
+    const roots = translated ? $(".listing-card[itemscope]") : $("a[href]");
+    roots.each((_index, node) => {
+      const root = $(node);
+      const href = translated
+        ? root.find("link[itemprop='url']").first().attr("content") ?? root.find("link[itemprop='url']").first().attr("href")
+        : root.attr("href");
       if (!href) return;
       let url: URL;
       try { url = new URL(href, searchUrl); }
       catch { return; }
       const listingId = listingIdFromUrl(url);
       if (!listingId) return;
-      const title = compactText(`${$(node).text()} ${$(node).closest("article, li, [class*='card'], [class*='product']").text()}`);
-      if (!matchesBrand(title, brand)) return;
+      const title = translated
+        ? brand
+        : compactText(`${root.text()} ${root.closest("article, li, [class*='card'], [class*='product']").text()}`);
+      if (!translated && !matchesBrand(title, brand)) return;
       const canonicalUrl = canonicalProductUrl(url.toString(), listingId);
       if (!canonicalUrl) return;
       refs.set(listingId, {
@@ -148,7 +243,7 @@ export class EaptekaAdapter implements SiteAdapter {
         brand,
         url: canonicalUrl,
         title,
-        metadata: { discovery: "eapteka-search", searchUrl }
+        metadata: { discovery: translated ? "eapteka-search-google-translate" : "eapteka-search", searchUrl }
       });
     });
 
@@ -178,6 +273,9 @@ export class EaptekaAdapter implements SiteAdapter {
         capturedAt,
         source: "eapteka-data-layer"
       };
+    }
+    if (!response.ok || isBlockedPage(html)) {
+      return this.collectFromReader(ref, listingId, requestUrl, capturedAt, context);
     }
     this.assertUsable(response, html, requestUrl);
 
@@ -248,6 +346,76 @@ export class EaptekaAdapter implements SiteAdapter {
       throw new AdapterBlockedError(`${DOMAIN}: ответ не прочитан: ${error instanceof Error ? error.message : String(error)}`);
     }
     return { response, html };
+  }
+
+  private async requestTranslated(url: string, context: AdapterContext): Promise<{ response: Response; html: string }> {
+    const source = new URL(url);
+    const endpoint = translatedUrl(source);
+    let response: Response;
+    try {
+      response = await safeFetch(endpoint.toString(), {
+        headers: { accept: "text/html,application/xhtml+xml" },
+        signal: context.signal
+      }, context.fetch ?? this.fetchImpl);
+    } catch (error) {
+      throw new AdapterBlockedError(`${DOMAIN}: translated request failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const html = await readTextBounded(response, MAX_DOCUMENT_BYTES);
+    if (!response.ok || isBlockedPage(html)) {
+      throw new AdapterBlockedError(`${DOMAIN}: translated page is blocked (HTTP ${response.status})`);
+    }
+    return { response, html };
+  }
+
+  private async collectFromReader(
+    ref: ProductRef,
+    listingId: string,
+    requestUrl: string,
+    capturedAt: string,
+    context: AdapterContext
+  ): Promise<Observation> {
+    const source = new URL(requestUrl);
+    const endpoint = readerProxyUrl(source);
+    let response: Response;
+    try {
+      response = await safeFetch(endpoint.toString(), { signal: context.signal, headers: { accept: "text/plain,text/markdown" } }, context.fetch ?? this.fetchImpl);
+    } catch (error) {
+      throw new AdapterBlockedError(`${DOMAIN}: product reader failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const markdown = await readTextBounded(response, 2_000_000);
+    if (!response.ok) throw new AdapterBlockedError(`${DOMAIN}: product reader returned HTTP ${response.status}`);
+    const parsed = readerMetrics(markdown, source);
+    if (!matchesBrand(parsed.title, ref.brand)) {
+      throw new ParserChangedError(`${DOMAIN}:${listingId}: reader returned another brand or product`);
+    }
+    const productEvidence = titleProductEvidence(parsed.title, { type: "product_id", value: listingId }, requestUrl);
+    const evidenceRef = await this.evidence.put({
+      capturedAt,
+      url: requestUrl,
+      status: response.status,
+      bodyDigest: createHash("sha256").update(markdown).digest("hex"),
+      parsed: { listingId, title: parsed.title, canonicalUrl: requestUrl, reviews: parsed.reviews, rating: parsed.rating, ratingCount: parsed.ratingCount },
+      productEvidence,
+      source: "eapteka-reader-product"
+    });
+    return {
+      domain: DOMAIN,
+      platform: DOMAIN,
+      listingId,
+      brand: ref.brand,
+      canonicalUrl: requestUrl,
+      product: parsed.title,
+      reviews: parsed.reviews,
+      rating: parsed.rating,
+      rawRating: parsed.rating,
+      rawRatingScale: 5,
+      ratingCount: parsed.ratingCount,
+      status: parsed.reviews === 0 ? "no_reviews" : "ok",
+      capturedAt,
+      evidenceRef,
+      productEvidence,
+      source: "eapteka-reader-product"
+    };
   }
 
   private assertUsable(response: Response, html: string, url: string): void {

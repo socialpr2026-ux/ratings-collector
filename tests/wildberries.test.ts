@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AdapterContext, ProductRef } from "../src/shared/types.js";
 import { AdapterBlockedError, ParserChangedError } from "../src/server/adapters/errors.js";
 import { WildberriesAdapter } from "../src/server/adapters/wildberries.js";
+import { analyzeProductIdentity } from "../src/server/utils/product-name.js";
 
 const FIXED_TIME = new Date("2026-07-13T09:00:00.000Z");
 
@@ -36,6 +37,8 @@ function createAdapter(
 ): WildberriesAdapter {
   return new WildberriesAdapter({
     fetch: fetchImplementation,
+    productInfoFetch: false,
+    searchEndpoint: "https://search.wb.ru/exactmatch/ru/common/v14/search",
     requestIntervalMs: 0,
     blockedRetryBaseMs: 0,
     sleep: async () => undefined,
@@ -45,6 +48,78 @@ function createAdapter(
 }
 
 describe("WildberriesAdapter.discover", () => {
+  it("falls back from blocked v14 to free v18 before requesting browser Sandbox", async () => {
+    const requests: Array<{ url: URL; browser: boolean }> = [];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const browser = new Headers(init?.headers).get("x-ratings-browser") === "1";
+      requests.push({ url, browser });
+      if (url.pathname.includes("/v14/")) return new Response("rate limited", { status: 429 });
+      return jsonResponse({
+        total: 3,
+        products: [
+          { id: 822669569, name: "Оциллококцинум гранулы гомеопатические 30 шт", nmReviewRating: 5, nmFeedbacks: 24 },
+          { id: 822660107, name: "Оциллококцинум гранулы гомеопатические 6 шт", nmReviewRating: 4.7, nmFeedbacks: 3 },
+          { id: 822679599, name: "Оциллококцинум гранулы гомеопатические 12 шт", nmReviewRating: 4.9, nmFeedbacks: 16 }
+        ]
+      });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new WildberriesAdapter({
+      fetch: fetchMock,
+      requestIntervalMs: 0,
+      blockedRetryBaseMs: 0,
+      sleep: async () => undefined,
+      now: () => FIXED_TIME
+    });
+
+    const refs = await adapter.discover("Оциллококцинум", context({ runId: "oscillo-live" }));
+
+    expect(refs.map(({ listingId }) => listingId)).toEqual(["822669569", "822660107", "822679599"]);
+    expect(requests.map(({ url }) => `${url.pathname}:${url.searchParams.get("appType")}`)).toEqual([
+      "/exactmatch/ru/common/v14/search:1",
+      "/exactmatch/ru/common/v14/search:32",
+      "/exactmatch/ru/common/v14/search:64",
+      "/exactmatch/ru/common/v18/search:1"
+    ]);
+    expect(requests.every(({ browser }) => !browser)).toBe(true);
+  });
+
+  it("reuses a successful discovery within one run without repeating public HTTP requests", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      total: 1,
+      products: [{ id: 701, name: "BrandX capsules", nmReviewRating: 4.8, nmFeedbacks: 10 }]
+    })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const runContext = context({ runId: "run-1", previousIds: ["wildberries:702"] });
+
+    const first = await adapter.discover("BrandX", runContext);
+    const second = await adapter.discover("BrandX", runContext);
+
+    expect(second).toEqual(first);
+    expect(first.map(({ listingId }) => listingId)).toEqual(["701", "702"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not cache a blocked discovery as a successful empty result", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+      .mockResolvedValueOnce(jsonResponse({
+        total: 1,
+        products: [{ id: 701, name: "BrandX capsules", nmReviewRating: 4.8, nmFeedbacks: 10 }]
+      })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock, { blockedCooldownMs: 0 });
+    const runContext = context({ runId: "run-1" });
+
+    await expect(adapter.discover("BrandX", runContext)).rejects.toBeInstanceOf(AdapterBlockedError);
+    await expect(adapter.discover("BrandX", runContext)).resolves.toMatchObject([{ listingId: "701" }]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
   it("recovers a blocked desktop route through appType 32 and keeps that free route for pagination", async () => {
     const sleeps: number[] = [];
     const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
@@ -76,7 +151,7 @@ describe("WildberriesAdapter.discover", () => {
     expect(sleeps).toEqual([10]);
   });
 
-  it("uses the warmed browser API route only after both direct app types remain blocked", async () => {
+  it("uses the warmed browser API route only after every direct app type remains blocked", async () => {
     const sleeps: number[] = [];
     const fetchMock = vi.fn(async (_input: URL | RequestInfo, init?: RequestInit) => {
       const headers = new Headers(init?.headers);
@@ -96,11 +171,49 @@ describe("WildberriesAdapter.discover", () => {
     const refs = await adapter.discover("BrandX", context());
 
     expect(refs.map(({ listingId }) => listingId)).toEqual(["801"]);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    const headers = new Headers(vi.mocked(fetchMock).mock.calls[2][1]?.headers);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const headers = new Headers(vi.mocked(fetchMock).mock.calls[3][1]?.headers);
     expect(headers.get("x-ratings-browser")).toBe("1");
     expect(headers.get("x-ratings-browser-mode")).toBe("wildberries-api");
-    expect(sleeps).toEqual([10, 30]);
+    expect(sleeps).toEqual([10, 20, 40]);
+  });
+
+  it("bounds total free-route backoff while preserving endpoint and appType order", async () => {
+    const sleeps: number[] = [];
+    const requests: string[] = [];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const browser = new Headers(init?.headers).get("x-ratings-browser") === "1";
+      requests.push(`${url.pathname}:${url.searchParams.get("appType")}:${browser ? "browser" : "direct"}`);
+      if (url.pathname.includes("/v18/") && url.searchParams.get("appType") === "64") {
+        return jsonResponse({
+          total: 1,
+          products: [{ id: 822669569, name: "Оциллококцинум гранулы 30 шт", nmReviewRating: 5, nmFeedbacks: 24 }]
+        });
+      }
+      return new Response("rate limited", { status: 429 });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new WildberriesAdapter({
+      fetch: fetchMock,
+      requestIntervalMs: 0,
+      blockedRetryBaseMs: 100,
+      sleep: async (milliseconds) => { sleeps.push(milliseconds); }
+    });
+
+    await expect(adapter.discover("Оциллококцинум", context())).resolves.toMatchObject([
+      { listingId: "822669569", metadata: { nmFeedbacks: 24, nmReviewRating: 5 } }
+    ]);
+
+    expect(requests).toEqual([
+      "/exactmatch/ru/common/v14/search:1:direct",
+      "/exactmatch/ru/common/v14/search:32:direct",
+      "/exactmatch/ru/common/v14/search:64:direct",
+      "/exactmatch/ru/common/v18/search:1:direct",
+      "/exactmatch/ru/common/v18/search:32:direct",
+      "/exactmatch/ru/common/v18/search:64:direct"
+    ]);
+    expect(sleeps).toEqual([100, 150, 150, 150, 150]);
+    expect(sleeps.reduce((sum, value) => sum + value, 0)).toBe(700);
   });
 
   it("accepts only an explicit rendered no-results proof after every JSON API route is blocked", async () => {
@@ -119,8 +232,8 @@ describe("WildberriesAdapter.discover", () => {
 
     await expect(adapter.discover("MissingBrand", context())).resolves.toEqual([]);
 
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    const [proofInput, proofInit] = vi.mocked(fetchMock).mock.calls[3];
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    const [proofInput, proofInit] = vi.mocked(fetchMock).mock.calls[4];
     const proofUrl = new URL(String(proofInput));
     expect(`${proofUrl.origin}${proofUrl.pathname}`).toBe(
       "https://www.wildberries.ru/catalog/0/search.aspx"
@@ -128,6 +241,15 @@ describe("WildberriesAdapter.discover", () => {
     expect(proofUrl.searchParams.get("search")).toBe("MissingBrand");
     expect(new Headers(proofInit?.headers).get("x-ratings-browser-mode")).toBe(
       "wildberries-search-proof"
+    );
+  });
+
+  it("fails closed on an empty first JSON page without explicit total zero", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ products: [] })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock, { browserFallbackAppType: false });
+
+    await expect(adapter.discover("Тикализис", context())).rejects.toThrow(
+      /empty first page without an explicit total/
     );
   });
 
@@ -195,7 +317,7 @@ describe("WildberriesAdapter.discover", () => {
     const urls = vi.mocked(fetchMock).mock.calls.map(([input]) => new URL(String(input)));
     expect(urls.map((url) => url.searchParams.get("page"))).toEqual(["1", "2"]);
     expect(urls.every((url) => url.searchParams.get("query") === "Арбидол")).toBe(true);
-    expect(urls.every((url) => url.pathname.endsWith("/common/v18/search"))).toBe(true);
+    expect(urls.every((url) => url.pathname.endsWith("/common/v14/search"))).toBe(true);
   });
 
   it("fails closed at the configured maximum when every page remains non-empty", async () => {
@@ -249,6 +371,71 @@ describe("WildberriesAdapter.discover", () => {
 });
 
 describe("WildberriesAdapter.collect", () => {
+  it("restores the exact package count from the same-nm product card when the buyer API title is truncated", async () => {
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      expect(url.hostname).toBe("basket-37.wbbasket.ru");
+      expect(url.pathname).toBe("/vol8226/part822665/822665269/info/ru/card.json");
+      return jsonResponse({
+        nm_id: 822665269,
+        imt_name: "Тромболикс Про раствор для в/в и в/м введ 600 ЛЕ/2мл 2 мл амп 10 шт",
+        options: [{ name: "Количество капсул/таблеток", value: "10 шт." }]
+      });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock, { productInfoFetch: fetchMock });
+
+    const observation = await adapter.collect(productRef({
+      listingId: "822665269",
+      brand: "Тромболикс Про",
+      url: "https://www.wildberries.ru/catalog/822665269/detail.aspx",
+      title: "Тромболикс Про раствор для в/в и в/м введ 600 ЛЕ/2мл 2 мл амп…",
+      metadata: {
+        source: "wildberries-search-v18",
+        nmReviewRating: 4.9,
+        nmFeedbacks: 8
+      }
+    }), context());
+
+    expect(observation).toMatchObject({
+      product: "Тромболикс Про раствор для в/в и в/м введ 600 ЛЕ/2мл 2 мл амп 10 шт",
+      reviews: 8,
+      rating: 4.9,
+      status: "ok"
+    });
+    expect(analyzeProductIdentity({
+      brand: observation.brand,
+      product: observation.product,
+      url: observation.canonicalUrl
+    })).toMatchObject({
+      label: "раствор для внутривенного и внутримышечного введения 2 мл №10",
+      granularity: "variant",
+      confidence: "exact"
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("never borrows a package count from basket metadata for another nmId", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      nm_id: 822665270,
+      imt_name: "Тромболикс Про раствор 2 мл ампулы №20"
+    })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock, { productInfoFetch: fetchMock });
+
+    const observation = await adapter.collect(productRef({
+      listingId: "822665269",
+      brand: "Тромболикс Про",
+      title: "Тромболикс Про раствор 2 мл…",
+      metadata: {
+        source: "wildberries-search-v18",
+        nmReviewRating: 4.9,
+        nmFeedbacks: 8
+      }
+    }), context());
+
+    expect(observation.product).toBe("Тромболикс Про раствор 2 мл…");
+    expect(observation.product).not.toContain("№20");
+  });
+
   it("collects current-search nm metrics without calling the card endpoint", async () => {
     const fetchMock = vi.fn(async () => {
       throw new Error("card endpoint must not be called");

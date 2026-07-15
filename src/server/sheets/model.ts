@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import type { Observation, ProductRecord, RunRequest } from "../../shared/types.js";
 import { normalizeText } from "../utils/normalize.js";
-import { analyzeProductIdentity, canonicalProductDescriptors } from "../utils/product-name.js";
+import { analyzeProductIdentity, canonicalProductVariants } from "../utils/product-name.js";
 import { productKey } from "../repository.js";
 
 export type SheetScalar = string | number | null;
 export type ExistingSheet = { values: SheetScalar[][] };
-export type SheetRowKind = "title" | "subheader" | "section" | "product" | "blank" | "summaryHeader" | "summary" | "footnote";
+export type SheetRowKind = "brand" | "title" | "subheader" | "section" | "product" | "blank" | "summaryHeader" | "summary" | "footnote";
 export type SheetDocument = {
   values: SheetScalar[][];
   formulas: Array<Array<string | null>>;
@@ -64,6 +64,78 @@ function asMetric(value: SheetScalar | undefined): number | null {
 
 type RowProduct = ProductRecord & { metrics: Record<string, { reviews: number | null; rating: number | null }> };
 
+type SheetCategory = {
+  id: "review-sites" | "pharmacies" | "marketplaces";
+  label: "Отзовики" | "Аптеки" | "Маркетплейсы";
+};
+
+const SHEET_CATEGORIES: readonly SheetCategory[] = [
+  { id: "review-sites", label: "Отзовики" },
+  { id: "pharmacies", label: "Аптеки" },
+  { id: "marketplaces", label: "Маркетплейсы" }
+] as const;
+
+const MARKETPLACE_DOMAINS = new Set([
+  "ozon.ru", "wildberries.ru", "market.yandex.ru", "yandex.ru", "megamarket.ru"
+]);
+
+const PHARMACY_DOMAINS = new Set([
+  "uteka.ru", "megapteka.ru", "medum.ru", "eapteka.ru", "polza.ru", "asna.ru",
+  "farmlend.ru", "okapteka.ru", "rigla.ru", "zdravcity.ru", "apteka.ru", "nfapteka.ru",
+  "budzdorov.ru", "etabl.ru", "apteka-april.ru"
+]);
+
+const PLATFORM_LABELS: Readonly<Record<string, string>> = {
+  "ozon.ru": "Ozon",
+  "wildberries.ru": "Wildberries",
+  "market.yandex.ru": "Яндекс Маркет",
+  "megamarket.ru": "Мегамаркет",
+  "irecommend.ru": "iRecommend",
+  "med-otzyv.ru": "Мед-отзыв",
+  "otzovik.com": "Отзовик",
+  "otzyv.pro": "Отзыв.pro",
+  "vseotzyvy.ru": "Все отзывы",
+  "otzyvru.com": "ОтзывРу",
+  "pravogolosa.net": "Право голоса",
+  "ru.otzyv.com": "Otzyv.com",
+  "uteka.ru": "Ютека",
+  "megapteka.ru": "Мегаптека",
+  "medum.ru": "Medum",
+  "eapteka.ru": "ЕАПТЕКА",
+  "polza.ru": "POLZAru",
+  "asna.ru": "АСНА",
+  "farmlend.ru": "Фармленд",
+  "okapteka.ru": "ОК Аптека",
+  "rigla.ru": "Ригла",
+  "zdravcity.ru": "Здравсити",
+  "apteka.ru": "Apteka.ru",
+  "nfapteka.ru": "Надежда-Фарм",
+  "budzdorov.ru": "Будь Здоров",
+  "etabl.ru": "eTabl.ru",
+  "apteka-april.ru": "Апрель"
+};
+
+function normalizedDomain(domain: string): string {
+  return domain.toLocaleLowerCase("en-US").replace(/^www\./, "").replace(/^reviews\.yandex\.ru$/, "market.yandex.ru");
+}
+
+function platformLabel(domain: string): string {
+  const normalized = normalizedDomain(domain);
+  return PLATFORM_LABELS[normalized] ?? normalized;
+}
+
+function sheetCategory(domain: string): SheetCategory {
+  const normalized = normalizedDomain(domain);
+  if (MARKETPLACE_DOMAINS.has(normalized)) return SHEET_CATEGORIES[2];
+  if (PHARMACY_DOMAINS.has(normalized) || /(?:^|[.-])(?:apteka|pharm|farm|zdrav|drugstore)(?:[.-]|$)/iu.test(normalized)) {
+    return SHEET_CATEGORIES[1];
+  }
+  // A new or custom domain must still fit the stable three-section report.
+  // Until it is explicitly classified as a pharmacy or marketplace, it is a
+  // public feedback source and belongs to the review-sites section.
+  return SHEET_CATEGORIES[0];
+}
+
 function canonicalRowIdentity(item: Pick<RowProduct, "domain" | "canonicalUrl">): string {
   try {
     const url = new URL(item.canonicalUrl);
@@ -101,25 +173,100 @@ function mergeCanonicalDuplicates(products: Iterable<RowProduct>): RowProduct[] 
   return [...byCanonical.values()];
 }
 
+function combinedAggregateLabel(items: readonly RowProduct[]): string {
+  const labels = [...new Set(items.map((item) => item.product.trim()))];
+  if (labels.length < 2) return labels[0] ?? "";
+  const parsed = labels.map((label) => label.match(/^(.*?)(?:\s*№\s*)(\d+)(.*)$/u));
+  if (parsed.every((match) => match)) {
+    const prefix = parsed[0]![1]!.trim();
+    const suffix = parsed[0]![3]!.trim();
+    const sameShape = parsed.every((match) =>
+      normalizeText(match![1]!) === normalizeText(prefix) && normalizeText(match![3]!) === normalizeText(suffix)
+    );
+    if (sameShape) {
+      const variants = [...new Set(parsed.map((match) => Number(match![2]!)))]
+        .sort((left, right) => left - right)
+        .map((value) => `№${value}`);
+      const list = variants.length === 2
+        ? variants.join(" и ")
+        : `${variants.slice(0, -1).join(", ")} и ${variants.at(-1)}`;
+      return [prefix, list, suffix].filter(Boolean).join(" ");
+    }
+  }
+  return labels.join(" / ");
+}
+
+function collapseSharedAggregateRows(products: readonly RowProduct[], months: readonly string[]): RowProduct[] {
+  const groups = new Map<string, RowProduct[]>();
+  for (const item of products) {
+    const key = item.aggregateGroupId
+      ? `${item.domain}\u0000${normalizeText(item.brand)}\u0000${item.aggregateGroupId}`
+      : `${item.domain}\u0000${item.listingId}`;
+    const members = groups.get(key) ?? [];
+    members.push(item);
+    groups.set(key, members);
+  }
+  return [...groups.values()].flatMap((members) => {
+    if (members.length < 2 || !members[0]!.aggregateGroupId) return members;
+    for (const month of months) {
+      const fingerprints = new Set(members.flatMap((item) => {
+        const metric = item.metrics[month];
+        return metric && (metric.reviews !== null || metric.rating !== null)
+          ? [`${metric.reviews ?? "null"}:${metric.rating ?? "null"}`]
+          : [];
+      }));
+      if (fingerprints.size > 1) return members;
+    }
+    const first = members[0]!;
+    const metrics: RowProduct["metrics"] = {};
+    for (const month of months) {
+      const metric = members.map((item) => item.metrics[month])
+        .find((value) => value && (value.reviews !== null || value.rating !== null));
+      if (metric) metrics[month] = metric;
+    }
+    return [{
+      ...first,
+      product: combinedAggregateLabel(members),
+      firstSeenMonth: members.map((item) => item.firstSeenMonth).sort()[0]!,
+      lastSeenMonth: members.map((item) => item.lastSeenMonth).sort().at(-1)!,
+      metrics
+    }];
+  });
+}
+
 function parseLegacy(existing: ExistingSheet, request: RunRequest): { products: RowProduct[]; months: string[] } {
   const values = existing.values;
-  const currentLayout = normalizeText(String(values[0]?.[0] ?? "")) === "бренд" &&
-    normalizeText(String(values[0]?.[1] ?? "")) === "ссылка";
-  const urlColumn = currentLayout ? 1 : 0;
-  const productColumn = currentLayout ? 2 : 1;
-  const metricStartColumn = currentLayout ? 4 : 3;
+  const reportTitle = normalizeText(String(values[0]?.[0] ?? ""));
+  const brandedLayout = reportTitle === "interfox ratings" || reportTitle === "рейтинги" || reportTitle.startsWith("рейтинги ");
+  const headerRow = brandedLayout ? 1 : 0;
+  const headerFirst = normalizeText(String(values[headerRow]?.[0] ?? ""));
+  const headerSecond = normalizeText(String(values[headerRow]?.[1] ?? ""));
+  const headerThird = normalizeText(String(values[headerRow]?.[2] ?? ""));
+  const platformFirstLayout = headerFirst === "бренд" &&
+    headerSecond === "площадка" && headerThird === "ссылка";
+  const linkFirstLayout = headerFirst === "бренд" &&
+    headerSecond === "ссылка";
+  const brandSheetLayout = headerFirst === "ссылка" && headerSecond === "площадка" && headerThird === "продукт";
+  const structuredLayout = platformFirstLayout || linkFirstLayout || brandSheetLayout;
+  const urlColumn = platformFirstLayout ? 2 : linkFirstLayout ? 1 : 0;
+  const productColumn = platformFirstLayout ? 3 : linkFirstLayout || brandSheetLayout ? 2 : 1;
+  const metricStartColumn = structuredLayout ? 4 : 3;
   const months: string[] = [];
-  for (let column = metricStartColumn; column < (values[0]?.length ?? 0); column += 2) {
-    const key = legacyMonthKey(values[0]?.[column], Number(request.month.slice(0, 4)));
+  for (let column = metricStartColumn; column < (values[headerRow]?.length ?? 0); column += 2) {
+    const key = legacyMonthKey(values[headerRow]?.[column], Number(request.month.slice(0, 4)));
     if (key) months.push(key);
   }
   const products: RowProduct[] = [];
-  for (let row = 2; row < values.length; row += 1) {
+  for (let row = headerRow + 2; row < values.length; row += 1) {
     const url = values[row]?.[urlColumn];
     if (typeof url !== "string" || !/^https:\/\//i.test(url)) continue;
     const rawProduct = String(values[row]?.[productColumn] ?? "").trim();
     const { domain, listingId } = inferListing(url);
-    const storedBrand = currentLayout ? String(values[row]?.[0] ?? "").trim() : "";
+    const storedBrand = platformFirstLayout || linkFirstLayout
+      ? String(values[row]?.[0] ?? "").trim()
+      : brandSheetLayout && request.brands.length === 1
+        ? request.brands[0]!
+        : "";
     const brand = storedBrand || inferBrand(url, rawProduct, request.brands);
     const metrics: RowProduct["metrics"] = {};
     months.forEach((month, index) => {
@@ -140,11 +287,16 @@ export function buildSheetDocument(
   existing: ExistingSheet,
   request: RunRequest,
   registry: ProductRecord[],
-  snapshots: Record<string, Record<string, Observation>>
+  snapshots: Record<string, Record<string, Observation>>,
+  brandScope?: string
 ): SheetDocument {
   const legacy = parseLegacy(existing, request);
   const months = [...new Set([...legacy.months, ...Object.keys(snapshots), request.month])].sort();
-  const productMap = new Map<string, RowProduct>(legacy.products.map((item) => [item.key, item]));
+  const normalizedBrandScope = brandScope ? normalizeText(brandScope) : undefined;
+  const legacyProducts = normalizedBrandScope
+    ? legacy.products.filter((item) => normalizeText(item.brand) === normalizedBrandScope)
+    : legacy.products;
+  const productMap = new Map<string, RowProduct>(legacyProducts.map((item) => [item.key, item]));
   for (const item of registry) {
     const previous = productMap.get(item.key);
     productMap.set(item.key, { ...item, metrics: previous?.metrics ?? {} });
@@ -166,6 +318,7 @@ export function buildSheetDocument(
         key, domain: observation.domain, listingId: observation.listingId, brand: observation.brand,
         canonicalUrl: observation.canonicalUrl, product: observation.product,
         platform: observation.platform, groupId: observation.groupId,
+        aggregateGroupId: observation.aggregateGroupId,
         productIdentity: observation.productIdentity,
         firstSeenMonth: previous ? [previous.firstSeenMonth, month].sort()[0] : month,
         lastSeenMonth: previous ? [previous.lastSeenMonth, month].sort().at(-1)! : month,
@@ -185,23 +338,28 @@ export function buildSheetDocument(
     }
     if (item.productIdentity.granularity === "not_product") deduplicated.splice(index, 1);
   }
-  const descriptors = canonicalProductDescriptors(deduplicated.map((item) => ({ brand: item.brand, product: item.product, url: item.canonicalUrl })));
-  deduplicated.forEach((item, index) => {
-    if (item.productIdentity?.label) descriptors[index] = item.productIdentity.label;
-  });
-  deduplicated.forEach((item, index) => { item.product = descriptors[index]; });
+  const variants = canonicalProductVariants(deduplicated.map((item) => ({
+    brand: item.brand,
+    product: item.product,
+    url: item.canonicalUrl,
+    productIdentity: item.productIdentity
+  })));
+  deduplicated.forEach((item, index) => { item.product = variants[index].label; });
   const domainOrder = [...new Set([...request.domains, ...deduplicated.map((item) => item.domain).filter((domain) => !request.domains.includes(domain)).sort()])];
   const brandOrder = [...new Set([...request.brands, ...deduplicated.map((item) => item.brand).filter((brand) => !request.brands.includes(brand)).sort((a, b) => a.localeCompare(b, "ru"))])];
-  const ordered = deduplicated.sort((a, b) =>
+  const ordered = collapseSharedAggregateRows(deduplicated.sort((a, b) =>
+    SHEET_CATEGORIES.findIndex((category) => category.id === sheetCategory(a.domain).id) -
+      SHEET_CATEGORIES.findIndex((category) => category.id === sheetCategory(b.domain).id) ||
     domainOrder.indexOf(a.domain) - domainOrder.indexOf(b.domain) ||
     brandOrder.indexOf(a.brand) - brandOrder.indexOf(b.brand) ||
     a.product.localeCompare(b.product, "ru") || a.listingId.localeCompare(b.listingId)
-  );
+  ), months);
   const columnCount = 4 + months.length * 2;
   const values: SheetScalar[][] = [];
   const formulas: Array<Array<string | null>> = [];
   const rowKinds: SheetRowKind[] = [];
   const merges: SheetDocument["merges"] = [];
+  const productRows: Array<{ item: RowProduct; row: number }> = [];
   const add = (kind: SheetRowKind, row: SheetScalar[], formula: Array<string | null> = []) => {
     // Some presentation rows are intentionally assembled by assigning cells
     // at month columns (for example D, F, ...). Array spread preserves those
@@ -217,28 +375,40 @@ export function buildSheetDocument(
     ));
     rowKinds.push(kind);
   };
-  const title: SheetScalar[] = ["Бренд", "Ссылка", "Продукт", null];
+  const reportBrand = request.brands.length === 1 ? request.brands[0] : request.brands.join(", ");
+  const brandRow: SheetScalar[] = [`Рейтинги: ${reportBrand}`, null, null, null, `Рейтинги товаров · ${request.region}`];
+  add("brand", brandRow);
+  merges.push({ startRow: 0, endRow: 1, startColumn: 0, endColumn: 4 });
+  if (columnCount > 4) merges.push({ startRow: 0, endRow: 1, startColumn: 4, endColumn: columnCount });
+
+  const title: SheetScalar[] = ["Ссылка", "Площадка", "Продукт", null];
   const subheader: SheetScalar[] = [null, null, null, null];
-  for (let column = 0; column < 3; column += 1) {
-    merges.push({ startRow: 0, endRow: 2, startColumn: column, endColumn: column + 1 });
+  for (let column = 0; column < 4; column += 1) {
+    merges.push({ startRow: 1, endRow: 3, startColumn: column, endColumn: column + 1 });
   }
   months.forEach((month, index) => {
     const column = 4 + index * 2;
-    title[column] = monthLabel(month); subheader[column] = "Отзывы"; subheader[column + 1] = "Рейтинг";
-    merges.push({ startRow: 0, endRow: 1, startColumn: column, endColumn: column + 2 });
+    title[column] = monthLabel(month); subheader[column] = "Отзывы / оценки"; subheader[column + 1] = "Рейтинг";
+    merges.push({ startRow: 1, endRow: 2, startColumn: column, endColumn: column + 2 });
   });
   add("title", title); add("subheader", subheader);
-  const productStartRow = 3;
-  for (const domain of domainOrder) {
-    const inDomain = ordered.filter((item) => item.domain === domain);
-    if (!inDomain.length) continue;
-    add("section", [domain, null, "Продукт", null]);
-    for (const item of inDomain) {
-      const row: SheetScalar[] = [item.brand, item.canonicalUrl, item.product, null];
+  const productStartRow = 5;
+  for (const category of SHEET_CATEGORIES) {
+    const inCategory = ordered.filter((item) => sheetCategory(item.domain).id === category.id);
+    if (!inCategory.length) continue;
+    add("section", [
+      category.label,
+      `Площадок: ${new Set(inCategory.map((item) => normalizedDomain(item.domain))).size}`,
+      `Карточек: ${inCategory.length}`,
+      null
+    ]);
+    for (const item of inCategory) {
+      const row: SheetScalar[] = [item.canonicalUrl, platformLabel(item.domain), item.product, null];
       months.forEach((month, index) => {
         const metric = item.metrics[month]; row[4 + index * 2] = metric?.reviews ?? null; row[5 + index * 2] = metric?.rating ?? null;
       });
       add("product", row);
+      productRows.push({ item, row: values.length });
     }
   }
   const productEndRow = Math.max(productStartRow, values.length);
@@ -248,30 +418,55 @@ export function buildSheetDocument(
   months.forEach((_, index) => { summaryHeader[4 + index * 2] = "Кол-во"; summaryHeader[5 + index * 2] = "Доля"; });
   const summaryHeaderRow = values.length;
   add("summaryHeader", summaryHeader);
-  merges.push({ startRow: summaryHeaderRow, endRow: summaryHeaderRow + 1, startColumn: 0, endColumn: 4 });
-  const labels = ["Отзывов всего", "Карточки с рейтингом ≥4 баллов", "Карточки с рейтингом <4 баллов", "Карточки без отзывов"];
+  merges.push({ startRow: summaryHeaderRow, endRow: summaryHeaderRow + 1, startColumn: 0, endColumn: 3 });
+  const labels = ["Всего отзывов / оценок", "Карточки с рейтингом ≥4 баллов", "Карточки с рейтингом <4 баллов", "Карточки без отзывов / оценок"];
   labels.forEach((label, metricIndex) => {
     const row: SheetScalar[] = [label]; const formula: Array<string | null> = [];
-    months.forEach((_, index) => {
+    months.forEach((_month, index) => {
       const reviewsColumn = columnLetter(5 + index * 2); const ratingColumn = columnLetter(6 + index * 2);
       const countRow = summaryStartRow + 1 + metricIndex;
-      const firstData = productStartRow; const lastData = productEndRow;
+      const reviewCells = productRows.map(({ row: productRow }) => `${reviewsColumn}${productRow}`);
+      const ratingCells = productRows.map(({ row: productRow }) => `${ratingColumn}${productRow}`);
+      const reviewArray = `{${reviewCells.join(";")}}`;
+      const ratingArray = `{${ratingCells.join(";")}}`;
       const formulasForMetric = [
-        `=SUM(${reviewsColumn}$${firstData}:${reviewsColumn}${lastData})`,
-        `=COUNTIFS(${ratingColumn}$${firstData}:${ratingColumn}${lastData};">=4";${reviewsColumn}$${firstData}:${reviewsColumn}${lastData};">0";$B$${firstData}:$B${lastData};"https*")`,
-        `=COUNTIFS(${ratingColumn}$${firstData}:${ratingColumn}${lastData};"<4";${ratingColumn}$${firstData}:${ratingColumn}${lastData};"<>";${reviewsColumn}$${firstData}:${reviewsColumn}${lastData};">0";$B$${firstData}:$B${lastData};"https*")`,
-        `=COUNTIFS(${reviewsColumn}$${firstData}:${reviewsColumn}${lastData};0;${reviewsColumn}$${firstData}:${reviewsColumn}${lastData};"<>";${ratingColumn}$${firstData}:${ratingColumn}${lastData};"";$B$${firstData}:$B${lastData};"https*")`
+        reviewCells.length ? `=SUM(${reviewCells.join(";")})` : "=0",
+        ratingCells.length ? `=COUNTIFS(${ratingArray};">=4";${reviewArray};">0")` : "=0",
+        ratingCells.length ? `=COUNTIFS(${ratingArray};"<4";${ratingArray};"<>";${reviewArray};">0")` : "=0",
+        ratingCells.length ? `=COUNTIFS(${reviewArray};0;${reviewArray};"<>";${ratingArray};"")` : "=0"
       ];
       formula[4 + index * 2] = formulasForMetric[metricIndex];
       if (metricIndex > 0) formula[5 + index * 2] = `=IFERROR(${reviewsColumn}${countRow}/SUM(${reviewsColumn}${summaryStartRow + 2}:${reviewsColumn}${summaryStartRow + 4});0)`;
     });
     const summaryRow = values.length;
     add("summary", row, formula);
-    merges.push({ startRow: summaryRow, endRow: summaryRow + 1, startColumn: 0, endColumn: 4 });
+    merges.push({ startRow: summaryRow, endRow: summaryRow + 1, startColumn: 0, endColumn: 3 });
   });
-  add("footnote", ["*Публичные агрегаты отзывов и рейтингов; ошибки и блокировки не подменяются нулевыми значениями."]);
-  merges.push({ startRow: values.length - 1, endRow: values.length, startColumn: 0, endColumn: columnCount });
+  add("footnote", ["*Публичные агрегаты отзывов, оценок и голосов; ошибки и блокировки не подменяются нулевыми значениями."]);
+  merges.push({ startRow: values.length - 1, endRow: values.length, startColumn: 0, endColumn: 3 });
   return { values, formulas, rowKinds, months, productStartRow, productEndRow, summaryStartRow, columnCount, merges };
+}
+
+export function buildBrandSheetDocument(
+  existing: ExistingSheet,
+  request: RunRequest,
+  brand: string,
+  registry: ProductRecord[],
+  snapshots: Record<string, Record<string, Observation>>
+): SheetDocument {
+  const normalizedBrand = normalizeText(brand);
+  const scopedRegistry = registry.filter((item) => normalizeText(item.brand) === normalizedBrand);
+  const scopedSnapshots = Object.fromEntries(Object.entries(snapshots).map(([month, observations]) => [
+    month,
+    Object.fromEntries(Object.entries(observations).filter(([, item]) => normalizeText(item.brand) === normalizedBrand))
+  ]));
+  return buildSheetDocument(
+    existing,
+    { ...request, brands: [brand] },
+    scopedRegistry,
+    scopedSnapshots,
+    brand
+  );
 }
 
 export function columnLetter(oneBased: number): string {

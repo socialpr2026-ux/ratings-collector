@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { SiteProfile } from "../src/shared/types.js";
 import { MemoryEvidenceStore } from "../src/server/evidence.js";
 import { MemoryRepository } from "../src/server/repository.js";
-import { createCollectorRuntime } from "../src/server/runtime.js";
+import { apifyFallbackEnabled, createCollectorRuntime } from "../src/server/runtime.js";
 
 const request = {
   sheetUrl: "https://docs.google.com/spreadsheets/d/test_sheet/edit",
@@ -100,7 +100,14 @@ function marketplaceFetch(usageUsd: number) {
 }
 
 describe("collector runtime fallback integration", () => {
-  it("uses one 0.75 USD Ozon batch reservation for every brand in the run", async () => {
+  it("treats only the exact string true as paid-fallback opt-in", () => {
+    expect(apifyFallbackEnabled("true")).toBe(true);
+    for (const value of [undefined, "", "false", "TRUE", " true ", "1"]) {
+      expect(apifyFallbackEnabled(value)).toBe(false);
+    }
+  });
+
+  it("uses one capped 0.25 USD Ozon batch reservation and ignores stale v2 reservations", async () => {
     let usageChecks = 0;
     const actorCalls: Array<{ url: URL; body: Record<string, unknown> }> = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -135,10 +142,15 @@ describe("collector runtime fallback integration", () => {
       throw new Error(`Unexpected test request: ${url}`);
     }) as unknown as typeof fetch;
     const runtime = await createCollectorRuntime({
-      repository: new MemoryRepository(),
+      repository: new MemoryRepository({
+        usage: {
+          [`apify:v2:${new Date().toISOString().slice(0, 7)}`]: 4.48,
+          [`apify:v3:${new Date().toISOString().slice(0, 7)}:${Math.floor(Date.now() / (30 * 60 * 1000))}`]: 4.48
+        }
+      }),
       evidence: new MemoryEvidenceStore(),
       fetch: fetchMock,
-      env: { APIFY_TOKEN: "test-token", APIFY_MONTHLY_BUDGET_USD: "4.50" }
+      env: { APIFY_FALLBACK_ENABLED: "true", APIFY_TOKEN: "test-token", APIFY_MONTHLY_BUDGET_USD: "4.50" }
     });
 
     const run = await runtime.service.executeRun((await runtime.service.createRun({
@@ -153,8 +165,50 @@ describe("collector runtime fallback integration", () => {
     ]);
     expect(actorCalls).toHaveLength(1);
     expect(usageChecks).toBe(1);
-    expect(actorCalls[0].url.searchParams.get("maxTotalChargeUsd")).toBe("0.75");
+    expect(actorCalls[0].url.searchParams.get("maxTotalChargeUsd")).toBe("0.25");
     expect(actorCalls[0].body.searchQueries).toEqual(["Brand A", "Brand B"]);
+  });
+
+  it("does not turn a second proven-empty Ozon run into quota_exceeded while live usage still lags", async () => {
+    let usageChecks = 0;
+    let actorCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.hostname === "www.ozon.ru") {
+        return new Response("captcha", { status: 403 });
+      }
+      if (url.hostname === "api.apify.com" && url.pathname === "/v2/users/me/usage/monthly") {
+        usageChecks += 1;
+        return json({ data: { totalUsageCreditsUsdAfterVolumeDiscount: 4.19 } });
+      }
+      if (url.hostname === "api.apify.com" && url.pathname.endsWith("run-sync-get-dataset-items")) {
+        actorCalls += 1;
+        return json([]);
+      }
+      if (url.hostname === "api.apify.com") return json({ data: { id: "actor" } });
+      throw new Error(`Unexpected test request: ${url}`);
+    }) as unknown as typeof fetch;
+    const runtime = await createCollectorRuntime({
+      repository: new MemoryRepository(),
+      evidence: new MemoryEvidenceStore(),
+      fetch: fetchMock,
+      env: { APIFY_FALLBACK_ENABLED: "true", APIFY_TOKEN: "test-token", APIFY_MONTHLY_BUDGET_USD: "4.50" }
+    });
+    const runRequest = {
+      ...request,
+      domains: ["ozon.ru"],
+      brands: ["No Such Brand"]
+    };
+
+    const first = await runtime.service.executeRun((await runtime.service.createRun(runRequest)).id);
+    const second = await runtime.service.executeRun((await runtime.service.createRun(runRequest)).id);
+
+    expect(first.partitions).toMatchObject([{ status: "no_results", discovered: 0, collected: 0 }]);
+    expect(second.partitions).toMatchObject([{ status: "no_results", discovered: 0, collected: 0 }]);
+    expect(first.errors).toEqual([]);
+    expect(second.errors).toEqual([]);
+    expect(actorCalls).toBe(2);
+    expect(usageChecks).toBe(2);
   });
 
   it("completes Wildberries through the alternate free app type without checking or spending Apify", async () => {
@@ -209,14 +263,51 @@ describe("collector runtime fallback integration", () => {
     expect(requestedUrls.some((url) => url.hostname === "api.apify.com")).toBe(false);
   });
 
-  it("routes blocked Wildberries and Yandex primary collectors through capped Apify and back to fallback collect", async () => {
+  it("uses only free adapters by default and reports their failures without touching Apify", async () => {
+    const requestedUrls: URL[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      requestedUrls.push(url);
+      if (url.hostname === "www.ozon.ru") return new Response("captcha", { status: 403 });
+      if (url.hostname === "search.wb.ru") return new Response("rate limited", { status: 429 });
+      if (url.hostname === "reviews.yandex.ru" && url.pathname === "/ugcpub/sitemap.xml") {
+        return new Response("temporarily unavailable", { status: 503 });
+      }
+      if (url.hostname === "api.apify.com") {
+        return json({ data: { totalUsageCreditsUsdAfterVolumeDiscount: 0 } });
+      }
+      throw new Error(`Unexpected test request: ${url}`);
+    }) as unknown as typeof fetch;
+    const runtime = await createCollectorRuntime({
+      repository: new MemoryRepository(),
+      evidence: new MemoryEvidenceStore(),
+      fetch: fetchMock,
+      reviewsFetch: fetchMock,
+      // A configured token and even an invalid paid-budget value are inert
+      // without the explicit opt-in flag.
+      env: { APIFY_TOKEN: "must-not-be-used", APIFY_MONTHLY_BUDGET_USD: "not-a-budget" }
+    });
+
+    const run = await runtime.service.executeRun((await runtime.service.createRun({
+      ...request,
+      domains: ["ozon.ru", "wildberries.ru", "market.yandex.ru"]
+    })).id);
+
+    expect(run.observations).toEqual([]);
+    expect(run.partitions).toHaveLength(3);
+    expect(run.partitions.every((partition) => partition.status === "blocked")).toBe(true);
+    expect(run.partitions.every((partition) => !/apify|quota_exceeded|квот/i.test(partition.message ?? ""))).toBe(true);
+    expect(requestedUrls.some((url) => url.hostname === "api.apify.com")).toBe(false);
+  });
+
+  it("preserves the capped paid marketplace fallbacks only after explicit opt-in", async () => {
     const mocked = marketplaceFetch(1);
     const runtime = await createCollectorRuntime({
       repository: new MemoryRepository(),
       evidence: new MemoryEvidenceStore(),
       fetch: mocked.fetchMock,
       reviewsFetch: mocked.fetchMock,
-      env: { APIFY_TOKEN: "test-token", APIFY_MONTHLY_BUDGET_USD: "4.50" }
+      env: { APIFY_FALLBACK_ENABLED: "true", APIFY_TOKEN: "test-token", APIFY_MONTHLY_BUDGET_USD: "4.50" }
     });
 
     const run = await runtime.service.executeRun((await runtime.service.createRun(request)).id);
@@ -235,23 +326,26 @@ describe("collector runtime fallback integration", () => {
     });
     expect(run.observations.find((item) => item.domain === "market.yandex.ru")).toMatchObject({
       listingId: "265149860",
-      reviews: 711,
+      reviews: 1827,
+      writtenReviewCount: 711,
       rating: 4.7,
       status: "ok",
       source: "yandex_reviews_json_ld"
     });
     expect(mocked.paidPaths).toHaveLength(2);
+    expect(mocked.paidPaths.some((path) => path.includes("piotrv1001~wildberries-listings-scraper"))).toBe(true);
+    expect(mocked.paidPaths.some((path) => path.includes("yandex-market-scraper"))).toBe(true);
     expect(mocked.maximumPaidCalls()).toBe(1);
     expect(mocked.requestedUrls.some((url) => url.hostname === "card.wb.ru")).toBe(false);
   });
 
-  it("fails both fallbacks closed against the common live monthly budget before starting an Actor", async () => {
+  it("fails every explicitly enabled paid fallback against the common budget before Actor start", async () => {
     const mocked = marketplaceFetch(4.3);
     const runtime = await createCollectorRuntime({
       repository: new MemoryRepository(),
       evidence: new MemoryEvidenceStore(),
       fetch: mocked.fetchMock,
-      env: { APIFY_TOKEN: "test-token", APIFY_MONTHLY_BUDGET_USD: "4.50" }
+      env: { APIFY_FALLBACK_ENABLED: "true", APIFY_TOKEN: "test-token", APIFY_MONTHLY_BUDGET_USD: "4.50" }
     });
 
     const run = await runtime.service.executeRun((await runtime.service.createRun(request)).id);
@@ -259,9 +353,91 @@ describe("collector runtime fallback integration", () => {
     expect(run.observations).toEqual([]);
     expect(run.partitions).toHaveLength(2);
     expect(run.partitions.every((partition) => partition.status === "blocked")).toBe(true);
+    expect(run.partitions.every((partition) => partition.message?.includes("quota_exceeded"))).toBe(true);
     expect(run.errors).toHaveLength(2);
     expect(run.errors.every((error) => error.message.includes("quota_exceeded"))).toBe(true);
     expect(mocked.paidPaths).toEqual([]);
+  });
+
+  it("retries a failed Yandex partition through the same exhaustive free path without any Apify request", async () => {
+    const indexUrl = "https://reviews.yandex.ru/ugcpub/sitemap.xml";
+    const modelMapUrl = "https://reviews.yandex.ru/ugcpub/sitemap_model_260000000-269999999-0.xml";
+    const productUrl = "https://reviews.yandex.ru/product/kagotsel--265149860";
+    const requestedUrls: URL[] = [];
+    let indexCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      requestedUrls.push(url);
+      if (url.toString() === indexUrl) {
+        indexCalls += 1;
+        if (indexCalls <= 3) return new Response("temporarily unavailable", { status: 503 });
+        return new Response(
+          `<?xml version="1.0"?><sitemapindex><sitemap><loc>${modelMapUrl}</loc></sitemap></sitemapindex>`,
+          { status: 200, headers: { "content-type": "application/xml" } }
+        );
+      }
+      if (url.toString() === modelMapUrl) {
+        return new Response(
+          `<?xml version="1.0"?><urlset><url><loc>${productUrl}</loc></url></urlset>`,
+          { status: 200, headers: { "content-type": "application/xml" } }
+        );
+      }
+      if (url.toString() === productUrl || url.pathname === "/product/model--265149860") {
+        return new Response(`<script type="application/ld+json">${JSON.stringify({
+          "@context": "https://schema.org",
+          "@type": "Product",
+          name: "Кагоцел таблетки 12 мг №20",
+          aggregateRating: {
+            "@type": "AggregateRating",
+            ratingValue: 4.7,
+            reviewCount: 711,
+            ratingCount: 1827,
+            bestRating: 5
+          }
+        })}</script>`, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+      }
+      throw new Error(`Unexpected test request: ${url}`);
+    }) as unknown as typeof fetch;
+    const runtime = await createCollectorRuntime({
+      repository: new MemoryRepository(),
+      evidence: new MemoryEvidenceStore(),
+      fetch: fetchMock,
+      reviewsFetch: fetchMock,
+      env: { APIFY_TOKEN: "must-not-be-used", APIFY_MONTHLY_BUDGET_USD: "4.50" }
+    });
+    const created = await runtime.service.createRun({
+      ...request,
+      domains: ["market.yandex.ru"]
+    });
+
+    const first = await runtime.service.executeRun(created.id);
+    expect(first.partitions).toEqual([{
+      domain: "market.yandex.ru",
+      brand: "Кагоцел",
+      status: "blocked",
+      discovered: 0,
+      collected: 0,
+      message: "blocked: Yandex is unavailable for https://reviews.yandex.ru/ugcpub/sitemap.xml: HTTP 503"
+    }]);
+
+    const retried = await runtime.service.executeRun(created.id);
+    expect(retried.partitions).toMatchObject([{
+      domain: "market.yandex.ru",
+      brand: "Кагоцел",
+      status: "complete",
+      discovered: 1,
+      collected: 1
+    }]);
+    expect(retried.observations).toMatchObject([{
+      domain: "market.yandex.ru",
+      listingId: "265149860",
+      reviews: 1827,
+      writtenReviewCount: 711,
+      rating: 4.7,
+      status: "ok",
+      source: "yandex_reviews_json_ld"
+    }]);
+    expect(requestedUrls.some((url) => url.hostname === "api.apify.com")).toBe(false);
   });
 
   it("keeps a persistent shared reservation floor when Apify live usage is delayed", async () => {
@@ -289,7 +465,7 @@ describe("collector runtime fallback integration", () => {
       repository: new MemoryRepository(),
       evidence: new MemoryEvidenceStore(),
       fetch: fetchMock,
-      env: { APIFY_TOKEN: "test-token", APIFY_MONTHLY_BUDGET_USD: "0.50" }
+      env: { APIFY_FALLBACK_ENABLED: "true", APIFY_TOKEN: "test-token", APIFY_MONTHLY_BUDGET_USD: "0.50" }
     });
 
     const run = await runtime.service.executeRun((await runtime.service.createRun({

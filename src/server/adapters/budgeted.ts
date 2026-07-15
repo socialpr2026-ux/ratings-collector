@@ -8,6 +8,13 @@ type DiscoveryCacheAwareAdapter = SiteAdapter & {
   isDiscoveryCached(brand: string, context: AdapterContext): boolean;
 };
 
+type EmptyBatchAwareAdapter = SiteAdapter & {
+  /** True only after one exhaustive paid batch proved no matching cards for every requested brand. */
+  isDiscoveryBatchExhaustivelyEmpty(brand: string, context: AdapterContext): boolean;
+};
+
+type UsageReservation = { release(): Promise<void> };
+
 function hasCachedDiscovery(
   adapter: SiteAdapter,
   brand: string,
@@ -16,6 +23,16 @@ function hasCachedDiscovery(
   const candidate = adapter as Partial<DiscoveryCacheAwareAdapter>;
   return typeof candidate.isDiscoveryCached === "function" &&
     candidate.isDiscoveryCached(brand, context);
+}
+
+function hasExhaustivelyEmptyBatch(
+  adapter: SiteAdapter,
+  brand: string,
+  context: AdapterContext
+): boolean {
+  const candidate = adapter as Partial<EmptyBatchAwareAdapter>;
+  return typeof candidate.isDiscoveryBatchExhaustivelyEmpty === "function" &&
+    candidate.isDiscoveryBatchExhaustivelyEmpty(brand, context);
 }
 
 /**
@@ -54,7 +71,7 @@ export class BudgetedAdapter implements SiteAdapter {
        * persistent conservative usage floor while Apify's live usage endpoint
        * is still catching up with a just-finished Actor run.
        */
-      reserveCapacityUsd?: (amount: number) => Promise<void>;
+      reserveCapacityUsd?: (amount: number) => Promise<void | UsageReservation>;
       runExclusive?: AsyncExclusive;
     }
   ) {
@@ -77,13 +94,16 @@ export class BudgetedAdapter implements SiteAdapter {
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const operation = async () => {
       context.signal?.throwIfAborted();
+      let reservation: UsageReservation | undefined;
       if (!hasCachedDiscovery(this.inner, brand, context)) {
         // Check live Apify usage immediately before the paid Actor call instead
         // of accumulating a stale synthetic ledger that over-reserves actual cost.
         const scope = `${context.runId ?? context.month ?? new Date().toISOString().slice(0, 7)}:${brand}`;
         let check = this.checks.get(scope);
         if (!check) {
-          check = this.assertCapacity();
+          check = this.assertCapacity().then((value) => {
+            reservation = value;
+          });
           this.checks.set(scope, check);
         }
         try {
@@ -95,20 +115,26 @@ export class BudgetedAdapter implements SiteAdapter {
         }
       }
       context.signal?.throwIfAborted();
-      return this.inner.discover(brand, context);
+      const discovered = await this.inner.discover(brand, context);
+      if (reservation && hasExhaustivelyEmptyBatch(this.inner, brand, context)) {
+        // A successful empty batch cannot spend the result-based maximum that
+        // was reserved before the Actor call. Release the excess without ever
+        // changing the classification of the already-proven empty result.
+        await reservation.release().catch(() => undefined);
+      }
+      return discovered;
     };
     return this.options.runExclusive
       ? this.options.runExclusive(operation)
       : operation();
   }
 
-  private async assertCapacity(): Promise<void> {
+  private async assertCapacity(): Promise<UsageReservation | undefined> {
     try {
       if (this.options.reserveCapacityUsd) {
-        await this.options.reserveCapacityUsd(this.options.reservePerDiscovery);
-        return;
+        return await this.options.reserveCapacityUsd(this.options.reservePerDiscovery) ?? undefined;
       }
-      if (!this.options.externalUsageUsd) return;
+      if (!this.options.externalUsageUsd) return undefined;
       const actual = await this.options.externalUsageUsd();
       if (!Number.isFinite(actual) || actual < 0 || actual + this.options.reservePerDiscovery > this.options.monthlyLimit + Number.EPSILON) {
         throw new Error(
@@ -119,5 +145,6 @@ export class BudgetedAdapter implements SiteAdapter {
       if (error instanceof AdapterQuotaError) throw error;
       throw new AdapterQuotaError(error instanceof Error ? error.message : String(error));
     }
+    return undefined;
   }
 }

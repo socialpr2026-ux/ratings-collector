@@ -103,6 +103,25 @@ export class BlobRepository implements Repository {
     });
   }
 
+  async releaseUsage(key: string, amount: number): Promise<number> {
+    if (!Number.isFinite(amount) || amount < 0) {
+      throw new Error("Incorrect usage release parameters");
+    }
+    return this.withLease(`usage:${key}`, 20_000, async () => {
+      const path = `usage/${hash(key)}.json`;
+      const value = await this.store.get(path, strongJson) as { used?: number } | null;
+      const used = Number(value?.used ?? 0);
+      if (!Number.isFinite(used) || used < 0) {
+        throw new Error("Incorrect reserved usage value");
+      }
+      const next = Math.max(0, used - amount);
+      if (next !== used) {
+        await this.store.setJSON(path, { used: next, updatedAt: new Date().toISOString() });
+      }
+      return next;
+    });
+  }
+
   async acquireLease(scope: string, leaseMs: number, attempts = 30): Promise<{ token: string; keys: string[] }> {
     if (!Number.isFinite(leaseMs) || leaseMs < 1000 || leaseMs > 3_700_000) throw new Error("Некорректная длительность lease");
     const token = randomUUID();

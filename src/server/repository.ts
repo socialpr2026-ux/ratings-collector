@@ -32,6 +32,10 @@ export interface Repository {
   getPublication(key: string): Promise<PublicationRecord | undefined>;
   savePublication(key: string, publication: PublicationRecord): Promise<void>;
   reserveUsage(key: string, amount: number, limit: number): Promise<number>;
+  releaseUsage(key: string, amount: number): Promise<number>;
+  /** Optional cross-instance lock used by short atomic workflows. */
+  acquireLease?(scope: string, leaseMs: number): Promise<{ token: string; keys: string[] }>;
+  releaseLease?(lease: { token: string; keys: string[] }): Promise<void>;
 }
 
 const emptyDatabase = (): Database => ({
@@ -97,6 +101,17 @@ export class MemoryRepository implements Repository {
     this.db.usage[key] = used + amount;
     await this.changed();
     return this.db.usage[key];
+  }
+  async releaseUsage(key: string, amount: number): Promise<number> {
+    if (!Number.isFinite(amount) || amount < 0) {
+      throw new Error("Invalid usage release parameters");
+    }
+    const used = this.db.usage[key] ?? 0;
+    const next = Math.max(0, used - amount);
+    if (next === used) return used;
+    this.db.usage[key] = next;
+    await this.changed();
+    return next;
   }
   protected async changed(): Promise<void> {}
 }

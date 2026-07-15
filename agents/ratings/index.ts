@@ -9,7 +9,7 @@ import { readAgentJson } from "../../src/server/utils/agent-request.js";
 import { safeErrorMessage } from "../../src/server/utils/error-message.js";
 import { loadPlaywright } from "../../src/server/utils/playwright-runtime.js";
 import { playwrightCdpBaseUrl } from "../../src/server/utils/sandbox-cdp.js";
-import { assertSafePublicDestination, isPrivateNetworkAddress } from "../../src/server/utils/safe-fetch.js";
+import { assertSafePublicDestination, isPrivateNetworkAddress, readTextBounded } from "../../src/server/utils/safe-fetch.js";
 
 type BrowserApi = { cdpUrl: string };
 type SandboxCommands = { run(command: string): Promise<unknown> };
@@ -24,6 +24,24 @@ type AgentContext = {
   env: Record<string, string | undefined>;
   sandbox: SandboxApi;
 };
+
+export function shouldAutoRetryInitialCollection(
+  initialStatus: "queued" | "running" | "review" | "publishing" | "published" | "failed",
+  partitions: Array<{ status: string; message?: string }>
+): boolean {
+  if (initialStatus !== "queued" || partitions.length > 50) return false;
+  const failures = partitions.filter(({ status }) => status !== "complete" && status !== "no_results");
+  if (failures.length === 0 || failures.length > 10) return false;
+  return failures.every(({ status, message = "" }) =>
+    (status === "blocked" || status === "error") &&
+    !/^(?:quota_exceeded|parser_changed)\s*:/i.test(message.trim()) &&
+    /\bcaptcha\b|капч|HTTP\s+(?:408|425|429|498|499|5\d{2})\b/i.test(message)
+  );
+}
+
+export const MAX_INITIAL_TRANSIENT_RECOVERY_PASSES = 3;
+
+const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);
 
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
@@ -45,6 +63,16 @@ function normalizedVisibleText(value: string): string {
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim()
     .replace(/\s+/g, " ");
+}
+
+function isCompleteYandexSitemap(url: URL, response: Response): Promise<boolean> {
+  if (!response.ok || !url.pathname.startsWith("/ugcpub/")) return Promise.resolve(response.ok);
+  const expected = url.pathname === "/ugcpub/sitemap.xml"
+    ? { open: /<sitemapindex\b/i, close: /<\/sitemapindex\s*>/i }
+    : { open: /<urlset\b/i, close: /<\/urlset\s*>/i };
+  return readTextBounded(response.clone(), 12_000_000, 20_000)
+    .then((body) => expected.open.test(body) && expected.close.test(body))
+    .catch(() => false);
 }
 
 export function hasExplicitWildberriesNoResults(bodyText: string, query: string): boolean {
@@ -92,6 +120,29 @@ export function browserFetch(
   const wildberriesResponseChecks: Promise<void>[] = [];
   let wildberriesNetworkViolation: Error | undefined;
   const hardenedContexts = new Map<string, Promise<BrowserContext>>();
+  const fetchViaStaticProxy = (url: URL, signal: AbortSignal) => {
+    if (!staticProxy) throw new Error("Static proxy is not configured");
+    return fetch(staticProxy.endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${staticProxy.token}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ url: url.toString() }),
+      signal
+    });
+  };
+  const fetchWildberriesViaStaticProxy = async (url: URL, signal: AbortSignal) => {
+    const first = await fetchViaStaticProxy(url, signal);
+    if (!TRANSIENT_STATIC_PROXY_STATUSES.has(first.status)) return first;
+    await first.body?.cancel().catch(() => undefined);
+    signal.throwIfAborted();
+    // One bounded retry absorbs a transient Function/upstream hand-off. The
+    // second response remains authoritative and can never become a fake zero.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    signal.throwIfAborted();
+    return fetchViaStaticProxy(url, signal);
+  };
   const acquireSandbox = createLazySandboxAcquire(sandbox);
   const getBrowser = () => connected ??= acquireSandbox()
     .then(() => loadPlaywright())
@@ -200,16 +251,107 @@ export function browserFetch(
     const request = new Request(input, init);
     const url = new URL(request.url);
     const host = url.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
-    if (staticProxy && (host === "uteka.ru" || host === "megapteka.ru" || host === "irecommend.ru" || host === "otzovik.com")) {
-      return fetch(staticProxy.endpoint, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${staticProxy.token}`,
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({ url: url.toString() }),
-        signal: request.signal
-      });
+    const fixedWildberriesTarget = !shouldUseHardenedBrowser(request) && (
+      url.hostname === "search.wb.ru" && [
+        "/exactmatch/ru/common/v14/search",
+        "/exactmatch/ru/common/v18/search"
+      ].includes(url.pathname) ||
+      url.hostname === "card.wb.ru" && url.pathname === "/cards/v4/detail"
+    );
+    const fixedYandexTarget = url.protocol === "https:" && url.hostname === "reviews.yandex.ru" &&
+      !url.port && !url.username && !url.password && !url.hash && !url.search && (
+        url.pathname === "/ugcpub/sitemap.xml" ||
+        /^\/ugcpub\/sitemap_model_\d+-\d+-\d+\.xml$/i.test(url.pathname) ||
+        /^\/product\/(?:[a-z0-9_-]+--)?\d+$/i.test(url.pathname)
+      );
+    const fixedZdravcityTarget = url.protocol === "https:" && url.hostname === "zdravcity.ru" &&
+      !url.port && !url.username && !url.password && !url.hash && !url.search && (
+        /^\/g_[a-z0-9-]+\/$/i.test(url.pathname) ||
+        /^\/p_[a-z0-9][a-z0-9-]*-\d+\.html$/i.test(url.pathname)
+      );
+    const fixedAptekaTarget = url.protocol === "https:" && url.hostname === "apteka.ru" &&
+      !url.port && !url.username && !url.password && !url.hash && (
+        !url.search && (
+          /^\/preparation\/[a-z0-9][a-z0-9-]*\/$/i.test(url.pathname) ||
+          /^\/product\/[a-z0-9-]+-[a-f0-9]{24}\/$/i.test(url.pathname)
+        ) ||
+        url.pathname === "/sitemap-product.xml" && url.searchParams.getAll("slugs").length === 1 &&
+          [...url.searchParams.keys()].every((key) => key === "slugs") &&
+          url.searchParams.get("slugs")!.split(",").every((slug) => /^[a-z0-9-]{3,80}$/i.test(slug))
+      );
+    if (staticProxy && [
+      "www-ozon-ru.translate.goog",
+      "farmlend-ru.translate.goog",
+      "okapteka-ru.translate.goog",
+      "www-asna-ru.translate.goog",
+      "polza-ru.translate.goog",
+      "apteka-ru.translate.goog",
+      "nfapteka-ru.translate.goog",
+      "www-budzdorov-ru.translate.goog",
+      "megamarket-ru.translate.goog"
+    ].includes(url.hostname)) {
+      const first = await fetchViaStaticProxy(url, request.signal);
+      if (![429, 502, 503, 504].includes(first.status)) return first;
+      await first.body?.cancel().catch(() => undefined);
+      request.signal.throwIfAborted();
+      // One bounded retry covers a transient Function/upstream hand-off. A
+      // second failure is returned unchanged and remains fail-closed.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      request.signal.throwIfAborted();
+      return fetchViaStaticProxy(url, request.signal);
+    }
+    if (staticProxy && fixedAptekaTarget) {
+      return fetchViaStaticProxy(url, request.signal);
+    }
+    if (staticProxy && fixedWildberriesTarget) {
+      let proxied: Response | undefined;
+      try {
+        // Agent egress is consistently throttled while the fixed Function
+        // egress succeeds for the same bounded buyer API request. Prefer the
+        // free fixed route so a healthy response never reaches Sandbox.
+        proxied = await fetchWildberriesViaStaticProxy(url, request.signal);
+        if (proxied.ok || !TRANSIENT_STATIC_PROXY_STATUSES.has(proxied.status)) return proxied;
+      } catch (error) {
+        if (request.signal.aborted) throw error;
+      }
+      try {
+        const direct = await fetch(request);
+        return direct.ok ? direct : proxied ?? direct;
+      } catch (error) {
+        if (proxied) return proxied;
+        throw error;
+      }
+    }
+    if (staticProxy && (fixedYandexTarget || fixedZdravcityTarget)) {
+      try {
+        const direct = await fetch(request);
+        const yandexSitemapIncomplete = fixedYandexTarget && url.pathname.startsWith("/ugcpub/")
+          ? !await isCompleteYandexSitemap(url, direct)
+          : false;
+        const shouldFallback = yandexSitemapIncomplete ||
+          [403, 408, 425, 429].includes(direct.status) || direct.status >= 500;
+        if (!shouldFallback) return direct;
+        const proxied = await fetchViaStaticProxy(url, request.signal);
+        if (proxied.ok) {
+          await direct.body?.cancel().catch(() => undefined);
+          return proxied;
+        }
+        await proxied.body?.cancel().catch(() => undefined);
+        return direct;
+      } catch {
+        return fetchViaStaticProxy(url, request.signal);
+      }
+    }
+    if (staticProxy && (
+      host === "uteka.ru" ||
+      host === "megapteka.ru" ||
+      host === "irecommend.ru" ||
+      host === "otzovik.com" ||
+      host === "pravogolosa.net" ||
+      host === "ru.otzyv.com" ||
+      host === "med-otzyv.ru"
+    )) {
+      return fetchViaStaticProxy(url, request.signal);
     }
     if (!shouldUseHardenedBrowser(request)) {
       return fetch(request);
@@ -218,6 +360,18 @@ export function browserFetch(
     if (browserMode === "ozon-composer") {
       if (url.protocol !== "https:" || url.hostname !== "www.ozon.ru" || url.pathname !== "/api/composer-api.bx/page/json/v2") {
         throw new Error("Ozon browser mode is restricted to the fixed composer endpoint");
+      }
+      // First try a fixed, authenticated Cloud Function egress. It costs no
+      // Sandbox GB-s and preserves the browser path as a fallback when Ozon
+      // blocks that IP range too.
+      if (staticProxy) {
+        try {
+          const proxied = await fetchViaStaticProxy(url, request.signal);
+          const contentType = proxied.headers.get("content-type") ?? "";
+          if (proxied.ok && /json/i.test(contentType)) return proxied;
+        } catch {
+          // Continue to the hardened browser route below.
+        }
       }
       let response!: Response;
       queue = queue.catch(() => undefined).then(async () => {
@@ -246,7 +400,10 @@ export function browserFetch(
       return response;
     }
     if (browserMode === "wildberries-api") {
-      const fixedSearch = url.hostname === "search.wb.ru" && url.pathname === "/exactmatch/ru/common/v18/search";
+      const fixedSearch = url.hostname === "search.wb.ru" && [
+        "/exactmatch/ru/common/v14/search",
+        "/exactmatch/ru/common/v18/search"
+      ].includes(url.pathname);
       const fixedCard = url.hostname === "card.wb.ru" && url.pathname === "/cards/v4/detail";
       if (url.protocol !== "https:" || (!fixedSearch && !fixedCard)) {
         throw new Error("Wildberries browser mode is restricted to the fixed search and card endpoints");
@@ -272,7 +429,7 @@ export function browserFetch(
         if (wildberriesNetworkViolation) throw wildberriesNetworkViolation;
         const final = await assertSafePublicDestination(result.finalUrl || url.toString());
         const isExpectedFinal =
-          fixedSearch && final.hostname === "search.wb.ru" && final.pathname === "/exactmatch/ru/common/v18/search" ||
+          fixedSearch && final.hostname === "search.wb.ru" && final.pathname === url.pathname ||
           fixedCard && final.hostname === "card.wb.ru" && final.pathname === "/cards/v4/detail";
         if (!isExpectedFinal) throw new Error(`Wildberries API redirected to ${final.hostname}`);
         response = new Response(result.text, {
@@ -495,7 +652,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
             await repository.releaseLease(apifyLease).catch(() => undefined);
           }
         });
-        const runtime = await createCollectorRuntime({
+        const runtimeOptions = () => ({
           repository,
           evidence: new RemoteEvidenceStore(repository),
           fetch: browserFetch(context.sandbox, {
@@ -505,8 +662,22 @@ export async function onRequest(context: AgentContext): Promise<Response> {
           env: context.env,
           apifyExclusive
         });
+        let runtime = await createCollectorRuntime(runtimeOptions());
         try {
-          const completed = await runtime.service.executeRun(run.id);
+          let completed = await runtime.service.executeRun(run.id);
+          for (
+            let recoveryPass = 0;
+            recoveryPass < MAX_INITIAL_TRANSIENT_RECOVERY_PASSES &&
+              shouldAutoRetryInitialCollection(run.status, completed.partitions);
+            recoveryPass += 1
+          ) {
+            // A fresh runtime clears per-adapter cooldowns and transient route
+            // state. Successful partitions are checkpointed, so the second
+            // through fourth passes touch only failed domain/brand pairs and cannot create
+            // duplicate observations.
+            runtime = await createCollectorRuntime(runtimeOptions());
+            completed = await runtime.service.executeRun(run.id);
+          }
           return json({ id: completed.id, status: completed.status });
         } catch (error) {
           const failed = await runtime.service.getRun(run.id);

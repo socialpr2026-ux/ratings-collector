@@ -3,17 +3,23 @@ import { describe, expect, it, vi } from "vitest";
 import type { AdapterContext, ProductRef } from "../src/shared/types.js";
 import { AdapterBlockedError, ParserChangedError } from "../src/server/adapters/errors.js";
 import { YandexAdapter } from "../src/server/adapters/yandex.js";
+import { analyzeProductIdentity } from "../src/server/utils/product-name.js";
+import { hasDeterministicAggregateProof } from "../src/shared/review-aggregates.js";
 
 const INDEX = "https://reviews.yandex.ru/ugcpub/sitemap.xml";
 const MAP_A = "https://reviews.yandex.ru/ugcpub/sitemap_model_0-9999999-0.xml";
 const MAP_B = "https://reviews.yandex.ru/ugcpub/sitemap_model_260000000-269999999-0.xml";
 const MAP_C = "https://reviews.yandex.ru/ugcpub/sitemap_model_500000000-509999999-0.xml";
+const MAP_695 = "https://reviews.yandex.ru/ugcpub/sitemap_model_690000000-699999999-0.xml";
 
 describe("YandexAdapter discovery", () => {
   it("discovers model cards by Cyrillic brand transliteration and deduplicates modelId", async () => {
     const fetch = routeFetch({
       [INDEX]: xmlResponse(sitemapIndex([MAP_A, MAP_B, "https://evil.example/sitemap_model_1-2-0.xml"])),
-      [MAP_A]: xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/chasy-kagotsel--111"])),
+      [MAP_A]: xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/chasy-kagotsel--111",
+        "https://reviews.yandex.ru/product/--3252533"
+      ])),
       [MAP_B]: xmlResponse(
         modelSitemap([
           "https://reviews.yandex.ru/product/kagotsel-tabletki-12-mg-20-sht--265149860",
@@ -31,8 +37,35 @@ describe("YandexAdapter discovery", () => {
     expect(refs.find(({ listingId }) => listingId === "265149860")?.url).toBe(
       "https://reviews.yandex.ru/product/kagotsel--265149860"
     );
+    expect(refs.some(({ listingId }) => listingId === "3252533")).toBe(false);
     expect(refs.every((ref) => ref.platform === "yandex" && ref.domain === "market.yandex.ru")).toBe(true);
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining("evil.example"), expect.anything());
+  });
+
+  it("discovers every current Kagocel model across distant sitemap shards", async () => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([MAP_B, MAP_695])),
+      [MAP_B]: xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/kagotsel--265149860"
+      ])),
+      [MAP_695]: xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/kagotsel-tabletki-12-mg-10-sht--695943742",
+        "https://reviews.yandex.ru/product/kagotsel-tabletki-12-mg-20-sht--695940046",
+        "https://reviews.yandex.ru/product/kagotsel-tabletki-12-mg-30-sht--695941716",
+        "https://reviews.yandex.ru/product/ingavirin--695999999"
+      ]))
+    });
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 2 });
+
+    const refs = await adapter.discover("Кагоцел", context({ runId: "kagocel-live-shape", brands: ["Кагоцел"] }));
+
+    expect(new Set(refs.map(({ listingId }) => listingId))).toEqual(new Set([
+      "265149860",
+      "695940046",
+      "695941716",
+      "695943742"
+    ]));
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 
   it("fails closed before scanning when the sitemap index exceeds the cap", async () => {
@@ -48,7 +81,7 @@ describe("YandexAdapter discovery", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("scans an index exactly at the cap and reuses cached responses", async () => {
+  it("reuses the small index but releases raw model sitemap responses between runs", async () => {
     const fetch = routeFetch({
       [INDEX]: xmlResponse(sitemapIndex([MAP_A, MAP_B, MAP_C])),
       [MAP_A]: xmlResponse(modelSitemap([])),
@@ -57,10 +90,109 @@ describe("YandexAdapter discovery", () => {
     });
     const adapter = new YandexAdapter({ fetch, maxSitemaps: 3, cacheTtlMs: 60_000 });
 
-    await adapter.discover("Кагоцел", context());
-    await adapter.discover("Кагоцел", context());
+    await adapter.discover("kagotsel", context({ runId: "run-a", brands: ["kagotsel"] }));
+    await adapter.discover("kagotsel", context({ runId: "run-b", brands: ["kagotsel"] }));
 
-    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(fetch).toHaveBeenCalledTimes(7);
+  });
+
+  it("scans every sitemap once for all brands in the same run", async () => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([MAP_A, MAP_B])),
+      [MAP_A]: xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/kagotsel--111",
+        "https://reviews.yandex.ru/product/ingavirin--112"
+      ])),
+      [MAP_B]: xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/kagotsel-tabletki--265149860",
+        "https://reviews.yandex.ru/product/ingavirin-kapsuly--265149861"
+      ]))
+    });
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 2 });
+    const shared = { runId: "run-batch", brands: ["kagotsel", "ingavirin"] } as const;
+
+    const [kagotsel, ingavirin] = await Promise.all([
+      adapter.discover("kagotsel", context(shared)),
+      adapter.discover("ingavirin", context(shared))
+    ]);
+    const repeated = await adapter.discover("kagotsel", context(shared));
+
+    expect(kagotsel.map(({ listingId }) => listingId)).toEqual(["111", "265149860"]);
+    expect(ingavirin.map(({ listingId }) => listingId)).toEqual(["112", "265149861"]);
+    expect(repeated).toEqual(kagotsel);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("isolates one brand candidate overflow without poisoning cached results for other brands", async () => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([MAP_A])),
+      [MAP_A]: xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/canpol-babies-a--101",
+        "https://reviews.yandex.ru/product/canpol-babies-b--102",
+        "https://reviews.yandex.ru/product/canpol-babies-c--103",
+        "https://reviews.yandex.ru/product/kagotsel-tabletki-10--201",
+        "https://reviews.yandex.ru/product/kagotsel-tabletki-20--202"
+      ]))
+    });
+    const adapter = new YandexAdapter({ fetch, maxCandidates: 2 });
+    const shared = { runId: "run-overflow-isolation", brands: ["Canpol Babies", "kagotsel"] } as const;
+
+    const [canpol, kagotsel] = await Promise.allSettled([
+      adapter.discover("Canpol Babies", context(shared)),
+      adapter.discover("kagotsel", context(shared))
+    ]);
+
+    expect(canpol).toMatchObject({
+      status: "rejected",
+      reason: expect.objectContaining({
+        message: "Yandex discovery for Canpol Babies found more than 2 distinct models"
+      })
+    });
+    expect(kagotsel).toMatchObject({
+      status: "fulfilled",
+      value: [
+        expect.objectContaining({ listingId: "201", brand: "kagotsel" }),
+        expect.objectContaining({ listingId: "202", brand: "kagotsel" })
+      ]
+    });
+    await expect(adapter.discover("kagotsel", context(shared))).resolves.toHaveLength(2);
+    await expect(adapter.discover("Canpol Babies", context(shared))).rejects.toThrow(
+      "Yandex discovery for Canpol Babies found more than 2 distinct models"
+    );
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails the whole brand batch closed and retries it after one unreadable shard", async () => {
+    let mapARequests = 0;
+    let mapBRequests = 0;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A, MAP_B]));
+      if (url === MAP_A) {
+        mapARequests += 1;
+        return xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/kagotsel--111"]));
+      }
+      if (url === MAP_B) {
+        mapBRequests += 1;
+        return mapBRequests === 1
+          ? xmlResponse("<html>changed</html>")
+          : xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/ingavirin--112"]));
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 2 });
+    const shared = { runId: "run-retry", brands: ["kagotsel", "ingavirin"] } as const;
+
+    await expect(Promise.all([
+      adapter.discover("kagotsel", context(shared)),
+      adapter.discover("ingavirin", context(shared))
+    ])).rejects.toBeInstanceOf(ParserChangedError);
+    await expect(adapter.discover("ingavirin", context(shared))).resolves.toMatchObject([
+      { listingId: "112", brand: "ingavirin" }
+    ]);
+
+    expect(mapARequests).toBe(2);
+    expect(mapBRequests).toBe(2);
   });
 
   it("fails closed only when the distinct candidate count actually exceeds its cap", async () => {
@@ -138,6 +270,27 @@ describe("YandexAdapter discovery", () => {
     expect(indexRequests).toBe(2);
   });
 
+  it("retries a transient sitemap 429 instead of switching away from the free collector", async () => {
+    let modelCalls = 0;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A]));
+      if (url === MAP_A) {
+        modelCalls += 1;
+        return modelCalls === 1
+          ? new Response("rate limited", { status: 429 })
+          : xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/kagotsel--265149860"]));
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new YandexAdapter({ fetch, sitemapRetryBaseMs: 0 });
+
+    await expect(adapter.discover("Кагоцел", context())).resolves.toMatchObject([
+      { listingId: "265149860" }
+    ]);
+    expect(modelCalls).toBe(2);
+  });
+
   it("retries a bounded sitemap body-read timeout without masking valid XML", async () => {
     let modelRequests = 0;
     const fetch = vi.fn(async (input: string | URL | Request) => {
@@ -187,9 +340,230 @@ describe("YandexAdapter discovery", () => {
     await expect(adapter.discover("kagotsel", context())).rejects.toBeInstanceOf(ParserChangedError);
     expect(fetch).toHaveBeenCalledTimes(2);
   });
+
+  it("does not turn a truncated model sitemap into exhaustive no_results", async () => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([MAP_A])),
+      [MAP_A]: xmlResponse("<?xml version=\"1.0\"?><urlset><url><loc>https://reviews.yandex.ru/product/other--999</loc></url>")
+    });
+    const adapter = new YandexAdapter({ fetch, sitemapRetryBaseMs: 0 });
+
+    await expect(adapter.discover("kagotsel", context())).rejects.toBeInstanceOf(ParserChangedError);
+  });
 });
 
 describe("YandexAdapter collection", () => {
+  it("uses source-bound reviewed product titles to resolve one exact Khondrofen variant", async () => {
+    const listingId = "5829843760";
+    const url = `https://reviews.yandex.ru/product/khondrofen-maz-d-nar-prim--${listingId}`;
+    const html = productHtml({
+      canonical: url,
+      product: {
+        "@context": "https://schema.org",
+        "@type": "Product",
+        name: "Хондрофен мазь д/нар.прим.",
+        brand: "Хондрофен",
+        aggregateRating: { "@type": "AggregateRating", reviewCount: 5, ratingCount: 5, ratingValue: 4.9 }
+      }
+    }).replace("</body>", `
+      <div class="Review-Text">Комментарий с ложным соседним вариантом 50 г</div>
+      <div class="Review-ReasonToTrustText">Товар — Хондрофен мазь для наружного применения 30 г 1 шт</div>
+      <script>window.__STATE__={"reasonToTrust":{"text":"Товар — Хондрофен мазь для наружного применения 30 г 1 шт"}}</script>
+    </body>`);
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }) });
+
+    const observation = await adapter.collect(ref({ listingId, brand: "Хондрофен", url }), context());
+    const identity = analyzeProductIdentity({
+      brand: observation.brand,
+      product: observation.product,
+      url: observation.canonicalUrl,
+      evidence: observation.productEvidence
+    });
+
+    expect(observation).toMatchObject({ reviews: 5, rating: 4.9, status: "ok" });
+    expect(observation.productEvidence?.signals).toContainEqual({
+      source: "variant",
+      text: "Хондрофен мазь для наружного применения 30 г 1 шт"
+    });
+    expect(identity).toMatchObject({
+      label: "мазь 30 г",
+      granularity: "variant",
+      confidence: "exact"
+    });
+    expect(identity.label).not.toContain("50 г");
+  });
+
+  it("keeps genuinely different source-bound packs visible under one proven Yandex model aggregate", async () => {
+    const listingId = "5829843760";
+    const url = `https://reviews.yandex.ru/product/khondrofen-maz-d-nar-prim--${listingId}`;
+    const html = productHtml({
+      canonical: url,
+      product: {
+        "@type": "Product",
+        name: "Хондрофен мазь д/нар.прим.",
+        brand: "Хондрофен",
+        aggregateRating: { "@type": "AggregateRating", reviewCount: 2, ratingValue: 5 }
+      }
+    }).replace("</body>", `
+      <div class="Review-ReasonToTrustText">Товар — Хондрофен мазь для наружного применения 30 г 1 шт</div>
+      <div class="Review-ReasonToTrustText">Товар — Хондрофен мазь для наружного применения 50 г 1 шт</div>
+    </body>`);
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }) });
+
+    const observation = await adapter.collect(ref({ listingId, brand: "Хондрофен", url }), context());
+    const identity = analyzeProductIdentity({
+      brand: observation.brand,
+      product: observation.product,
+      url: observation.canonicalUrl,
+      evidence: observation.productEvidence
+    });
+
+    expect(identity).toMatchObject({ granularity: "family", confidence: "exact", variantCount: 2 });
+    expect(identity.label).toContain("мазь 30 г");
+    expect(identity.label).toContain("мазь 50 г");
+    expect(hasDeterministicAggregateProof({ ...observation, productIdentity: identity })).toBe(true);
+  });
+
+  it("collapses equivalent Trombolix Pro offer spellings into one exact product variant", async () => {
+    const listingId = "1016049020";
+    const url = `https://reviews.yandex.ru/product/tromboliks-pro--${listingId}`;
+    const html = productHtml({
+      canonical: url,
+      product: {
+        "@type": "Product",
+        name: "Тромболикс Про",
+        brand: "Тромболикс Про",
+        aggregateRating: { "@type": "AggregateRating", reviewCount: 17, ratingCount: 25, ratingValue: 4.8 }
+      }
+    }).replace("</body>", `
+      <div class="Review-ReasonToTrustText">Товар — Тромболикс Про раствор для в/в и в/м введ. 600ЛЕ/2мл 2мл 10шт</div>
+      <div class="Review-ReasonToTrustText">Товар — Тромболикс Про раствор для в/в и в/м введ 600 ле/2мл 2 мл амп 10 шт</div>
+    </body>`);
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }) });
+
+    const observation = await adapter.collect(ref({ listingId, brand: "Тромболикс Про", url }), context());
+    const identity = analyzeProductIdentity({
+      brand: observation.brand,
+      product: observation.product,
+      url: observation.canonicalUrl,
+      evidence: observation.productEvidence
+    });
+
+    expect(observation.productEvidence).toMatchObject({ scope: "product_family" });
+    expect(observation.productEvidence?.variants).toHaveLength(2);
+    expect(identity).toMatchObject({
+      label: "раствор для внутривенного и внутримышечного введения 2 мл №10",
+      granularity: "variant",
+      confidence: "exact"
+    });
+  });
+
+  it("publishes Cereton packs as one explicit shared-rating model instead of an unconfirmable ambiguity", async () => {
+    const listingId = "1778172988";
+    const url = `https://reviews.yandex.ru/product/tsereton-kaps--${listingId}`;
+    const html = productHtml({
+      canonical: url,
+      product: {
+        "@type": "Product",
+        name: "Церетон капс.",
+        brand: "Церетон",
+        aggregateRating: { "@type": "AggregateRating", reviewCount: 101, ratingCount: 438, ratingValue: 4.7 }
+      }
+    }).replace("</body>", `
+      <div class="Review-ReasonToTrustText">Товар — Церетон, капсулы 400 мг, 112 шт.</div>
+      <div class="Review-ReasonToTrustText">Товар — Церетон, капсулы 400 мг, 56 шт.</div>
+    </body>`);
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }) });
+
+    const observation = await adapter.collect(ref({ listingId, brand: "Церетон", url }), context());
+    const identity = analyzeProductIdentity({
+      brand: observation.brand,
+      product: observation.product,
+      url: observation.canonicalUrl,
+      evidence: observation.productEvidence
+    });
+
+    expect(identity).toMatchObject({ granularity: "family", confidence: "exact", variantCount: 2 });
+    expect(identity.label).toContain("капсулы 400 мг №112");
+    expect(identity.label).toContain("капсулы 400 мг №56");
+    expect(hasDeterministicAggregateProof({ ...observation, productIdentity: identity })).toBe(true);
+  });
+
+  it("drops a source-unbound stale model without blocking the complete Yandex partition", async () => {
+    const listingId = "5887938423";
+    const url = `https://reviews.yandex.ru/product/tsereton-kaps--${listingId}`;
+    const adapter = new YandexAdapter({
+      fetch: routeFetch({
+        [url]: htmlResponse(productHtml({
+          // This is the exact malformed canonical currently returned by the
+          // first-party page. It cannot bind the aggregate to the discovered
+          // model and therefore must never be published.
+          canonical: `https://reviews.yandex.ru${listingId}`,
+          product: {
+            "@type": "Product",
+            name: "Церетон капс.",
+            aggregateRating: { "@type": "AggregateRating", reviewCount: 3, ratingCount: 31, ratingValue: 4.9 }
+          }
+        }))
+      })
+    });
+
+    await expect(adapter.collect(ref({ listingId, brand: "Церетон", url }), context())).resolves.toMatchObject({
+      listingId,
+      status: "not_found",
+      reviews: null,
+      rating: null,
+      source: "yandex_reviews_missing_candidate"
+    });
+  });
+
+  it.each([
+    ["1897545674", "Церетон р-р д/вн. приема", "Церетон раствор для приема внутрь", 22, 27, 4.8],
+    ["1404748455", "Церетон р-р для в/в и в/м введ.", "Церетон раствор для в/в и в/м введ.", 16, 37, 4.7]
+  ])("uses the first-party model title as exact family evidence for Cereton model %s", async (
+    listingId,
+    title,
+    expandedTitle,
+    reviewCount,
+    ratingCount,
+    ratingValue
+  ) => {
+    const url = `https://reviews.yandex.ru/product/tsereton--${listingId}`;
+    const adapter = new YandexAdapter({
+      fetch: routeFetch({
+        [url]: htmlResponse(productHtml({
+          canonical: url,
+          product: {
+            "@type": "Product",
+            name: title,
+            brand: "Церетон",
+            aggregateRating: { "@type": "AggregateRating", reviewCount, ratingCount, ratingValue }
+          }
+        }))
+      })
+    });
+
+    const observation = await adapter.collect(ref({ listingId, brand: "Церетон", url }), context());
+    const identity = analyzeProductIdentity({
+      brand: observation.brand,
+      product: observation.product,
+      url: observation.canonicalUrl,
+      evidence: observation.productEvidence
+    });
+
+    expect(observation.productEvidence).toMatchObject({
+      scope: "product_family",
+      variants: [expandedTitle]
+    });
+    expect(identity).toMatchObject({
+      granularity: "family",
+      confidence: "exact",
+      missing: [],
+      variantCount: 1
+    });
+    expect(hasDeterministicAggregateProof({ ...observation, productIdentity: identity })).toBe(true);
+  });
+
   it("collects reviewCount (not ratingCount), rating and canonical model URL from Product JSON-LD", async () => {
     const url = "https://reviews.yandex.ru/product/kagotsel--265149860?utm_source=test";
     const fetch = routeFetch({
@@ -229,6 +603,136 @@ describe("YandexAdapter collection", () => {
       capturedAt: "2026-07-13T09:00:00.000Z",
       source: "yandex_reviews_json_ld"
     });
+  });
+
+  it("recovers a cloud-blocked product through the fixed translated numeric route", async () => {
+    const modelId = "695943742";
+    const directUrl = `https://reviews.yandex.ru/product/kagotsel-tabletki-12-mg-10-sht--${modelId}`;
+    const translatedUrl = `https://reviews-yandex-ru.translate.goog/product/${modelId}?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en`;
+    const canonical = `https://reviews.yandex.ru/product/kagotsel-tabletki-12-mg-10-sht--${modelId}`;
+    const fetch = routeFetch({
+      [directUrl]: new Response("blocked", { status: 403 }),
+      [translatedUrl]: htmlResponse(translatedProductHtml({
+        source: `https://reviews.yandex.ru/product/${modelId}`,
+        canonical,
+        product: {
+          "@context": "https://schema.org",
+          "@type": "Product",
+          name: "Кагоцел, таблетки 12 мг, 10 шт.",
+          brand: { "@type": "Brand", name: "Без бренда" },
+          aggregateRating: {
+            "@type": "AggregateRating",
+            ratingValue: "5.0",
+            ratingCount: "7",
+            reviewCount: "2"
+          }
+        }
+      }))
+    });
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.collect(ref({ listingId: modelId, url: directUrl }), context())).resolves.toMatchObject({
+      listingId: modelId,
+      canonicalUrl: canonical,
+      reviews: 2,
+      ratingCount: 7,
+      rating: 5,
+      status: "ok",
+      source: "yandex_reviews_json_ld_google_translate"
+    });
+    expect(fetch.mock.calls.map(([input]) => input)).toEqual([directUrl, translatedUrl]);
+  });
+
+  it("binds translated metrics to the Product identifying the requested model", async () => {
+    const modelId = "695943742";
+    const directUrl = `https://reviews.yandex.ru/product/kagotsel--${modelId}`;
+    const translatedUrl = `https://reviews-yandex-ru.translate.goog/product/${modelId}?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en`;
+    const fetch = routeFetch({
+      [directUrl]: new Response("blocked", { status: 403 }),
+      [translatedUrl]: htmlResponse(translatedProductHtml({
+        source: `https://reviews.yandex.ru/product/${modelId}`,
+        canonical: directUrl,
+        product: [
+          {
+            "@type": "Product",
+            url: "https://reviews.yandex.ru/product/unrelated--999999999",
+            name: "Соседний товар",
+            aggregateRating: { "@type": "AggregateRating", ratingValue: 1, reviewCount: 999 }
+          },
+          {
+            "@type": "Product",
+            url: directUrl,
+            name: "Кагоцел, таблетки 12 мг, 10 шт.",
+            aggregateRating: { "@type": "AggregateRating", ratingValue: 5, reviewCount: 2 }
+          }
+        ]
+      }))
+    });
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.collect(ref({ listingId: modelId, url: directUrl }), context())).resolves.toMatchObject({
+      product: "Кагоцел, таблетки 12 мг, 10 шт.",
+      reviews: 2,
+      rating: 5
+    });
+  });
+
+  it("never turns a partial translated Product without AggregateRating into zero reviews", async () => {
+    const modelId = "695943742";
+    const directUrl = `https://reviews.yandex.ru/product/kagotsel--${modelId}`;
+    const translatedUrl = `https://reviews-yandex-ru.translate.goog/product/${modelId}?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en`;
+    const partial = `<html><head><base href="https://reviews.yandex.ru/product/${modelId}"><link rel="canonical" href="${directUrl}"><script type="application/ld+json">${JSON.stringify({
+      "@type": "Product",
+      name: "Кагоцел"
+    })}</script></head>`;
+    const fetch = routeFetch({
+      [directUrl]: new Response("blocked", { status: 403 }),
+      [translatedUrl]: htmlResponse(partial)
+    });
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.collect(ref({ listingId: modelId, url: directUrl }), context()))
+      .rejects.toThrow(/incomplete HTML/);
+  });
+
+  it("requires explicit zero-review proof on a complete translated Product without AggregateRating", async () => {
+    const modelId = "695943742";
+    const directUrl = `https://reviews.yandex.ru/product/kagotsel--${modelId}`;
+    const translatedUrl = `https://reviews-yandex-ru.translate.goog/product/${modelId}?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en`;
+    const fetch = routeFetch({
+      [directUrl]: new Response("blocked", { status: 403 }),
+      [translatedUrl]: htmlResponse(translatedProductHtml({
+        source: `https://reviews.yandex.ru/product/${modelId}`,
+        canonical: directUrl,
+        product: { "@type": "Product", name: "Кагоцел" }
+      }))
+    });
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.collect(ref({ listingId: modelId, url: directUrl }), context()))
+      .rejects.toThrow(/explicit zero-review proof/);
+  });
+
+  it("fails closed when the translated renderer cannot prove the exact source model", async () => {
+    const modelId = "695943742";
+    const directUrl = `https://reviews.yandex.ru/product/kagotsel--${modelId}`;
+    const translatedUrl = `https://reviews-yandex-ru.translate.goog/product/${modelId}?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en`;
+    const fetch = routeFetch({
+      [directUrl]: new Response("blocked", { status: 403 }),
+      [translatedUrl]: htmlResponse(translatedProductHtml({
+        source: "https://reviews.yandex.ru/product/265149860",
+        canonical: directUrl,
+        product: {
+          "@type": "Product",
+          name: "Кагоцел",
+          aggregateRating: { "@type": "AggregateRating", ratingValue: 5, reviewCount: 2 }
+        }
+      }))
+    });
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.collect(ref({ listingId: modelId, url: directUrl }), context()))
+      .rejects.toThrow(/different source page/);
   });
 
   it("finds Product inside @graph and falls back to its title for brand validation", async () => {
@@ -306,7 +810,7 @@ describe("YandexAdapter collection", () => {
     });
   });
 
-  it("never substitutes ratingCount when reviewCount disappears", async () => {
+  it("accepts a confirmed ratingCount when reviewCount is absent", async () => {
     const adapter = new YandexAdapter({
       fetch: productFetch({
         "@type": "Product",
@@ -315,8 +819,12 @@ describe("YandexAdapter collection", () => {
       })
     });
 
-    await expect(adapter.collect(ref(), context())).rejects.toThrow(/ratingCount is not a substitute/);
-    await expect(adapter.collect(ref(), context())).rejects.toBeInstanceOf(ParserChangedError);
+    await expect(adapter.collect(ref(), context())).resolves.toMatchObject({
+      reviews: null,
+      ratingCount: 1827,
+      rating: 4.7,
+      status: "ok"
+    });
   });
 
   it("detects missing JSON-LD and invalid rating shapes as parser drift", async () => {
@@ -484,4 +992,16 @@ function modelSitemap(urls: string[]): string {
 
 function productHtml({ canonical, product }: { canonical: string; product: unknown }): string {
   return `<!doctype html><html><head><link href="${canonical}" rel="canonical"><script type="application/ld+json">${JSON.stringify(product)}</script></head><body></body></html>`;
+}
+
+function translatedProductHtml({
+  source,
+  canonical,
+  product
+}: {
+  source: string;
+  canonical: string;
+  product: unknown;
+}): string {
+  return `<!doctype html><html><head><base href="${source}"><link href="${canonical}" rel="canonical"><script type="application/ld+json">${JSON.stringify(product)}</script></head><body></body></html>`;
 }

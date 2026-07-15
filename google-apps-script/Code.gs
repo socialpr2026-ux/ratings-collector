@@ -4,13 +4,15 @@
  * Deploy as a Web App that executes as the owner and is available to Anyone.
  * The endpoint intentionally has no application secret, so every request is
  * restricted to a spreadsheet that is itself shared as public Editor and to
- * the single tab named "Рейтинги".
+ * a canonical "Ratings <brand>" tab (or the legacy shared Ratings tabs).
  */
 
-var RATINGS_TAB = "Рейтинги";
+var RATINGS_TAB = "Ratings";
+var LEGACY_RATINGS_TAB = "Рейтинги";
 var MAX_CELLS = 50000;
 var LOCK_WAIT_MS = 30000;
 var ROW_KINDS = {
+  brand: true,
   title: true,
   subheader: true,
   section: true,
@@ -39,7 +41,13 @@ function doPost(event) {
     if (payload.action === "write") {
       return jsonOutput_(withLock_(function () { return writeAction_(payload); }));
     }
-    throw serviceError_("invalid_action", "Разрешены только операции read и write", false);
+    if (payload.action === "readBatch") {
+      return jsonOutput_(withLock_(function () { return readBatchAction_(payload); }));
+    }
+    if (payload.action === "writeBatch") {
+      return jsonOutput_(withLock_(function () { return writeBatchAction_(payload); }));
+    }
+    throw serviceError_("invalid_action", "Разрешены только операции read, write, readBatch и writeBatch", false);
   } catch (error) {
     return jsonOutput_({
       ok: false,
@@ -55,6 +63,25 @@ function readAction_(payload) {
   var target = openTarget_(payload);
   var readback = captureSheet_(target.spreadsheetId, target.sheet);
   return { ok: true, action: "read", readback: readback };
+}
+
+function readBatchAction_(payload) {
+  if (!Array.isArray(payload.tabNames) || !payload.tabNames.length) {
+    throw serviceError_("invalid_request", "tabNames должен содержать хотя бы одну вкладку", false);
+  }
+  var seen = {};
+  var readbacks = payload.tabNames.map(function (tabName) {
+    var identity = tabIdentity_(tabName);
+    if (seen[identity]) throw serviceError_("invalid_request", "Названия вкладок не должны повторяться", false);
+    seen[identity] = true;
+    var target = openTarget_({
+      action: "read",
+      spreadsheetId: payload.spreadsheetId,
+      tabName: tabName
+    });
+    return captureSheet_(target.spreadsheetId, target.sheet);
+  });
+  return { ok: true, action: "readBatch", readbacks: readbacks };
 }
 
 function writeAction_(payload) {
@@ -165,12 +192,159 @@ function writeAction_(payload) {
   }
 }
 
+function writeBatchAction_(payload) {
+  if (!Array.isArray(payload.sheets) || !payload.sheets.length) {
+    throw serviceError_("invalid_request", "sheets должен содержать хотя бы одну вкладку", false);
+  }
+  var seen = {};
+  var totalCells = 0;
+  var entries = payload.sheets.map(function (item) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw serviceError_("invalid_request", "Каждая публикация должна быть объектом", false);
+    }
+    var identity = tabIdentity_(item.tabName);
+    if (seen[identity]) throw serviceError_("invalid_request", "Названия вкладок не должны повторяться", false);
+    seen[identity] = true;
+    var target = openTarget_({
+      action: "write",
+      spreadsheetId: payload.spreadsheetId,
+      tabName: item.tabName
+    });
+    var document = validateDocument_(item.document);
+    totalCells += document.values.length * document.columnCount;
+    if (totalCells > MAX_CELLS) {
+      throw serviceError_("sheet_too_large", "Суммарная публикация превышает лимит " + MAX_CELLS + " ячеек", false);
+    }
+    if (typeof item.expectedRevision !== "string" || !/^[a-f0-9]{64}$/i.test(item.expectedRevision)) {
+      throw serviceError_("invalid_revision", "expectedRevision должна быть SHA-256 строкой", false);
+    }
+    var current = captureSheet_(target.spreadsheetId, target.sheet);
+    if (current.revision !== item.expectedRevision) {
+      throw serviceError_(
+        "revision_mismatch",
+        "Вкладка «" + item.tabName + "» изменилась после чтения. Повторите публикацию.",
+        true
+      );
+    }
+    return {
+      target: target,
+      document: document,
+      current: current,
+      changed: !matchesDocument_(current, document),
+      backup: null,
+      readback: null
+    };
+  });
+
+  try {
+    entries.forEach(function (entry) {
+      if (entry.changed) entry.backup = createBackup_(entry.target.spreadsheet, entry.target.sheet);
+    });
+    entries.forEach(function (entry) {
+      if (entry.changed) {
+        replaceSheet_(entry.target.sheet, entry.document, entry.current.rows, entry.current.columns);
+      }
+    });
+    SpreadsheetApp.flush();
+    entries.forEach(function (entry) {
+      entry.readback = entry.changed
+        ? captureSheet_(
+            entry.target.spreadsheetId,
+            entry.target.sheet,
+            entry.document.values.length,
+            entry.document.columnCount
+          )
+        : entry.current;
+      var mismatches = documentMismatches_(entry.readback, entry.document);
+      if (mismatches.length) {
+        throw serviceError_(
+          "readback_mismatch",
+          "Точная проверка вкладки «" + entry.target.sheet.getName() + "» не пройдена: " + mismatches.slice(0, 5).join("; "),
+          false
+        );
+      }
+    });
+    entries.forEach(function (entry) {
+      if (entry.backup) {
+        try {
+          entry.target.spreadsheet.deleteSheet(entry.backup);
+          entry.backup = null;
+        } catch (cleanupError) {
+          // The verified target is the committed result. A hidden backup left
+          // behind is safer than reporting a false publication failure after
+          // every target has already passed exact readback.
+        }
+      }
+    });
+    var verifiedAt = new Date().toISOString();
+    return {
+      ok: true,
+      action: "writeBatch",
+      verifiedAt: verifiedAt,
+      results: entries.map(function (entry) {
+        return {
+          tabName: entry.target.sheet.getName(),
+          range: targetRange_(entry.document.columnCount, entry.document.values.length),
+          attempts: entry.changed ? 1 : 0,
+          readback: entry.readback
+        };
+      })
+    };
+  } catch (writeError) {
+    var rollbackErrors = [];
+    entries.forEach(function (entry) {
+      if (!entry.changed || !entry.backup) return;
+      try {
+        restoreBackup_(
+          entry.target.sheet,
+          entry.backup,
+          entry.current,
+          entry.document.values.length,
+          entry.document.columnCount
+        );
+      } catch (restoreError) {
+        rollbackErrors.push(entry.target.sheet.getName() + ": " + safeMessage_(restoreError));
+      }
+    });
+    SpreadsheetApp.flush();
+    entries.forEach(function (entry) {
+      if (!entry.backup) return;
+      try {
+        var restored = captureSheet_(
+          entry.target.spreadsheetId,
+          entry.target.sheet,
+          entry.current.rows,
+          entry.current.columns
+        );
+        if (restored.revision !== entry.current.revision) {
+          rollbackErrors.push(entry.target.sheet.getName() + ": revision после rollback не совпала");
+          return;
+        }
+        entry.target.spreadsheet.deleteSheet(entry.backup);
+        entry.backup = null;
+      } catch (verificationError) {
+        rollbackErrors.push(entry.target.sheet.getName() + ": " + safeMessage_(verificationError));
+      }
+    });
+    if (rollbackErrors.length) {
+      var uncertain = serviceError_(
+        "rollback_failed",
+        "Пакетная запись завершилась ошибкой, и исходные вкладки не удалось точно восстановить: " + rollbackErrors.join("; "),
+        false
+      );
+      uncertain.rollbackFailed = true;
+      throw uncertain;
+    }
+    throw writeError;
+  }
+}
+
 function openTarget_(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw serviceError_("invalid_request", "Тело запроса должно быть JSON-объектом", false);
   }
-  if (payload.tabName !== RATINGS_TAB) {
-    throw serviceError_("invalid_tab", "Разрешена только вкладка «" + RATINGS_TAB + "»", false);
+  if (!isRatingsTabName_(payload.tabName)) {
+    throw serviceError_("invalid_tab", "Разрешены только вкладки Ratings <бренд> и прежние вкладки Ratings/Рейтинги", false);
   }
   if (typeof payload.spreadsheetId !== "string" || !/^[a-zA-Z0-9_-]+$/.test(payload.spreadsheetId)) {
     throw serviceError_("invalid_spreadsheet_id", "Некорректный spreadsheetId", false);
@@ -205,9 +379,36 @@ function openTarget_(payload) {
   } catch (error) {
     throw serviceError_("spreadsheet_unavailable", "Не удалось открыть таблицу", false);
   }
-  var sheet = spreadsheet.getSheetByName(RATINGS_TAB);
-  if (!sheet) throw serviceError_("tab_not_found", "Вкладка «" + RATINGS_TAB + "» не найдена", false);
+  var sheet = spreadsheet.getSheetByName(payload.tabName);
+  if (!sheet && payload.action === "read") {
+    if (payload.tabName === RATINGS_TAB) {
+      sheet = spreadsheet.getSheetByName(RATINGS_TAB) || spreadsheet.getSheetByName(LEGACY_RATINGS_TAB);
+    }
+    if (!sheet) {
+      try {
+        sheet = spreadsheet.insertSheet(payload.tabName);
+      } catch (error) {
+        // A manual edit can race with this request even though Web App calls
+        // are serialized by LockService. Re-read before reporting failure.
+        sheet = spreadsheet.getSheetByName(payload.tabName);
+        if (!sheet) throw serviceError_("tab_create_failed", "Не удалось создать вкладку «" + payload.tabName + "»", false);
+      }
+    }
+  }
+  if (!sheet) {
+    throw serviceError_("tab_changed", "Рабочая вкладка изменилась после проверки. Повторите публикацию.", true);
+  }
   return { spreadsheetId: payload.spreadsheetId, spreadsheet: spreadsheet, sheet: sheet };
+}
+
+function isRatingsTabName_(value) {
+  return value === RATINGS_TAB || value === LEGACY_RATINGS_TAB ||
+    typeof value === "string" && value.length <= 100 && /^Ratings [^\[\]*?:\\/]+$/.test(value);
+}
+
+function tabIdentity_(value) {
+  var text = String(value || "");
+  return (typeof text.normalize === "function" ? text.normalize("NFKC") : text).toLocaleLowerCase("ru-RU");
 }
 
 function validateDocument_(input) {
@@ -322,7 +523,7 @@ function captureSheet_(spreadsheetId, sheet, forcedRows, forcedColumns) {
   var revisionPayload = { rows: rows, columns: columns, values: values, formulas: formulas, merges: merges };
   return {
     spreadsheetId: spreadsheetId,
-    tabName: RATINGS_TAB,
+    tabName: sheet.getName(),
     values: values,
     formulas: formulas,
     displayValues: displayValues,
@@ -355,7 +556,7 @@ function replaceSheet_(sheet, document, previousRows, previousColumns) {
   writeCells_(sheet, document.values, document.formulas, rows, columns);
   applyFormatting_(sheet, document.rowKinds, rows, columns);
   applyMerges_(sheet, document.merges);
-  applyLayout_(sheet, rows, columns);
+  applyLayout_(sheet, document.rowKinds, rows, columns);
 }
 
 function restoreBackup_(target, backup, backupState, writtenRows, writtenColumns) {
@@ -409,35 +610,70 @@ function applyMerges_(sheet, merges) {
 function applyFormatting_(sheet, rowKinds, rows, columns) {
   var whole = sheet.getRange(1, 1, rows, columns);
   whole
-    .setFontFamily("Arial")
-    .setFontSize(9)
-    .setFontColor("#000000")
+    .setFontFamily("Inter")
+    .setFontSize(10)
+    .setFontColor("#241f35")
     .setFontWeight("normal")
     .setFontStyle("normal")
+    .setFontLine("none")
     .setBackground("#ffffff")
     .setVerticalAlignment("middle")
     .setHorizontalAlignment("left")
     .setWrap(true);
 
+  // Product rows form one contiguous block inside each of the three report
+  // sections. Format those blocks in batches so a long monthly history does
+  // not turn into thousands of remote Apps Script calls.
+  var productBlockStart = -1;
+  for (var productCursor = 0; productCursor <= rows; productCursor += 1) {
+    if (productCursor < rows && rowKinds[productCursor] === "product") {
+      if (productBlockStart < 0) productBlockStart = productCursor;
+      continue;
+    }
+    if (productBlockStart >= 0) {
+      var productCount = productCursor - productBlockStart;
+      var productRange = sheet.getRange(productBlockStart + 1, 1, productCount, columns);
+      productRange.setBackground("#ffffff")
+        .setBorder(null, null, true, null, null, true, "#ebe9f4", SpreadsheetApp.BorderStyle.SOLID);
+      sheet.getRange(productBlockStart + 1, 1, productCount, 1).setFontColor("#4932a8").setFontLine("underline");
+      sheet.getRange(productBlockStart + 1, 3, productCount, 1).setFontWeight("bold").setFontColor("#120755");
+      if (columns > 4) {
+        sheet.getRange(productBlockStart + 1, 5, productCount, columns - 4)
+          .setBackground("#fbfaff").setHorizontalAlignment("center");
+      }
+      productBlockStart = -1;
+    }
+  }
+
   for (var row = 0; row < rows; row += 1) {
     var kind = rowKinds[row];
+    if (kind === "product") continue;
     var rowRange = sheet.getRange(row + 1, 1, 1, columns);
-    if (kind === "title") {
-      rowRange.setBackground("#20124d").setFontColor("#ffffff").setFontWeight("bold");
+    if (kind === "brand") {
+      rowRange.setBackground("#120755").setFontColor("#ffffff").setFontWeight("bold");
+      rowRange.setBorder(null, null, true, null, null, null, "#ff4d00", SpreadsheetApp.BorderStyle.SOLID_THICK);
+      sheet.getRange(row + 1, 1).setFontSize(16);
+      if (columns > 4) {
+        sheet.getRange(row + 1, 5, 1, columns - 4).setFontColor("#aeade5").setHorizontalAlignment("right");
+      }
+    } else if (kind === "title") {
+      rowRange.setBackground("#120755").setFontColor("#ffffff").setFontWeight("bold").setFontSize(10);
     } else if (kind === "subheader" && columns > 4) {
       sheet.getRange(row + 1, 5, 1, columns - 4)
-        .setBackground("#20124d").setFontColor("#ffffff").setFontWeight("bold");
+        .setBackground("#120755").setFontColor("#ffffff").setFontWeight("bold").setFontSize(10);
     } else if (kind === "section") {
-      rowRange.setBackground("#d0e0e3");
-      sheet.getRange(row + 1, 1).setFontWeight("bold").setFontColor("#1155cc").setFontLine("underline");
+      rowRange.setBackground("#f0effa").setFontWeight("bold").setFontColor("#625b85");
+      rowRange.setBorder(true, null, true, null, null, null, "#aeade5", SpreadsheetApp.BorderStyle.SOLID);
+      sheet.getRange(row + 1, 1).setFontSize(12).setFontColor("#120755")
+        .setBorder(null, true, null, null, null, null, "#ff4d00", SpreadsheetApp.BorderStyle.SOLID_THICK);
     } else if (kind === "summaryHeader") {
-      rowRange.setBackground("#d9ead3").setFontWeight("bold");
+      rowRange.setBackground("#e7e5f7").setFontWeight("bold").setFontColor("#120755");
+      rowRange.setBorder(true, null, null, null, null, null, "#ff4d00", SpreadsheetApp.BorderStyle.SOLID_THICK);
     } else if (kind === "summary") {
-      sheet.getRange(row + 1, 1).setFontWeight("bold");
+      rowRange.setBackground("#fbfaff").setBorder(null, null, true, null, null, null, "#e3e0f1", SpreadsheetApp.BorderStyle.SOLID);
+      sheet.getRange(row + 1, 1).setFontWeight("bold").setFontColor("#120755");
     } else if (kind === "footnote") {
-      rowRange.setFontStyle("italic").setFontColor("#666666");
-    } else if (kind === "product") {
-      sheet.getRange(row + 1, 2).setFontColor("#1155cc").setFontLine("underline");
+      rowRange.setBackground("#fbfaff").setFontStyle("italic").setFontColor("#746f86").setFontSize(9);
     }
     if (columns > 4 && ["title", "subheader", "section", "product", "summaryHeader", "summary"].indexOf(kind) >= 0) {
       sheet.getRange(row + 1, 5, 1, columns - 4).setHorizontalAlignment("center");
@@ -463,22 +699,45 @@ function applyFormatting_(sheet, rowKinds, rows, columns) {
 
   if (columns > 4) {
     sheet.getRange(1, 5, rows, columns - 4).setBorder(
-      null, true, null, true, true, null, "#000000", SpreadsheetApp.BorderStyle.DOTTED
+      null, true, null, true, true, null, "#e3e0f1", SpreadsheetApp.BorderStyle.SOLID
     );
   }
 
 }
 
-function applyLayout_(sheet, rows, columns) {
+function applyLayout_(sheet, rowKinds, rows, columns) {
   // Apply sizing after merges: Google Sheets can otherwise retain dimensions
   // from the previous three-column layout during an in-place migration.
-  sheet.setColumnWidth(1, 150);
-  if (columns >= 2) sheet.setColumnWidth(2, 430);
-  if (columns >= 3) sheet.setColumnWidth(3, 330);
+  sheet.setHiddenGridlines(true);
+  sheet.setFrozenRows(Math.min(3, rows));
+  // The report header merges A:D, so the freeze boundary must sit after D.
+  // Freezing only A:C cuts that merged cell and Google rejects the entire
+  // publication even though the spreadsheet is editable.
+  sheet.setFrozenColumns(Math.min(4, columns));
+  sheet.setTabColor("#ff4d00");
+  sheet.setColumnWidth(1, 320);
+  if (columns >= 2) sheet.setColumnWidth(2, 150);
+  if (columns >= 3) sheet.setColumnWidth(3, 310);
   if (columns >= 4) sheet.setColumnWidth(4, 24);
-  if (columns > 4) sheet.setColumnWidths(5, columns - 4, 92);
+  // The first column in every monthly pair is the combined public counter
+  // "Отзывы / оценки"; keep it wider than the compact rating column.
+  for (var metricColumn = 5; metricColumn <= columns; metricColumn += 2) {
+    sheet.setColumnWidth(metricColumn, 110);
+    if (metricColumn + 1 <= columns) sheet.setColumnWidth(metricColumn + 1, 82);
+  }
   if (rows > 0) sheet.autoResizeRows(1, rows);
-  if (rows >= 2) sheet.setRowHeights(1, 2, 28);
+  var heightStart = 0;
+  var activeHeight = rowKinds[0] === "brand" ? 44 : 30;
+  for (var row = 1; row <= rowKinds.length; row += 1) {
+    var height = row < rowKinds.length ?
+      (rowKinds[row] === "brand" ? 44 : rowKinds[row] === "section" ? 36 : rowKinds[row] === "blank" ? 16 : rowKinds[row] === "product" ? 32 : 30) :
+      -1;
+    if (height !== activeHeight) {
+      sheet.setRowHeights(heightStart + 1, row - heightStart, activeHeight);
+      heightStart = row;
+      activeHeight = height;
+    }
+  }
 }
 
 function documentMismatches_(readback, document) {

@@ -4,6 +4,7 @@ import type { Repository } from "../repository.js";
 import type { RatingsService } from "../orchestrator.js";
 import { safeErrorMessage } from "../utils/error-message.js";
 import { extractSpreadsheetId } from "../utils/urls.js";
+import { ratingsTabNameForBrand } from "./tab-name.js";
 
 const BROWSER_ERROR_PARTITIONS = new Set([
   "google-sheets",
@@ -20,6 +21,13 @@ export type BrowserPublicationIntent = {
   shouldPublish: boolean;
 };
 
+function targetsResolvedTab(record: PublicationRecord, run: RunState): boolean {
+  const brandTabs = run.request.brands.map(ratingsTabNameForBrand);
+  return brandTabs.length > 0 && brandTabs.every((tabName) =>
+    record.updatedRange.includes(`'${tabName.replace(/'/g, "''")}'!`)
+  );
+}
+
 export class PublicationCommitUncertainError extends Error {
   constructor(readonly saveError: unknown, readonly verificationError: unknown) {
     super("Маркер публикации мог быть сохранён, но его состояние не удалось подтвердить");
@@ -34,7 +42,7 @@ export async function reconcileBrowserPublication(
   if (!run.payloadHash) return run;
   const spreadsheetId = extractSpreadsheetId(run.request.sheetUrl);
   const prior = await repository.getPublication(`${spreadsheetId}:${run.request.month}`);
-  if (prior?.payloadHash !== run.payloadHash) return run;
+  if (prior?.payloadHash !== run.payloadHash || !targetsResolvedTab(prior, run)) return run;
   run.status = "published";
   run.publication = prior;
   run.updatedAt = prior.publishedAt;
@@ -67,7 +75,7 @@ export async function prepareBrowserPublication(
   if (!run.payloadHash) throw new Error("У запуска нет контрольной суммы");
 
   const prior = await repository.getPublication(publicationKey);
-  if (prior?.payloadHash === run.payloadHash) {
+  if (prior?.payloadHash === run.payloadHash && targetsResolvedTab(prior, run)) {
     run.status = "published";
     run.publication = prior;
     run.updatedAt = prior.publishedAt;
@@ -94,6 +102,8 @@ export async function completeBrowserPublication(
     verifiedAt: string;
     attempts: number;
     limitations: string[];
+    tabName?: string;
+    tabs?: Array<{ tabName: string; range: string }>;
     evidenceRef?: string;
     verificationMethod?: "anonymous-browser-readback" | "apps-script-readback";
   }
@@ -101,13 +111,18 @@ export async function completeBrowserPublication(
   const { run, spreadsheetId, publicationKey } = intent;
   if (!run.payloadHash) throw new Error("У запуска нет контрольной суммы");
   await service.commitSuccessfulRun(run);
+  const tabName = result.tabs?.[0]?.tabName ?? result.tabName ?? run.sheetTabName ?? "Ratings";
+  run.sheetTabName = tabName;
+  const updatedRange = result.tabs?.length
+    ? result.tabs.map((tab) => `'${tab.tabName.replace(/'/g, "''")}'!${tab.range}`).join(", ")
+    : `'${tabName.replace(/'/g, "''")}'!${result.range}`;
   const publication: PublicationRecord = {
     runId: run.id,
     spreadsheetId,
     month: run.request.month,
     payloadHash: run.payloadHash,
     publishedAt: result.verifiedAt,
-    updatedRange: `'Рейтинги'!${result.range}`,
+    updatedRange,
     verification: {
       method: result.verificationMethod ?? "anonymous-browser-readback",
       attempts: result.attempts,

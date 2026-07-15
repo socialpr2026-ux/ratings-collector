@@ -1,4 +1,4 @@
-import type { Observation } from "../shared/types.js";
+import type { Observation, RunState } from "../shared/types.js";
 import { isKnownReviewAggregateDomain } from "../shared/review-aggregates.js";
 
 export type SetupReadiness = {
@@ -136,8 +136,20 @@ export function friendlyErrorMessage(error: unknown, action: UserAction) {
   if (action === "review" && /не содержит доказанного товарного варианта/i.test(raw)) {
     return "Карточке не хватает данных для точного определения товара. Обновите страницу; если сообщение останется, не подтверждайте эту карточку.";
   }
-  if (action === "publish" || /permission|forbidden|доступ[^.]{0,40}(?:таблиц|редактор)|google\s*(?:sheet|таблиц)/i.test(raw)) {
+  if (action === "publish" && /freeze columns|frozen columns|merged cell|закреп\S* столбц|объедин[её]нн\S* яче/i.test(raw)) {
+    return "Не удалось применить оформление таблицы. Результат сбора сохранён — повторите запись.";
+  }
+  if (action === "publish" && /revision[_\s-]*mismatch|таблиц\S* изменил|изменилась после чтения/i.test(raw)) {
+    return "Таблица изменилась во время записи. Результат сбора сохранён — повторите запись.";
+  }
+  if (action === "publish" && /sheet[_\s-]*too[_\s-]*large|превышает лимит|лист слишком велик/i.test(raw)) {
+    return "Лист слишком велик для безопасной записи. Удалите лишние пустые строки или столбцы и повторите.";
+  }
+  if (/permission|forbidden|public[_\s-]*edit[_\s-]*required|доступ[^.]{0,80}(?:таблиц|редактор)|ролью\s+[«\"]?редактор/i.test(raw)) {
     return actionFallbacks.publish;
+  }
+  if (action === "publish") {
+    return "Не удалось записать данные в Google Таблицу. Результат сбора сохранён — повторите запись.";
   }
   if (/\/api\/|syntaxerror|unexpected token|internal server|service unavailable|status code|\bat\s+\w+\s*\(|\b[a-z]+_[a-z_]+\b|\b(?:typeerror|econn\w*|etimedout)\b/i.test(raw)) {
     return actionFallbacks[action];
@@ -162,9 +174,9 @@ export function observationMatchesQuery(
 export function observationIssueText(item: Pick<Observation, "reviews" | "rating" | "productIdentity">) {
   const identity = item.productIdentity;
   if (identity?.granularity === "not_product") return "Не является товаром";
-  if (item.reviews === null) return "Отзывы не получены";
+  if (item.reviews === null) return "Отзывы / оценки не получены";
   if (item.reviews > 0 && item.rating === null) return "Рейтинг не получен";
-  if (item.reviews === 0 && item.rating !== null) return "Проверьте число отзывов";
+  if (item.reviews === 0 && item.rating !== null) return "Проверьте число отзывов / оценок";
   if (!identity || identity.granularity === "unresolved" || identity.confidence !== "exact") return "Не хватает данных о варианте";
   return "Нужно сверить карточку";
 }
@@ -172,10 +184,12 @@ export function observationIssueText(item: Pick<Observation, "reviews" | "rating
 export function canConfirmObservation(item: Pick<Observation, "reviews" | "rating" | "productIdentity" | "productEvidence"> & { domain?: string }) {
   const identity = item.productIdentity;
   const exactVariant = identity?.granularity === "variant" && identity.confidence === "exact";
+  const knownReviewAggregate = Boolean(identity && isKnownReviewAggregateDomain(item.domain) &&
+    identity.granularity !== "not_product" && identity.confidence !== "ambiguous");
   const provenAggregate = Boolean(identity && ["family", "line"].includes(identity.granularity) &&
     identity.confidence !== "ambiguous" &&
     (identity.confidence === "exact" || item.productEvidence?.scope === "product_family" || isKnownReviewAggregateDomain(item.domain)));
-  const identityCanBeConfirmed = exactVariant || provenAggregate;
+  const identityCanBeConfirmed = exactVariant || provenAggregate || knownReviewAggregate;
   return identityCanBeConfirmed && (item.reviews === 0
     ? item.rating === null
     : item.reviews !== null && item.reviews > 0 && item.rating !== null);
@@ -189,8 +203,42 @@ export function finalProductLabel(identityLabel: string, sourceTitle: string) {
   return identityLabel.trim() || sourceTitle.trim() || "Продукт по данным площадки";
 }
 
+/**
+ * Product proof shown to an operator must stay semantic and bounded. Raw
+ * `productEvidence.variants` are intentionally excluded here: on review sites
+ * a comment card can use the same generic DOM class as a product switcher and
+ * its heading must never be presented as a product characteristic.
+ */
+export function productProofLines(item: Pick<Observation, "productIdentity">): string[] {
+  const identity = item.productIdentity;
+  if (!identity) return [];
+  const result = identity.granularity === "variant"
+    ? [`Определён товарный вариант: ${identity.label}`]
+    : identity.granularity === "not_product"
+      ? []
+      : [`Определена общая карточка: ${identity.label}`];
+  for (const reason of identity.reasons) {
+    const value = reason.trim();
+    if (value && !result.includes(value)) result.push(value);
+  }
+  return result.slice(0, 5);
+}
+
 export function canRetryFailedPartitions(status: "queued" | "running" | "review" | "publishing" | "published" | "failed", failedPartitionCount: number) {
   return failedPartitionCount > 0 && (status === "review" || status === "failed");
+}
+
+/** Local Chrome is a reserve route, never a first choice or a parser workaround. */
+export function ozonCompanionEligibleBrands(
+  run: Pick<RunState, "status" | "request" | "partitions">
+): string[] {
+  if (!["review", "failed"].includes(run.status) || !run.request.domains.includes("ozon.ru")) return [];
+  return run.request.brands.filter((brand) => run.partitions.some((partition) =>
+    partition.domain === "ozon.ru" &&
+    partition.brand === brand &&
+    !["complete", "no_results"].includes(partition.status) &&
+    /^(?:blocked|quota_exceeded)\s*:/i.test(partition.message?.trim() ?? "")
+  ));
 }
 
 export function reviewIntroText(reviewCount: number, failedPartitionCount: number) {
@@ -202,5 +250,5 @@ export function reviewIntroText(reviewCount: number, failedPartitionCount: numbe
   }
   return reviewCount > 0
     ? `${reviewCount} ${plural(reviewCount, "карточка требует", "карточки требуют", "карточек требуют")} решения. Откройте карточку, сверьте товар и отметьте подходящие.`
-    : "Проверять ничего не нужно — спорных карточек нет. При желании можно открыть весь список.";
+    : "Все карточки определены. Результат готов к записи в таблицу.";
 }
