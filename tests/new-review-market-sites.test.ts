@@ -166,4 +166,45 @@ describe("Med-otzyv exact indexed adapter", () => {
       ratingUnavailable: true, status: "ok", source: "med-otzyv-source-page"
     });
   });
+
+  it("recovers a blocked Cereton source only from a fresh exact indexed title for the same medicine ID", async () => {
+    let searchCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/__external_search__") {
+        searchCalls += 1;
+        return searchCalls === 1
+          ? new Response("<html><body>No exact result</body></html>")
+          : new Response(`<!doctype html><a class="result__a"
+              href="https://med-otzyv.ru/lekarstva/165-c/36138-tsereton">
+              Церетон - 49 отзывов врачей и пациентов
+            </a>`, { headers: { "content-type": "text/html" } });
+      }
+      if (url.pathname === "/lekarstva/165-c/36138-tsereton") return new Response("blocked", { status: 502 });
+      throw new Error(`Unexpected URL ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new MedOtzyvAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const [ref] = await adapter.discover("Церетон", context);
+    const observation = await adapter.collect(ref, context);
+
+    expect(observation).toMatchObject({
+      listingId: "36138", product: "Церетон", reviews: 49, rating: null,
+      ratingUnavailable: true, status: "ok", source: "med-otzyv-exact-index-after-source-block"
+    });
+    expect(searchCalls).toBe(2);
+  });
+
+  it("preserves the Cereton source blocker when the refreshed index cannot prove the exact count", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/__external_search__") return new Response("<html><body>No exact result</body></html>");
+      if (url.pathname === "/lekarstva/165-c/36138-tsereton") return new Response("blocked", { status: 502 });
+      throw new Error(`Unexpected URL ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new MedOtzyvAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const [ref] = await adapter.discover("Церетон", context);
+    await expect(adapter.collect(ref, context)).rejects.toThrow(/verified product page returned HTTP 502/);
+  });
 });

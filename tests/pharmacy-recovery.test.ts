@@ -47,6 +47,21 @@ function asnaCard(source: string, sku: string, reviews: number): string {
   `);
 }
 
+function responseAt(body: string, finalUrl: string, init: ResponseInit = {}): Response {
+  const response = new Response(body, init);
+  Object.defineProperty(response, "url", { value: finalUrl });
+  return response;
+}
+
+function translatedFinal(source: URL): string {
+  const final = new URL(source.pathname, "https://www-asna-ru.translate.goog");
+  for (const [key, value] of source.searchParams) final.searchParams.set(key, value);
+  final.searchParams.set("_x_tr_sl", "ru");
+  final.searchParams.set("_x_tr_tl", "en");
+  final.searchParams.set("_x_tr_hl", "en");
+  return final.toString();
+}
+
 describe("recovered first-party pharmacy adapters", () => {
   it("discovers only exact Polza family cards and collects the product aggregate", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -181,6 +196,57 @@ describe("recovered first-party pharmacy adapters", () => {
     expect(refs.find((item) => item.listingId === "14666")?.title).toBe("Кагоцел 12 мг №10 таблетки");
     const result = await adapter.collect(refs[0], { region: "Москва" });
     expect(result).toMatchObject({ product: "Кагоцел 12 мг №10 таблетки", reviews: 29, rating: 5, status: "ok", source: "asna-product-microdata:google-translate" });
+  });
+
+  it("recovers a current ASNA family omitted from card sitemaps through the exact Google launcher", async () => {
+    const card = "https://www.asna.ru/cards/tsereton_400mg_n28_kaps_soteks.html";
+    const other = "https://www.asna.ru/cards/tserakson_500mg_n28_tab_soteks.html";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www.asna.ru" && url.pathname.startsWith("/sitemap/")) {
+        return new Response("<urlset></urlset>");
+      }
+      if (url.hostname === "www-asna-ru.translate.goog") {
+        return new Response("temporary fixed egress failure", { status: 502, headers: { "content-type": "text/html" } });
+      }
+      if (url.hostname === "translate.google.com" && url.pathname === "/website") {
+        const source = new URL(url.searchParams.get("u")!);
+        const body = source.pathname === "/product/tsereton/"
+          ? translated(source.toString(), `<a href="https://www-asna-ru.translate.goog${new URL(card).pathname}?_x_tr_sl=ru&amp;_x_tr_tl=en">Церетон</a>
+              <a href="${other}">Цераксон</a>`)
+          : source.pathname === new URL(card).pathname
+            ? asnaCard(card, "20046", 1)
+            : translated(source.toString(), "<main>Нет точных карточек</main>");
+        return responseAt(body, translatedFinal(source), { headers: { "content-type": "text/html" } });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock as unknown as typeof fetch);
+
+    const refs = await adapter.discover("Церетон", { region: "Москва" });
+    expect(refs).toMatchObject([{ listingId: "20046", url: card, title: "Церетон 400 мг №28 капсулы" }]);
+    await expect(adapter.collect(refs[0], { region: "Москва" })).resolves.toMatchObject({
+      listingId: "20046", reviews: 1, rating: 5, status: "ok"
+    });
+    expect(fetchMock.mock.calls.some(([input]) => new URL(String(input)).hostname === "translate.google.com")).toBe(true);
+  });
+
+  it("rejects an ASNA launcher response whose final renderer URL is not the requested source", async () => {
+    const card = "https://www.asna.ru/cards/tsereton_400mg_n28_kaps_soteks.html";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www-asna-ru.translate.goog") return new Response("temporary", { status: 502 });
+      if (url.hostname === "translate.google.com") {
+        return responseAt(asnaCard(card, "20046", 1),
+          "https://www-asna-ru.translate.goog/cards/another-product.html?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
+          { headers: { "content-type": "text/html" } });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch;
+
+    await expect(new AsnaAdapter(new MemoryEvidenceStore(), fetchMock).collect({
+      domain: "asna.ru", platform: "asna.ru", listingId: "20046", brand: "Церетон", url: card, metadata: {}
+    }, { region: "Москва" })).rejects.toThrow(/unbound final URL/);
   });
 
   it("derives exact human Oscillococcinum variants from ASNA card slugs", async () => {

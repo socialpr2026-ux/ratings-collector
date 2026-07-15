@@ -63,6 +63,30 @@ async function requestSearch(brand: string, context: AdapterContext, fetchImpl: 
   return { html, status: response.status };
 }
 
+function indexedRefs(brand: string, html: string): ProductRef[] {
+  const refs = new Map<string, ProductRef>();
+  const $ = load(html);
+  $("a.result__a[href]").each((_index, node) => {
+    const title = compact($(node).text());
+    const href = $(node).attr("href");
+    const product = href ? parsedProduct(href) : undefined;
+    const reviewCount = reviewsFromTitle(title);
+    // Search snippets and review bodies may mention another medicine. Only an
+    // exact result title bound to a stable med-otzyv medicine URL counts.
+    if (!product || reviewCount === undefined || !matchesBrand(title.split(/\s+(?:-|—)\s+\d/)[0] ?? title, brand)) return;
+    refs.set(product.id, {
+      domain: DOMAIN,
+      platform: DOMAIN,
+      listingId: product.id,
+      brand,
+      url: product.url,
+      title: title.replace(/\s+(?:-|—)\s+\d[\d\s\u00a0\u202f]*\s+отзыв[а-яё\s]+$/iu, "").trim(),
+      metadata: { source: "med-otzyv-exact-index", reviewCount, proofTitle: title }
+    });
+  });
+  return [...refs.values()];
+}
+
 export class MedOtzyvAdapter implements SiteAdapter {
   readonly id = "med-otzyv:exact-index-v1";
   readonly supportedDomains = [DOMAIN] as const;
@@ -94,25 +118,7 @@ export class MedOtzyvAdapter implements SiteAdapter {
     let searchFailure: unknown;
     try {
       const { html } = await requestSearch(brand, context, this.fetchImpl);
-      const $ = load(html);
-      $("a.result__a[href]").each((_index, node) => {
-        const title = compact($(node).text());
-        const href = $(node).attr("href");
-        const product = href ? parsedProduct(href) : undefined;
-        const reviewCount = reviewsFromTitle(title);
-        // Search snippets and review bodies may mention another medicine. Only
-        // an exact result title bound to a stable med-otzyv medicine URL counts.
-        if (!product || reviewCount === undefined || !matchesBrand(title.split(/\s+(?:-|—)\s+\d/)[0] ?? title, brand)) return;
-        refs.set(product.id, {
-          domain: DOMAIN,
-          platform: DOMAIN,
-          listingId: product.id,
-          brand,
-          url: product.url,
-          title: title.replace(/\s+(?:-|—)\s+\d[\d\s\u00a0\u202f]*\s+отзыв[а-яё\s]+$/iu, "").trim(),
-          metadata: { source: "med-otzyv-exact-index", reviewCount, proofTitle: title }
-        });
-      });
+      for (const ref of indexedRefs(brand, html)) refs.set(ref.listingId, ref);
     } catch (error) {
       searchFailure = error;
     }
@@ -151,24 +157,51 @@ export class MedOtzyvAdapter implements SiteAdapter {
     let title = ref.title ? compact(ref.title) : "";
     let proofSource = "med-otzyv-exact-index";
     if (ref.metadata.source === "med-otzyv-verified-route" && product) {
-      let response: Response;
+      let sourceFailure: Error | undefined;
       try {
-        response = await safeFetch(product.url, { signal: context.signal }, context.fetch ?? this.fetchImpl, 2, 60_000);
+        const response = await safeFetch(product.url, { signal: context.signal }, context.fetch ?? this.fetchImpl, 2, 60_000);
+        const html = await readTextBounded(response, 2_000_000, 60_000);
+        if (!response.ok) throw new AdapterBlockedError(`${DOMAIN}:${ref.listingId}: verified product page returned HTTP ${response.status}`);
+        const $ = load(html);
+        title = compact($("h1").first().text() || $("title").first().text());
+        const value = [
+          $("[itemprop='reviewCount']").first().attr("content"),
+          $("[itemprop='reviewCount']").first().text(),
+          $.root().text().match(/Все\s+отзывы\s+([\d\s\u00a0\u202f]+)/iu)?.[1]
+        ].find((candidate) => Boolean(candidate?.trim()));
+        reviewCount = value === undefined ? undefined : Number(String(value).replace(/[\s\u00a0\u202f]/g, ""));
+        if (!title || !matchesBrand(title, ref.brand) || typeof reviewCount !== "number" ||
+          !Number.isSafeInteger(reviewCount) || reviewCount < 0) {
+          throw new ParserChangedError(`${DOMAIN}:${ref.listingId}: verified product page proof is incomplete`);
+        }
+        proofTitle = `${title} — ${reviewCount} отзывов врачей и пациентов`;
+        proofSource = "med-otzyv-source-page";
       } catch (error) {
-        throw new AdapterBlockedError(`${DOMAIN}:${ref.listingId}: verified product page is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        sourceFailure = error instanceof Error
+          ? error
+          : new AdapterBlockedError(`${DOMAIN}:${ref.listingId}: verified product page is unavailable: ${String(error)}`);
       }
-      const html = await readTextBounded(response, 2_000_000, 60_000);
-      if (!response.ok) throw new AdapterBlockedError(`${DOMAIN}:${ref.listingId}: verified product page returned HTTP ${response.status}`);
-      const $ = load(html);
-      title = compact($("h1").first().text() || $("title").first().text());
-      const value = [
-        $("[itemprop='reviewCount']").first().attr("content"),
-        $("[itemprop='reviewCount']").first().text(),
-        $.root().text().match(/Все\s+отзывы\s+([\d\s\u00a0\u202f]+)/iu)?.[1]
-      ].find((candidate) => Boolean(candidate?.trim()));
-      reviewCount = value === undefined ? undefined : Number(String(value).replace(/[\s\u00a0\u202f]/g, ""));
-      proofTitle = `${title} — ${reviewCount} отзывов врачей и пациентов`;
-      proofSource = "med-otzyv-source-page";
+      if (sourceFailure) {
+        // The exact source can block one egress while the independently indexed
+        // title remains available. Perform one bounded refresh and accept only
+        // the same stable medicine ID plus the same strict title/count proof as
+        // normal discovery. If that proof is absent, preserve the source block.
+        try {
+          const { html } = await requestSearch(ref.brand, context, this.fetchImpl);
+          const indexed = indexedRefs(ref.brand, html).find((candidate) => candidate.listingId === ref.listingId);
+          if (indexed) {
+            title = compact(indexed.title ?? "");
+            reviewCount = indexed.metadata.reviewCount;
+            proofTitle = indexed.metadata.proofTitle;
+            proofSource = "med-otzyv-exact-index-after-source-block";
+            sourceFailure = undefined;
+          }
+        } catch {
+          // Preserve the exact source failure below; an unavailable or unrelated
+          // external index is never a zero-result proof.
+        }
+        if (sourceFailure) throw sourceFailure;
+      }
     }
     if (!product || product.id !== ref.listingId || !title || !matchesBrand(title, ref.brand) ||
       typeof reviewCount !== "number" || !Number.isSafeInteger(reviewCount) || reviewCount < 0 ||

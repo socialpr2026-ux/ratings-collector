@@ -39,6 +39,33 @@ function translatedUrl(source: URL, translatedHost: string): URL {
   return result;
 }
 
+function translateLauncherUrl(source: URL): URL {
+  const result = new URL("https://translate.google.com/website");
+  result.searchParams.set("sl", "ru");
+  result.searchParams.set("tl", "en");
+  result.searchParams.set("hl", "en");
+  result.searchParams.set("u", source.toString());
+  return result;
+}
+
+function exactTranslatedFinal(value: string, source: URL, translatedHost: string): boolean {
+  try {
+    const final = new URL(value);
+    if (final.protocol !== "https:" || final.hostname !== translatedHost || final.port || final.username || final.password || final.hash) {
+      return false;
+    }
+    if (final.pathname !== source.pathname) return false;
+    const sourceEntries = [...source.searchParams.entries()].sort();
+    const finalSourceEntries = [...final.searchParams.entries()]
+      .filter(([key]) => !(key in TRANSLATE_PARAMETERS) && key !== "_x_tr_sch")
+      .sort();
+    return JSON.stringify(sourceEntries) === JSON.stringify(finalSourceEntries) &&
+      final.searchParams.get("_x_tr_sl") === "ru" && final.searchParams.get("_x_tr_tl") === "en";
+  } catch {
+    return false;
+  }
+}
+
 function assertTranslatedSource(html: string, source: URL): CheerioAPI {
   const $ = load(html);
   const base = $("base[href]").first().attr("href");
@@ -84,21 +111,63 @@ async function translatedPage(
   source: URL,
   translatedHost: string,
   context: AdapterContext,
-  fallbackFetch: typeof fetch
+  fallbackFetch: typeof fetch,
+  allowLauncherFallback = false
 ): Promise<{ html: string; $: CheerioAPI }> {
   const endpoint = translatedUrl(source, translatedHost);
   let response: Response;
   try {
     response = await safeFetch(endpoint.toString(), { signal: context.signal, headers: { accept: "text/html,application/xhtml+xml" } }, context.fetch ?? fallbackFetch);
   } catch (error) {
+    if (allowLauncherFallback) {
+      return translatedPageViaLauncher(source, translatedHost, context, fallbackFetch);
+    }
     throw new AdapterBlockedError(`${normalizeHost(source.hostname)} translated request failed: ${error instanceof Error ? error.message : String(error)}`);
   }
   const html = await readTextBounded(response, MAX_DOCUMENT_BYTES);
   if (!response.ok || blockPage(html)) {
+    if (allowLauncherFallback && [403, 408, 425, 429, 498, 502, 503, 504].includes(response.status)) {
+      return translatedPageViaLauncher(source, translatedHost, context, fallbackFetch);
+    }
     throw new AdapterBlockedError(`${normalizeHost(source.hostname)} translated request is blocked (HTTP ${response.status})`);
   }
   if (!/text\/html/i.test(response.headers.get("content-type") ?? "text/html")) {
     throw new ParserChangedError(`${normalizeHost(source.hostname)} translated request returned non-HTML data`);
+  }
+  return { html, $: assertTranslatedSource(html, source) };
+}
+
+async function translatedPageViaLauncher(
+  source: URL,
+  translatedHost: string,
+  context: AdapterContext,
+  fallbackFetch: typeof fetch
+): Promise<{ html: string; $: CheerioAPI }> {
+  // The fixed Function route is preferred. This second path is used only when
+  // that route is transiently unavailable or for the bounded ASNA family page
+  // that the Function intentionally does not expose. Google controls the only
+  // redirect, and the final renderer URL plus both in-document source proofs
+  // must bind back to the exact requested first-party URL.
+  let response: Response;
+  try {
+    response = await (context.fetch ?? fallbackFetch)(translateLauncherUrl(source), {
+      signal: context.signal,
+      redirect: "follow",
+      headers: { accept: "text/html,application/xhtml+xml" }
+    });
+  } catch (error) {
+    throw new AdapterBlockedError(`${normalizeHost(source.hostname)} translated launcher failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const finalUrl = response.headers.get("x-ratings-final-url") ?? response.url;
+  const html = await readTextBounded(response, MAX_DOCUMENT_BYTES);
+  if (!response.ok || blockPage(html)) {
+    throw new AdapterBlockedError(`${normalizeHost(source.hostname)} translated launcher is blocked (HTTP ${response.status})`);
+  }
+  if (!exactTranslatedFinal(finalUrl, source, translatedHost)) {
+    throw new ParserChangedError(`Translated ${source.hostname} launcher returned an unbound final URL`);
+  }
+  if (!/text\/html/i.test(response.headers.get("content-type") ?? "text/html")) {
+    throw new ParserChangedError(`${normalizeHost(source.hostname)} translated launcher returned non-HTML data`);
   }
   return { html, $: assertTranslatedSource(html, source) };
 }
@@ -477,7 +546,7 @@ export class AsnaAdapter implements SiteAdapter {
     const checkedAt = new Date().toISOString();
     try {
       const source = new URL("https://www.asna.ru/cards/kagotsel_12mg_n10_tab_niarmedik_plyus_ooo.html");
-      const { $ } = await translatedPage(source, "www-asna-ru.translate.goog", context, this.fetchImpl);
+      const { $ } = await translatedPage(source, "www-asna-ru.translate.goog", context, this.fetchImpl, true);
       if (!asnaProduct($)) throw new ParserChangedError("asna.ru canary has no exact aggregate product");
       return { ok: true, checkedAt, message: "asna.ru: fixed translated product canary is healthy" };
     } catch (error) {
@@ -488,11 +557,14 @@ export class AsnaAdapter implements SiteAdapter {
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = new Map(asnaPreviousRefs(brand, context).map((ref) => [ref.listingId, ref]));
     const slugs = brandSlugs(brand);
-    const maps = await Promise.all([
+    const maps = await Promise.allSettled([
       sitemap("https://www.asna.ru/sitemap/sitemap_cards.xml", context, this.fetchImpl),
       sitemap("https://www.asna.ru/sitemap/sitemap_cards1.xml", context, this.fetchImpl)
     ]);
-    for (const xml of maps) {
+    const candidates = new Map<string, { listingId: string; canonicalUrl: string; discovery: string }>();
+    for (const map of maps) {
+      if (map.status !== "fulfilled") continue;
+      const xml = map.value;
       for (const match of xml.matchAll(/<loc>([^<]+)<\/loc>/gi)) {
         let url: URL;
         try { url = new URL(match[1].replace(/&amp;/gi, "&")); }
@@ -501,7 +573,38 @@ export class AsnaAdapter implements SiteAdapter {
         if (!slug || !slugMatches(slug, slugs)) continue;
         const preliminary = asnaRef(url);
         if (!preliminary) continue;
-        const { $ } = await translatedPage(new URL(preliminary.canonicalUrl), "www-asna-ru.translate.goog", context, this.fetchImpl);
+        candidates.set(preliminary.canonicalUrl, { ...preliminary, discovery: "asna-card-sitemap" });
+      }
+    }
+    // ASNA's current card sitemaps can omit an otherwise live medicine family.
+    // Its exact `/product/<brand>/` page is a source-bound first-party listing,
+    // so use it only to discover card URLs; every card aggregate is still
+    // fetched and verified independently below.
+    for (const slug of slugs) {
+      const family = new URL(`https://www.asna.ru/product/${slug}/`);
+      let $: CheerioAPI;
+      try {
+        ({ $ } = await translatedPageViaLauncher(family, "www-asna-ru.translate.goog", context, this.fetchImpl));
+      } catch (error) {
+        if (error instanceof AdapterBlockedError || error instanceof ParserChangedError) continue;
+        throw error;
+      }
+      $("a[href*='/cards/']").each((_index, node) => {
+        const href = $(node).attr("href");
+        if (!href) return;
+        let translated: URL;
+        try { translated = new URL(href, `https://www-asna-ru.translate.goog/`); }
+        catch { return; }
+        if (!["www-asna-ru.translate.goog", "www.asna.ru"].includes(translated.hostname)) return;
+        const preliminary = asnaRef(`https://www.asna.ru${translated.pathname}`);
+        const cardSlug = translated.pathname.match(/^\/cards\/([a-z0-9_.-]+)\.html$/i)?.[1];
+        if (!preliminary || !cardSlug || !slugMatches(cardSlug, slugs)) return;
+        candidates.set(preliminary.canonicalUrl, { ...preliminary, discovery: "asna-product-family" });
+      });
+    }
+    for (const preliminary of candidates.values()) {
+      try {
+        const { $ } = await translatedPage(new URL(preliminary.canonicalUrl), "www-asna-ru.translate.goog", context, this.fetchImpl, true);
         const parsed = asnaProduct($);
         if (!parsed || parsed.canonicalUrl !== preliminary.canonicalUrl) continue;
         for (const [existingId, existing] of refs) {
@@ -510,8 +613,11 @@ export class AsnaAdapter implements SiteAdapter {
         refs.set(parsed.listingId, {
           domain: "asna.ru", platform: "asna.ru", listingId: parsed.listingId, brand,
           url: parsed.canonicalUrl, title: asnaTitle(parsed.canonicalUrl, brand, slugs),
-          metadata: { discovery: "asna-card-sitemap", reviewCount: parsed.reviews, rating: parsed.rating }
+          metadata: { discovery: preliminary.discovery, reviewCount: parsed.reviews, rating: parsed.rating }
         });
+      } catch (error) {
+        if (error instanceof AdapterBlockedError || error instanceof ParserChangedError) continue;
+        throw error;
       }
     }
     if (refs.size === 0) {
@@ -524,7 +630,7 @@ export class AsnaAdapter implements SiteAdapter {
     const parsedRef = asnaRef(ref.url, ref.listingId);
     if (!parsedRef) throw new ParserChangedError(`asna.ru: invalid product ref ${ref.listingId}`);
     const capturedAt = new Date().toISOString();
-    const { html, $ } = await translatedPage(new URL(parsedRef.canonicalUrl), "www-asna-ru.translate.goog", context, this.fetchImpl);
+    const { html, $ } = await translatedPage(new URL(parsedRef.canonicalUrl), "www-asna-ru.translate.goog", context, this.fetchImpl, true);
     const parsed = asnaProduct($);
     if (!parsed || parsed.listingId !== ref.listingId || parsed.canonicalUrl !== parsedRef.canonicalUrl) {
       throw new ParserChangedError(`asna.ru:${ref.listingId}: product identity or aggregate changed`);
