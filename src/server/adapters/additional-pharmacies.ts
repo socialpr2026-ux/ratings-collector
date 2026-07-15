@@ -505,7 +505,11 @@ export class NfAptekaAdapter extends AdditionalPharmacyAdapter {
     }
     if (reviews > 0) {
       const visible = nfVisibleReviewMetrics(page.$, title);
-      if (!visible || visible.reviews !== reviews || Math.abs(visible.rating - value!) > 0.01) {
+      const aggregateMatchesVisible = visible && (
+        Math.abs(visible.rating - value!) <= 0.01 ||
+        Number.isInteger(value) && Math.round(visible.rating) === value
+      );
+      if (!visible || visible.reviews !== reviews || !aggregateMatchesVisible) {
         throw new ParserChangedError(`${NF_DOMAIN}:${ref.listingId}: aggregate feedback is not proven by the exact product review list`);
       }
     }
@@ -655,28 +659,48 @@ type BudReview = { id?: unknown; ratings?: Array<{ attribute_code?: unknown; val
 export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
   readonly id = "budzdorov.ru:translated-review-state-v1";
   readonly supportedDomains = [BUD_DOMAIN, `www.${BUD_DOMAIN}`] as const;
+  private readonly successfulDiscovery = new Map<string, ProductRef[]>();
+
+  private discoveryKey(brand: string, context: AdapterContext): string {
+    return `${context.runId ?? "standalone"}:${normalizeText(brand)}`;
+  }
 
   healthCheck(context: AdapterContext): Promise<AdapterHealth> {
-    return this.canary("Оциллококцинум", context);
+    // Check the product family that this run is actually about. A transient
+    // block on an unrelated canary must not prevent a healthy brand partition.
+    return this.canary(context.brands?.[0]?.trim() || "Оциллококцинум", context);
   }
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = historicalRefs(BUD_DOMAIN, brand, context, budRef);
+    const cacheKey = this.discoveryKey(brand, context);
+    const cached = this.successfulDiscovery.get(cacheKey);
+    if (cached) {
+      this.successfulDiscovery.delete(cacheKey);
+      for (const ref of cached) refs.set(ref.listingId, { ...ref, metadata: { ...ref.metadata } });
+      return [...refs.values()].sort((left, right) => (left.title ?? "").localeCompare(right.title ?? "", "ru"));
+    }
     const source = new URL(`https://www.${BUD_DOMAIN}/forms/${budFormSlug(brand)}`);
     const page = await requestPage(source, context, this.fetchImpl, BUD_TRANSLATE_HOST);
+    const liveRefs = new Map<string, ProductRef>();
     page.$("a[href*='/product/']").each((_index, node) => {
       const parsed = budRef(page.$(node).attr("href") ?? "");
       const title = compactText(page.$(node).attr("title") || page.$(node).text());
       if (!parsed || !matchesBrand(title, brand)) return;
-      refs.set(parsed.id, {
+      liveRefs.set(parsed.id, {
         domain: BUD_DOMAIN, platform: BUD_DOMAIN, listingId: parsed.id, brand,
         url: parsed.url, title, metadata: { discovery: "translated-first-party-form-page" }
       });
     });
-    if (!refs.size) {
+    if (!liveRefs.size && !refs.size) {
       const text = compactText(page.$("main, body").text());
       if (/ничего не найдено|товары не найдены|нет препаратов/i.test(text)) return [];
       throw new AdapterBlockedError(`${BUD_DOMAIN}: form page proved neither exact products nor no results`);
+    }
+    if (liveRefs.size) {
+      const snapshot = [...liveRefs.values()].map((ref) => ({ ...ref, metadata: { ...ref.metadata } }));
+      this.successfulDiscovery.set(cacheKey, snapshot);
+      for (const ref of snapshot) refs.set(ref.listingId, ref);
     }
     return [...refs.values()].sort((left, right) => (left.title ?? "").localeCompare(right.title ?? "", "ru"));
   }

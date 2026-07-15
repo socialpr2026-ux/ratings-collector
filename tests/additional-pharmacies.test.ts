@@ -160,6 +160,35 @@ describe("additional pharmacy adapters", () => {
     await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({ reviews: 3, rating: 4.3, status: "ok" });
   });
 
+  it("accepts an integer-rounded NFapteka aggregate only when the exact review list proves it", async () => {
+    const brand = "\u041a\u0430\u0433\u043e\u0446\u0435\u043b";
+    const title = `${brand} \u0442\u0430\u0431\u043b\u0435\u0442\u043a\u0438 12 \u043c\u0433 \u211620`;
+    const path = "/tambov/catalog/lekarstva/kagocel-tabletki-12-mg-20.html";
+    const productSource = `https://nfapteka.ru${path}`;
+    const page = (aggregateRating: number) => translated(productSource,
+      `<link rel="canonical" href="${productSource}"><h1>${title}</h1><input name="productId" value="20020">` +
+      `<div itemprop="aggregateRating"><meta itemprop="ratingValue" content="${aggregateRating}">` +
+      `<span itemprop="reviewCount">3</span></div>${nfReviewList(title, [5, 5, 4])}`);
+    const ref = {
+      domain: "nfapteka.ru", platform: "nfapteka.ru", listingId: "20020", brand,
+      url: productSource, metadata: {}
+    };
+
+    const adapter = new NfAptekaAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(page(5), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+    await expect(adapter.collect(ref, context)).resolves.toMatchObject({
+      reviews: 3,
+      rating: 5,
+      rawRating: 5,
+      rawRatingScale: 5,
+      status: "ok"
+    });
+
+    const mismatched = new NfAptekaAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(page(4), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+    await expect(mismatched.collect(ref, context)).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
   it("accepts only the exact empty NFapteka product review section as zero feedback", async () => {
     const path = "/tambov/catalog/lekarstva/khondrofen-maz-30-g.html";
     const productSource = `https://nfapteka.ru${path}`;
@@ -207,6 +236,27 @@ describe("additional pharmacy adapters", () => {
     expect(new URL(String(fetchSpy.mock.calls[0][0])).pathname).toBe("/forms/ocillokokcinum");
     await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({ reviews: 3, rating: 4.7, status: "ok" });
     expect(new URL(String(fetchSpy.mock.calls[1][0])).pathname).toBe(productPath);
+  });
+
+  it("checks the requested Bud Zdorov brand and reuses its successful discovery in the same run", async () => {
+    const brand = "\u041a\u0430\u0433\u043e\u0446\u0435\u043b";
+    const formSource = "https://www.budzdorov.ru/forms/kagocel";
+    const productPath = "/product/kagotsel-tab-12mg-no20-106662";
+    const form = translated(formSource,
+      `<main><a href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en" ` +
+      `title="${brand} \u0442\u0430\u0431\u043b\u0435\u0442\u043a\u0438 12\u043c\u0433 \u211620">${brand}</a></main>`);
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      expect(new URL(String(input)).pathname).toBe("/forms/kagocel");
+      return new Response(form, { status: 200, headers: { "content-type": "text/html" } });
+    });
+    const adapter = new BudZdorovAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+    const runContext = { ...context, runId: "bud-kagocel-run", brands: [brand] };
+
+    await expect(adapter.healthCheck(runContext)).resolves.toMatchObject({ ok: true });
+    await expect(adapter.discover(brand, runContext)).resolves.toMatchObject([
+      { listingId: "106662", url: `https://www.budzdorov.ru${productPath}` }
+    ]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it("collects eTabl product state and drops its default rating when there are no reviews", async () => {
