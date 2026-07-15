@@ -463,6 +463,22 @@ describe("run orchestration and fail-closed QA", () => {
     const bareFormRun = await bareFormService.executeRun((await bareFormService.createRun(request)).id);
     await expect(bareFormService.approveObservations(bareFormRun.id, ["example.com:1"]))
       .rejects.toThrow("не содержит доказанного товарного варианта");
+    await expect(bareFormService.approveObservations(
+      bareFormRun.id,
+      ["example.com:1"],
+      { "example.com:1": "капсулы" }
+    )).rejects.toThrow("Уточните форму, дозировку или упаковку");
+    const manuallyResolved = await bareFormService.approveObservations(
+      bareFormRun.id,
+      ["example.com:1"],
+      { "example.com:1": "капсулы 100 мг №20" }
+    );
+    expect(manuallyResolved.observations[0]).toMatchObject({
+      status: "ok",
+      product: "Бренд капсулы",
+      productOverride: "капсулы 100 мг №20",
+      productIdentity: { granularity: "variant", confidence: "exact", label: "капсулы 100 мг №20" }
+    });
 
     const aggregateService = makeService("Бренд отзывы", {
       scope: "product_family", signals: [{ source: "title", text: "Бренд отзывы" }],

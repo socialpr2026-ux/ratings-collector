@@ -24,6 +24,7 @@ import { analyzeProductIdentity } from "./utils/product-name.js";
 import { titleProductEvidence } from "./utils/product-evidence.js";
 import { normalizeObservationFeedback } from "./feedback-count.js";
 import { RunActivityTracker, runtimeSignals } from "./runtime-activity.js";
+import { normalizeProductOverride, resolveProductOverride } from "./utils/product-override.js";
 
 const RUN_SOFT_DEADLINE_MS = 26 * 60 * 1000;
 
@@ -628,12 +629,22 @@ export class RatingsService {
     }
   }
 
-  async approveObservations(id: string, keys: string[]): Promise<RunState> {
+  async approveObservations(id: string, keys: string[], productLabels: Record<string, string> = {}): Promise<RunState> {
     const run = await this.requireRun(id);
     if (run.status !== "review") {
       throw new Error(`Нельзя подтверждать карточки из статуса ${run.status}`);
     }
     const accepted = new Set(keys);
+    const reviewKeys = new Set(run.observations
+      .filter((item) => item.status === "needs_review")
+      .map((item) => productKey(item.domain, item.listingId)));
+    for (const [key, value] of Object.entries(productLabels)) {
+      if (!accepted.has(key)) throw new Error(`Уточнение продукта передано для невыбранной карточки ${key}`);
+      if (!reviewKeys.has(key)) throw new Error(`Карточка для уточнения не найдена: ${key}`);
+      if (typeof value !== "string" || !normalizeProductOverride(value) || normalizeProductOverride(value).length > 240) {
+        throw new Error(`Некорректное уточнение продукта для карточки ${key}`);
+      }
+    }
     const profiles = new Map<string, SiteProfile | undefined>();
     for (const item of run.observations) {
       if (item.status !== "needs_review" || !accepted.has(productKey(item.domain, item.listingId))) continue;
@@ -648,6 +659,16 @@ export class RatingsService {
         if (item.profileVersion !== profile.version) {
           throw new Error(`Карточка ${item.domain}:${item.listingId} собрана профилем другой версии; повторите запуск`);
         }
+      }
+      const key = productKey(item.domain, item.listingId);
+      const productLabel = productLabels[key];
+      if (productLabel !== undefined) {
+        const manualIdentity = resolveProductOverride(item, productLabel);
+        if (!manualIdentity) {
+          throw new Error(`Уточните форму, дозировку или упаковку товара для карточки ${key}`);
+        }
+        item.productOverride = manualIdentity.label;
+        item.productIdentity = manualIdentity;
       }
       const identity = item.productIdentity;
       const exactVariant = identity?.granularity === "variant" && identity.confidence === "exact";

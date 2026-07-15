@@ -247,6 +247,13 @@ tbody tr.row-review:hover { background: #fff9e8; }
 .product-cell a span { color: #60766b; font-size: 12px; }
 .product-cell a:hover { color: var(--green); text-decoration: underline; text-underline-offset: 3px; }
 .product-cell small { display: block; margin-top: 4px; color: #68716c; font-size: 11px; }
+.product-edit { display: grid; gap: 5px; margin-top: 9px; padding: 9px; border: 1px solid #e1d7ba; border-radius: 10px; background: rgba(255,255,255,.76); }
+.product-edit > span { color: #5a513b; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .035em; }
+.product-edit input { width: 100%; min-height: 36px; border: 1px solid #d5d9d7; border-radius: 8px; padding: 7px 9px; color: #28243d; background: #fff; font: inherit; font-size: 12px; }
+.product-edit input:focus-visible { outline: 3px solid rgba(255,77,0,.24); outline-offset: 2px; border-color: var(--orange); }
+.product-edit small { margin: 0; color: #66716b; font-size: 10px; line-height: 1.35; }
+.product-edit-invalid input { border-color: #d2a89d; background: #fff9f7; }
+.product-edit-invalid small { color: #8a514b; }
 .identity-badge { width: fit-content; margin-top: 7px; padding: 3px 7px; border-radius: 999px; color: #4f5b55; background: #edf1ef; font-size: 9px; font-weight: 850; letter-spacing: .025em; text-transform: uppercase; }
 .identity-variant { color: #246048; background: #e7f3ec; }
 .identity-family, .identity-line { color: #765914; background: #fff1c9; }

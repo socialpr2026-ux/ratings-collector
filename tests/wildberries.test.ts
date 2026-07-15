@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AdapterContext, ProductRef } from "../src/shared/types.js";
 import { AdapterBlockedError, ParserChangedError } from "../src/server/adapters/errors.js";
 import { WildberriesAdapter } from "../src/server/adapters/wildberries.js";
+import { analyzeProductIdentity } from "../src/server/utils/product-name.js";
 
 const FIXED_TIME = new Date("2026-07-13T09:00:00.000Z");
 
@@ -36,6 +37,7 @@ function createAdapter(
 ): WildberriesAdapter {
   return new WildberriesAdapter({
     fetch: fetchImplementation,
+    productInfoFetch: false,
     searchEndpoint: "https://search.wb.ru/exactmatch/ru/common/v14/search",
     requestIntervalMs: 0,
     blockedRetryBaseMs: 0,
@@ -369,6 +371,71 @@ describe("WildberriesAdapter.discover", () => {
 });
 
 describe("WildberriesAdapter.collect", () => {
+  it("restores the exact package count from the same-nm product card when the buyer API title is truncated", async () => {
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      expect(url.hostname).toBe("basket-37.wbbasket.ru");
+      expect(url.pathname).toBe("/vol8226/part822665/822665269/info/ru/card.json");
+      return jsonResponse({
+        nm_id: 822665269,
+        imt_name: "Тромболикс Про раствор для в/в и в/м введ 600 ЛЕ/2мл 2 мл амп 10 шт",
+        options: [{ name: "Количество капсул/таблеток", value: "10 шт." }]
+      });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock, { productInfoFetch: fetchMock });
+
+    const observation = await adapter.collect(productRef({
+      listingId: "822665269",
+      brand: "Тромболикс Про",
+      url: "https://www.wildberries.ru/catalog/822665269/detail.aspx",
+      title: "Тромболикс Про раствор для в/в и в/м введ 600 ЛЕ/2мл 2 мл амп…",
+      metadata: {
+        source: "wildberries-search-v18",
+        nmReviewRating: 4.9,
+        nmFeedbacks: 8
+      }
+    }), context());
+
+    expect(observation).toMatchObject({
+      product: "Тромболикс Про раствор для в/в и в/м введ 600 ЛЕ/2мл 2 мл амп 10 шт",
+      reviews: 8,
+      rating: 4.9,
+      status: "ok"
+    });
+    expect(analyzeProductIdentity({
+      brand: observation.brand,
+      product: observation.product,
+      url: observation.canonicalUrl
+    })).toMatchObject({
+      label: "раствор в ампулах 2 мл №10",
+      granularity: "variant",
+      confidence: "exact"
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("never borrows a package count from basket metadata for another nmId", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      nm_id: 822665270,
+      imt_name: "Тромболикс Про раствор 2 мл ампулы №20"
+    })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock, { productInfoFetch: fetchMock });
+
+    const observation = await adapter.collect(productRef({
+      listingId: "822665269",
+      brand: "Тромболикс Про",
+      title: "Тромболикс Про раствор 2 мл…",
+      metadata: {
+        source: "wildberries-search-v18",
+        nmReviewRating: 4.9,
+        nmFeedbacks: 8
+      }
+    }), context());
+
+    expect(observation.product).toBe("Тромболикс Про раствор 2 мл…");
+    expect(observation.product).not.toContain("№20");
+  });
+
   it("collects current-search nm metrics without calling the card endpoint", async () => {
     const fetchMock = vi.fn(async () => {
       throw new Error("card endpoint must not be called");

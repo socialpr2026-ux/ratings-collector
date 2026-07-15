@@ -283,6 +283,24 @@ function canonicalForm(form: string | undefined): string | undefined {
 }
 
 /**
+ * Catalogs often omit the ampoule container from an otherwise identical
+ * injectable solution title.  Treat that omission as a difference in title
+ * richness, not as a second dosage form.  Rendering still keeps the richer
+ * human label when the source provides it.
+ */
+function comparableForm(form: string | undefined): string | undefined {
+  const canonical = canonicalForm(form);
+  return canonical === "раствор в ампулах" ? "раствор" : canonical;
+}
+
+function formSubsumes(richer: string | undefined, poorer: string | undefined): boolean {
+  if (!poorer) return true;
+  if (!richer || comparableForm(richer) !== comparableForm(poorer)) return false;
+  return canonicalForm(richer) === canonicalForm(poorer)
+    || canonicalForm(richer) === "раствор в ампулах" && canonicalForm(poorer) === "раствор";
+}
+
+/**
  * A measured single container does not become a different product merely
  * because one catalog spells out "1 шт".  The physical pack is already
  * identified by "30 г"/"100 мл"; real multi-packs remain distinct.
@@ -401,7 +419,7 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
 }
 
 function partsKey(parts: ProductParts): string {
-  return [parts.modifier, canonicalForm(parts.form), parts.doses.join("+"), canonicalCount(parts), parts.multipack].map((item) => item ?? "").join("|");
+  return [parts.modifier, comparableForm(parts.form), parts.doses.join("+"), canonicalCount(parts), parts.multipack].map((item) => item ?? "").join("|");
 }
 
 function specificity(parts: ProductParts): number {
@@ -464,7 +482,7 @@ function setIsSubset(left: readonly string[], right: readonly string[]): boolean
 }
 
 function partsCompatible(left: ProductParts, right: ProductParts): boolean {
-  if (left.form && right.form && canonicalForm(left.form) !== canonicalForm(right.form)) return false;
+  if (left.form && right.form && comparableForm(left.form) !== comparableForm(right.form)) return false;
   const leftCount = canonicalCount(left);
   const rightCount = canonicalCount(right);
   if (leftCount && rightCount && leftCount !== rightCount) return false;
@@ -480,7 +498,7 @@ function partsCompatible(left: ProductParts, right: ProductParts): boolean {
 
 function partsSubsumes(richer: ProductParts, poorer: ProductParts): boolean {
   if (!partsCompatible(richer, poorer)) return false;
-  if (poorer.form && canonicalForm(richer.form) !== canonicalForm(poorer.form)) return false;
+  if (!formSubsumes(richer.form, poorer.form)) return false;
   const poorerCount = canonicalCount(poorer);
   if (poorerCount && canonicalCount(richer) !== poorerCount) return false;
   if (poorer.multipack && richer.multipack !== poorer.multipack) return false;
@@ -663,9 +681,13 @@ export function analyzeProductIdentity(item: ProductNameInput): ProductIdentity 
       // the employee-facing label as "Общий рейтинг: №30" when a review
       // control was mistaken for a variant selector.
       if (parts.generic || !parts.form && !parts.doses.length && !parts.modifier) continue;
-      const baseKey = [parts.modifier, canonicalForm(parts.form), [...parts.doses].sort().join("+"), canonicalCount(parts), parts.multipack].map((value) => value ?? "").join("|");
+      const baseKey = [parts.modifier, comparableForm(parts.form), [...parts.doses].sort().join("+"), canonicalCount(parts), parts.multipack].map((value) => value ?? "").join("|");
       const previous = variantGroups.get(baseKey);
-      if (!previous || specificity(parts) > specificity(previous)) variantGroups.set(baseKey, parts);
+      if (
+        !previous
+        || (partsSubsumes(parts, previous) && !partsSubsumes(previous, parts))
+        || specificity(parts) > specificity(previous)
+      ) variantGroups.set(baseKey, parts);
     }
     // A review site may mark every page as an aggregate because one rating is
     // shared by all reviews on that page.  That does not make a page such as

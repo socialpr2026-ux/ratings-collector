@@ -4,6 +4,7 @@ import type { AdapterContext, ProductRef } from "../src/shared/types.js";
 import { AdapterBlockedError, ParserChangedError } from "../src/server/adapters/errors.js";
 import { YandexAdapter } from "../src/server/adapters/yandex.js";
 import { analyzeProductIdentity } from "../src/server/utils/product-name.js";
+import { hasDeterministicAggregateProof } from "../src/shared/review-aggregates.js";
 
 const INDEX = "https://reviews.yandex.ru/ugcpub/sitemap.xml";
 const MAP_A = "https://reviews.yandex.ru/ugcpub/sitemap_model_0-9999999-0.xml";
@@ -381,7 +382,7 @@ describe("YandexAdapter collection", () => {
 
     expect(observation).toMatchObject({ reviews: 5, rating: 4.9, status: "ok" });
     expect(observation.productEvidence?.signals).toContainEqual({
-      source: "json_ld",
+      source: "variant",
       text: "Хондрофен мазь для наружного применения 30 г 1 шт"
     });
     expect(identity).toMatchObject({
@@ -392,7 +393,7 @@ describe("YandexAdapter collection", () => {
     expect(identity.label).not.toContain("50 г");
   });
 
-  it("does not merge conflicting source-bound Yandex product variants", async () => {
+  it("keeps genuinely different source-bound packs visible under one proven Yandex model aggregate", async () => {
     const listingId = "5829843760";
     const url = `https://reviews.yandex.ru/product/khondrofen-maz-d-nar-prim--${listingId}`;
     const html = productHtml({
@@ -417,7 +418,75 @@ describe("YandexAdapter collection", () => {
       evidence: observation.productEvidence
     });
 
-    expect(identity).toMatchObject({ granularity: "unresolved", confidence: "ambiguous" });
+    expect(identity).toMatchObject({ granularity: "family", confidence: "exact", variantCount: 2 });
+    expect(identity.label).toContain("мазь 30 г");
+    expect(identity.label).toContain("мазь 50 г");
+    expect(hasDeterministicAggregateProof({ ...observation, productIdentity: identity })).toBe(true);
+  });
+
+  it("collapses equivalent Trombolix Pro offer spellings into one exact product variant", async () => {
+    const listingId = "1016049020";
+    const url = `https://reviews.yandex.ru/product/tromboliks-pro--${listingId}`;
+    const html = productHtml({
+      canonical: url,
+      product: {
+        "@type": "Product",
+        name: "Тромболикс Про",
+        brand: "Тромболикс Про",
+        aggregateRating: { "@type": "AggregateRating", reviewCount: 17, ratingCount: 25, ratingValue: 4.8 }
+      }
+    }).replace("</body>", `
+      <div class="Review-ReasonToTrustText">Товар — Тромболикс Про раствор для в/в и в/м введ. 600ЛЕ/2мл 2мл 10шт</div>
+      <div class="Review-ReasonToTrustText">Товар — Тромболикс Про раствор для в/в и в/м введ 600 ле/2мл 2 мл амп 10 шт</div>
+    </body>`);
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }) });
+
+    const observation = await adapter.collect(ref({ listingId, brand: "Тромболикс Про", url }), context());
+    const identity = analyzeProductIdentity({
+      brand: observation.brand,
+      product: observation.product,
+      url: observation.canonicalUrl,
+      evidence: observation.productEvidence
+    });
+
+    expect(observation.productEvidence).toMatchObject({ scope: "product_family" });
+    expect(observation.productEvidence?.variants).toHaveLength(2);
+    expect(identity).toMatchObject({
+      label: "раствор 2 мл №10",
+      granularity: "variant",
+      confidence: "exact"
+    });
+  });
+
+  it("publishes Cereton packs as one explicit shared-rating model instead of an unconfirmable ambiguity", async () => {
+    const listingId = "1778172988";
+    const url = `https://reviews.yandex.ru/product/tsereton-kaps--${listingId}`;
+    const html = productHtml({
+      canonical: url,
+      product: {
+        "@type": "Product",
+        name: "Церетон капс.",
+        brand: "Церетон",
+        aggregateRating: { "@type": "AggregateRating", reviewCount: 101, ratingCount: 438, ratingValue: 4.7 }
+      }
+    }).replace("</body>", `
+      <div class="Review-ReasonToTrustText">Товар — Церетон, капсулы 400 мг, 112 шт.</div>
+      <div class="Review-ReasonToTrustText">Товар — Церетон, капсулы 400 мг, 56 шт.</div>
+    </body>`);
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }) });
+
+    const observation = await adapter.collect(ref({ listingId, brand: "Церетон", url }), context());
+    const identity = analyzeProductIdentity({
+      brand: observation.brand,
+      product: observation.product,
+      url: observation.canonicalUrl,
+      evidence: observation.productEvidence
+    });
+
+    expect(identity).toMatchObject({ granularity: "family", confidence: "exact", variantCount: 2 });
+    expect(identity.label).toContain("капсулы 400 мг №112");
+    expect(identity.label).toContain("капсулы 400 мг №56");
+    expect(hasDeterministicAggregateProof({ ...observation, productIdentity: identity })).toBe(true);
   });
 
   it("collects reviewCount (not ratingCount), rating and canonical model URL from Product JSON-LD", async () => {

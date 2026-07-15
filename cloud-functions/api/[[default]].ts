@@ -2361,8 +2361,12 @@ export default async function onRequest(context: Context): Promise<Response> {
       const run = await service.getRun(decodeURIComponent(reviewMatch[1]));
       if (!run) return json({ error: "Запуск не найден" }, 404);
       assertOwner(run, user);
-      const body = await context.request.json() as { acceptedKeys?: string[] };
-      return json(pagedRun(await service.approveObservations(run.id, body.acceptedKeys ?? []), url));
+      const body = await context.request.json() as { acceptedKeys?: string[]; productLabels?: Record<string, string> };
+      return json(pagedRun(await service.approveObservations(
+        run.id,
+        body.acceptedKeys ?? [],
+        body.productLabels ?? {}
+      ), url));
     }
     if (context.request.method === "POST" && companionSessionMatch) {
       const runId = decodeURIComponent(companionSessionMatch[1]);

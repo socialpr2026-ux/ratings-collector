@@ -329,10 +329,13 @@ export class YandexAdapter implements SiteAdapter {
       // Yandex's page-level Product name is sometimes abbreviated to the
       // dosage form (for example, "Хондрофен мазь д/нар.прим.").  The
       // source-bound `reasonToTrust` field identifies the exact item bought by
-      // each reviewer and is not review prose.  Keep those titles as strong
-      // structured evidence; conflicting packs remain separate candidates and
-      // therefore fail closed in product identity analysis.
-      structuredSignals: [title, description, ...reviewedProductTitles]
+      // each reviewer and is not review prose.  It belongs to the model's
+      // variant set, though: two slightly different pharmacy spellings must
+      // not become two unrelated products, while genuinely different packs
+      // must remain visible under the one model-level aggregate rating.
+      forceFamily: reviewedProductTitles.length > 0,
+      extraVariants: reviewedProductTitles,
+      structuredSignals: [title, description]
         .filter((value): value is string => Boolean(value))
     });
     productEvidence.identifiers.push({ type: "model_id", value: listingId });

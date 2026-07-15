@@ -65,4 +65,12 @@ describe("Interfox Ratings product shell", () => {
     expect(appSource).toContain('reviewItems.length > 0 && <div className="view-switch"');
     expect(appSource).toContain(': "Результат готов"');
   });
+
+  it("lets an operator repair and confirm every disputed product card", () => {
+    expect(appSource).toContain('className={`product-edit');
+    expect(appSource).toContain('placeholder="Например: раствор 2 мл №10"');
+    expect(appSource).toContain("resolveProductOverride(item");
+    expect(appSource).toContain("productLabels: Object.fromEntries");
+    expect(appSource).toContain("Точный вариант готов к подтверждению");
+  });
 });

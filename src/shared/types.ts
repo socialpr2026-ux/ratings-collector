@@ -92,6 +92,8 @@ export const observationSchema = z.object({
   source: z.string().optional(),
   productEvidence: productEvidenceSchema.optional(),
   productIdentity: productIdentitySchema.optional(),
+  /** Human variant label confirmed during review; source title stays in `product`. */
+  productOverride: z.string().trim().min(1).max(240).optional(),
   historical: z.boolean().optional(),
   profileVersion: z.number().int().positive().optional()
 });

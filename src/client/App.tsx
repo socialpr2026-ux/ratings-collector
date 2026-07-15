@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { MAX_RUN_PARTITIONS, type Observation, type RunActivityStage, type RunState, type SiteProfile } from "../shared/types.js";
 import type { OzonCompanionResult, OzonCompanionSession } from "../shared/companion.js";
 import { analyzeProductIdentity, canonicalProductVariants } from "../server/utils/product-name.js";
+import { normalizeProductOverride, resolveProductOverride } from "../server/utils/product-override.js";
 import {
   canConfirmObservation,
   canRetryFailedPartitions,
@@ -240,6 +241,7 @@ export function App() {
   const [brands, setBrands] = useState("");
   const [run, setRun] = useState<RunState>();
   const [selected, setSelected] = useState(new Set<string>());
+  const [productEdits, setProductEdits] = useState<Record<string, string>>({});
   const [profileMeanings, setProfileMeanings] = useState<Record<string, ReviewCountMeaning>>({});
   const [siteProfiles, setSiteProfiles] = useState<Record<string, SiteProfile | null>>({});
   const [confirmedProfileExamples, setConfirmedProfileExamples] = useState<Record<string, string[]>>({});
@@ -531,10 +533,16 @@ export function App() {
     try {
       await api(`/api/runs/${run.id}/review`, {
         method: "POST",
-        body: JSON.stringify({ acceptedKeys: validSelectedKeys })
+        body: JSON.stringify({
+          acceptedKeys: validSelectedKeys,
+          productLabels: Object.fromEntries(validSelectedKeys
+            .map((key) => [key, normalizeProductOverride(productEdits[key] ?? "")] as const)
+            .filter(([, value]) => Boolean(value)))
+        })
       });
       setRun(await fetchRun(run.id));
       setSelected(new Set());
+      setProductEdits({});
     } catch (caught) {
       setError(friendlyErrorMessage(caught, "review"));
     } finally {
@@ -686,7 +694,12 @@ export function App() {
   }
 
   const reviewItems = run?.observations.filter((item) => item.status === "needs_review") ?? [];
-  const confirmableReviewItems = reviewItems.filter(canConfirmObservation);
+  const reviewedIdentity = (item: Observation) => {
+    const edit = normalizeProductOverride(productEdits[productKey(item)] ?? "");
+    return edit ? resolveProductOverride(item, edit) : item.productIdentity;
+  };
+  const isReviewItemConfirmable = (item: Observation) => canConfirmObservation({ ...item, productIdentity: reviewedIdentity(item) });
+  const confirmableReviewItems = reviewItems.filter(isReviewItemConfirmable);
   const unfilteredItems = run ? (reviewOnly && reviewItems.length ? reviewItems : run.observations) : [];
   const normalizedListQuery = listQuery.trim();
   const visibleItems = normalizedListQuery ? unfilteredItems.filter((item) => observationMatchesQuery(item, normalizedListQuery)) : unfilteredItems;
@@ -711,7 +724,7 @@ export function App() {
     };
   }, [run?.observations]);
   const newDomains = [...new Set(reviewItems.filter((item) => item.profileVersion !== undefined).map((item) => item.domain))];
-  const visibleConfirmableReviewItems = visibleItems.filter((item) => item.status === "needs_review" && canConfirmObservation(item));
+  const visibleConfirmableReviewItems = visibleItems.filter((item) => item.status === "needs_review" && isReviewItemConfirmable(item));
   const confirmableReviewKeySignature = confirmableReviewItems.map(productKey).sort().join("\n");
   const confirmableReviewKeys = useMemo(
     () => new Set(confirmableReviewItems.map(productKey)),
@@ -801,6 +814,12 @@ export function App() {
     if (!run || pendingStatuses.has(run.status)) return;
     setSelected((current) => retainValidSelection(current, confirmableReviewKeys));
   }, [run?.id, run?.updatedAt, run?.status, confirmableReviewKeys]);
+
+  useEffect(() => {
+    setProductEdits(Object.fromEntries((run?.observations ?? [])
+      .filter((item) => item.status === "needs_review" && item.productOverride)
+      .map((item) => [productKey(item), item.productOverride!] as const)));
+  }, [run?.id]);
 
   const profileDomainSignature = newDomains.slice().sort().join("\n");
   useEffect(() => {
@@ -1190,17 +1209,19 @@ export function App() {
             <thead><tr><th scope="col" className="check-column"><span className="sr-only">Выбор</span></th><th scope="col">Площадка</th><th scope="col">Бренд</th><th scope="col">Продукт в таблице</th><th scope="col">Отзывы / оценки</th><th scope="col">Рейтинг</th><th scope="col">Результат</th></tr></thead>
             <tbody>
               {visibleItems.map((item) => {
-                const confirmable = canConfirmObservation(item);
-                const canonicalProduct = canonicalProducts.get(productKey(item)) ?? item.product;
-                const identity = item.productIdentity ?? analyzeProductIdentity({ brand: item.brand, product: item.product, url: item.canonicalUrl, evidence: item.productEvidence });
+                const key = productKey(item);
+                const manualIdentity = resolveProductOverride(item, productEdits[key] ?? "");
+                const confirmable = isReviewItemConfirmable(item);
+                const canonicalProduct = manualIdentity?.label ?? canonicalProducts.get(key) ?? item.product;
+                const identity = manualIdentity ?? item.productIdentity ?? analyzeProductIdentity({ brand: item.brand, product: item.product, url: item.canonicalUrl, evidence: item.productEvidence });
                 const proofLines = productProofLines({ productIdentity: identity });
-                return <tr key={productKey(item)} className={item.status === "needs_review" ? "row-review" : ""}>
+                return <tr key={key} className={item.status === "needs_review" ? "row-review" : ""}>
                   <td className={`check-column ${item.status !== "needs_review" ? "check-empty" : ""}`} data-label="Выбрать">{item.status === "needs_review" && (confirmable
-                    ? <input aria-label={`Подтвердить карточку ${item.product}`} type="checkbox" checked={selected.has(productKey(item))} onChange={(event) => setSelected((current) => { const next = new Set(current); event.target.checked ? next.add(productKey(item)) : next.delete(productKey(item)); return next; })} />
+                    ? <input aria-label={`Подтвердить карточку ${item.product}`} type="checkbox" checked={selected.has(key)} onChange={(event) => setSelected((current) => { const next = new Set(current); event.target.checked ? next.add(key) : next.delete(key); return next; })} />
                     : <span className="check-unavailable" aria-label="Карточку нельзя подтвердить без полных метрик">—</span>)}</td>
                   <td data-label="Площадка"><span className="domain-name">{item.domain}</span></td>
                   <td className="brand-cell" data-label="Бренд"><strong>{item.brand}</strong></td>
-                  <td className="product-cell" data-label="Продукт"><a href={item.canonicalUrl} target="_blank" rel="noreferrer" aria-label={`Открыть карточку «${item.product}» на ${item.domain} в новой вкладке`}>{canonicalProduct}<span aria-hidden="true">↗</span></a><div className={`identity-badge identity-${identity.granularity}`}>{productIdentityLabels[identity.granularity]}</div><details className="product-proof"><summary>Как определён продукт</summary><p>Название на площадке: {item.product}</p><p>ID карточки: {item.listingId}</p>{proofLines.length > 0 && <ul>{proofLines.map((line) => <li key={line}>{line}</li>)}</ul>}</details></td>
+                  <td className="product-cell" data-label="Продукт"><a href={item.canonicalUrl} target="_blank" rel="noreferrer" aria-label={`Открыть карточку «${item.product}» на ${item.domain} в новой вкладке`}>{canonicalProduct}<span aria-hidden="true">↗</span></a><div className={`identity-badge identity-${identity.granularity}`}>{productIdentityLabels[identity.granularity]}</div>{item.status === "needs_review" && <label className={`product-edit ${productEdits[key] && !manualIdentity ? "product-edit-invalid" : ""}`}><span>Продукт в таблице</span><input type="text" value={productEdits[key] ?? ""} maxLength={240} placeholder="Например: раствор 2 мл №10" onChange={(event) => setProductEdits((current) => ({ ...current, [key]: event.target.value }))} /><small>{manualIdentity ? "Точный вариант готов к подтверждению" : confirmable ? "Можно подтвердить как определено или уточнить название" : "Укажите форму и упаковку — после этого появится выбор"}</small></label>}<details className="product-proof"><summary>Как определён продукт</summary><p>Название на площадке: {item.product}</p><p>ID карточки: {item.listingId}</p>{proofLines.length > 0 && <ul>{proofLines.map((line) => <li key={line}>{line}</li>)}</ul>}</details></td>
                   <td className="number-cell" data-label="Отзывы / оценки">{formatReviews(item.reviews)}</td>
                   <td className="number-cell" data-label="Рейтинг">{formatRating(item.rating)}</td>
                   <td data-label="Результат"><span className={`result-badge result-${item.status}`}>{observationStatusLabels[item.status]}</span>{item.status === "needs_review" && !confirmable && <small className={`result-note ${identity.granularity === "not_product" ? "result-note-error" : ""}`}>{observationIssueText(item)}</small>}</td>

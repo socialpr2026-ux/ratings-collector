@@ -28,7 +28,22 @@ const DEFAULT_BLOCKED_RETRY_BASE_MS = 100;
 const DEFAULT_BLOCKED_COOLDOWN_MS = 30_000;
 const MAX_BLOCKED_RETRY_DELAY_MS = 150;
 const MAX_BLOCKED_RETRY_TOTAL_MS = 1_200;
+const MAX_CARD_INFO_BYTES = 256_000;
 const TRANSIENT_BLOCK_STATUSES = new Set([403, 407, 423, 429, 498, 502, 503, 504]);
+
+// Wildberries stores the nm-specific product description on its public basket
+// CDN. The buyer APIs intentionally shorten long names with an ellipsis, which
+// can remove the package count even though it is explicit on the product page.
+// These are the current storefront volume boundaries; after basket 36 the
+// allocation continues in 312-volume blocks.
+const BASKET_VOLUME_LIMITS = [
+  143, 287, 431, 719, 1007, 1061, 1115, 1169, 1313, 1601, 1655, 1919,
+  2045, 2189, 2405, 2621, 2837, 3053, 3269, 3485, 3701, 3917, 4133, 4349,
+  4565, 4877, 5189, 5501, 5813, 6125, 6437, 6749, 7061, 7373, 7685, 7997
+] as const;
+
+const EXPLICIT_PACKAGE_COUNT = /(?:№|#|\bN(?:o)?\.?)\s*(\d{1,4})(?!\d)|(?<!\d)(\d{1,4})\s*(?:шт(?:\.|ук[аи]?)?|таблет(?:ок|ки|ка)?|капсул(?:а|ы)?|ампул(?:а|ы)?|флакон(?:а|ов|ы)?|саше|пакет(?:а|ов|ы)?|доз(?:а|ы)?)(?![\p{L}\p{N}])/iu;
+const TRUNCATED_TITLE = /(?:…|\.\.\.)\s*$/u;
 
 type JsonObject = Record<string, unknown>;
 
@@ -39,6 +54,8 @@ type ProductPage = {
 
 export type WildberriesAdapterOptions = {
   fetch?: typeof globalThis.fetch;
+  /** Test/embedding override. `false` disables optional title enrichment. */
+  productInfoFetch?: typeof globalThis.fetch | false;
   maxPages?: number;
   requestIntervalMs?: number;
   searchEndpoint?: string;
@@ -147,6 +164,73 @@ function canonicalProductUrl(listingId: string): string {
   return `https://www.wildberries.ru/catalog/${listingId}/detail.aspx`;
 }
 
+function basketNumber(listingId: string): number | undefined {
+  const numericId = Number(listingId);
+  if (!Number.isSafeInteger(numericId) || numericId <= 0) return undefined;
+  const volume = Math.floor(numericId / 100_000);
+  const boundedIndex = BASKET_VOLUME_LIMITS.findIndex((limit) => volume <= limit);
+  if (boundedIndex >= 0) return boundedIndex + 1;
+  return 37 + Math.floor((volume - 7_998) / 312);
+}
+
+function cardInfoUrls(listingId: string): URL[] {
+  const basket = basketNumber(listingId);
+  if (basket === undefined || basket < 1 || basket > 99) return [];
+  const numericId = Number(listingId);
+  const volume = Math.floor(numericId / 100_000);
+  const part = Math.floor(numericId / 1_000);
+  // Adjacent baskets are a bounded compatibility fallback at a volume
+  // boundary. A response is accepted only when its nm_id equals listingId.
+  const candidates = [basket, basket - 1, basket + 1]
+    .filter((value, index, values) => value >= 1 && value <= 99 && values.indexOf(value) === index);
+  return candidates.map((value) => new URL(
+    `https://basket-${String(value).padStart(2, "0")}.wbbasket.ru/vol${volume}/part${part}/${listingId}/info/ru/card.json`
+  ));
+}
+
+function hasExplicitPackageCount(value: string): boolean {
+  const match = value.match(EXPLICIT_PACKAGE_COUNT);
+  return Boolean(match && Number(match[1] ?? match[2]) > 1);
+}
+
+function strictOptionPackageCount(payload: JsonObject): number | undefined {
+  if (!Array.isArray(payload.options)) return undefined;
+  for (const item of payload.options) {
+    if (!isObject(item)) continue;
+    const name = asNonemptyString(item.name);
+    const value = asNonemptyString(item.value);
+    if (!name || !value) continue;
+    if (!/(?:количество|фасовка)/iu.test(name) ||
+      !/(?:капсул|таблет|предмет|штук|ампул|флакон|саше|пакет|доз|упаков)/iu.test(name)) continue;
+    const match = value.match(/^\s*(\d{1,4})\s*(?:шт(?:\.|ук[аи]?)?|таблет(?:ок|ки|ка)?|капсул(?:а|ы)?|ампул(?:а|ы)?|флакон(?:а|ов|ы)?|саше|пакет(?:а|ов|ы)?|доз(?:а|ы)?)?\s*$/iu);
+    if (!match) continue;
+    const count = Number(match[1]);
+    if (Number.isInteger(count) && count > 1) return count;
+  }
+  return undefined;
+}
+
+function exactCardInfoTitle(payload: unknown, listingId: string, brand: string): string | undefined {
+  if (!isObject(payload) || firstDefinedId(payload, ["nm_id", "nmId", "id"]) !== listingId) return undefined;
+  let title = asNonemptyString(payload.imt_name) ?? asNonemptyString(payload.name);
+  if (!title || TRUNCATED_TITLE.test(title) || !matchesBrand(title, brand)) return undefined;
+  if (!hasExplicitPackageCount(title)) {
+    const count = strictOptionPackageCount(payload);
+    if (count !== undefined) title = `${title} №${count}`;
+  }
+  return title;
+}
+
+function preferProductTitle(primary: string, alternative: string | undefined): string {
+  if (!alternative) return primary;
+  const primaryCount = hasExplicitPackageCount(primary);
+  const alternativeCount = hasExplicitPackageCount(alternative);
+  if (alternativeCount && !primaryCount) return alternative;
+  if (primaryCount && !alternativeCount) return primary;
+  if (TRUNCATED_TITLE.test(primary) && !TRUNCATED_TITLE.test(alternative)) return alternative;
+  return primary;
+}
+
 function previousListingId(value: string): string | undefined {
   const match = value.trim().match(/^(?:(?:wildberries|wildberries\.ru):)?(\d+)$/i);
   return match ? asId(match[1]) : undefined;
@@ -207,6 +291,7 @@ export class WildberriesAdapter implements SiteAdapter {
   readonly supportedDomains = [PLATFORM_DOMAIN, "www.wildberries.ru"] as const;
 
   private readonly injectedFetch?: typeof globalThis.fetch;
+  private readonly productInfoFetchOverride?: typeof globalThis.fetch | false;
   private readonly maxPages: number;
   private readonly requestIntervalMs: number;
   private readonly searchEndpoints: readonly string[];
@@ -257,6 +342,7 @@ export class WildberriesAdapter implements SiteAdapter {
     }
 
     this.injectedFetch = options.fetch;
+    this.productInfoFetchOverride = options.productInfoFetch;
     this.maxPages = maxPages;
     this.requestIntervalMs = options.requestIntervalMs ?? DEFAULT_REQUEST_INTERVAL_MS;
     // An explicitly injected endpoint keeps fixtures/local overrides isolated.
@@ -424,7 +510,17 @@ export class WildberriesAdapter implements SiteAdapter {
     const listingId = asId(ref.listingId);
     if (!listingId) throw new ParserChangedError("Wildberries listingId must be a positive numeric nmId");
 
-    const searchObservation = observationFromSearchMetadata(ref, listingId, this.now().toISOString());
+    const currentSearchTitle = asNonemptyString(ref.title);
+    const enrichedSearchTitle = currentSearchTitle
+      ? await this.enrichProductTitle(listingId, ref.brand, currentSearchTitle, context)
+      : undefined;
+    const searchObservation = observationFromSearchMetadata(
+      enrichedSearchTitle && enrichedSearchTitle !== currentSearchTitle
+        ? { ...ref, title: enrichedSearchTitle }
+        : ref,
+      listingId,
+      this.now().toISOString()
+    );
     if (searchObservation) return searchObservation;
 
     const { page, evidenceUrl } = await this.fetchCard(listingId, context);
@@ -450,8 +546,10 @@ export class WildberriesAdapter implements SiteAdapter {
       };
     }
 
-    const title = asNonemptyString(product.name) ?? asNonemptyString(product.title) ?? ref.title;
-    if (!title) throw new ParserChangedError(`Wildberries card ${listingId} has no product title`);
+    const apiTitle = asNonemptyString(product.name) ?? asNonemptyString(product.title) ?? ref.title;
+    if (!apiTitle) throw new ParserChangedError(`Wildberries card ${listingId} has no product title`);
+    const bestKnownTitle = preferProductTitle(apiTitle, asNonemptyString(ref.title));
+    const title = await this.enrichProductTitle(listingId, ref.brand, bestKnownTitle, context);
 
     const groupId =
       firstDefinedId(product, ["root", "rootId", "imtId", "imtID"]) ?? metadataId(ref.metadata, "rootId");
@@ -503,6 +601,50 @@ export class WildberriesAdapter implements SiteAdapter {
       ...(groupId ? { groupId } : {}),
       source: "wildberries-card-v4"
     };
+  }
+
+  private async enrichProductTitle(
+    listingId: string,
+    brand: string,
+    currentTitle: string,
+    context: AdapterContext
+  ): Promise<string> {
+    if ((!TRUNCATED_TITLE.test(currentTitle) && hasExplicitPackageCount(currentTitle)) ||
+      !matchesBrand(currentTitle, brand) || this.productInfoFetchOverride === false) return currentTitle;
+    const fetchImplementation = this.productInfoFetchOverride ?? context.fetch ?? this.injectedFetch ?? globalThis.fetch;
+    if (typeof fetchImplementation !== "function") return currentTitle;
+
+    for (const url of cardInfoUrls(listingId)) {
+      let response: Response;
+      try {
+        response = await fetchImplementation(url, {
+          method: "GET",
+          redirect: "error",
+          headers: {
+            accept: "application/json",
+            "accept-language": "ru-RU,ru;q=0.9",
+            referer: canonicalProductUrl(listingId),
+            "user-agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36"
+          },
+          signal: context.signal
+        });
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        return currentTitle;
+      }
+      if (response.status === 404) continue;
+      if (!response.ok) return currentTitle;
+      const body = await response.text();
+      if (body.length > MAX_CARD_INFO_BYTES) return currentTitle;
+      try {
+        const enriched = exactCardInfoTitle(JSON.parse(body) as unknown, listingId, brand);
+        return enriched ? preferProductTitle(currentTitle, enriched) : currentTitle;
+      } catch {
+        return currentTitle;
+      }
+    }
+    return currentTitle;
   }
 
   private async fetchSearchPage(
