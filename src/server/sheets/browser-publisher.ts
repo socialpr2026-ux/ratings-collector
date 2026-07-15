@@ -112,31 +112,48 @@ function cellCss(document: SheetDocument, row: number, column: number, cell: Exp
   const metric = column >= 4;
   const css = [
     "overflow:hidden",
-    "padding:4px 6px",
+    "padding:7px 10px",
     "vertical-align:middle",
-    "font-family:Arial",
+    "font-family:Inter,Arial,sans-serif",
     `font-size:${kind === "footnote" ? 9 : 10}pt`,
-    "white-space:normal"
+    "white-space:normal",
+    "color:#241f35"
   ];
-  if (kind === "title" || kind === "subheader" && column > 0) {
-    css.push("background-color:#154f3d", "color:#ffffff");
+  if (kind === "brand") {
+    css.push("background-color:#120755", "color:#ffffff", "border-bottom:3px solid #ff4d00");
+    if (column === 0) css.push("font-size:16pt", "font-weight:bold", "letter-spacing:0.4px");
+    if (metric) css.push("color:#aeade5", "font-weight:bold", "text-align:right");
+  }
+  if (kind === "title" || kind === "subheader" && metric) {
+    css.push("background-color:#120755", "color:#ffffff");
     if (kind === "title" || metric) css.push("font-weight:bold");
   }
   if (kind === "section") {
-    css.push("background-color:#e6f1eb", "border:1px dotted #d5ddd8");
-    if (column === 0) css.push("font-weight:bold", "color:#154f3d", "text-decoration:underline");
+    css.push("background-color:#f0effa", "border-top:1px solid #aeade5", "border-bottom:1px solid #dcd9f1");
+    if (column === 0) css.push("font-size:12pt", "font-weight:bold", "color:#120755", "border-left:4px solid #ff4d00");
+    if (column === 1 || column === 2) css.push("font-weight:bold", "color:#625b85");
   }
-  if (kind === "summaryHeader") css.push("background-color:#edf4f0", "color:#154f3d", "font-weight:bold");
-  if (kind === "summary" && column === 0) css.push("font-weight:bold");
-  if (kind === "footnote") css.push("font-style:italic", "color:#68706c");
-  if (kind === "product" && column === 1) css.push("color:#1155cc", "text-decoration:underline");
+  if (kind === "product") {
+    css.push(`background-color:${row % 2 === 0 ? "#ffffff" : "#fbfaff"}`, "border-bottom:1px solid #ebe9f4");
+    if (column === 0) css.push("font-weight:bold", "color:#120755");
+    if (column === 1) css.push("color:#4932a8", "text-decoration:underline");
+  }
+  if (kind === "summaryHeader") css.push("background-color:#e7e5f7", "color:#120755", "font-weight:bold", "border-top:3px solid #ff4d00");
+  if (kind === "summary") {
+    css.push("background-color:#fbfaff", "border-bottom:1px solid #e3e0f1");
+    if (column === 0) css.push("font-weight:bold", "color:#120755");
+  }
+  if (kind === "footnote") css.push("font-style:italic", "color:#746f86", "background-color:#fbfaff");
   if (metric && ["title", "subheader", "section", "product", "summaryHeader", "summary"].includes(kind)) {
-    css.push("border-left:1px dotted #d5ddd8", "border-right:1px dotted #d5ddd8", "text-align:center");
+    css.push("border-left:1px solid #e3e0f1", "border-right:1px solid #e3e0f1", "text-align:center");
   }
   if ((kind === "product" || kind === "summary") && metric) {
     const share = kind === "summary" && (column - 4) % 2 === 1;
     const rating = kind === "product" && (column - 4) % 2 === 1;
     css.push(`mso-number-format:'${share ? "0%" : rating ? "0.0" : "#,##0"}'`);
+    if (kind === "product" && rating && typeof cell.value === "number") {
+      css.push("font-weight:bold", `color:${cell.value >= 4 ? "#120755" : "#c83d00"}`);
+    }
   }
   if (typeof cell.value === "string" && !cell.formula) css.push("mso-number-format:'\\@'");
   return css.join(";");
@@ -188,11 +205,19 @@ export function buildBrowserSheetClipboardPlan(document: SheetDocument, locale =
         : html(value);
       htmlCells.push(`<td ${attributes.join(" ")}>${content}</td>`);
     }
-    htmlRows.push(`<tr style="height:28px">${htmlCells.join("")}</tr>`);
+    const height = document.rowKinds[row] === "brand" ? 44
+      : document.rowKinds[row] === "section" ? 36
+        : document.rowKinds[row] === "blank" ? 16
+          : document.rowKinds[row] === "product" ? 32
+            : 30;
+    htmlRows.push(`<tr style="height:${height}px">${htmlCells.join("")}</tr>`);
   }
-  const widths = [130, 360, 300, 20, ...Array(Math.max(0, document.columnCount - 4)).fill(86)];
+  const widths = [150, 320, 310, 18, ...Array.from(
+    { length: Math.max(0, document.columnCount - 4) },
+    (_, index) => index % 2 === 0 ? 110 : 82
+  )];
   const colgroup = `<colgroup>${widths.map((width) => `<col width="${width}">`).join("")}</colgroup>`;
-  const htmlText = `<google-sheets-html-origin><table xmlns="http://www.w3.org/1999/xhtml" cellspacing="0" cellpadding="0" dir="ltr" data-sheets-root="1" style="table-layout:fixed;font-size:10pt;font-family:Arial;width:0px">${colgroup}<tbody>${htmlRows.join("")}</tbody></table></google-sheets-html-origin>`;
+  const htmlText = `<google-sheets-html-origin><table xmlns="http://www.w3.org/1999/xhtml" cellspacing="0" cellpadding="0" dir="ltr" data-sheets-root="1" style="table-layout:fixed;font-size:10pt;font-family:Inter,Arial,sans-serif;width:0px">${colgroup}<tbody>${htmlRows.join("")}</tbody></table></google-sheets-html-origin>`;
   return {
     payload: { plainText, htmlText }, cells, merges,
     range: `A1:${columnLetter(document.columnCount)}${document.values.length}`

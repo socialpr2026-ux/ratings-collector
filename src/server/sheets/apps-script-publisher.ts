@@ -5,6 +5,7 @@ import { extractSpreadsheetId } from "../utils/urls.js";
 const SHEET_TAB = "Рейтинги";
 const MAX_CELLS = 50_000;
 const ROW_KINDS = new Set<SheetRowKind>([
+  "brand",
   "title",
   "subheader",
   "section",

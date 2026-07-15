@@ -6,7 +6,7 @@ import { productKey } from "../repository.js";
 
 export type SheetScalar = string | number | null;
 export type ExistingSheet = { values: SheetScalar[][] };
-export type SheetRowKind = "title" | "subheader" | "section" | "product" | "blank" | "summaryHeader" | "summary" | "footnote";
+export type SheetRowKind = "brand" | "title" | "subheader" | "section" | "product" | "blank" | "summaryHeader" | "summary" | "footnote";
 export type SheetDocument = {
   values: SheetScalar[][];
   formulas: Array<Array<string | null>>;
@@ -63,6 +63,43 @@ function asMetric(value: SheetScalar | undefined): number | null {
 }
 
 type RowProduct = ProductRecord & { metrics: Record<string, { reviews: number | null; rating: number | null }> };
+
+type SheetCategory = {
+  id: "review-sites" | "pharmacies" | "marketplaces";
+  label: "Отзовики" | "Аптеки" | "Маркетплейсы";
+};
+
+const SHEET_CATEGORIES: readonly SheetCategory[] = [
+  { id: "review-sites", label: "Отзовики" },
+  { id: "pharmacies", label: "Аптеки" },
+  { id: "marketplaces", label: "Маркетплейсы" }
+] as const;
+
+const MARKETPLACE_DOMAINS = new Set([
+  "ozon.ru", "wildberries.ru", "market.yandex.ru", "yandex.ru", "megamarket.ru"
+]);
+
+const PHARMACY_DOMAINS = new Set([
+  "uteka.ru", "megapteka.ru", "medum.ru", "eapteka.ru", "polza.ru", "asna.ru",
+  "farmlend.ru", "okapteka.ru", "rigla.ru", "zdravcity.ru", "apteka.ru", "nfapteka.ru",
+  "budzdorov.ru", "etabl.ru", "apteka-april.ru"
+]);
+
+function normalizedDomain(domain: string): string {
+  return domain.toLocaleLowerCase("en-US").replace(/^www\./, "").replace(/^reviews\.yandex\.ru$/, "market.yandex.ru");
+}
+
+function sheetCategory(domain: string): SheetCategory {
+  const normalized = normalizedDomain(domain);
+  if (MARKETPLACE_DOMAINS.has(normalized)) return SHEET_CATEGORIES[2];
+  if (PHARMACY_DOMAINS.has(normalized) || /(?:^|[.-])(?:apteka|pharm|farm|zdrav|drugstore)(?:[.-]|$)/iu.test(normalized)) {
+    return SHEET_CATEGORIES[1];
+  }
+  // A new or custom domain must still fit the stable three-section report.
+  // Until it is explicitly classified as a pharmacy or marketplace, it is a
+  // public feedback source and belongs to the review-sites section.
+  return SHEET_CATEGORIES[0];
+}
 
 function canonicalRowIdentity(item: Pick<RowProduct, "domain" | "canonicalUrl">): string {
   try {
@@ -164,18 +201,22 @@ function collapseSharedAggregateRows(products: readonly RowProduct[], months: re
 
 function parseLegacy(existing: ExistingSheet, request: RunRequest): { products: RowProduct[]; months: string[] } {
   const values = existing.values;
-  const currentLayout = normalizeText(String(values[0]?.[0] ?? "")) === "бренд" &&
-    normalizeText(String(values[0]?.[1] ?? "")) === "ссылка";
+  const brandedLayout = normalizeText(String(values[0]?.[0] ?? "")) === "interfox ratings" &&
+    normalizeText(String(values[1]?.[0] ?? "")) === "бренд" &&
+    normalizeText(String(values[1]?.[1] ?? "")) === "ссылка";
+  const headerRow = brandedLayout ? 1 : 0;
+  const currentLayout = normalizeText(String(values[headerRow]?.[0] ?? "")) === "бренд" &&
+    normalizeText(String(values[headerRow]?.[1] ?? "")) === "ссылка";
   const urlColumn = currentLayout ? 1 : 0;
   const productColumn = currentLayout ? 2 : 1;
   const metricStartColumn = currentLayout ? 4 : 3;
   const months: string[] = [];
-  for (let column = metricStartColumn; column < (values[0]?.length ?? 0); column += 2) {
-    const key = legacyMonthKey(values[0]?.[column], Number(request.month.slice(0, 4)));
+  for (let column = metricStartColumn; column < (values[headerRow]?.length ?? 0); column += 2) {
+    const key = legacyMonthKey(values[headerRow]?.[column], Number(request.month.slice(0, 4)));
     if (key) months.push(key);
   }
   const products: RowProduct[] = [];
-  for (let row = 2; row < values.length; row += 1) {
+  for (let row = headerRow + 2; row < values.length; row += 1) {
     const url = values[row]?.[urlColumn];
     if (typeof url !== "string" || !/^https:\/\//i.test(url)) continue;
     const rawProduct = String(values[row]?.[productColumn] ?? "").trim();
@@ -257,6 +298,8 @@ export function buildSheetDocument(
   const domainOrder = [...new Set([...request.domains, ...deduplicated.map((item) => item.domain).filter((domain) => !request.domains.includes(domain)).sort()])];
   const brandOrder = [...new Set([...request.brands, ...deduplicated.map((item) => item.brand).filter((brand) => !request.brands.includes(brand)).sort((a, b) => a.localeCompare(b, "ru"))])];
   const ordered = collapseSharedAggregateRows(deduplicated.sort((a, b) =>
+    SHEET_CATEGORIES.findIndex((category) => category.id === sheetCategory(a.domain).id) -
+      SHEET_CATEGORIES.findIndex((category) => category.id === sheetCategory(b.domain).id) ||
     domainOrder.indexOf(a.domain) - domainOrder.indexOf(b.domain) ||
     brandOrder.indexOf(a.brand) - brandOrder.indexOf(b.brand) ||
     a.product.localeCompare(b.product, "ru") || a.listingId.localeCompare(b.listingId)
@@ -282,23 +325,33 @@ export function buildSheetDocument(
     ));
     rowKinds.push(kind);
   };
+  const brandRow: SheetScalar[] = ["Interfox Ratings", null, null, null, `Рейтинги товаров · ${request.region}`];
+  add("brand", brandRow);
+  merges.push({ startRow: 0, endRow: 1, startColumn: 0, endColumn: 4 });
+  if (columnCount > 4) merges.push({ startRow: 0, endRow: 1, startColumn: 4, endColumn: columnCount });
+
   const title: SheetScalar[] = ["Бренд", "Ссылка", "Продукт", null];
   const subheader: SheetScalar[] = [null, null, null, null];
   for (let column = 0; column < 3; column += 1) {
-    merges.push({ startRow: 0, endRow: 2, startColumn: column, endColumn: column + 1 });
+    merges.push({ startRow: 1, endRow: 3, startColumn: column, endColumn: column + 1 });
   }
   months.forEach((month, index) => {
     const column = 4 + index * 2;
     title[column] = monthLabel(month); subheader[column] = "Отзывы / оценки"; subheader[column + 1] = "Рейтинг";
-    merges.push({ startRow: 0, endRow: 1, startColumn: column, endColumn: column + 2 });
+    merges.push({ startRow: 1, endRow: 2, startColumn: column, endColumn: column + 2 });
   });
   add("title", title); add("subheader", subheader);
-  const productStartRow = 3;
-  for (const domain of domainOrder) {
-    const inDomain = ordered.filter((item) => item.domain === domain);
-    if (!inDomain.length) continue;
-    add("section", [domain, null, "Продукт", null]);
-    for (const item of inDomain) {
+  const productStartRow = 5;
+  for (const category of SHEET_CATEGORIES) {
+    const inCategory = ordered.filter((item) => sheetCategory(item.domain).id === category.id);
+    if (!inCategory.length) continue;
+    add("section", [
+      category.label,
+      `Площадок: ${new Set(inCategory.map((item) => normalizedDomain(item.domain))).size}`,
+      `Карточек: ${inCategory.length}`,
+      null
+    ]);
+    for (const item of inCategory) {
       const row: SheetScalar[] = [item.brand, item.canonicalUrl, item.product, null];
       months.forEach((month, index) => {
         const metric = item.metrics[month]; row[4 + index * 2] = metric?.reviews ?? null; row[5 + index * 2] = metric?.rating ?? null;

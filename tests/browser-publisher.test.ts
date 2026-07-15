@@ -168,9 +168,12 @@ describe("browser-only Google Sheets publisher", () => {
     expect(plan.payload.htmlText).toContain("data-sheets-formula=");
     expect(plan.payload.htmlText).toContain("colspan=\"2\"");
     expect(plan.payload.htmlText).toContain("rowspan=\"2\"");
-    expect(plan.payload.htmlText).toContain("background-color:#154f3d");
-    expect(plan.payload.htmlText).toContain('<col width="130">');
-    expect(plan.payload.htmlText).toContain('<col width="360">');
+    expect(plan.payload.htmlText).toContain("background-color:#120755");
+    expect(plan.payload.htmlText).toContain("border-bottom:3px solid #ff4d00");
+    expect(plan.payload.htmlText).toContain("background-color:#f0effa");
+    expect(plan.payload.htmlText).toContain("font-family:Inter,Arial,sans-serif");
+    expect(plan.payload.htmlText).toContain('<col width="150">');
+    expect(plan.payload.htmlText).toContain('<col width="320">');
     expect(plan.payload.htmlText).toContain('href="https://example.com/p/1"');
   });
 

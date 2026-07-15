@@ -17,11 +17,21 @@ describe("Google Apps Script bridge source", () => {
   });
 
   it("keeps the operational sheet readable during monthly work", () => {
-    expect(source).toContain("sheet.setFrozenRows(Math.min(2, rows));");
+    expect(source).toContain("sheet.setFrozenRows(Math.min(3, rows));");
     expect(source).toContain("sheet.setFrozenColumns(Math.min(3, columns));");
     expect(source).toContain("sheet.setHiddenGridlines(true);");
-    expect(source).toContain('sheet.setTabColor("#154f3d");');
-    expect(source).toContain("sheet.setColumnWidth(metricColumn, 112);");
-    expect(source).toContain("sheet.setColumnWidth(metricColumn + 1, 86);");
+    expect(source).toContain('sheet.setTabColor("#ff4d00");');
+    expect(source).toContain("sheet.setColumnWidth(metricColumn, 110);");
+    expect(source).toContain("sheet.setColumnWidth(metricColumn + 1, 82);");
+  });
+
+  it("applies the Interfox visual system to brand, section and summary rows", () => {
+    expect(source).toContain("brand: true");
+    expect(source).toContain('.setFontFamily("Inter")');
+    expect(source).toContain('kind === "brand"');
+    expect(source).toContain('.setBackground("#120755")');
+    expect(source).toContain('"#ff4d00", SpreadsheetApp.BorderStyle.SOLID_THICK');
+    expect(source).toContain('.setBackground("#f0effa")');
+    expect(source).toContain('.setBackground("#e7e5f7")');
   });
 });

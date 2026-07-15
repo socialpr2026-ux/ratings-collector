@@ -11,6 +11,7 @@ var RATINGS_TAB = "Рейтинги";
 var MAX_CELLS = 50000;
 var LOCK_WAIT_MS = 30000;
 var ROW_KINDS = {
+  brand: true,
   title: true,
   subheader: true,
   section: true,
@@ -355,7 +356,7 @@ function replaceSheet_(sheet, document, previousRows, previousColumns) {
   writeCells_(sheet, document.values, document.formulas, rows, columns);
   applyFormatting_(sheet, document.rowKinds, rows, columns);
   applyMerges_(sheet, document.merges);
-  applyLayout_(sheet, rows, columns);
+  applyLayout_(sheet, document.rowKinds, rows, columns);
 }
 
 function restoreBackup_(target, backup, backupState, writtenRows, writtenColumns) {
@@ -409,35 +410,70 @@ function applyMerges_(sheet, merges) {
 function applyFormatting_(sheet, rowKinds, rows, columns) {
   var whole = sheet.getRange(1, 1, rows, columns);
   whole
-    .setFontFamily("Arial")
+    .setFontFamily("Inter")
     .setFontSize(10)
-    .setFontColor("#000000")
+    .setFontColor("#241f35")
     .setFontWeight("normal")
     .setFontStyle("normal")
+    .setFontLine("none")
     .setBackground("#ffffff")
     .setVerticalAlignment("middle")
     .setHorizontalAlignment("left")
     .setWrap(true);
 
+  // Product rows form one contiguous block inside each of the three report
+  // sections. Format those blocks in batches so a long monthly history does
+  // not turn into thousands of remote Apps Script calls.
+  var productBlockStart = -1;
+  for (var productCursor = 0; productCursor <= rows; productCursor += 1) {
+    if (productCursor < rows && rowKinds[productCursor] === "product") {
+      if (productBlockStart < 0) productBlockStart = productCursor;
+      continue;
+    }
+    if (productBlockStart >= 0) {
+      var productCount = productCursor - productBlockStart;
+      var productRange = sheet.getRange(productBlockStart + 1, 1, productCount, columns);
+      productRange.setBackground("#ffffff")
+        .setBorder(null, null, true, null, null, true, "#ebe9f4", SpreadsheetApp.BorderStyle.SOLID);
+      sheet.getRange(productBlockStart + 1, 1, productCount, 1).setFontWeight("bold").setFontColor("#120755");
+      sheet.getRange(productBlockStart + 1, 2, productCount, 1).setFontColor("#4932a8").setFontLine("underline");
+      if (columns > 4) {
+        sheet.getRange(productBlockStart + 1, 5, productCount, columns - 4)
+          .setBackground("#fbfaff").setHorizontalAlignment("center");
+      }
+      productBlockStart = -1;
+    }
+  }
+
   for (var row = 0; row < rows; row += 1) {
     var kind = rowKinds[row];
+    if (kind === "product") continue;
     var rowRange = sheet.getRange(row + 1, 1, 1, columns);
-    if (kind === "title") {
-      rowRange.setBackground("#154f3d").setFontColor("#ffffff").setFontWeight("bold").setFontSize(10);
+    if (kind === "brand") {
+      rowRange.setBackground("#120755").setFontColor("#ffffff").setFontWeight("bold");
+      rowRange.setBorder(null, null, true, null, null, null, "#ff4d00", SpreadsheetApp.BorderStyle.SOLID_THICK);
+      sheet.getRange(row + 1, 1).setFontSize(16);
+      if (columns > 4) {
+        sheet.getRange(row + 1, 5, 1, columns - 4).setFontColor("#aeade5").setHorizontalAlignment("right");
+      }
+    } else if (kind === "title") {
+      rowRange.setBackground("#120755").setFontColor("#ffffff").setFontWeight("bold").setFontSize(10);
     } else if (kind === "subheader" && columns > 4) {
       sheet.getRange(row + 1, 5, 1, columns - 4)
-        .setBackground("#154f3d").setFontColor("#ffffff").setFontWeight("bold").setFontSize(10);
+        .setBackground("#120755").setFontColor("#ffffff").setFontWeight("bold").setFontSize(10);
     } else if (kind === "section") {
-      rowRange.setBackground("#e6f1eb");
-      sheet.getRange(row + 1, 1).setFontWeight("bold").setFontColor("#154f3d").setFontLine("underline");
+      rowRange.setBackground("#f0effa").setFontWeight("bold").setFontColor("#625b85");
+      rowRange.setBorder(true, null, true, null, null, null, "#aeade5", SpreadsheetApp.BorderStyle.SOLID);
+      sheet.getRange(row + 1, 1).setFontSize(12).setFontColor("#120755")
+        .setBorder(null, true, null, null, null, null, "#ff4d00", SpreadsheetApp.BorderStyle.SOLID_THICK);
     } else if (kind === "summaryHeader") {
-      rowRange.setBackground("#edf4f0").setFontWeight("bold").setFontColor("#154f3d");
+      rowRange.setBackground("#e7e5f7").setFontWeight("bold").setFontColor("#120755");
+      rowRange.setBorder(true, null, null, null, null, null, "#ff4d00", SpreadsheetApp.BorderStyle.SOLID_THICK);
     } else if (kind === "summary") {
-      sheet.getRange(row + 1, 1).setFontWeight("bold");
+      rowRange.setBackground("#fbfaff").setBorder(null, null, true, null, null, null, "#e3e0f1", SpreadsheetApp.BorderStyle.SOLID);
+      sheet.getRange(row + 1, 1).setFontWeight("bold").setFontColor("#120755");
     } else if (kind === "footnote") {
-      rowRange.setFontStyle("italic").setFontColor("#68706c").setFontSize(9);
-    } else if (kind === "product") {
-      sheet.getRange(row + 1, 2).setFontColor("#1155cc").setFontLine("underline");
+      rowRange.setBackground("#fbfaff").setFontStyle("italic").setFontColor("#746f86").setFontSize(9);
     }
     if (columns > 4 && ["title", "subheader", "section", "product", "summaryHeader", "summary"].indexOf(kind) >= 0) {
       sheet.getRange(row + 1, 5, 1, columns - 4).setHorizontalAlignment("center");
@@ -463,33 +499,44 @@ function applyFormatting_(sheet, rowKinds, rows, columns) {
 
   if (columns > 4) {
     sheet.getRange(1, 5, rows, columns - 4).setBorder(
-      null, true, null, true, true, null, "#d5ddd8", SpreadsheetApp.BorderStyle.DOTTED
+      null, true, null, true, true, null, "#e3e0f1", SpreadsheetApp.BorderStyle.SOLID
     );
   }
 
 }
 
-function applyLayout_(sheet, rows, columns) {
+function applyLayout_(sheet, rowKinds, rows, columns) {
   // Apply sizing after merges: Google Sheets can otherwise retain dimensions
   // from the previous three-column layout during an in-place migration.
   sheet.setHiddenGridlines(true);
-  sheet.setFrozenRows(Math.min(2, rows));
+  sheet.setFrozenRows(Math.min(3, rows));
   // Summary labels and the footnote end at column C; the blank D column stays
   // as a visual separator before the monthly metrics.
   sheet.setFrozenColumns(Math.min(3, columns));
-  sheet.setTabColor("#154f3d");
-  sheet.setColumnWidth(1, 130);
-  if (columns >= 2) sheet.setColumnWidth(2, 360);
-  if (columns >= 3) sheet.setColumnWidth(3, 300);
-  if (columns >= 4) sheet.setColumnWidth(4, 20);
+  sheet.setTabColor("#ff4d00");
+  sheet.setColumnWidth(1, 150);
+  if (columns >= 2) sheet.setColumnWidth(2, 320);
+  if (columns >= 3) sheet.setColumnWidth(3, 310);
+  if (columns >= 4) sheet.setColumnWidth(4, 18);
   // The first column in every monthly pair is the combined public counter
   // "Отзывы / оценки"; keep it wider than the compact rating column.
   for (var metricColumn = 5; metricColumn <= columns; metricColumn += 2) {
-    sheet.setColumnWidth(metricColumn, 112);
-    if (metricColumn + 1 <= columns) sheet.setColumnWidth(metricColumn + 1, 86);
+    sheet.setColumnWidth(metricColumn, 110);
+    if (metricColumn + 1 <= columns) sheet.setColumnWidth(metricColumn + 1, 82);
   }
   if (rows > 0) sheet.autoResizeRows(1, rows);
-  if (rows >= 2) sheet.setRowHeights(1, 2, 30);
+  var heightStart = 0;
+  var activeHeight = rowKinds[0] === "brand" ? 44 : 30;
+  for (var row = 1; row <= rowKinds.length; row += 1) {
+    var height = row < rowKinds.length ?
+      (rowKinds[row] === "brand" ? 44 : rowKinds[row] === "section" ? 36 : rowKinds[row] === "blank" ? 16 : rowKinds[row] === "product" ? 32 : 30) :
+      -1;
+    if (height !== activeHeight) {
+      sheet.setRowHeights(heightStart + 1, row - heightStart, activeHeight);
+      heightStart = row;
+      activeHeight = height;
+    }
+  }
 }
 
 function documentMismatches_(readback, document) {
