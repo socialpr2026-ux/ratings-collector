@@ -110,6 +110,21 @@ function sameSite(url: URL, domain: string): boolean {
   return host === domain || host.endsWith(`.${domain}`);
 }
 
+function canonicalOtzovikProductUrl(value: string | URL): string | undefined {
+  try {
+    const url = value instanceof URL ? value : new URL(value);
+    if (url.protocol !== "https:" || !sameSite(url, "otzovik.com")) return undefined;
+    const slug = url.pathname.match(/^\/reviews\/([a-z0-9_-]+)\/?$/i)?.[1];
+    if (!slug) return undefined;
+    // The static product gateway deliberately accepts only the apex host and
+    // an exact product path. Old Sheet/registry URLs may retain www or view
+    // parameters, so normalize them before identity deduplication and fetch.
+    return `https://otzovik.com/reviews/${slug}/`;
+  } catch {
+    return undefined;
+  }
+}
+
 function absoluteProductUrl(value: string | undefined, base: string, definition: ReviewSiteDefinition): string | undefined {
   if (!value) return undefined;
   try {
@@ -970,7 +985,10 @@ export class ReviewSiteAdapter implements SiteAdapter {
         const url = new URL(previous.url);
         if (!sameSite(url, this.definition.domain) || !this.definition.isProductUrl(url)) continue;
         url.protocol = "https:";
-        const canonical = canonicalizeUrl(url.toString());
+        const canonical = this.definition.domain === "otzovik.com"
+          ? canonicalOtzovikProductUrl(url)
+          : canonicalizeUrl(url.toString());
+        if (!canonical) continue;
         if (!refs.has(canonical)) refs.set(canonical, {
           domain: this.definition.domain,
           platform: this.definition.domain,

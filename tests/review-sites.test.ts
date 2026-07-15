@@ -449,6 +449,43 @@ describe("first-party review-site adapters", () => {
     expect(results.every((item) => item.productEvidence?.scope === "product_family")).toBe(true);
   });
 
+  it("canonicalizes and deduplicates historical Otzovik product URLs before collection", async () => {
+    const slug = "gomeopaticheskoe_sredstvo_ot_grippa_i_prostudnih_zabolevaniy_buaron_ocillokokcinum";
+    const currentSlug = "gomeopaticheskiy_preparat_boiron_ocillokokcinum_zaschita_ot_virusov";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      expect(url.hostname).toBe("otzovik.com");
+      if (url.pathname === "/__external_search__") return new Response(`
+        <a class="result__a" href="https://otzovik.com/reviews/${currentSlug}/">Отзывы о препарате Оциллококцинум защита от вирусов</a>
+      `);
+      if (url.pathname === `/reviews/${slug}/`) return new Response(
+        `<h1 itemprop="name">Гомеопатический препарат Буарон «Оциллококцинум»</h1>` +
+        `<span itemprop="aggregateRating"><meta itemprop="ratingValue" content="4.0">` +
+        `<meta itemprop="reviewCount" content="394"><meta itemprop="bestRating" content="5"></span>`
+      );
+      throw new Error(`Unexpected URL ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("otzovik.com", fetchMock);
+
+    const refs = await adapter.discover("Оциллококцинум", {
+      region: "Москва",
+      previousRefs: [{
+        listingId: "historical-id",
+        url: `https://www.otzovik.com/reviews/${slug}/?sort=negative#reviews`
+      }, {
+        listingId: "duplicate-id",
+        url: `https://otzovik.com/reviews/${slug}/`
+      }]
+    });
+    const historical = refs.find((ref) => ref.listingId === "historical-id");
+    if (!historical) throw new Error("Missing canonical historical ref");
+    const result = await adapter.collect(historical, context);
+
+    expect(refs).toHaveLength(2);
+    expect(historical.url).toBe(`https://otzovik.com/reviews/${slug}/`);
+    expect(result).toMatchObject({ reviews: 394, rating: 4, status: "ok" });
+  });
+
   it.each(["Тикализис", "Даксабрис"])("accepts an explicit external-search zero as proved no_results for Otzovik: %s", async (brand) => {
     const fetchMock = (async () => new Response(
       `<main><h1>No results found for <strong>site:otzovik.com/reviews/ &quot;${brand}&quot;</strong></h1></main>`
