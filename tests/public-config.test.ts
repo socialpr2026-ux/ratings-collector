@@ -809,6 +809,7 @@ describe("static pharmacy Translate gateway", () => {
     const searchSource = new URL("https://nfapteka.ru/catalog/");
     searchSource.searchParams.set("q", "Оциллококцинум");
     const productPath = "/tambov/catalog/prostuda/otsillokoktsinum-gran-gomeopat-1-doza-1-g-12.html";
+    let completeReviews = true;
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
       if (url.pathname === "/catalog/") return new Response(`<html><head><base href="${searchSource}"></head><body>
@@ -817,7 +818,9 @@ describe("static pharmacy Translate gateway", () => {
       const source = `https://nfapteka.ru${productPath}`;
       return new Response(`<html><head><base href="${source}"><link rel="canonical" href="${source}"></head><body>
         <h1>Оциллококцинум гранулы №12</h1><input name="productId" value="97307"><div itemprop="aggregateRating">
-        <meta itemprop="ratingValue" content="4.3"><span itemprop="reviewCount">3</span></div></body></html>`, {
+        <meta itemprop="ratingValue" content="4.3"><span itemprop="reviewCount">3</span></div><div id="review">
+        ${(completeReviews ? [1, 2, 3] : [1, 2]).map(() => `<article class="testimonial" itemscope itemtype="https://schema.org/Review"><meta itemprop="itemReviewed" content="NF product"><span itemprop="reviewRating"><meta itemprop="ratingValue" content="4.3"></span></article>`).join("")}
+        </div></body></html>`, {
         headers: { "content-type": "text/html" }
       });
     });
@@ -831,6 +834,10 @@ describe("static pharmacy Translate gateway", () => {
     expect(product.status).toBe(200);
     expect(proof).toContain('itemprop="reviewCount" content="3"');
     expect(proof).toContain('itemprop="ratingValue" content="4.3"');
+    expect(proof.match(/itemprop="itemReviewed"/g)).toHaveLength(3);
+    completeReviews = false;
+    const incomplete = await callGateway(translated("nfapteka-ru.translate.goog", productPath).toString());
+    expect(incomplete.status).toBe(502);
   });
 
   it("compacts the complete Bud Zdorov review state", async () => {
