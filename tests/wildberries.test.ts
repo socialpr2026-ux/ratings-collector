@@ -407,7 +407,7 @@ describe("WildberriesAdapter.collect", () => {
       product: observation.product,
       url: observation.canonicalUrl
     })).toMatchObject({
-      label: "раствор в ампулах 2 мл №10",
+      label: "раствор для внутривенного и внутримышечного введения 2 мл №10",
       granularity: "variant",
       confidence: "exact"
     });
