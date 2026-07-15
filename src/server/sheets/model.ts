@@ -166,6 +166,7 @@ export function buildSheetDocument(
         key, domain: observation.domain, listingId: observation.listingId, brand: observation.brand,
         canonicalUrl: observation.canonicalUrl, product: observation.product,
         platform: observation.platform, groupId: observation.groupId,
+        aggregateGroupId: observation.aggregateGroupId,
         productIdentity: observation.productIdentity,
         firstSeenMonth: previous ? [previous.firstSeenMonth, month].sort()[0] : month,
         lastSeenMonth: previous ? [previous.lastSeenMonth, month].sort().at(-1)! : month,
@@ -204,6 +205,7 @@ export function buildSheetDocument(
   const formulas: Array<Array<string | null>> = [];
   const rowKinds: SheetRowKind[] = [];
   const merges: SheetDocument["merges"] = [];
+  const productRows: Array<{ item: RowProduct; row: number }> = [];
   const add = (kind: SheetRowKind, row: SheetScalar[], formula: Array<string | null> = []) => {
     // Some presentation rows are intentionally assembled by assigning cells
     // at month columns (for example D, F, ...). Array spread preserves those
@@ -241,6 +243,7 @@ export function buildSheetDocument(
         const metric = item.metrics[month]; row[4 + index * 2] = metric?.reviews ?? null; row[5 + index * 2] = metric?.rating ?? null;
       });
       add("product", row);
+      productRows.push({ item, row: values.length });
     }
   }
   const productEndRow = Math.max(productStartRow, values.length);
@@ -254,15 +257,43 @@ export function buildSheetDocument(
   const labels = ["Всего отзывов / оценок", "Карточки с рейтингом ≥4 баллов", "Карточки с рейтингом <4 баллов", "Карточки без отзывов / оценок"];
   labels.forEach((label, metricIndex) => {
     const row: SheetScalar[] = [label]; const formula: Array<string | null> = [];
-    months.forEach((_, index) => {
+    months.forEach((month, index) => {
       const reviewsColumn = columnLetter(5 + index * 2); const ratingColumn = columnLetter(6 + index * 2);
       const countRow = summaryStartRow + 1 + metricIndex;
-      const firstData = productStartRow; const lastData = productEndRow;
+      const groups = new Map<string, Array<{ item: RowProduct; row: number }>>();
+      for (const entry of productRows) {
+        const key = entry.item.aggregateGroupId
+          ? `${entry.item.domain}\u0000${normalizeText(entry.item.brand)}\u0000${entry.item.aggregateGroupId}`
+          : `${entry.item.domain}\u0000${entry.item.listingId}`;
+        const members = groups.get(key) ?? [];
+        members.push(entry);
+        groups.set(key, members);
+      }
+      const representatives = [...groups.values()].flatMap((members) => {
+        if (members.length < 2 || !members[0]!.item.aggregateGroupId) return members;
+        const populated = members.filter(({ item }) => {
+          const metric = item.metrics[month];
+          return metric && (metric.reviews !== null || metric.rating !== null);
+        });
+        if (populated.length < 2) return populated.length ? [populated[0]!] : [members[0]!];
+        const fingerprints = new Set(populated.map(({ item }) => {
+          const metric = item.metrics[month]!;
+          return `${metric.reviews ?? "null"}:${metric.rating ?? "null"}`;
+        }));
+        // A platform aggregate is counted once only while every populated
+        // member proves the same metrics. Conflicts remain visible and are not
+        // silently collapsed.
+        return fingerprints.size === 1 ? [populated[0]!] : members;
+      });
+      const reviewCells = representatives.map(({ row: productRow }) => `${reviewsColumn}${productRow}`);
+      const ratingCells = representatives.map(({ row: productRow }) => `${ratingColumn}${productRow}`);
+      const reviewArray = `{${reviewCells.join(";")}}`;
+      const ratingArray = `{${ratingCells.join(";")}}`;
       const formulasForMetric = [
-        `=SUM(${reviewsColumn}$${firstData}:${reviewsColumn}${lastData})`,
-        `=COUNTIFS(${ratingColumn}$${firstData}:${ratingColumn}${lastData};">=4";${reviewsColumn}$${firstData}:${reviewsColumn}${lastData};">0";$B$${firstData}:$B${lastData};"https*")`,
-        `=COUNTIFS(${ratingColumn}$${firstData}:${ratingColumn}${lastData};"<4";${ratingColumn}$${firstData}:${ratingColumn}${lastData};"<>";${reviewsColumn}$${firstData}:${reviewsColumn}${lastData};">0";$B$${firstData}:$B${lastData};"https*")`,
-        `=COUNTIFS(${reviewsColumn}$${firstData}:${reviewsColumn}${lastData};0;${reviewsColumn}$${firstData}:${reviewsColumn}${lastData};"<>";${ratingColumn}$${firstData}:${ratingColumn}${lastData};"";$B$${firstData}:$B${lastData};"https*")`
+        reviewCells.length ? `=SUM(${reviewCells.join(";")})` : "=0",
+        ratingCells.length ? `=COUNTIFS(${ratingArray};">=4";${reviewArray};">0")` : "=0",
+        ratingCells.length ? `=COUNTIFS(${ratingArray};"<4";${ratingArray};"<>";${reviewArray};">0")` : "=0",
+        ratingCells.length ? `=COUNTIFS(${reviewArray};0;${reviewArray};"<>";${ratingArray};"")` : "=0"
       ];
       formula[4 + index * 2] = formulasForMetric[metricIndex];
       if (metricIndex > 0) formula[5 + index * 2] = `=IFERROR(${reviewsColumn}${countRow}/SUM(${reviewsColumn}${summaryStartRow + 2}:${reviewsColumn}${summaryStartRow + 4});0)`;

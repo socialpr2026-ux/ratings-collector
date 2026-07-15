@@ -405,6 +405,7 @@ type ExactProductMetrics = {
   reviews: number;
   rating: number | null;
   rawRating: number | null;
+  aggregateGroupId?: string;
 };
 
 async function mapWithConcurrency<T, R>(
@@ -471,6 +472,31 @@ function parseExactProductMetrics(html: string, target: URL, listingId: string):
   const title = product ? asString(product.name) : undefined;
   if (!product || !title) throw new ParserChangedError("Ozon translated product has no matching Product JSON-LD");
 
+  const variantIds = new Set<string>([listingId]);
+  const compactVariantProof = $('meta[name="ratings-ozon-variant-skus"][content]').first().attr("content");
+  if (compactVariantProof) {
+    const ids = compactVariantProof.split(",").map((value) => asSku(value));
+    if (ids.some((value) => !value) || !ids.includes(listingId) || new Set(ids).size !== ids.length) {
+      throw new ParserChangedError("Ozon compact variant proof is invalid");
+    }
+    ids.forEach((value) => variantIds.add(value!));
+  } else {
+    $('a[href*="/product/"][href*="from_sku="]').each((_index, node) => {
+      const raw = $(node).attr("href");
+      if (!raw) return;
+      try {
+        const link = new URL(raw, TRANSLATE_ORIGIN);
+        if (!["www.ozon.ru", "ozon.ru", "www-ozon-ru.translate.goog"].includes(link.hostname) ||
+          link.searchParams.get("from_sku") !== listingId || link.searchParams.get("oos_search") !== "false") return;
+        const targetId = skuFromUrl(link.toString());
+        if (targetId) variantIds.add(targetId);
+      } catch { /* unrelated malformed storefront link */ }
+    });
+  }
+  const aggregateGroupId = variantIds.size > 1
+    ? `ozon:variants:${[...variantIds].sort((left, right) => Number(left) - Number(right)).join(",")}`
+    : undefined;
+
   const scoreValue = $('[id^="state-webSingleProductScore"]').first().attr("data-state");
   if (!scoreValue) throw new ParserChangedError("Ozon translated product has no review score proof");
   let score: JsonObject;
@@ -487,7 +513,7 @@ function parseExactProductMetrics(html: string, target: URL, listingId: string):
     if (!/^\u043d\u0435\u0442 \u043e\u0442\u0437\u044b\u0432\u043e\u0432$/iu.test(scoreText)) {
       throw new ParserChangedError("Ozon translated product has no AggregateRating and no explicit zero-review proof");
     }
-    return { product: title, reviews: 0, rating: null, rawRating: null };
+    return { product: title, reviews: 0, rating: null, rawRating: null, ...(aggregateGroupId ? { aggregateGroupId } : {}) };
   }
 
   const reviews = exactNonNegativeInteger(aggregate.reviewCount);
@@ -501,7 +527,13 @@ function parseExactProductMetrics(html: string, target: URL, listingId: string):
   if (scoreReviews !== reviews || scoreRating !== rawRating) {
     throw new ParserChangedError("Ozon translated product JSON-LD and visible review score disagree");
   }
-  return { product: title, reviews, rating: normalizeRating(rawRating, 5), rawRating };
+  return {
+    product: title,
+    reviews,
+    rating: normalizeRating(rawRating, 5),
+    rawRating,
+    ...(aggregateGroupId ? { aggregateGroupId } : {})
+  };
 }
 
 function blockedBody(value: string): boolean {
@@ -639,7 +671,8 @@ export class OzonBrowserAdapter implements SiteAdapter {
         ...(exact ? {
           exactProductTitle: exact.product,
           exactProductListingId: product.listingId,
-          exactProductProof: EXACT_TRANSLATE_PROOF
+          exactProductProof: EXACT_TRANSLATE_PROOF,
+          ...(exact.aggregateGroupId ? { exactProductAggregateGroupId: exact.aggregateGroupId } : {})
         } : {})
       }
     };
@@ -659,7 +692,13 @@ export class OzonBrowserAdapter implements SiteAdapter {
         ref.metadata.exactProductListingId === listingId && cachedTitle !== undefined &&
         reviews !== null && (reviews === 0 ? rawRating === null : rawRating !== null && rawRating > 0);
       const exact = hasExactProof
-        ? { product: cachedTitle, reviews: reviews!, rating: rawRating === null ? null : normalizeRating(rawRating, 5), rawRating }
+        ? {
+            product: cachedTitle,
+            reviews: reviews!,
+            rating: rawRating === null ? null : normalizeRating(rawRating, 5),
+            rawRating,
+            aggregateGroupId: asString(ref.metadata.exactProductAggregateGroupId)
+          }
         : await this.fetchExactTranslatedProduct(ref, listingId, context);
       if (!matchesBrand(exact.product, ref.brand)) {
         throw new ParserChangedError("Ozon translated product JSON-LD belongs to a different brand");
@@ -667,6 +706,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
       product = exact.product;
       reviews = exact.reviews;
       rawRating = exact.rawRating;
+      if (exact.aggregateGroupId) ref.metadata.exactProductAggregateGroupId = exact.aggregateGroupId;
     }
     let normalizedRating = rawRating === null ? null : normalizeRating(rawRating, 5);
     let status: Observation["status"];
@@ -689,6 +729,9 @@ export class OzonBrowserAdapter implements SiteAdapter {
       reviews,
       rating: normalizedRating,
       ...(rawRating === null ? {} : { rawRating, rawRatingScale: 5 }),
+      ...(asString(ref.metadata.exactProductAggregateGroupId)
+        ? { aggregateGroupId: asString(ref.metadata.exactProductAggregateGroupId)! }
+        : {}),
       status,
       capturedAt: Number.isNaN(captured) ? this.now().toISOString() : new Date(captured).toISOString(),
       source

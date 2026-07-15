@@ -576,6 +576,7 @@ export class RatingsService {
       key: productKey(item.domain, item.listingId), domain: item.domain, listingId: item.listingId,
       brand: item.brand, canonicalUrl: item.canonicalUrl, product: item.product, platform: item.platform,
       groupId: item.groupId,
+      aggregateGroupId: item.aggregateGroupId,
       productIdentity: item.productIdentity,
       firstSeenMonth: earlierMonth(
         existing.get(productKey(item.domain, item.listingId))?.firstSeenMonth,

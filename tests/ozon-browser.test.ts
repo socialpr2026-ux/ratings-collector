@@ -73,7 +73,14 @@ function translatedHtml(sourceUrl: URL, tiles: string[], totalPages: number, emp
   </body></html>`;
 }
 
-function translatedProductHtml(sourceUrl: URL, sku: string, title: string, ratingValue: number, reviews: number): string {
+function translatedProductHtml(
+  sourceUrl: URL,
+  sku: string,
+  title: string,
+  ratingValue: number,
+  reviews: number,
+  variantSkus: string[] = []
+): string {
   const escapedSource = sourceUrl.toString().replaceAll("&", "&amp;");
   const scoreText = `${ratingValue} \u2022 ${reviews} \u043e\u0442\u0437\u044b\u0432\u043e\u0432`;
   const product = {
@@ -84,6 +91,7 @@ function translatedProductHtml(sourceUrl: URL, sku: string, title: string, ratin
     aggregateRating: { "@type": "AggregateRating", ratingValue: String(ratingValue), reviewCount: String(reviews) }
   };
   return `<html><head><base href="${escapedSource}"><script type="application/ld+json">${JSON.stringify(product)}</script></head><body>
+    ${variantSkus.map((variantSku) => `<a href="https://www-ozon-ru.translate.goog/product/variant-${variantSku}/?from_sku=${sku}&oos_search=false&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en">${variantSku}</a>`).join("")}
     <div id="state-webSingleProductScore-1" data-state='${JSON.stringify({ text: scoreText })}'></div>
     <script>window.__NUXT__={};window.__NUXT__.state='{}';</script>
   </body></html>`;
@@ -192,6 +200,39 @@ describe("Ozon browser collector", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(observation).toMatchObject({ listingId: "148170210", reviews: 2454, rating: 4.9, status: "ok" });
+  });
+
+  it("marks only an explicit Ozon variant selector as one shared aggregate", async () => {
+    const ids = ["148170210", "148170802"];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const source = sourceUrlFromTranslate(new URL(String(input)));
+      if (source.pathname.startsWith("/product/")) {
+        const sku = source.pathname.match(/-(\d+)\/$/)![1]!;
+        const other = ids.filter((id) => id !== sku);
+        return new Response(translatedProductHtml(
+          source,
+          sku,
+          `Оциллококцинум гранулы 1 г, ${sku === ids[0] ? 12 : 30} шт.`,
+          4.9,
+          2454,
+          other
+        ), { headers: { "content-type": "text/html" } });
+      }
+      return new Response(translatedHtml(source, [
+        translatedTile(ids[0]!, "Оциллококцинум гранулы 1 г, 12 шт.", "4.9", 2454),
+        translatedTile(ids[1]!, "Оциллококцинум гранулы 1 г, 30 шт.", "4.9", 2454)
+      ], 1), { headers: { "content-type": "text/html" } });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({ fetch: fetchMock });
+
+    const refs = await adapter.discover("Оциллококцинум", { ...context, brands: ["Оциллококцинум"] });
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context)));
+
+    expect(observations).toHaveLength(2);
+    expect(observations.map((item) => item.aggregateGroupId)).toEqual([
+      "ozon:variants:148170210,148170802",
+      "ozon:variants:148170210,148170802"
+    ]);
   });
 
   it("rejects a brand-prediction redirect without a bounded numeric brand id", async () => {

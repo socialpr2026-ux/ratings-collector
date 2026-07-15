@@ -87,6 +87,8 @@ export const observationSchema = z.object({
   capturedAt: z.string().datetime(),
   evidenceRef: z.string().optional(),
   groupId: z.string().optional(),
+  /** Proven platform aggregate shared by several distinct product variants. */
+  aggregateGroupId: z.string().optional(),
   source: z.string().optional(),
   productEvidence: productEvidenceSchema.optional(),
   productIdentity: productIdentitySchema.optional(),
@@ -175,6 +177,7 @@ export type ProductRecord = {
   product: string;
   platform: string;
   groupId?: string;
+  aggregateGroupId?: string;
   productIdentity?: ProductIdentity;
   firstSeenMonth: string;
   lastSeenMonth: string;

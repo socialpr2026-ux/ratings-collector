@@ -540,6 +540,7 @@ describe("static Ozon Translate gateway", () => {
             name: "Кагоцел таблетки 12 мг №20",
             aggregateRating: { ratingValue: "4.8", reviewCount: "711" }
           })}</script></head><body>
+          <a href="https://www-ozon-ru.translate.goog/product/kagotsel-1234567891/?from_sku=1234567890&amp;oos_search=false&amp;_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">№30</a>
           <div id="state-webSingleProductScore-1" data-state='{"text":"4.8 • 711 отзывов"}'></div>
           <script>window.__NUXT__.state={}</script></body></html>`, {
           headers: { "content-type": "text/html; charset=utf-8" }
@@ -567,6 +568,9 @@ describe("static Ozon Translate gateway", () => {
       expect(response.headers.get("x-ratings-source")).toBe("google-translate-ozon-ssr");
       const proof = await response.text();
       expect(proof).toContain("window.__NUXT__.state=");
+      if (target.pathname.startsWith("/product/")) {
+        expect(proof).toContain('name="ratings-ozon-variant-skus" content="1234567890,1234567891"');
+      }
       expect(Number(response.headers.get("x-ratings-proof-bytes"))).toBeLessThan(10_000);
     }
     expect(upstream).toHaveBeenCalledTimes(3);

@@ -207,6 +207,47 @@ describe("Google Sheets model", () => {
     expect(formulas).not.toContain("34");
   });
 
+  it("counts one proven shared Ozon aggregate once while keeping both pack variants", () => {
+    const shared = "ozon:variants:148170210,148170802";
+    const variants = [
+      { listingId: "148170210", pack: 12, aggregateGroupId: shared },
+      { listingId: "148170802", pack: 30, aggregateGroupId: shared }
+    ].map(({ listingId, pack, aggregateGroupId }): Observation => ({
+      domain: "ozon.ru", platform: "ozon", listingId, brand: "Оциллококцинум",
+      canonicalUrl: `https://www.ozon.ru/product/otsillokoktsinum-${listingId}/`,
+      product: `Оциллококцинум гранулы 1 г №${pack}`,
+      reviews: 2454, rating: 4.9, status: "ok", capturedAt: "2026-07-15T00:00:00.000Z",
+      aggregateGroupId,
+      productIdentity: { label: `гранулы 1 г №${pack}`, granularity: "variant", confidence: "exact", missing: [], reasons: [] }
+    }));
+    const document = buildSheetDocument({ values: [] }, {
+      ...request, brands: ["Оциллококцинум"]
+    }, [], {
+      "2026-07": Object.fromEntries(variants.map((item) => [`ozon.ru:${item.listingId}`, item]))
+    });
+    const rows = document.values.filter((_row, index) => document.rowKinds[index] === "product");
+    const summary = document.formulas.filter((_row, index) => document.rowKinds[index] === "summary");
+
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.slice(2, 6))).toEqual([
+      ["гранулы 1 г №12", null, 2454, 4.9],
+      ["гранулы 1 г №30", null, 2454, 4.9]
+    ]);
+    expect(summary[0][4]).toBe("=SUM(E4)");
+    expect(summary[1][4]).toBe('=COUNTIFS({F4};">=4";{E4};">0")');
+  });
+
+  it("does not merge unrelated cards merely because their metrics are equal", () => {
+    const first = observation("149024614", 2454);
+    const second = observation("149024615", 2454);
+    const document = buildSheetDocument({ values: [] }, request, [], {
+      "2026-07": { "ozon.ru:149024614": first, "ozon.ru:149024615": second }
+    });
+    const summary = document.formulas.filter((_row, index) => document.rowKinds[index] === "summary");
+
+    expect(summary[0][4]).toBe("=SUM(E4;E5)");
+  });
+
   it("clears the current pair when a SKU disappears on a same-month rerun", () => {
     const existing = { values: [
       [null, null, null, "Июль 2026"], [null, null, null, "Отзывы", "Рейтинг"],
@@ -284,14 +325,14 @@ describe("Google Sheets model", () => {
 
     const summary = document.formulas.filter((_, index) => document.rowKinds[index] === "summary");
     expect(summary[1][4]).toContain('">=4"');
-    expect(summary[1][4]).toContain('E$3:E');
+    expect(summary[1][4]).toContain('{E');
     expect(summary[1][4]).toContain('">0"');
-    expect(summary[1][4]).toContain('$B$3:$B');
+    expect(summary[1][4]).not.toContain('$B$3:$B');
     expect(summary[2][4]).toContain('"<4"');
     expect(summary[2][4]).toContain('"<>"');
     expect(summary[3][4]).toContain(';0;');
     expect(summary[3][4]).toContain(';"<>";');
-    expect(summary[3][4]).toContain(';"";');
+    expect(summary[3][4]).toContain(';"")');
   });
 
   it("re-reads the new brand/link/product layout without losing history", () => {
@@ -326,7 +367,7 @@ describe("Google Sheets model", () => {
       "Карточки без отзывов / оценок"
     ]);
     expect(footnote).toContain("отзывов, оценок и голосов");
-    expect(document.formulas.flat().filter(Boolean).join("\n")).toContain("=SUM(E$3:E");
+    expect(document.formulas.flat().filter(Boolean).join("\n")).toContain("=SUM(E");
   });
 
   it("does not publish a medical article as a product row", () => {

@@ -1462,7 +1462,23 @@ function compactOzonTranslateHtml(html: string, requested: OzonTranslateTarget):
     return types.includes("Product") && String(entry.sku ?? "") === requested.sku;
   })!;
   const scoreValue = $('[id^="state-webSingleProductScore"][data-state]').first().attr("data-state")!;
+  const variantIds = new Set<string>([requested.sku!]);
+  $('a[href*="/product/"][href*="from_sku="]').each((_index, node) => {
+    const raw = $(node).attr("href");
+    if (!raw) return;
+    try {
+      const link = new URL(raw, `https://${OZON_TRANSLATE_HOST}`);
+      if (![OZON_TRANSLATE_HOST, OZON_SOURCE_HOST].includes(link.hostname) ||
+        link.searchParams.get("from_sku") !== requested.sku || link.searchParams.get("oos_search") !== "false") return;
+      const variantId = link.pathname.match(/^\/product\/[a-z0-9-]*-(\d+)\/$/i)?.[1];
+      if (variantId) variantIds.add(variantId);
+    } catch { /* unrelated malformed storefront link */ }
+  });
+  const variantProof = variantIds.size > 1
+    ? `<meta name="ratings-ozon-variant-skus" content="${[...variantIds].sort((left, right) => Number(left) - Number(right)).join(",")}">`
+    : "";
   return `<html><head><base href="${escapeHtml(baseValue)}">` +
+    variantProof +
     `<script type="application/ld+json">${JSON.stringify(product).replace(/</g, "\\u003c")}</script></head><body>` +
     `<div id="state-webSingleProductScore-proof" data-state="${escapeHtml(scoreValue)}"></div>` +
     `<script>window.__NUXT__={};window.__NUXT__.state={}</script></body></html>`;
