@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  BRAND_SHEET_COLUMNS_TEXT,
+  brandSheetDestinationText,
   canConfirmObservation,
   canRetryFailedPartitions,
   finalProductLabel,
@@ -14,6 +16,13 @@ import {
 } from "../src/client/review-copy.js";
 
 describe("review summary copy", () => {
+  it("describes per-brand sheets without a duplicate brand column", () => {
+    expect(BRAND_SHEET_COLUMNS_TEXT).toBe("Столбцы каждого листа: Ссылка · Площадка · Продукт · Отзывы / оценки · Рейтинг.");
+    expect(BRAND_SHEET_COLUMNS_TEXT).not.toContain("Бренд ·");
+    expect(brandSheetDestinationText(1)).toBe("листе бренда");
+    expect(brandSheetDestinationText(2)).toBe("отдельных листах брендов");
+  });
+
   it("distinguishes clean cards from an incomplete blocked collection", () => {
     expect(reviewIntroText(0, 2)).toBe(
       "Спорных карточек нет, но сбор завершён не полностью. Не завершено проверок: 2. Запись отключена, чтобы в таблицу не попали частичные данные."
