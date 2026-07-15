@@ -204,7 +204,16 @@ describe("recovered first-party pharmacy adapters", () => {
     }) as unknown as typeof fetch;
     const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock);
 
-    const refs = await adapter.discover("Оциллококцинум", { region: "Москва" });
+    const refs = await adapter.discover("Оциллококцинум", {
+      region: "Москва",
+      previousRefs: [
+        { listingId: "9533", url: cards[0] },
+        { listingId: "9534", url: cards[1] },
+        { listingId: "bed61415fd1fce6b6369", url: cards[1] }
+      ]
+    });
+    expect(refs.map((item) => item.listingId).sort()).toEqual(["9533", "9534", "9535"]);
+    expect(refs.some((item) => item.listingId === "bed61415fd1fce6b6369")).toBe(false);
     expect(refs.map((item) => item.title).sort()).toEqual([
       "Оциллококцинум гранулы гомеопатические 1 доза №12",
       "Оциллококцинум гранулы гомеопатические 1 доза №30",
@@ -223,6 +232,45 @@ describe("recovered first-party pharmacy adapters", () => {
         confidence: "exact"
       });
     }
+  });
+
+  it("keeps a historical-only ASNA URL fail-closed while replacing a current legacy hash", async () => {
+    const current = "https://www.asna.ru/cards/otsillokoktsinum_1_doza_n12_granuly_gomeopaticheskie_laboratoires_boiron.html";
+    const historical = "https://www.asna.ru/cards/otsillokoktsinum_1_doza_n60_granuly_gomeopaticheskie_laboratoires_boiron.html";
+    const currentHash = "bed61415fd1fce6b6369";
+    const historicalHash = "a458c3011df2e97eca10";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www.asna.ru" && url.pathname.endsWith("sitemap_cards.xml")) {
+        return new Response(`<urlset><url><loc>${current}</loc></url></urlset>`);
+      }
+      if (url.hostname === "www.asna.ru" && url.pathname.endsWith("sitemap_cards1.xml")) {
+        return new Response("<urlset></urlset>");
+      }
+      if (url.hostname === "www-asna-ru.translate.goog") {
+        const source = `https://www.asna.ru${url.pathname}`;
+        return new Response(asnaCard(source, url.pathname.includes("_n12_") ? "9533" : "9999", 4), {
+          headers: { "content-type": "text/html" }
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const refs = await adapter.discover("Оциллококцинум", {
+      region: "Москва",
+      previousRefs: [
+        { listingId: currentHash, url: current },
+        { listingId: historicalHash, url: historical }
+      ]
+    });
+
+    expect(refs.map((ref) => ref.listingId).sort()).toEqual(["9533", historicalHash].sort());
+    expect(refs.some((ref) => ref.listingId === currentHash)).toBe(false);
+    const historicalRef = refs.find((ref) => ref.listingId === historicalHash)!;
+    await expect(adapter.collect(historicalRef, { region: "Москва" })).rejects.toThrow(
+      `asna.ru:${historicalHash}: product identity or aggregate changed`
+    );
   });
 
   it("fails closed when translated aggregate proof is incomplete", async () => {

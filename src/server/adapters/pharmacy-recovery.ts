@@ -376,6 +376,27 @@ function asnaRef(value: string | URL, listingId?: string): { listingId: string; 
   }
 }
 
+function asnaPreviousRefs(brand: string, context: AdapterContext): ProductRef[] {
+  const refs = new Map<string, ProductRef>();
+  for (const previous of context.previousRefs ?? []) {
+    // Preserve historical-only URLs fail-closed, including legacy URL hashes.
+    // A current sitemap card below replaces a legacy ID only after its exact
+    // canonical URL and numeric SKU are proved from product microdata.
+    if (!/^(?:\d+|[a-f0-9]{20})$/i.test(previous.listingId)) continue;
+    const parsed = asnaRef(previous.url, previous.listingId);
+    if (!parsed) continue;
+    refs.set(parsed.listingId, {
+      domain: "asna.ru",
+      platform: "asna.ru",
+      listingId: parsed.listingId,
+      brand,
+      url: parsed.canonicalUrl,
+      metadata: { discovery: "registry" }
+    });
+  }
+  return [...refs.values()];
+}
+
 function asnaTitle(url: string, brand: string, slugs: readonly string[]): string {
   const pathSlug = new URL(url).pathname.match(/^\/cards\/([a-z0-9_.-]+)\.html$/i)?.[1] ?? "";
   const brandSlug = [...slugs].sort((left, right) => right.length - left.length).find((slug) =>
@@ -443,7 +464,7 @@ export class AsnaAdapter implements SiteAdapter {
   }
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
-    const refs = new Map(previousRefs("asna.ru", brand, context, (value) => asnaRef(value)).map((ref) => [ref.listingId, ref]));
+    const refs = new Map(asnaPreviousRefs(brand, context).map((ref) => [ref.listingId, ref]));
     const slugs = brandSlugs(brand);
     const maps = await Promise.all([
       sitemap("https://www.asna.ru/sitemap/sitemap_cards.xml", context, this.fetchImpl),
@@ -461,6 +482,9 @@ export class AsnaAdapter implements SiteAdapter {
         const { $ } = await translatedPage(new URL(preliminary.canonicalUrl), "www-asna-ru.translate.goog", context, this.fetchImpl);
         const parsed = asnaProduct($);
         if (!parsed || parsed.canonicalUrl !== preliminary.canonicalUrl) continue;
+        for (const [existingId, existing] of refs) {
+          if (existingId !== parsed.listingId && existing.url === parsed.canonicalUrl) refs.delete(existingId);
+        }
         refs.set(parsed.listingId, {
           domain: "asna.ru", platform: "asna.ru", listingId: parsed.listingId, brand,
           url: parsed.canonicalUrl, title: asnaTitle(parsed.canonicalUrl, brand, slugs),
