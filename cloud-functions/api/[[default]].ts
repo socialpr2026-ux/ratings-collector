@@ -643,10 +643,25 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
     }
     if (!translatedSourceMatches(canonicalValue, requested.source) || !productId || !/^\d+$/.test(productId) || !heading ||
       !/^\d+$/.test(reviews) || Number(reviews) > 0 && !/^\d(?:[.,]\d+)?$/.test(rating)) return undefined;
+    const compactReviews: string[] = [];
+    if (Number(reviews) > 0) {
+      const items = reviewSection.find(".testimonial[itemscope][itemtype*='Review']");
+      if (items.length !== Number(reviews)) return undefined;
+      for (const node of items.toArray()) {
+        const item = $(node);
+        const reviewed = item.find("meta[itemprop='itemReviewed']").first().attr("content")?.normalize("NFKC").replace(/\s+/g, " ").trim();
+        const score = item.find("[itemprop='reviewRating'] [itemprop='ratingValue']").first().attr("content")?.trim();
+        if (!reviewed || !/^\d(?:[.,]\d+)?$/.test(score ?? "")) return undefined;
+        compactReviews.push(`<article class="testimonial" itemscope itemtype="https://schema.org/Review">` +
+          `<meta itemprop="itemReviewed" content="${escapeHtml(reviewed)}">` +
+          `<span itemprop="reviewRating"><meta itemprop="ratingValue" content="${escapeHtml(score!)}"></span></article>`);
+      }
+    }
     return `<html><head>${base}<link rel="canonical" href="${escapeHtml(requested.source.toString())}"></head><body>` +
       `<h1>${escapeHtml(heading)}</h1><input name="productId" value="${escapeHtml(productId)}">` +
       `<div itemprop="aggregateRating"><meta itemprop="reviewCount" content="${escapeHtml(reviews)}">` +
-      `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</div></body></html>`;
+      `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</div>` +
+      `${compactReviews.length ? `<div id="review">${compactReviews.join("")}</div>` : ""}</body></html>`;
   }
 
   if (requested.kind === "budzdorov-family") {
