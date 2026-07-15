@@ -11,6 +11,7 @@ import {
 } from "../src/server/adapters/review-sites.js";
 import { canConfirmObservation } from "../src/client/review-copy.js";
 import { analyzeProductIdentity } from "../src/server/utils/product-name.js";
+import { hasDeterministicAggregateProof } from "../src/shared/review-aggregates.js";
 
 function urlOf(input: RequestInfo | URL): URL {
   return new URL(input instanceof Request ? input.url : input.toString());
@@ -427,6 +428,41 @@ describe("first-party review-site adapters", () => {
     expect(result).toMatchObject({ reviews: 430, rating: 3.9, ratingCount: null, status: "ok" });
   });
 
+  it("binds all three live Cereton iRecommend search aggregates to their own dedicated pages", async () => {
+    const cards = [
+      ["4773250", "nootropnoe-sredstvo-soteks-ampuly-vv-i-vm-tsereton", "Ноотропное средство Сотекс Ампулы в/в и в/м Церетон", 7, 4.9],
+      ["5227645", "nootropnoe-sredstvo-zao-soteks-tsereton", "Ноотропное средство ЗАО Сотекс Церетон", 13, 4.5],
+      ["10010285", "nootropnoe-sredstvo-zao-soteks-tsereton-rastvor-dlya-priema-vnutr", "Ноотропное средство ЗАО Сотекс Церетон раствор для приема внутрь", 3, 4.7]
+    ] as const;
+    const adapter = adapterFor("irecommend.ru", (async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname !== "/srch") throw new Error("proved ProductTizers must not require product-page requests");
+      return new Response(`<ul class="srch-result-nodes">${cards.map(([id, slug, title, reviews, rating]) =>
+        `<li><div class="ProductTizer" data-type="2" data-nid="${id}"><div class="title"><a href="/content/${slug}">${title}</a></div>` +
+        `<a class="read-all-reviews-link"><span class="counter">${reviews}</span></a>` +
+        `<div class="fivestar-summary"><span class="average-rating"><span>${rating}</span></span></div></div></li>`
+      ).join("")}</ul>`);
+    }) as typeof fetch);
+
+    const refs = await adapter.discover("Церетон", context);
+    const results = await Promise.all(refs.map((ref) => adapter.collect(ref, context)));
+
+    expect(results.map((item) => [item.listingId, item.reviews, item.rating, item.status])).toEqual([
+      ["4773250", 7, 4.9, "ok"], ["5227645", 13, 4.5, "ok"], ["10010285", 3, 4.7, "ok"]
+    ]);
+    expect(results.every((item) => item.productEvidence?.scope === "product_family")).toBe(true);
+    expect(results.every((item) => item.productEvidence?.variants.length === 1)).toBe(true);
+    expect(results.every((item) => item.productEvidence?.identifiers.some((identifier) =>
+      identifier.type === "product_id" && identifier.value === item.listingId
+    ))).toBe(true);
+    expect(results.every((item) => {
+      const productIdentity = analyzeProductIdentity({
+        brand: item.brand, product: item.product, url: item.canonicalUrl, evidence: item.productEvidence
+      });
+      return hasDeterministicAggregateProof({ ...item, productIdentity });
+    })).toBe(true);
+  });
+
   it("does not mistake iRecommend's dormant captcha script for an active challenge", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = urlOf(input);
@@ -464,6 +500,64 @@ describe("first-party review-site adapters", () => {
       rating: null,
       source: "review_site_non_product_candidate"
     });
+  });
+
+  it.each([
+    ["Церетон отзывы неврологов", "ЦЕРЕТОН ОТЗЫВЫ НЕВРОЛОГОВ отзывы врачей отрицательные и реальные"],
+    ["Церетон инструкция по применению цена отзывы таблетки", "ЦЕРЕТОН ИНСТРУКЦИЯ ПО ПРИМЕНЕНИЮ ЦЕНА ОТЗЫВЫ ТАБЛЕТКИ"]
+  ])("excludes Otzyv.pro single-review prose even when it exposes aggregate microdata: %s", async (subject, title) => {
+    const slug = subject.includes("невролог") ? "cereton-otzyvy-nevrologov" : "cereton-instrukciya";
+    const path = `/category/lekarstvennyie-sredstva/793897-${slug}.html`;
+    const adapter = adapterFor("otzyv.pro", (async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/") return new Response(
+        `<article><h2>${subject}</h2><a href="${path}">${subject}</a></article>`
+      );
+      return new Response(`<html><head><title>${title}</title></head><body>
+        <a itemprop="name">Отзыв про</a>
+        <span itemprop="name">${subject} - отзыв</span>
+        <meta itemprop="itemReviewed" content="${subject}">
+        <meta itemprop="ratingValue" content="5">
+        <meta itemprop="reviewCount" content="1">
+        <article itemprop="review"><p>Автор рассказывает об опыте лечения.</p></article>
+      </body></html>`);
+    }) as typeof fetch);
+
+    const [ref] = await adapter.discover("Церетон", context);
+    await expect(adapter.collect(ref, context)).resolves.toMatchObject({
+      status: "not_found",
+      reviews: null,
+      rating: null,
+      source: "review_site_non_product_candidate"
+    });
+  });
+
+  it("keeps the Cereton Otzyv.pro capsule aggregate as a dedicated product-family proof", async () => {
+    const path = "/category/lekarstvennyie-sredstva/753861-cereton-kapsuly.html";
+    const adapter = adapterFor("otzyv.pro", (async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/") return new Response(
+        `<article><h2>Церетон капсулы</h2><a href="${path}">Церетон капсулы</a></article>`
+      );
+      return new Response(`<html><body><h1 itemprop="name">Церетон капсулы - отзыв</h1>
+        <meta itemprop="itemReviewed" content="Церетон капсулы">
+        <meta itemprop="ratingValue" content="5"><meta itemprop="reviewCount" content="1">
+      </body></html>`);
+    }) as typeof fetch);
+
+    const [ref] = await adapter.discover("Церетон", context);
+    const result = await adapter.collect(ref, context);
+
+    expect(result).toMatchObject({ listingId: "753861", reviews: 1, rating: 5, status: "ok" });
+    expect(result.productEvidence).toMatchObject({
+      scope: "product_family",
+      variants: ["Церетон капсулы - отзыв"],
+      identifiers: expect.arrayContaining([{ type: "product_id", value: "753861" }])
+    });
+    const productIdentity = analyzeProductIdentity({
+      brand: result.brand, product: result.product, url: result.canonicalUrl, evidence: result.productEvidence
+    });
+    expect(hasDeterministicAggregateProof({ ...result, productIdentity })).toBe(true);
   });
 
   it("preserves a registered iRecommend id when the reader exposes an image id", async () => {
@@ -571,6 +665,54 @@ describe("first-party review-site adapters", () => {
     expect(results.map((item) => item.listingId)).toEqual(refs.map((item) => item.listingId));
     expect(results).toMatchObject([{ reviews: 83, rating: 4 }, { reviews: 12, rating: 4.3 }]);
     expect(results.every((item) => item.productEvidence?.scope === "product_family")).toBe(true);
+    expect(results.every((item) => item.productEvidence?.variants.length === 1)).toBe(true);
+    expect(results.every((item) => item.productEvidence?.identifiers.some((identifier) =>
+      identifier.type === "product_id" && identifier.value === item.listingId
+    ))).toBe(true);
+    expect(results.every((item) => {
+      const productIdentity = analyzeProductIdentity({
+        brand: item.brand, product: item.product, url: item.canonicalUrl, evidence: item.productEvidence
+      });
+      return hasDeterministicAggregateProof({ ...item, productIdentity });
+    })).toBe(true);
+  });
+
+  it("binds the three live Cereton Otzovik form aggregates without reading review prose", async () => {
+    const fixtures = [
+      ["kapsuli_soteks_cereton", "Капсулы Сотекс \"Церетон\" - отзывы", 72, 4.53],
+      ["pitevoy_rastvor_soteks_cereton", "Питьевой раствор \"Сотекс\" Церетон - отзывы", 25, 4.86],
+      ["rastvor_dlya_vnutrivennogo_i_vnutrimishechnogo_vvedeniya_soteks_cereton", "Раствор для внутривенного и внутримышечного введения Сотекс \"Церетон\" - отзывы", 17, 4]
+    ] as const;
+    const adapter = adapterFor("otzovik.com", (async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      const fixture = fixtures.find(([slug]) => url.pathname === `/reviews/${slug}/`);
+      if (!fixture) throw new Error(`Unexpected URL ${url}`);
+      const [, title, reviews, rating] = fixture;
+      return new Response(`<main itemscope itemtype="https://schema.org/Product">
+        <h1 itemprop="name">${title}</h1>
+        <span itemprop="aggregateRating"><meta itemprop="ratingValue" content="${rating}">
+        <meta itemprop="reviewCount" content="${reviews}"><meta itemprop="bestRating" content="5"></span>
+        <article itemprop="review"><p>В тексте упомянуты таблетки другого препарата №20.</p></article>
+      </main>`);
+    }) as typeof fetch);
+
+    const results = await Promise.all(fixtures.map(([slug]) => adapter.collect({
+      domain: "otzovik.com", platform: "otzovik.com", listingId: slug, brand: "Церетон",
+      url: `https://otzovik.com/reviews/${slug}/`, metadata: { source: "external-search" }
+    }, context)));
+
+    expect(results.map((item) => [item.reviews, item.rating, item.status])).toEqual([
+      [72, 4.5, "ok"], [25, 4.9, "ok"], [17, 4, "ok"]
+    ]);
+    expect(results.every((item) => item.productEvidence?.scope === "product_family")).toBe(true);
+    expect(results.every((item) => item.productEvidence?.variants.length === 1)).toBe(true);
+    expect(JSON.stringify(results.map((item) => item.productEvidence))).not.toContain("другого препарата");
+    expect(results.every((item) => {
+      const productIdentity = analyzeProductIdentity({
+        brand: item.brand, product: item.product, url: item.canonicalUrl, evidence: item.productEvidence
+      });
+      return hasDeterministicAggregateProof({ ...item, productIdentity });
+    })).toBe(true);
   });
 
   it("canonicalizes and deduplicates historical Otzovik product URLs before collection", async () => {

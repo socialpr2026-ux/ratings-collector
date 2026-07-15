@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { load, type CheerioAPI } from "cheerio";
-import type { AdapterContext, AdapterHealth, Observation, ProductRef, SiteAdapter } from "../../shared/types.js";
+import type { AdapterContext, AdapterHealth, Observation, ProductEvidence, ProductRef, SiteAdapter } from "../../shared/types.js";
 import type { EvidenceStore } from "../evidence.js";
 import { extractJsonLdProducts, type JsonLdProduct } from "../generic/jsonld.js";
 import { aliasesForBrand, matchesBrand, normalizeRating } from "../utils/normalize.js";
@@ -136,16 +136,53 @@ function absoluteProductUrl(value: string | undefined, base: string, definition:
   }
 }
 
+const OTZYV_PRO_EDITORIAL_SUBJECT = /(?:отзыв(?:ы)?\s+(?:врач(?:ей|а)?|невролог(?:ов|а)?|пациент(?:ов|а)?)|инструкц(?:ия|ии)\s+по\s+применению|совет(?:ы|ов)?\s+и\s+инструкц)/iu;
+const DEDICATED_FAMILY_DOMAINS = new Set(["irecommend.ru", "otzovik.com", "otzyv.pro"]);
+
 function isExplicitNonProductReviewPage(html: string, definition: ReviewSiteDefinition): boolean {
   if (definition.domain !== "otzyv.pro") return false;
   const $ = load(html);
   const title = $("title").first().text().replace(/\s+/g, " ").trim();
+  const itemReviewed = $("[itemprop='itemReviewed']").first().attr("content") ??
+    $("[itemprop='itemReviewed']").first().text().replace(/\s+/g, " ").trim();
   const hasAggregate = $("[itemprop='aggregateRating'], [itemprop='reviewCount'], [itemprop='ratingValue']").length > 0 ||
     /"aggregateRating"\s*:|"reviewCount"\s*:|"ratingValue"\s*:/i.test(html);
   // Otzyv.pro search mixes product aggregates with editorial advice pages.
-  // The latter identify themselves in the page title and expose no aggregate
-  // at all; they are proved non-product candidates, not parser failures.
-  return !hasAggregate && /(?:советы\s+и\s+инструкции|стать[ьяи]|справочн)/iu.test(title);
+  // Some single-review articles also expose reviewCount=1/ratingValue=5 as
+  // microdata for that author's review. The itemReviewed/title still names an
+  // audience or an instruction, not a product. Reject that prose even when it
+  // carries rating markup; ordinary product/form titles remain eligible.
+  const editorialSubject = OTZYV_PRO_EDITORIAL_SUBJECT.test(itemReviewed || title);
+  return editorialSubject || !hasAggregate && /(?:советы\s+и\s+инструкции|стать[ьяи]|справочн)/iu.test(title);
+}
+
+function dedicatedFamilyEvidence(
+  evidence: ProductEvidence,
+  definition: ReviewSiteDefinition,
+  listingId: string,
+  title: string,
+  brand: string
+): ProductEvidence {
+  if (
+    evidence.scope !== "product_family" ||
+    !DEDICATED_FAMILY_DOMAINS.has(definition.domain) ||
+    !listingId.trim() ||
+    !matchesBrand(title, brand)
+  ) return evidence;
+
+  // Search/aggregate parsing has already bound title, stable page id and
+  // metrics to one first-party card. Preserve that dedicated page title as
+  // its single family option so legitimate form-specific aggregates are not
+  // mistaken for one collapsed generic product. Review bodies never take
+  // part in this proof.
+  const productId = evidence.identifiers.some((identifier) =>
+    identifier.type === "product_id" && identifier.value === listingId
+  ) ? [] : [{ type: "product_id" as const, value: listingId }];
+  return {
+    ...evidence,
+    variants: evidence.variants.length ? evidence.variants : [title],
+    identifiers: [...evidence.identifiers, ...productId]
+  };
 }
 
 function jsonLdMetrics(html: string, pageUrl: string, brand: string): ParsedMetrics {
@@ -1060,10 +1097,10 @@ export class ReviewSiteAdapter implements SiteAdapter {
       const canonicalUrl = canonicalizeUrl(ref.url);
       const reviews = ref.metadata.reviewCount;
       const rating: number | null = reviews === 0 ? null : ref.metadata.rating as number;
-      const productEvidence = {
+      const productEvidence = dedicatedFamilyEvidence({
         ...titleProductEvidence(ref.title!, { type: "product_id" as const, value: ref.listingId }, canonicalUrl),
         scope: "product_family" as const
-      };
+      }, this.definition, ref.listingId, ref.title!, ref.brand);
       const proof = JSON.stringify({
         listingId: ref.listingId, canonicalUrl, title: ref.title, reviews, rating,
         source: ref.metadata.source
@@ -1170,13 +1207,20 @@ export class ReviewSiteAdapter implements SiteAdapter {
     if (feedbackCount > 0 && rating === undefined) throw new ParserChangedError(`${this.definition.domain}: есть обратная связь, но не найден рейтинг`);
     // Dedicated Megapteka pages are sellable SKUs; the other definitions are
     // aggregate review pages for a product/family.
-    const productEvidence = this.definition.domain === "megapteka.ru"
+    const rawProductEvidence = this.definition.domain === "megapteka.ru"
       // Megapteka catalog pages contain same-brand recommendations for adjacent
       // packs. Discovery already gave us a stable first-party SKU and the page
       // parser resolved the canonical Product title, so only those listing-local
       // facts may participate in product identity.
       ? titleProductEvidence(title, { type: "product_id", value: listingId }, canonicalUrl)
       : extractPageProductEvidence(html, canonicalUrl, ref.brand, { forceFamily: true });
+    const productEvidence = dedicatedFamilyEvidence(
+      rawProductEvidence,
+      this.definition,
+      listingId,
+      title,
+      ref.brand
+    );
     const evidenceRef = await this.evidence.put({
       capturedAt,
       url: ref.url,
