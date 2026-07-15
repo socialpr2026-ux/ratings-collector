@@ -47,8 +47,13 @@ describe("Google Sheets model", () => {
 
     expect(document.values
       .filter((_row, index) => document.rowKinds[index] === "product")
-      .map((row) => row[2]))
-      .toEqual(["мазь 30 г", "мазь 30 г", "мазь 30 г", "мазь 30 г"]);
+      .map((row) => [row[3], row[1]]))
+      .toEqual([
+        ["мазь 30 г", "iRecommend"],
+        ["мазь 30 г", "Мед-отзыв"],
+        ["мазь 30 г", "review.example"],
+        ["мазь 30 г", "Wildberries"]
+      ]);
   });
 
   it("publishes one human product label for equivalent variants from different sites", () => {
@@ -86,7 +91,7 @@ describe("Google Sheets model", () => {
 
     expect(document.values
       .filter((_row, index) => document.rowKinds[index] === "product")
-      .map((row) => row[2]))
+      .map((row) => row[3]))
       .toEqual(["гранулы №30", "гранулы №30", "гранулы №30"]);
   });
 
@@ -102,14 +107,15 @@ describe("Google Sheets model", () => {
     expect(document.months).toEqual(["2026-07"]);
     expect(document.values.filter((_, index) => document.rowKinds[index] === "product")).toHaveLength(1);
     const row = document.values.find((_, index) => document.rowKinds[index] === "product")!;
-    expect(row.slice(0, 6)).toEqual(["Кагоцел", current.canonicalUrl, "таблетки 12 мг №20", null, 5800, 4.7]);
+    expect(row.slice(0, 6)).toEqual(["Кагоцел", "Ozon", current.canonicalUrl, "таблетки 12 мг №20", 5800, 4.7]);
     expect(document.values[0].slice(0, 5)).toEqual(["Interfox Ratings", null, null, null, "Рейтинги товаров · Москва"]);
-    expect(document.values[1].slice(0, 5)).toEqual(["Бренд", "Ссылка", "Продукт", null, "Июль 2026"]);
+    expect(document.values[1].slice(0, 5)).toEqual(["Бренд", "Площадка", "Ссылка", "Продукт", "Июль 2026"]);
     expect(document.values[2].slice(4, 6)).toEqual(["Отзывы / оценки", "Рейтинг"]);
     expect(document.merges).toContainEqual({ startRow: 0, endRow: 1, startColumn: 0, endColumn: 4 });
     expect(document.merges).toContainEqual({ startRow: 1, endRow: 3, startColumn: 0, endColumn: 1 });
     expect(document.merges).toContainEqual({ startRow: 1, endRow: 3, startColumn: 1, endColumn: 2 });
     expect(document.merges).toContainEqual({ startRow: 1, endRow: 3, startColumn: 2, endColumn: 3 });
+    expect(document.merges).toContainEqual({ startRow: 1, endRow: 3, startColumn: 3, endColumn: 4 });
     const summaryRows = document.rowKinds
       .map((kind, index) => kind === "summary" ? index : -1)
       .filter((index) => index >= 0);
@@ -150,7 +156,7 @@ describe("Google Sheets model", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0].slice(0, 8)).toEqual([
-      "Анвифен", `${url}/`, "Общая карточка бренда", null, 5, 3.6, 6, 3.7
+      "Анвифен", "iRecommend", `${url}/`, "Общая карточка бренда", 5, 3.6, 6, 3.7
     ]);
   });
 
@@ -161,7 +167,7 @@ describe("Google Sheets model", () => {
     });
     const row = document.values.find((_, index) => document.rowKinds[index] === "product")!;
     expect(row[0]).toBe("Кагоцел");
-    expect(row[2]).toBe("таблетки 12 мг №20");
+    expect(row[3]).toBe("таблетки 12 мг №20");
   });
 
   it("densifies sparse summary rows into explicit nulls for JSON publication", () => {
@@ -232,8 +238,9 @@ describe("Google Sheets model", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]!.slice(1, 6)).toEqual([
+      "Ozon",
       "https://www.ozon.ru/product/otsillokoktsinum-148170210/",
-      "гранулы 1 г №12 и №30", null, 2454, 4.9
+      "гранулы 1 г №12 и №30", 2454, 4.9
     ]);
     expect(summary[0][4]).toBe("=SUM(E5)");
     expect(summary[1][4]).toBe('=COUNTIFS({F5};">=4";{E5};">0")');
@@ -280,9 +287,9 @@ describe("Google Sheets model", () => {
     const partialRequest = { ...request, brands: ["Бактоблис"] };
 
     const document = buildSheetDocument(existing, partialRequest, [], { "2026-07": {} });
-    const row = document.values.find((value) => value[1] === "https://www.ozon.ru/product/kagotsel-99/")!;
+    const row = document.values.find((value) => value[2] === "https://www.ozon.ru/product/kagotsel-99/")!;
 
-    expect(row.slice(0, 6)).toEqual(["Кагоцел", "https://www.ozon.ru/product/kagotsel-99/", "таблетки №20", null, 10, 4.9]);
+    expect(row.slice(0, 6)).toEqual(["Кагоцел", "Ozon", "https://www.ozon.ru/product/kagotsel-99/", "таблетки №20", 10, 4.9]);
   });
 
   it("migrates a stored draft identity to a final human product label", () => {
@@ -298,7 +305,7 @@ describe("Google Sheets model", () => {
     };
     const document = buildSheetDocument({ values: [] }, request, [record], {});
     const row = document.values.find((_, index) => document.rowKinds[index] === "product")!;
-    expect(row.slice(0, 3)).toEqual(["Кагоцел", record.canonicalUrl, "таблетки №20"]);
+    expect(row.slice(0, 4)).toEqual(["Кагоцел", "Ozon", record.canonicalUrl, "таблетки №20"]);
   });
 
   it("emits one section and one row per historical product when a domain or brand repeats", () => {
@@ -340,10 +347,10 @@ describe("Google Sheets model", () => {
       .map((row) => row[0]);
     const productDomains = document.values
       .filter((_row, index) => document.rowKinds[index] === "product")
-      .map((row) => new URL(String(row[1])).hostname);
+      .map((row) => new URL(String(row[2])).hostname);
     const reviewRows = document.values
       .filter((_row, index) => document.rowKinds[index] === "product")
-      .filter((row) => String(row[1]).includes("otzovik.com"));
+      .filter((row) => String(row[2]).includes("otzovik.com"));
 
     expect(sections).toEqual(["Отзовики", "Аптеки", "Маркетплейсы"]);
     expect(productDomains).toEqual([
@@ -401,7 +408,7 @@ describe("Google Sheets model", () => {
     expect(document.months).toEqual(["2026-06", "2026-07"]);
     expect(document.values[2].slice(4, 8)).toEqual(["Отзывы / оценки", "Рейтинг", "Отзывы / оценки", "Рейтинг"]);
     expect(row.slice(0, 8)).toEqual([
-      "Кагоцел", "https://www.ozon.ru/product/kagotsel-99/", "таблетки 12 мг №20", null, 9, 4.8, null, null
+      "Кагоцел", "Ozon", "https://www.ozon.ru/product/kagotsel-99/", "таблетки 12 мг №20", 9, 4.8, null, null
     ]);
   });
 

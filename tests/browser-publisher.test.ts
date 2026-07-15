@@ -177,6 +177,9 @@ describe("browser-only Google Sheets publisher", () => {
     expect(plan.payload.htmlText).toContain('<col width="150">');
     expect(plan.payload.htmlText).toContain('<col width="320">');
     expect(plan.payload.htmlText).toContain('href="https://example.com/p/1"');
+    const productCells = plan.cells.find((_row, index) => document.rowKinds[index] === "product")!;
+    expect(productCells[1].value).toBe("example.com");
+    expect(productCells[2].value).toBe("https://example.com/p/1");
   });
 
   it("rejects non-Google targets before opening a browser page", async () => {

@@ -85,8 +85,43 @@ const PHARMACY_DOMAINS = new Set([
   "budzdorov.ru", "etabl.ru", "apteka-april.ru"
 ]);
 
+const PLATFORM_LABELS: Readonly<Record<string, string>> = {
+  "ozon.ru": "Ozon",
+  "wildberries.ru": "Wildberries",
+  "market.yandex.ru": "Яндекс Маркет",
+  "megamarket.ru": "Мегамаркет",
+  "irecommend.ru": "iRecommend",
+  "med-otzyv.ru": "Мед-отзыв",
+  "otzovik.com": "Отзовик",
+  "otzyv.pro": "Отзыв.pro",
+  "vseotzyvy.ru": "Все отзывы",
+  "otzyvru.com": "ОтзывРу",
+  "pravogolosa.net": "Право голоса",
+  "ru.otzyv.com": "Otzyv.com",
+  "uteka.ru": "Ютека",
+  "megapteka.ru": "Мегаптека",
+  "medum.ru": "Medum",
+  "eapteka.ru": "ЕАПТЕКА",
+  "polza.ru": "POLZAru",
+  "asna.ru": "АСНА",
+  "farmlend.ru": "Фармленд",
+  "okapteka.ru": "ОК Аптека",
+  "rigla.ru": "Ригла",
+  "zdravcity.ru": "Здравсити",
+  "apteka.ru": "Apteka.ru",
+  "nfapteka.ru": "Надежда-Фарм",
+  "budzdorov.ru": "Будь Здоров",
+  "etabl.ru": "eTabl.ru",
+  "apteka-april.ru": "Апрель"
+};
+
 function normalizedDomain(domain: string): string {
   return domain.toLocaleLowerCase("en-US").replace(/^www\./, "").replace(/^reviews\.yandex\.ru$/, "market.yandex.ru");
+}
+
+function platformLabel(domain: string): string {
+  const normalized = normalizedDomain(domain);
+  return PLATFORM_LABELS[normalized] ?? normalized;
 }
 
 function sheetCategory(domain: string): SheetCategory {
@@ -201,14 +236,21 @@ function collapseSharedAggregateRows(products: readonly RowProduct[], months: re
 
 function parseLegacy(existing: ExistingSheet, request: RunRequest): { products: RowProduct[]; months: string[] } {
   const values = existing.values;
+  const secondHeader = normalizeText(String(values[1]?.[1] ?? ""));
+  const thirdHeader = normalizeText(String(values[1]?.[2] ?? ""));
   const brandedLayout = normalizeText(String(values[0]?.[0] ?? "")) === "interfox ratings" &&
     normalizeText(String(values[1]?.[0] ?? "")) === "бренд" &&
-    normalizeText(String(values[1]?.[1] ?? "")) === "ссылка";
+    (secondHeader === "ссылка" || secondHeader === "площадка" && thirdHeader === "ссылка");
   const headerRow = brandedLayout ? 1 : 0;
-  const currentLayout = normalizeText(String(values[headerRow]?.[0] ?? "")) === "бренд" &&
-    normalizeText(String(values[headerRow]?.[1] ?? "")) === "ссылка";
-  const urlColumn = currentLayout ? 1 : 0;
-  const productColumn = currentLayout ? 2 : 1;
+  const headerSecond = normalizeText(String(values[headerRow]?.[1] ?? ""));
+  const headerThird = normalizeText(String(values[headerRow]?.[2] ?? ""));
+  const platformFirstLayout = normalizeText(String(values[headerRow]?.[0] ?? "")) === "бренд" &&
+    headerSecond === "площадка" && headerThird === "ссылка";
+  const linkFirstLayout = normalizeText(String(values[headerRow]?.[0] ?? "")) === "бренд" &&
+    headerSecond === "ссылка";
+  const currentLayout = platformFirstLayout || linkFirstLayout;
+  const urlColumn = platformFirstLayout ? 2 : linkFirstLayout ? 1 : 0;
+  const productColumn = platformFirstLayout ? 3 : linkFirstLayout ? 2 : 1;
   const metricStartColumn = currentLayout ? 4 : 3;
   const months: string[] = [];
   for (let column = metricStartColumn; column < (values[headerRow]?.length ?? 0); column += 2) {
@@ -330,9 +372,9 @@ export function buildSheetDocument(
   merges.push({ startRow: 0, endRow: 1, startColumn: 0, endColumn: 4 });
   if (columnCount > 4) merges.push({ startRow: 0, endRow: 1, startColumn: 4, endColumn: columnCount });
 
-  const title: SheetScalar[] = ["Бренд", "Ссылка", "Продукт", null];
+  const title: SheetScalar[] = ["Бренд", "Площадка", "Ссылка", "Продукт"];
   const subheader: SheetScalar[] = [null, null, null, null];
-  for (let column = 0; column < 3; column += 1) {
+  for (let column = 0; column < 4; column += 1) {
     merges.push({ startRow: 1, endRow: 3, startColumn: column, endColumn: column + 1 });
   }
   months.forEach((month, index) => {
@@ -352,7 +394,7 @@ export function buildSheetDocument(
       null
     ]);
     for (const item of inCategory) {
-      const row: SheetScalar[] = [item.brand, item.canonicalUrl, item.product, null];
+      const row: SheetScalar[] = [item.brand, platformLabel(item.domain), item.canonicalUrl, item.product];
       months.forEach((month, index) => {
         const metric = item.metrics[month]; row[4 + index * 2] = metric?.reviews ?? null; row[5 + index * 2] = metric?.rating ?? null;
       });
