@@ -24,6 +24,7 @@ const DEFAULT_DETAIL_RETRY_DELAY_MS = 750;
 const MAX_DETAIL_ATTEMPTS = 3;
 const MAX_TRANSLATE_REDIRECTS = 2;
 const EXACT_TRANSLATE_PROOF = "ozon:product-json-ld:google-translate";
+const EXACT_COMPOSER_PROOF = "ozon:product-composer-json";
 
 type JsonObject = Record<string, unknown>;
 
@@ -226,6 +227,110 @@ function parseSearchPage(value: unknown): SearchPage {
     throw new ParserChangedError("Ozon search tiles no longer expose SKU and product title");
   }
   return { items, rawItemCount: raw.length, totalPages: totalPages(value) };
+}
+
+function exactScoreText(value: unknown): { reviews: number; rawRating: number | null } | undefined {
+  const text = asString(value)?.replace(/\s+/g, " ");
+  if (!text) return undefined;
+  if (/^(?:\u043d\u0435\u0442 \u043e\u0442\u0437\u044b\u0432\u043e\u0432|\u043e\u0441\u0442\u0430\u0432\u0438\u0442\u044c \u043e\u0442\u0437\u044b\u0432)$/iu.test(text)) {
+    return { reviews: 0, rawRating: null };
+  }
+  const match = text.match(/^([0-5](?:[.,]\d+)?)\s*[\u2022\u00b7]\s*([\d\s\u00a0\u202f]+)\s*\u043e\u0442\u0437\u044b\u0432(?:\u0430|\u043e\u0432)?$/iu);
+  if (!match) return undefined;
+  const reviews = exactNonNegativeInteger(match[2]!.replace(/[\s\u00a0\u202f]+/g, ""));
+  const rawRating = rating(match[1]);
+  return reviews !== null && reviews > 0 && rawRating !== null && rawRating > 0
+    ? { reviews, rawRating }
+    : undefined;
+}
+
+function collectBoundVariantIds(value: unknown, listingId: string, result: Set<string>, depth = 0): void {
+  if (depth > 12) return;
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectBoundVariantIds(item, listingId, result, depth + 1));
+    return;
+  }
+  if (!isObject(value)) return;
+  for (const [key, nested] of Object.entries(value)) {
+    if (["link", "url", "href"].includes(key) && typeof nested === "string") {
+      try {
+        const link = new URL(nested, "https://www.ozon.ru");
+        if (
+          link.hostname === "www.ozon.ru" && link.pathname.startsWith("/product/") &&
+          link.searchParams.get("from_sku") === listingId && link.searchParams.get("oos_search") === "false"
+        ) {
+          const variantId = skuFromUrl(link.toString());
+          if (variantId) result.add(variantId);
+        }
+      } catch { /* unrelated malformed aspect link */ }
+    }
+    if (nested && typeof nested === "object") collectBoundVariantIds(nested, listingId, result, depth + 1);
+  }
+}
+
+function parseExactComposerProduct(value: unknown, listingId: string): ExactProductMetrics {
+  if (!isObject(value)) throw new ParserChangedError("Ozon product composer returned a non-object response");
+
+  const headings = parsedWidgets(value, "webProductHeading")
+    .map((state) => asString(state.title))
+    .filter((title): title is string => title !== undefined);
+  if (headings.length !== 1) throw new ParserChangedError("Ozon product composer has no unambiguous product heading");
+
+  const galleries = parsedWidgets(value, "webGallery");
+  const boundGalleries = galleries.filter((state) => asSku(state.sku) === listingId);
+  if (boundGalleries.length !== 1 || galleries.some((state) => asSku(state.sku) !== listingId)) {
+    throw new ParserChangedError("Ozon product composer is not bound to the requested SKU");
+  }
+
+  const structuredScores = parsedWidgets(value, "webReviewProductScore").filter((state) =>
+    (asSku(state.itemId) ?? skuFromUrl(state.url)) === listingId
+  );
+  if (structuredScores.length > 1) throw new ParserChangedError("Ozon product composer exposes multiple review score widgets");
+
+  let reviews: number | null = null;
+  let rawRating: number | null = null;
+  if (structuredScores.length === 1) {
+    const score = structuredScores[0]!;
+    reviews = exactNonNegativeInteger(score.reviewsCount);
+    rawRating = rating(score.totalScore);
+    if (reviews === null || (reviews === 0 ? rawRating !== null && rawRating !== 0 : rawRating === null || rawRating <= 0)) {
+      throw new ParserChangedError("Ozon product composer review score is incomplete");
+    }
+    if (reviews === 0) rawRating = null;
+  }
+
+  const singleScores = parsedWidgets(value, "webSingleProductScore").filter((state) => skuFromUrl(state.link) === listingId);
+  if (singleScores.length > 1) throw new ParserChangedError("Ozon product composer exposes multiple visible score widgets");
+  const visibleScore = singleScores.length === 1 ? exactScoreText(singleScores[0]!.text) : undefined;
+  if (structuredScores.length === 0) {
+    if (!visibleScore) throw new ParserChangedError("Ozon product composer has no exact review score proof");
+    reviews = visibleScore.reviews;
+    rawRating = visibleScore.rawRating;
+  } else if (visibleScore && (visibleScore.reviews !== reviews || visibleScore.rawRating !== rawRating)) {
+    throw new ParserChangedError("Ozon product composer structured and visible review scores disagree");
+  }
+
+  const variantIds = new Set<string>([listingId]);
+  parsedWidgets(value, "webAspects").forEach((state) => collectBoundVariantIds(state, listingId, variantIds));
+  const aggregateGroupId = variantIds.size > 1
+    ? `ozon:variants:${[...variantIds].sort((left, right) => Number(left) - Number(right)).join(",")}`
+    : undefined;
+  return {
+    product: headings[0]!,
+    reviews: reviews!,
+    rating: rawRating === null ? null : normalizeRating(rawRating, 5),
+    rawRating,
+    proof: EXACT_COMPOSER_PROOF,
+    ...(aggregateGroupId ? { aggregateGroupId } : {})
+  };
+}
+
+function setBounded<K, V>(map: Map<K, V>, key: K, value: V, maximumEntries: number): void {
+  if (!map.has(key) && map.size >= maximumEntries) {
+    const oldest = map.keys().next().value as K | undefined;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(key, value);
 }
 
 function canonicalTranslatedProduct(value: string): { listingId: string; url: string } {
@@ -439,6 +544,7 @@ type ExactProductMetrics = {
   rating: number | null;
   rawRating: number | null;
   aggregateGroupId?: string;
+  proof?: typeof EXACT_COMPOSER_PROOF;
 };
 
 async function mapWithConcurrency<T, R>(
@@ -586,6 +692,8 @@ export class OzonBrowserAdapter implements SiteAdapter {
   private readonly detailDelayMs: number;
   private readonly detailRetryDelayMs: number;
   private readonly searchPageCache = new Map<string, SearchPage>();
+  private readonly discoveryTileCache = new Map<string, SearchTile[]>();
+  private readonly exactProductCache = new Map<string, ExactProductMetrics>();
 
   constructor(options: OzonBrowserAdapterOptions = {}) {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
@@ -627,55 +735,69 @@ export class OzonBrowserAdapter implements SiteAdapter {
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const requestedBrand = brand.normalize("NFKC").trim();
     if (!requestedBrand) throw new TypeError("brand must not be empty");
-    const products = new Map<string, SearchTile>();
-    let previousPageIds: string | undefined;
-    let declaredTotalPages: number | undefined;
-    let exhausted = false;
+    const runScope = `${context.runId ?? "unscoped"}\u0000${requestedBrand.toLocaleLowerCase("ru-RU")}`;
+    let matchedProducts = this.discoveryTileCache.get(runScope);
+    if (!matchedProducts) {
+      const products = new Map<string, SearchTile>();
+      let previousPageIds: string | undefined;
+      let declaredTotalPages: number | undefined;
+      let exhausted = false;
 
-    for (let pageNumber = 1; pageNumber <= this.maxPages; pageNumber += 1) {
-      const page = await this.fetchSearchPage(requestedBrand, pageNumber, context);
-      if (page.totalPages !== undefined && page.totalPages > this.maxPages) {
-        throw new AdapterBlockedError(
-          `Ozon search for ${requestedBrand} has ${page.totalPages} pages, above the safe limit ${this.maxPages}`
-        );
-      }
-      if (page.totalPages !== undefined) {
-        if (page.rawItemCount > 0 && page.totalPages === 0) {
-          throw new ParserChangedError(`Ozon search for ${requestedBrand} returned items with totalPages=0`);
-        }
-        declaredTotalPages = Math.max(declaredTotalPages ?? 0, page.totalPages);
-      }
-      if (page.rawItemCount === 0) {
-        if (declaredTotalPages !== undefined && declaredTotalPages >= pageNumber) {
+      for (let pageNumber = 1; pageNumber <= this.maxPages; pageNumber += 1) {
+        const page = await this.fetchSearchPage(requestedBrand, pageNumber, context);
+        if (page.totalPages !== undefined && page.totalPages > this.maxPages) {
           throw new AdapterBlockedError(
-            `Ozon search for ${requestedBrand} returned an empty page ${pageNumber} before declared page ${declaredTotalPages}`
+            `Ozon search for ${requestedBrand} has ${page.totalPages} pages, above the safe limit ${this.maxPages}`
           );
         }
-        exhausted = true;
-        break;
+        if (page.totalPages !== undefined) {
+          if (page.rawItemCount > 0 && page.totalPages === 0) {
+            throw new ParserChangedError(`Ozon search for ${requestedBrand} returned items with totalPages=0`);
+          }
+          declaredTotalPages = Math.max(declaredTotalPages ?? 0, page.totalPages);
+        }
+        if (page.rawItemCount === 0) {
+          if (declaredTotalPages !== undefined && declaredTotalPages >= pageNumber) {
+            throw new AdapterBlockedError(
+              `Ozon search for ${requestedBrand} returned an empty page ${pageNumber} before declared page ${declaredTotalPages}`
+            );
+          }
+          exhausted = true;
+          break;
+        }
+        const pageIds = page.items.map((item) => item.listingId).join(",");
+        if (previousPageIds !== undefined && pageIds === previousPageIds) {
+          throw new AdapterBlockedError(`Ozon repeated a search page for ${requestedBrand}; discovery was stopped fail-closed`);
+        }
+        previousPageIds = pageIds;
+        for (const item of page.items) {
+          if (matchesBrand(item.title, requestedBrand)) products.set(item.listingId, item);
+        }
+        if (declaredTotalPages !== undefined && pageNumber >= declaredTotalPages) {
+          exhausted = true;
+          break;
+        }
       }
-      const pageIds = page.items.map((item) => item.listingId).join(",");
-      if (previousPageIds !== undefined && pageIds === previousPageIds) {
-        throw new AdapterBlockedError(`Ozon repeated a search page for ${requestedBrand}; discovery was stopped fail-closed`);
-      }
-      previousPageIds = pageIds;
-      for (const item of page.items) {
-        if (matchesBrand(item.title, requestedBrand)) products.set(item.listingId, item);
-      }
-      if (declaredTotalPages !== undefined && pageNumber >= declaredTotalPages) {
-        exhausted = true;
-        break;
-      }
-    }
 
-    if (!exhausted) {
-      throw new AdapterBlockedError(
-        `Ozon search for ${requestedBrand} reached the ${this.maxPages}-page safety limit without proving exhaustion`
-      );
+      if (!exhausted) {
+        throw new AdapterBlockedError(
+          `Ozon search for ${requestedBrand} reached the ${this.maxPages}-page safety limit without proving exhaustion`
+        );
+      }
+      matchedProducts = [...products.values()];
+      setBounded(this.discoveryTileCache, runScope, matchedProducts, 250);
+    } else {
+      await reportActivity(context, {
+        operationId: `ozon:reuse-discovery:${requestedBrand}`,
+        stage: "discovery",
+        label: "Ozon · сохранённая выдача",
+        channels: ["registry"],
+        status: "complete",
+        detail: `Повторяем только незавершённые карточки · найдено ${matchedProducts.length}`
+      });
     }
 
     const capturedAt = this.now().toISOString();
-    const matchedProducts = [...products.values()];
     const exactMetrics = new Map<string, ExactProductMetrics>();
     const searchTileFallbacks = new Map<string, string>();
     await mapWithConcurrency(
@@ -696,31 +818,48 @@ export class OzonBrowserAdapter implements SiteAdapter {
           metadata: { source: product.source }
         };
         let exact: ExactProductMetrics;
+        const proofCacheKey = `${runScope}\u0000${product.listingId}`;
+        const cachedExact = this.exactProductCache.get(proofCacheKey);
+        if (cachedExact) {
+          exactMetrics.set(product.listingId, cachedExact);
+          return cachedExact;
+        }
         try {
           exact = await this.fetchExactTranslatedProductWithRetry(ref, product.listingId, context);
-        } catch (error) {
-          if (!(error instanceof AdapterBlockedError)) throw error;
-          const hasBoundTileMetrics = product.reviews !== null && (
-            product.reviews === 0
-              ? product.rating === null
-              : product.rating !== null && product.rating > 0
-          );
-          if (!hasBoundTileMetrics) throw error;
-          searchTileFallbacks.set(product.listingId, error.message);
-          await reportActivity(context, {
-            operationId: `ozon:search-tile-fallback:${product.listingId}`,
-            stage: "collection",
-            label: "Ozon · данные поисковой карточки",
-            listingId: product.listingId,
-            channels: ["google_translate"],
-            status: "warning",
-            detail: "Точная страница временно недоступна; карточка сохранена для проверки"
-          });
-          return undefined;
+        } catch (translateError) {
+          if (!(translateError instanceof AdapterBlockedError)) throw translateError;
+          try {
+            exact = await this.fetchExactComposerProduct(ref, product.listingId, context);
+          } catch (composerError) {
+            const message = `translated detail: ${translateError.message}; product composer: ${composerError instanceof Error ? composerError.message : String(composerError)}`;
+            const hasBoundTileMetrics = product.reviews !== null && (
+              product.reviews === 0
+                ? product.rating === null
+                : product.rating !== null && product.rating > 0
+            );
+            if (!hasBoundTileMetrics) {
+              if (composerError instanceof ParserChangedError) {
+                throw new ParserChangedError(`Ozon exact product proof changed: ${message}`);
+              }
+              throw new AdapterBlockedError(`Ozon exact product proof is unavailable: ${message}`);
+            }
+            searchTileFallbacks.set(product.listingId, message);
+            await reportActivity(context, {
+              operationId: `ozon:search-tile-fallback:${product.listingId}`,
+              stage: "collection",
+              label: "Ozon · данные поисковой карточки",
+              listingId: product.listingId,
+              channels: ["google_translate"],
+              status: "warning",
+              detail: "Точная страница временно недоступна; карточка сохранена для проверки"
+            });
+            return undefined;
+          }
         }
         if (!matchesBrand(exact.product, requestedBrand)) {
-          throw new ParserChangedError("Ozon translated product JSON-LD belongs to a different brand");
+          throw new ParserChangedError("Ozon exact product proof belongs to a different brand");
         }
+        setBounded(this.exactProductCache, proofCacheKey, exact, 5_000);
         exactMetrics.set(product.listingId, exact);
         return exact;
       }
@@ -750,7 +889,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
         ...(exact ? {
           exactProductTitle: exact.product,
           exactProductListingId: product.listingId,
-          exactProductProof: EXACT_TRANSLATE_PROOF,
+          exactProductProof: exact.proof ?? EXACT_TRANSLATE_PROOF,
           ...(exact.aggregateGroupId ? { exactProductAggregateGroupId: exact.aggregateGroupId } : {})
         } : {})
       }
@@ -764,12 +903,17 @@ export class OzonBrowserAdapter implements SiteAdapter {
     if (!listingId || !product) throw new ParserChangedError("Ozon composer ProductRef is incomplete");
     const translatedSource = ref.metadata.source === TRANSLATE_SOURCE;
     const searchTileFallback = translatedSource && ref.metadata.exactProductFallback === "search_tile";
-    const source = searchTileFallback ? `${TRANSLATE_SOURCE}:search-tile-fallback` : translatedSource ? TRANSLATE_SOURCE : SOURCE;
+    const composerProductProof = ref.metadata.exactProductProof === EXACT_COMPOSER_PROOF;
+    const source = searchTileFallback
+      ? `${TRANSLATE_SOURCE}:search-tile-fallback`
+      : composerProductProof
+        ? `${SOURCE}:product-fallback`
+        : translatedSource ? TRANSLATE_SOURCE : SOURCE;
     let reviews = reviewCount(ref.metadata.reviewCount);
     let rawRating = rating(ref.metadata.rating);
     if (translatedSource && !searchTileFallback) {
       const cachedTitle = asString(ref.metadata.exactProductTitle);
-      const hasExactProof = ref.metadata.exactProductProof === EXACT_TRANSLATE_PROOF &&
+      const hasExactProof = [EXACT_TRANSLATE_PROOF, EXACT_COMPOSER_PROOF].includes(String(ref.metadata.exactProductProof)) &&
         ref.metadata.exactProductListingId === listingId && cachedTitle !== undefined &&
         reviews !== null && (reviews === 0 ? rawRating === null : rawRating !== null && rawRating > 0);
       const exact = hasExactProof
@@ -919,6 +1063,74 @@ export class OzonBrowserAdapter implements SiteAdapter {
       }
     }
     throw lastFailure ?? new AdapterBlockedError("Ozon product proof did not complete");
+  }
+
+  private async fetchExactComposerProduct(
+    ref: ProductRef,
+    listingId: string,
+    context: AdapterContext
+  ): Promise<ExactProductMetrics> {
+    return withActivity(context, {
+      operationId: `ozon:composer-product:${listingId}`,
+      stage: "collection",
+      label: "Ozon API · точная карточка",
+      listingId,
+      channels: ["sandbox", "browser", "first_party_api"],
+      detail: "Резерв после недоступной страницы Google Translate"
+    }, async () => {
+      const target = new URL(canonicalUrl(ref.url, listingId));
+      if (
+        target.protocol !== "https:" || target.hostname !== "www.ozon.ru" || target.search || target.hash ||
+        !/^\/product\/[a-z0-9-]+\/$/i.test(target.pathname) || skuFromUrl(target.toString()) !== listingId
+      ) {
+        throw new ParserChangedError("Ozon composer ProductRef is outside the fixed product path");
+      }
+      const endpoint = new URL(SEARCH_ENDPOINT);
+      endpoint.searchParams.set("url", target.pathname);
+      let response: Response;
+      try {
+        response = await this.fetchImpl(endpoint, {
+          method: "GET",
+          headers: {
+            accept: "application/json",
+            "accept-language": "ru-RU,ru;q=0.9",
+            "x-ratings-browser": "1",
+            "x-ratings-browser-mode": "ozon-composer"
+          },
+          signal: context.signal
+        });
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        throw new AdapterBlockedError(`Ozon product composer request failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const declaredLength = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declaredLength) && declaredLength > this.maxDocumentBytes) {
+        throw new ParserChangedError("Ozon product composer response exceeded the document safety limit");
+      }
+      const body = await response.text();
+      if (body.length > this.maxDocumentBytes) {
+        throw new ParserChangedError("Ozon product composer response exceeded the document safety limit");
+      }
+      if ([403, 407, 423, 429, 498, 503].includes(response.status) || blockedBody(body)) {
+        throw new AdapterBlockedError(`Ozon blocked the product composer (HTTP ${response.status})`);
+      }
+      if (!response.ok) throw new AdapterBlockedError(`Ozon product composer returned HTTP ${response.status}`);
+      return withActivity(context, {
+        operationId: `ozon:parse-product-composer:${listingId}`,
+        stage: "parsing",
+        label: "Ozon JSON · рейтинг и отзывы",
+        listingId,
+        channels: ["sandbox", "browser", "first_party_api"],
+        parsers: ["api_json"]
+      }, async () => {
+        try {
+          return parseExactComposerProduct(JSON.parse(body) as unknown, listingId);
+        } catch (error) {
+          if (error instanceof ParserChangedError) throw error;
+          throw new ParserChangedError("Ozon product composer returned invalid JSON");
+        }
+      });
+    });
   }
 
   private async fetchSearchPage(

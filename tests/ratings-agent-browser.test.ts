@@ -162,6 +162,31 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("permits one exact Ozon product composer path and rejects nested unsafe paths", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async () => new Response('{"widgetStates":{}}', {
+      headers: { "content-type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const exact = new URL("https://www.ozon.ru/api/composer-api.bx/page/json/v2");
+    exact.searchParams.set("url", "/product/baktoblis-sashe-123456789/");
+
+    await expect(routedFetch(exact, {
+      headers: { "x-ratings-browser": "1", "x-ratings-browser-mode": "ozon-composer" }
+    })).resolves.toBeInstanceOf(Response);
+
+    const unsafe = new URL("https://www.ozon.ru/api/composer-api.bx/page/json/v2");
+    unsafe.searchParams.set("url", "https://metadata.google.internal/latest/meta-data/");
+    await expect(routedFetch(unsafe, {
+      headers: { "x-ratings-browser": "1", "x-ratings-browser-mode": "ozon-composer" }
+    })).rejects.toThrow("restricted to product search or one exact product card");
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("routes the exact Ozon Translate render host through fixed function egress", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
@@ -323,7 +348,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
     const routedFetch = browserFetch(sandbox(run));
 
     await expect(routedFetch(
-      "https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=%2Fsearch%2F%3Ftext%3Dtest",
+      "https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=%2Fsearch%2F%3Ftext%3Dtest%26from_global%3Dtrue",
       {
         headers: {
           "x-ratings-browser": "1",
