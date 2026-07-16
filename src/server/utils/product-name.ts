@@ -366,7 +366,6 @@ function productHintFromUrl(url: string | undefined): string {
       .replace(/\bs loratadinom\b/giu, " с лоратадином ")
       .replace(/\bsupp vag i rekt\b/giu, " суппозитории вагинальные и ректальные ")
       .replace(/\br r dlia v v vved vved i v m vved amp\b/giu, " раствор в ампулах ")
-      .replace(/\bvkus klubniki\b/giu, " вкус клубники ")
       .replace(/(\d+(?:[.,]\d+)?)\s*mg\b/giu, "$1 мг ")
       .replace(/(\d+)\s*sht\b/giu, "$1 шт ")
       .replace(/\s+/g, " ")

@@ -310,7 +310,7 @@ describe("canonical product descriptors", () => {
     expect(new Set(variants.map((item) => item.variantKey)).size).toBe(3);
   });
 
-  it("uses a canonical URL slug when a marketplace stored only a model label", () => {
+  it("uses structural URL hints but never invents a sachet flavor without page evidence", () => {
     const values = canonicalProductDescriptors([
       {
         brand: "Амиксин",
@@ -323,7 +323,22 @@ describe("canonical product descriptors", () => {
         url: "https://reviews.yandex.ru/product/baktoblis-vkus-klubniki-poroshok-dlia-priema-vnutr-sashe-paket-1500mg-30sht--1437465355"
       }
     ]);
-    expect(values).toEqual(["Общая карточка формы «таблетки»", "вкус клубники порошок в саше 1500 мг №30"]);
+    expect(values).toEqual(["Общая карточка формы «таблетки»", "порошок в саше 1500 мг №30"]);
+
+    expect(analyzeProductIdentity({
+      brand: "Бактоблис",
+      product: "Бактоблис саше",
+      url: "https://reviews.yandex.ru/product/baktoblis-vkus-klubniki-poroshok-dlia-priema-vnutr-sashe-paket-1500mg-30sht--1437465355",
+      evidence: {
+        scope: "listing",
+        signals: [{ source: "title", text: "Бактоблис вкус клубники порошок в саше 1500 мг №30" }],
+        variants: [], identifiers: [], imageUrls: [], instructionUrls: []
+      }
+    })).toMatchObject({
+      label: "вкус клубники порошок в саше 1500 мг №30",
+      granularity: "variant",
+      confidence: "exact"
+    });
   });
 
   it("removes transliterated brands left by legacy URL hints", () => {
@@ -371,6 +386,18 @@ describe("canonical product descriptors", () => {
     expect(analyzeProductIdentity({ brand: "Анаферон", product: "Анаферон детский" })).toMatchObject({ granularity: "unresolved", label: "Общая карточка серии «детский»" });
     expect(analyzeProductIdentity({ brand: "Арбидол", product: "Арбидол Максимум капсулы" })).toMatchObject({ granularity: "unresolved", label: "Общая карточка: Максимум капсулы" });
     expect(analyzeProductIdentity({ brand: "Кагоцел", product: "Кагоцел таблетки 12 мг №20" })).toMatchObject({ granularity: "variant", label: "таблетки 12 мг №20" });
+    expect(analyzeProductIdentity({ brand: "Бактоблис", product: "Бактоблис №30" })).toMatchObject({
+      granularity: "unresolved", confidence: "partial", label: "№30", missing: ["form", "strength_or_detail"]
+    });
+    expect(analyzeProductIdentity({
+      brand: "Бактоблис",
+      product: "Бактоблис №30",
+      evidence: {
+        scope: "listing",
+        signals: [{ source: "title", text: "Бактоблис таблетки для рассасывания №30" }],
+        variants: [], identifiers: [], imageUrls: [], instructionUrls: []
+      }
+    })).toMatchObject({ granularity: "variant", confidence: "exact", label: "таблетки для рассасывания №30" });
   });
 
   it("does not promote a marketing modifier or an administration dose to an exact product", () => {
