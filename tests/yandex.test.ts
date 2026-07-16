@@ -353,6 +353,32 @@ describe("YandexAdapter discovery", () => {
 });
 
 describe("YandexAdapter collection", () => {
+  it("does not attach a reviewed tablet variant to the source-bound Baktoblis sachet model", async () => {
+    const listingId = "5705860403";
+    const url = `https://reviews.yandex.ru/product/baktoblis-sashe--${listingId}`;
+    const html = productHtml({
+      canonical: url,
+      product: {
+        "@type": "Product",
+        name: "БактоБЛИС саше",
+        brand: "БактоБЛИС",
+        aggregateRating: { "@type": "AggregateRating", reviewCount: 1, ratingCount: 1, ratingValue: 5 }
+      }
+    }).replace("</body>", `
+      <div class="Review-ReasonToTrustText">Товар — Бактоблис+ Таб. д/Рассас.No90</div>
+    </body>`);
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }) });
+
+    const observation = await adapter.collect(ref({ listingId, brand: "Бактоблис", url }), context());
+
+    expect(observation).toMatchObject({ product: "БактоБЛИС саше", reviews: 1, rating: 5, status: "ok" });
+    expect(observation.productEvidence?.variants).toEqual(["БактоБЛИС саше"]);
+    expect(observation.productEvidence?.signals).not.toContainEqual({
+      source: "variant",
+      text: "Бактоблис+ Таб. д/Рассас.No90"
+    });
+  });
+
   it("uses source-bound reviewed product titles to resolve one exact Khondrofen variant", async () => {
     const listingId = "5829843760";
     const url = `https://reviews.yandex.ru/product/khondrofen-maz-d-nar-prim--${listingId}`;

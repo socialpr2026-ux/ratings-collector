@@ -341,7 +341,8 @@ export class YandexAdapter implements SiteAdapter {
     if (!title) throw new ParserChangedError(`Yandex model ${listingId} JSON-LD Product has no name`);
 
     const description = nonEmptyString(product.description);
-    const reviewedProductTitles = extractReviewedProductTitles(html, ref.brand);
+    const reviewedProductTitles = extractReviewedProductTitles(html, ref.brand)
+      .filter((reviewedTitle) => reviewedVariantMatchesModelForm(title, reviewedTitle));
     // When no individual review exposes its bought variant, the canonical
     // JSON-LD Product name is still first-party evidence for the model-level
     // aggregate. If that name does not prove a complete sellable variant,
@@ -1053,6 +1054,16 @@ function extractReviewedProductTitles(html: string, brand: string): string[] {
     }
   }
   return [...result].slice(0, 30);
+}
+
+function reviewedVariantMatchesModelForm(modelTitle: string, reviewedTitle: string): boolean {
+  const modelIsSachet = /(?:^|[^\p{L}])(?:саше|порошок)(?:$|[^\p{L}])/iu.test(modelTitle);
+  const reviewedIsTablet = /(?:^|[^\p{L}])(?:таб(?:л(?:етки?)?)?\.?|таблетки?)(?:$|[^\p{L}])/iu.test(reviewedTitle);
+  if (modelIsSachet && reviewedIsTablet) return false;
+
+  const modelIsTablet = /(?:^|[^\p{L}])(?:таб(?:л(?:етки?)?)?\.?|таблетки?)(?:$|[^\p{L}])/iu.test(modelTitle);
+  const reviewedIsSachet = /(?:^|[^\p{L}])(?:саше|порошок)(?:$|[^\p{L}])/iu.test(reviewedTitle);
+  return !(modelIsTablet && reviewedIsSachet);
 }
 
 function extractBrandNames(product: JsonObject): string[] {
