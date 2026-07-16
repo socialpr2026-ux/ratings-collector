@@ -1288,6 +1288,6 @@ export function App() {
       <button type="button" onClick={() => setError("")} aria-label="Закрыть сообщение">×</button>
     </div>}
 
-    <footer><span className="footer-brand"><strong>Interfox</strong><span className="footer-ratings">Ratings</span></span><span>Репутационные данные — в порядке</span></footer>
+    <footer><span className="footer-brand"><strong>Interfox</strong><span>Ratings</span></span><span>Репутационные данные — в порядке</span></footer>
   </div>;
 }

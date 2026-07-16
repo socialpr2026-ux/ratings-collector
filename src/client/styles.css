@@ -656,7 +656,6 @@ tbody tr:hover { background: #fbfaff; }
 footer { color: #716b80; }
 .footer-brand { display: inline-flex; align-items: baseline; gap: .35em; line-height: 1; }
 .footer-brand strong { color: var(--brand); font-family: Orbitron, Inter, sans-serif; font-weight: 500; }
-.footer-ratings { position: relative; top: 1px; }
 
 @media (max-width: 960px) {
   .intro { grid-template-columns: 1fr; gap: 30px; padding: 42px; }
