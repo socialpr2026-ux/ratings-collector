@@ -432,7 +432,8 @@ describe("Ozon browser collector", () => {
     });
     const adapter = new OzonBrowserAdapter({
       fetch: fetchMock as unknown as typeof globalThis.fetch,
-      detailConcurrency: 4
+      detailConcurrency: 4,
+      detailDelayMs: 0
     });
 
     const refs = await adapter.discover("\u041a\u0430\u0433\u043e\u0446\u0435\u043b", context);
