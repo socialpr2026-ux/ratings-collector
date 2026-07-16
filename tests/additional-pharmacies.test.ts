@@ -244,6 +244,30 @@ describe("additional pharmacy adapters", () => {
     expect(new URL(String(fetchSpy.mock.calls[1][0])).pathname).toBe(productPath);
   });
 
+  it("accepts Bud Zdorov's current self-removing state script but rejects an unknown executable suffix", async () => {
+    const productPath = "/product/baktoblis-plyus-tabdlya-rassas-950mg-no30-ddet-starshe-3-kh-let-i-vzr-bad-5005555";
+    const productSource = `https://www.budzdorov.ru${productPath}`;
+    const state = JSON.stringify({ productView: { reviews: [
+      { id: 901, ratings: [{ attribute_code: "Оценка", value: 5 }] }
+    ] } });
+    const cleanup = ";(function(){var s;(s=document.currentScript||document.scripts[document.scripts.length-1]).parentNode.removeChild(s);}())";
+    const page = (suffix: string) => translated(productSource,
+      `<h1>Бактоблис плюс таблетки для рассасывания 950 мг №30</h1><div allreviewsqty="1"></div>` +
+      `<script>window.__INITIAL_STATE__=${state}${suffix}</script>`);
+    const ref = {
+      domain: "budzdorov.ru", platform: "budzdorov.ru", listingId: "5005555", brand: "Бактоблис",
+      url: productSource, metadata: {}
+    };
+
+    await expect(new BudZdorovAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(page(cleanup), { status: 200 })) as unknown as typeof fetch).collect(ref, context))
+      .resolves.toMatchObject({ listingId: "5005555", reviews: 1, rating: 5, status: "ok" });
+
+    await expect(new BudZdorovAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(page(";sendStateElsewhere()"), { status: 200 })) as unknown as typeof fetch).collect(ref, context))
+      .rejects.toThrow(/unknown executable suffix/);
+  });
+
   it("falls back to the translated letter index when the brand form was removed", async () => {
     const formSource = "https://www.budzdorov.ru/forms/baktoblis";
     const letterSource = "https://www.budzdorov.ru/letter/%D0%91";
