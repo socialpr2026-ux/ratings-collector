@@ -2,6 +2,13 @@
 
 Изменения проекта публикуются автоматически через Release Please на основе Conventional Commits.
 
+## [0.3.1](https://github.com/socialpr2026-ux/ratings-collector/compare/v0.3.0...v0.3.1) (2026-07-16)
+
+
+### Bug Fixes
+
+* collect unrated Bud Zdorov reviews ([25ba6d2](https://github.com/socialpr2026-ux/ratings-collector/commit/25ba6d2ff0caa8ba21e3b9f905a643511d524e66))
+
 ## [0.3.0](https://github.com/socialpr2026-ux/ratings-collector/compare/v0.2.0...v0.3.0) (2026-07-16)
 
 
