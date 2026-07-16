@@ -2,6 +2,13 @@
 
 Изменения проекта публикуются автоматически через Release Please на основе Conventional Commits.
 
+## [0.3.2](https://github.com/socialpr2026-ux/ratings-collector/compare/v0.3.1...v0.3.2) (2026-07-16)
+
+
+### Bug Fixes
+
+* recover Kagocel pharmacy collection ([#25](https://github.com/socialpr2026-ux/ratings-collector/issues/25)) ([08d223f](https://github.com/socialpr2026-ux/ratings-collector/commit/08d223f4014583c5e5b6e21abe63716275d3be0b))
+
 ## [0.3.1](https://github.com/socialpr2026-ux/ratings-collector/compare/v0.3.0...v0.3.1) (2026-07-16)
 
 
