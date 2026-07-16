@@ -29,7 +29,12 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
     sites: [
       { domain: "irecommend.ru", label: "iRecommend" },
       { domain: "reviews.yandex.ru", label: "Яндекс Отзывы", note: "Использует те же модели товаров, что и Яндекс Маркет; дубли объединяются" },
-      { domain: "med-otzyv.ru", label: "Мед-отзыв" },
+      {
+        domain: "med-otzyv.ru",
+        label: "Мед-отзыв",
+        availability: "temporarily_blocked",
+        note: "Сайт сейчас недоступен"
+      },
       { domain: "otzovik.com", label: "Отзовик" },
       { domain: "otzyv.pro", label: "Отзыв.pro" },
       { domain: "vseotzyvy.ru", label: "Все отзывы" },

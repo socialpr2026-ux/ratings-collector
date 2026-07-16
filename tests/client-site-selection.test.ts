@@ -36,6 +36,11 @@ describe("site picker catalog", () => {
       "apteka-april.ru"
     ]));
     expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("medum.ru");
+    expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("med-otzyv.ru");
+    expect(SITE_CATALOG.flatMap((group) => group.sites).find((site) => site.domain === "med-otzyv.ru")).toMatchObject({
+      availability: "temporarily_blocked",
+      note: "Сайт сейчас недоступен"
+    });
     expect(SITE_CATALOG.flatMap((group) => group.sites).find((site) => site.domain === "medum.ru")).toMatchObject({
       availability: "temporarily_blocked"
     });
@@ -63,11 +68,11 @@ describe("site picker catalog", () => {
   });
 
   it("keeps a manually pasted unavailable site visible but excludes it from the runnable set", () => {
-    const value = "https://medum.ru/\npolza.ru\neapteka.ru\ncustom.example";
+    const value = "https://medum.ru/\nmed-otzyv.ru\npolza.ru\neapteka.ru\ncustom.example";
 
-    expect(parseDomainList(value)).toEqual(["medum.ru", "polza.ru", "eapteka.ru", "custom.example"]);
+    expect(parseDomainList(value)).toEqual(["medum.ru", "med-otzyv.ru", "polza.ru", "eapteka.ru", "custom.example"]);
     expect(parseRunnableDomainList(value)).toEqual(["custom.example"]);
-    expect(parseTemporarilyBlockedDomainList(value)).toEqual(["medum.ru", "polza.ru", "eapteka.ru"]);
+    expect(parseTemporarilyBlockedDomainList(value)).toEqual(["medum.ru", "med-otzyv.ru", "polza.ru", "eapteka.ru"]);
   });
 
   it("keeps unrelated manual entries unchanged when a preset is toggled", () => {
