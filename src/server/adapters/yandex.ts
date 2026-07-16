@@ -57,6 +57,8 @@ export type YandexAdapterOptions = {
   sitemapRetryAttempts?: number;
   sitemapRetryBaseMs?: number;
   sitemapReadTimeoutMs?: number;
+  /** Whole discovery deadline. A partial sitemap scan is rejected, never returned as no results. */
+  discoveryTimeoutMs?: number;
   now?: () => Date;
   sleep?: (milliseconds: number) => Promise<void>;
 };
@@ -115,6 +117,7 @@ export class YandexAdapter implements SiteAdapter {
   private readonly sitemapRetryAttempts: number;
   private readonly sitemapRetryBaseMs: number;
   private readonly sitemapReadTimeoutMs: number;
+  private readonly discoveryTimeoutMs: number;
   private readonly now: () => Date;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private indexCache?: Cached<string[]>;
@@ -133,11 +136,10 @@ export class YandexAdapter implements SiteAdapter {
     this.maxSitemaps = boundedInteger(options.maxSitemaps, 400, 1, 400);
     this.maxCandidates = boundedInteger(options.maxCandidates, 300, 1, 2_000);
     this.maxDocumentBytes = boundedInteger(options.maxDocumentBytes, 12_000_000, 10_000, 25_000_000);
-    // Edge/cloud egress is more likely to be throttled when several multi-MB
-    // sitemap shards arrive at once. Four workers keep the complete scan fast
-    // while avoiding the burst that previously pushed production into a
-    // fallback path.
-    this.sitemapConcurrency = boundedInteger(options.sitemapConcurrency, 4, 1, 12);
+    // The live index contains hundreds of independent shards. Twelve bounded
+    // workers finish the exhaustive pass within the run deadline without ever
+    // treating an unfinished pass as an empty result.
+    this.sitemapConcurrency = boundedInteger(options.sitemapConcurrency, 12, 1, 12);
     this.cacheTtlMs = boundedInteger(options.cacheTtlMs, 30 * 60_000, 0, 24 * 60 * 60_000);
     this.sitemapRetryAttempts = boundedInteger(options.sitemapRetryAttempts, 3, 1, 5);
     this.sitemapRetryBaseMs = boundedInteger(options.sitemapRetryBaseMs, 250, 0, 10_000);
@@ -146,6 +148,7 @@ export class YandexAdapter implements SiteAdapter {
     // verified transfer can legitimately take more than 20 seconds; keep the
     // safety deadline, but do not misclassify a healthy shard as blocked.
     this.sitemapReadTimeoutMs = boundedInteger(options.sitemapReadTimeoutMs, 60_000, 1, 120_000);
+    this.discoveryTimeoutMs = boundedInteger(options.discoveryTimeoutMs, 90_000, 1, 300_000);
     this.now = options.now ?? (() => new Date());
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
@@ -225,6 +228,35 @@ export class YandexAdapter implements SiteAdapter {
   }
 
   private async scanDiscoveryBatch(
+    brands: string[],
+    context: AdapterContext
+  ): Promise<DiscoveryBatch> {
+    const deadline = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      deadline.abort();
+    }, this.discoveryTimeoutMs);
+    const relayAbort = () => deadline.abort(context.signal?.reason);
+    if (context.signal?.aborted) relayAbort();
+    else context.signal?.addEventListener("abort", relayAbort, { once: true });
+    const boundedContext = { ...context, signal: deadline.signal };
+    try {
+      return await this.scanDiscoveryBatchWithinDeadline(brands, boundedContext);
+    } catch (error) {
+      if (timedOut) {
+        throw new AdapterBlockedError(
+          `Yandex discovery exceeded ${this.discoveryTimeoutMs}ms; partial sitemap matches were discarded`
+        );
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      context.signal?.removeEventListener("abort", relayAbort);
+    }
+  }
+
+  private async scanDiscoveryBatchWithinDeadline(
     brands: string[],
     context: AdapterContext
   ): Promise<DiscoveryBatch> {
