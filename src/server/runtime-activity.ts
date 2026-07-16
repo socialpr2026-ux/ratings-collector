@@ -65,7 +65,8 @@ export function runtimeSignals(...evidence: unknown[]): RuntimeSignals {
   const channels: RunActivityChannel[] = [];
   const parsers: RunActivityParser[] = [];
 
-  if (/google[-_\s]?translate|translate\.goog|translated/.test(text)) channels.push("google_translate");
+  if (/yandex[-_\s]?translate|translate\.yandex|turbopages/.test(text)) channels.push("yandex_translate");
+  else if (/google[-_\s]?translate|translate\.goog|translated/.test(text)) channels.push("google_translate");
   if (/\breader\b|reader[-_\s]?proxy|static[-_\s]?reader/.test(text)) channels.push("reader_proxy");
   if (/\bgateway\b|fixed[-_\s]?proxy|proxy[-_\s]?gateway/.test(text)) channels.push("gateway");
   if (/edgeone[-_\s]?browser|sandbox/.test(text)) channels.push("sandbox", "browser");
@@ -75,7 +76,7 @@ export function runtimeSignals(...evidence: unknown[]): RuntimeSignals {
     channels.push("first_party_api");
   }
   if (
-    !channels.some((channel) => ["google_translate", "reader_proxy", "gateway", "sandbox", "browser", "registry"].includes(channel)) &&
+    !channels.some((channel) => ["google_translate", "yandex_translate", "reader_proxy", "gateway", "sandbox", "browser", "registry"].includes(channel)) &&
     /\bdirect\b|first[-_\s]?party|site[-_\s]?search|data[-_\s]?layer|initial[-_\s]?state|next[-_\s]?data/.test(text)
   ) {
     channels.push("direct");

@@ -245,6 +245,36 @@ describe("Google Sheets model", () => {
     expect(summary[1][4]).toBe('=COUNTIFS({F5};">=4";{E5};">0")');
   });
 
+  it("never merges distinct listings merely because rating and review count match", () => {
+    const first = {
+      ...observation("baktoblis-sachet", 30),
+      brand: "Бактоблис",
+      product: "Бактоблис порошок в саше 1500 мг №15",
+      rating: 4.9
+    };
+    const second = {
+      ...observation("baktoblis-tablets", 30),
+      brand: "Бактоблис",
+      product: "Бактоблис таблетки для рассасывания №30",
+      rating: 4.9
+    };
+    const document = buildSheetDocument({ values: [] }, {
+      ...request, brands: ["Бактоблис"]
+    }, [], {
+      "2026-07": {
+        [`ozon.ru:${first.listingId}`]: first,
+        [`ozon.ru:${second.listingId}`]: second
+      }
+    });
+
+    const rows = document.values.filter((_row, index) => document.rowKinds[index] === "product");
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row[2])).toEqual([
+      "порошок в саше 1500 мг №15",
+      "таблетки для рассасывания №30"
+    ]);
+  });
+
   it("keeps shared-group variants separate when their monthly metrics conflict", () => {
     const shared = "ozon:variants:1,2";
     const first = { ...observation("149024614", 100), aggregateGroupId: shared };

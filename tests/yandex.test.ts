@@ -68,6 +68,50 @@ describe("YandexAdapter discovery", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it("scans a live-sized 319-shard index with bounded parallelism", async () => {
+    const maps = Array.from({ length: 319 }, (_value, index) =>
+      `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
+    );
+    let inFlight = 0;
+    let peak = 0;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      inFlight -= 1;
+      return xmlResponse(modelSitemap(url === maps[17]
+        ? ["https://reviews.yandex.ru/product/baktoblis-sashe--170000001"]
+        : []));
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 319, discoveryTimeoutMs: 2_000 });
+
+    await expect(adapter.discover("Бактоблис", context())).resolves.toMatchObject([
+      { listingId: "170000001", brand: "Бактоблис" }
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(320);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(12);
+  });
+
+  it("fails a timed-out partial sitemap scan closed instead of returning no results", async () => {
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A]));
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new YandexAdapter({
+      fetch, maxSitemaps: 1, sitemapRetryAttempts: 1, discoveryTimeoutMs: 10
+    });
+
+    const error = await adapter.discover("Бактоблис", context()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AdapterBlockedError);
+    expect((error as Error).message).toContain("partial sitemap matches were discarded");
+  });
+
   it("fails closed before scanning when the sitemap index exceeds the cap", async () => {
     const fetch = routeFetch({
       [INDEX]: xmlResponse(sitemapIndex([MAP_A, MAP_B, MAP_C]))
@@ -353,6 +397,32 @@ describe("YandexAdapter discovery", () => {
 });
 
 describe("YandexAdapter collection", () => {
+  it("does not attach a reviewed tablet variant to the source-bound Baktoblis sachet model", async () => {
+    const listingId = "5705860403";
+    const url = `https://reviews.yandex.ru/product/baktoblis-sashe--${listingId}`;
+    const html = productHtml({
+      canonical: url,
+      product: {
+        "@type": "Product",
+        name: "БактоБЛИС саше",
+        brand: "БактоБЛИС",
+        aggregateRating: { "@type": "AggregateRating", reviewCount: 1, ratingCount: 1, ratingValue: 5 }
+      }
+    }).replace("</body>", `
+      <div class="Review-ReasonToTrustText">Товар — Бактоблис+ Таб. д/Рассас.No90</div>
+    </body>`);
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }) });
+
+    const observation = await adapter.collect(ref({ listingId, brand: "Бактоблис", url }), context());
+
+    expect(observation).toMatchObject({ product: "БактоБЛИС саше", reviews: 1, rating: 5, status: "ok" });
+    expect(observation.productEvidence?.variants).toEqual(["БактоБЛИС саше"]);
+    expect(observation.productEvidence?.signals).not.toContainEqual({
+      source: "variant",
+      text: "Бактоблис+ Таб. д/Рассас.No90"
+    });
+  });
+
   it("uses source-bound reviewed product titles to resolve one exact Khondrofen variant", async () => {
     const listingId = "5829843760";
     const url = `https://reviews.yandex.ru/product/khondrofen-maz-d-nar-prim--${listingId}`;

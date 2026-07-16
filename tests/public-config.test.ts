@@ -51,6 +51,75 @@ describe("new static collector gateways", () => {
     expect(upstream).toHaveBeenCalledOnce();
   });
 
+  it("follows only Ozon's exact brand-category redirect for Google composer search JSON", async () => {
+    const sourcePath = "/search/?text=Baktoblis&from_global=true&page=2";
+    const target = new URL("https://www-ozon-ru.translate.goog/api/composer-api.bx/page/json/v2");
+    target.searchParams.set("url", sourcePath);
+    target.searchParams.set("_x_tr_sl", "ru");
+    target.searchParams.set("_x_tr_tl", "en");
+    target.searchParams.set("_x_tr_hl", "en");
+    const categorySource = "/category/bady-6183/baktoblis-100260712/?brand_was_predicted=true&category_was_predicted=true&deny_category_prediction=true&from_global=true&page=2&text=Baktoblis";
+    const redirect = new URL(target.origin + target.pathname);
+    redirect.searchParams.set("page_changed", "true");
+    redirect.searchParams.set("url", categorySource);
+    redirect.searchParams.set("_x_tr_sl", "ru");
+    redirect.searchParams.set("_x_tr_tl", "en");
+    redirect.searchParams.set("_x_tr_hl", "en");
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.toString() === target.toString()) {
+        return new Response(null, { status: 302, headers: { location: redirect.toString() } });
+      }
+      expect(url.toString()).toBe(redirect.toString());
+      return new Response('{"widgetStates":{}}', { headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target.toString());
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-ozon-composer");
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("follows only the exact Yandex Translate redirect for Ozon composer JSON", async () => {
+    const sourcePath = "/search/?text=Baktoblis&from_global=true";
+    const composer = new URL("https://www.ozon.ru/api/composer-api.bx/page/json/v2");
+    composer.searchParams.set("url", sourcePath);
+    const target = new URL("https://translate.yandex.ru/translate");
+    target.searchParams.set("url", composer.toString());
+    target.searchParams.set("lang", "ru-en");
+    const redirect = new URL("https://translated.turbopages.org/proxy_u/signed-1/https/www.ozon.ru/api/composer-api.bx/page/json/v2");
+    redirect.searchParams.set("url", sourcePath);
+    const categorySource = "/category/bady-6183/baktoblis-100260712/?brand_was_predicted=true&category_was_predicted=true&deny_category_prediction=true&from_global=true&text=Baktoblis";
+    const categoryRedirect = new URL(redirect.origin + redirect.pathname);
+    categoryRedirect.searchParams.set("page_changed", "true");
+    categoryRedirect.searchParams.set("url", categorySource);
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "translate.yandex.ru") {
+        return new Response(null, { status: 302, headers: { location: redirect.toString() } });
+      }
+      if (url.toString() === redirect.toString()) {
+        return new Response(null, { status: 307, headers: { location: categoryRedirect.toString() } });
+      }
+      expect(url.toString()).toBe(categoryRedirect.toString());
+      return new Response('{"widgetStates":{}}', { headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target.toString());
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("yandex-translate-ozon-composer");
+    expect(upstream).toHaveBeenCalledTimes(3);
+
+    const unsafeComposer = new URL(composer);
+    unsafeComposer.searchParams.set("url", "https://metadata.google.internal/latest/meta-data/");
+    const unsafe = new URL(target);
+    unsafe.searchParams.set("url", unsafeComposer.toString());
+    expect((await callGateway(unsafe.toString())).status).toBe(400);
+    expect(upstream).toHaveBeenCalledTimes(3);
+  });
+
   it("uses a bounded exact-site index query for med-otzyv discovery", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
@@ -560,6 +629,30 @@ describe("static Ozon Translate gateway", () => {
     target.searchParams.set("_x_tr_hl", "en");
     return target;
   };
+
+  it("proxies only one exact Ozon product through the translated composer API", async () => {
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const target = new URL(String(input));
+      expect(target.hostname).toBe("www-ozon-ru.translate.goog");
+      expect(target.pathname).toBe("/api/composer-api.bx/page/json/v2");
+      expect(target.searchParams.get("url")).toBe("/product/baktoblis-sashe-123456789/");
+      return new Response('{"widgetStates":{}}', { headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", upstream);
+    const exact = translatedTarget("/api/composer-api.bx/page/json/v2", {
+      url: "/product/baktoblis-sashe-123456789/"
+    });
+
+    const response = await callGateway(exact.toString());
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-ozon-composer");
+
+    const unsafe = translatedTarget("/api/composer-api.bx/page/json/v2", {
+      url: "https://metadata.google.internal/latest/meta-data/"
+    });
+    expect((await callGateway(unsafe.toString())).status).toBe(400);
+    expect(upstream).toHaveBeenCalledOnce();
+  });
 
   it("accepts only source-bound Ozon search, category and product HTML", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {

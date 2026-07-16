@@ -1042,7 +1042,7 @@ describe("blocked free-mode review sites", () => {
     await expect(adapter.discover()).rejects.toMatchObject({ code: "parser_changed" });
   });
 
-  it("registers direct review adapters plus the remaining Medum access guardrail", () => {
+  it("registers direct review adapters plus explicit blocked pharmacy guardrails", () => {
     const adapters = createReviewSiteAdapters(new MemoryEvidenceStore());
     expect(adapters.map((item) => item.supportedDomains[0])).toEqual([
       "irecommend.ru",
@@ -1054,7 +1054,9 @@ describe("blocked free-mode review sites", () => {
       "otzovik.com",
       "pravogolosa.net",
       "ru.otzyv.com",
-      "medum.ru"
+      "medum.ru",
+      "eapteka.ru",
+      "polza.ru"
     ]);
   });
 });

@@ -114,12 +114,20 @@ function productPageMetrics(
   const section = exactSection as ReturnType<typeof $>;
   const header = compactText(section.find(".sec-item__reviews-header").first().text());
   const headerMatch = header.match(/^(.*?):\s*([\d\s\u00a0]+)\s+отзыв/iu);
-  const visibleCount = parseNonNegativeInteger(headerMatch?.[2]);
+  const headerTitle = compactText(headerMatch?.[1] ?? header.split(":", 1)[0] ?? "");
+  const headerCount = parseNonNegativeInteger(headerMatch?.[2]);
+  const ratingBasisCount = parseNonNegativeInteger(
+    compactText(section.text()).match(/на\s+основе\s+([\d\s\u00a0]+)\s+оцен/iu)?.[1]
+  );
+  if (headerCount !== undefined && ratingBasisCount !== undefined && headerCount !== ratingBasisCount) {
+    throw new ParserChangedError(`${DOMAIN}:${listingId}: visible review and rating totals disagree`);
+  }
+  const visibleCount = headerCount ?? ratingBasisCount ?? (offerCount === 0 ? 0 : undefined);
   const visibleRating = parseRating(section.find(".sec-item__rating-value").first().text());
   const hasReviewApplication = section.find(".reviews-application-container").length === 1;
   const hiddenRatingMatches = hiddenRating === undefined || offerRating !== undefined &&
     Math.round(hiddenRating * 10) === Math.round(offerRating * 10);
-  if (normalizeText(headerMatch?.[1] ?? "") !== normalizeText(title) ||
+  if (normalizeText(headerTitle) !== normalizeText(title) ||
       offerCount === undefined || visibleCount !== offerCount || hiddenReviews !== undefined && hiddenReviews !== offerCount ||
       offerCount > 0 && (offerRating === undefined || offerRating <= 0 || offerRating > 5 || visibleRating !== offerRating ||
         !hiddenRatingMatches) ||
@@ -213,21 +221,29 @@ function readerMetrics(
   return { title, reviews, rating: feedbackCount === 0 ? null : rating!, ratingCount };
 }
 
-function hasExactListingCanary(html: string): boolean {
+function hasExactListingCanary(html: string, brand: string): boolean {
   const $ = load(html);
   let proved = false;
-  $(".listing-card[itemscope]").each((_index, node) => {
+  $(".listing-card").each((_index, node) => {
     if (proved) return;
     const root = $(node);
-    const link = root.find("link[itemprop='url']").first().attr("content") ?? root.find("link[itemprop='url']").first().attr("href");
+    const link = root.find("link[itemprop='url']").first().attr("content") ??
+      root.find("link[itemprop='url']").first().attr("href") ?? root.find("a[href*='/goods/id']").first().attr("href");
     let listingId: string | undefined;
     try { listingId = link ? listingIdFromUrl(new URL(link, ORIGIN)) : undefined; }
     catch { listingId = undefined; }
+    const title = compactText(`${root.text()} ${root.find("[title], [data-name]").map((_i, item) =>
+      `${$(item).attr("title") ?? ""} ${$(item).attr("data-name") ?? ""}`).get().join(" ")}`);
+    if (!listingId || !matchesBrand(title, brand)) return;
     const aggregate = root.find("[itemprop='aggregateRating']").first();
+    if (!aggregate.length) {
+      proved = true;
+      return;
+    }
     const metricScope = aggregate.length ? aggregate : root;
     const reviews = parseNonNegativeInteger(metricScope.find("meta[itemprop='reviewCount']").first().attr("content"));
     const rating = parseRating(metricScope.find("meta[itemprop='ratingValue']").first().attr("content"));
-    if (listingId && reviews !== undefined && (reviews === 0 || rating !== undefined && rating > 0 && rating <= 5)) proved = true;
+    if (reviews !== undefined && (reviews === 0 || rating !== undefined && rating > 0 && rating <= 5)) proved = true;
   });
   return proved;
 }
@@ -269,14 +285,14 @@ export class EaptekaAdapter implements SiteAdapter {
     try {
       const direct = await this.request(HEALTH_URL, context);
       if (direct.response.ok && !isBlockedPage(direct.html)) {
-        if (!hasExactListingCanary(direct.html)) {
+        if (!hasExactListingCanary(direct.html, "Кагоцел")) {
           return { ok: false, checkedAt, message: `parser_changed: ${DOMAIN} direct canary has no exact aggregate listing card` };
         }
         return { ok: true, checkedAt, message: `${DOMAIN}: direct search is healthy` };
       }
       const { html } = await this.requestTranslated(HEALTH_URL, context);
       translatedSource(html, new URL(HEALTH_URL));
-      if (!hasExactListingCanary(html)) {
+      if (!hasExactListingCanary(html, "Кагоцел")) {
         return { ok: false, checkedAt, message: `parser_changed: ${DOMAIN} translated canary has no exact listing cards` };
       }
       return { ok: true, checkedAt, message: `${DOMAIN}: fixed translated search is healthy` };

@@ -35,6 +35,8 @@ export function shouldAutoRetryInitialCollection(
   return failures.every(({ status, message = "" }) =>
     (status === "blocked" || status === "error") &&
     !/^(?:quota_exceeded|parser_changed)\s*:/i.test(message.trim()) &&
+    !/Ozon exact product proof is unavailable/i.test(message) &&
+    !/Ozon[^\n]*HTTP\s+502/i.test(message) &&
     /\bcaptcha\b|капч|HTTP\s+(?:408|425|429|498|499|5\d{2})\b/i.test(message)
   );
 }
@@ -291,6 +293,7 @@ export function browserFetch(
           url.searchParams.get("slugs")!.split(",").every((slug) => /^[a-z0-9-]{3,80}$/i.test(slug))
       );
     if (staticProxy && [
+      "translate.yandex.ru",
       "www-ozon-ru.translate.goog",
       "farmlend-ru.translate.goog",
       "okapteka-ru.translate.goog",

@@ -544,8 +544,31 @@ function initialState($: CheerioAPI, domain: string): Record<string, unknown> {
     .find((value) => value.startsWith("window.__INITIAL_STATE__="));
   if (!script) throw new ParserChangedError(`${domain}: __INITIAL_STATE__ is missing`);
   const raw = script.slice("window.__INITIAL_STATE__=".length);
-  const marker = raw.indexOf(";document.currentScript.remove()");
-  try { return JSON.parse(marker >= 0 ? raw.slice(0, marker) : raw.replace(/;\s*$/, "")) as Record<string, unknown>; }
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  let end = -1;
+  for (let index = 0; index < raw.length; index += 1) {
+    const character = raw[index];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') quoted = false;
+      continue;
+    }
+    if (character === '"') quoted = true;
+    else if (character === "{") depth += 1;
+    else if (character === "}" && --depth === 0) {
+      end = index + 1;
+      break;
+    }
+  }
+  const suffix = end >= 0 ? raw.slice(end).trim() : "";
+  const knownCleanup = /^(?:;\s*)?(?:document\.currentScript\.remove\(\)|\(function\(\)\{var s;\(s=document\.currentScript\|\|document\.scripts\[document\.scripts\.length-1\]\)\.parentNode\.removeChild\(s\);\}\(\)\))?;?$/u;
+  if (end < 0 || !knownCleanup.test(suffix)) {
+    throw new ParserChangedError(`${domain}: __INITIAL_STATE__ has an unknown executable suffix`);
+  }
+  try { return JSON.parse(raw.slice(0, end)) as Record<string, unknown>; }
   catch { throw new ParserChangedError(`${domain}: __INITIAL_STATE__ is invalid JSON`); }
 }
 
@@ -708,6 +731,26 @@ export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
         if (/ничего не найдено|товары не найдены|нет препаратов/i.test(text)) explicitNoResults += 1;
       } catch (error) {
         lastError = error;
+      }
+    }
+    if (!liveRefs.size && successfulPages === 0) {
+      const initial = brand.normalize("NFKC").trim().charAt(0).toLocaleUpperCase("ru-RU");
+      if (initial) {
+        try {
+          const source = new URL(`https://www.${BUD_DOMAIN}/letter/${encodeURIComponent(initial)}`);
+          const page = await requestPage(source, context, this.fetchImpl, BUD_TRANSLATE_HOST);
+          page.$(".alphabet-forms a[href*='/product/'], a.alphabet-forms__item-link[href*='/product/']").each((_index, node) => {
+            const parsed = budRef(page.$(node).attr("href") ?? "");
+            const title = compactText(page.$(node).attr("title") || page.$(node).text());
+            if (!parsed || !matchesBrand(title, brand)) return;
+            liveRefs.set(parsed.id, {
+              domain: BUD_DOMAIN, platform: BUD_DOMAIN, listingId: parsed.id, brand,
+              url: parsed.url, title, metadata: { discovery: "translated-first-party-letter-index" }
+            });
+          });
+        } catch (error) {
+          lastError = error;
+        }
       }
     }
     if (!liveRefs.size && !refs.size) {
