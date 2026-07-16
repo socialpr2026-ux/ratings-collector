@@ -90,10 +90,20 @@ function issueDomain(raw: string): string | undefined {
   return raw.match(/^([a-z0-9.-]+)(?::|\s*\/)/i)?.[1]?.replace(/^www\./, "").toLocaleLowerCase("ru-RU");
 }
 
+function issueBrand(raw: string): string | undefined {
+  return raw.match(/^[a-z0-9.-]+\s*\/\s*([^:]+):/i)?.[1]?.trim();
+}
+
 /** Collapses the same site-level failure across many brands into one actionable line. */
 export function summarizeIssues(values: readonly string[]): string[] {
   const unique = [...new Set(values.map((value) => value.trim()).filter(Boolean))];
-  const grouped = new Map<string, { domain: string; kind: Exclude<IssueKind, "other">; count: number }>();
+  const grouped = new Map<string, {
+    domain: string;
+    kind: Exclude<IssueKind, "other">;
+    count: number;
+    brands: Set<string>;
+    hasUnscopedIssue: boolean;
+  }>();
   const other: string[] = [];
   for (const raw of unique) {
     const kind = issueKind(raw);
@@ -103,17 +113,31 @@ export function summarizeIssues(values: readonly string[]): string[] {
       continue;
     }
     const key = `${domain}\u0000${kind}`;
+    const brand = issueBrand(raw);
     const current = grouped.get(key);
-    if (current) current.count += 1;
-    else grouped.set(key, { domain, kind, count: 1 });
+    if (current) {
+      current.count += 1;
+      if (brand) current.brands.add(brand);
+      else current.hasUnscopedIssue = true;
+    } else {
+      grouped.set(key, {
+        domain,
+        kind,
+        count: 1,
+        brands: new Set(brand ? [brand] : []),
+        hasUnscopedIssue: !brand
+      });
+    }
   }
-  const groupedLines = [...grouped.values()].map(({ domain, kind, count }) => {
-    const suffix = count > 1 ? ` (${count} ${plural(count, "проверка", "проверки", "проверок")})` : "";
-    if (kind === "quota") return `${domain}: исчерпан доступный лимит сбора${suffix}.`;
-    if (kind === "unsupported") return `${domain}: площадка пока не поддерживается в бесплатном режиме${suffix}.`;
-    if (kind === "blocked") return `${domain}: площадка не дала завершить автоматический сбор${suffix}.`;
-    if (kind === "parser") return `${domain}: требуется повторная настройка сбора${suffix}.`;
-    return `${domain}: проверьте найденную карточку выше${suffix}.`;
+  const groupedLines = [...grouped.values()].map(({ domain, kind, count, brands, hasUnscopedIssue }) => {
+    const showBrands = !hasUnscopedIssue && brands.size > 0 && brands.size <= 3;
+    const target = showBrands ? `${domain} / ${[...brands].join(", ")}` : domain;
+    const suffix = !showBrands && count > 1 ? ` (${count} ${plural(count, "проверка", "проверки", "проверок")})` : "";
+    if (kind === "quota") return `${target}: исчерпан доступный лимит сбора${suffix}.`;
+    if (kind === "unsupported") return `${target}: площадка пока не поддерживается в бесплатном режиме${suffix}.`;
+    if (kind === "blocked") return `${target}: площадка не дала завершить автоматический сбор${suffix}.`;
+    if (kind === "parser") return `${target}: требуется повторная настройка сбора${suffix}.`;
+    return `${target}: проверьте найденную карточку выше${suffix}.`;
   });
   return [...groupedLines, ...new Set(other)];
 }
@@ -250,9 +274,11 @@ export function ozonCompanionEligibleBrands(
   ));
 }
 
-export function reviewIntroText(reviewCount: number, failedPartitionCount: number) {
+export function reviewIntroText(reviewCount: number, failedPartitionCount: number, partialPublicationAvailable = false) {
   if (failedPartitionCount > 0) {
-    const blockerText = `Не завершено проверок: ${failedPartitionCount}. Запись отключена, чтобы в таблицу не попали частичные данные.`;
+    const blockerText = partialPublicationAvailable
+      ? `Не завершено проверок: ${failedPartitionCount}. Готовые сочетания площадок и брендов можно записать отдельно.`
+      : `Не завершено проверок: ${failedPartitionCount}. Запись отключена, чтобы в таблицу не попали частичные данные.`;
     return reviewCount > 0
       ? `${reviewCount} ${plural(reviewCount, "карточка требует", "карточки требуют", "карточек требуют")} решения. Откройте карточку, сверьте товар и отметьте подходящие. ${blockerText}`
       : `Спорных карточек нет, но сбор завершён не полностью. ${blockerText}`;
