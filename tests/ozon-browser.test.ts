@@ -34,6 +34,25 @@ function page(items: unknown[], totalPages?: number) {
   };
 }
 
+function productComposerPage(sku: string, title: string, ratingValue: number | null, reviews: number) {
+  return {
+    widgetStates: {
+      "webProductHeading-1-default-1": JSON.stringify({ title }),
+      "webGallery-1-default-1": JSON.stringify({ sku }),
+      "webReviewProductScore-1-default-1": JSON.stringify({
+        itemId: Number(sku),
+        url: `/product/product-${sku}/reviews/`,
+        reviewsCount: reviews,
+        totalScore: ratingValue
+      }),
+      "webSingleProductScore-1-default-1": JSON.stringify({
+        link: `/product/product-${sku}/reviews/`,
+        text: reviews === 0 ? "Нет отзывов" : `${ratingValue} • ${reviews} отзывов`
+      })
+    }
+  };
+}
+
 function sourceUrlFromTranslate(input: URL): URL {
   const source = new URL(input.toString());
   source.hostname = "www.ozon.ru";
@@ -494,6 +513,118 @@ describe("Ozon browser collector", () => {
       source: "ozon:search-html:google-translate:search-tile-fallback"
     });
     expect(observations.slice(1).every((item) => item.status === "ok")).toBe(true);
+  });
+
+  it("recovers one metric-less translated card through the exact Ozon product composer", async () => {
+    const items = [
+      translatedTile("720001", "Бактоблис саше №10", "4.9", 15),
+      translatedTile("720002", "Бактоблис саше №30")
+    ];
+    const composerPaths: string[] = [];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const endpoint = new URL(String(input));
+      if (endpoint.hostname === "www.ozon.ru") {
+        expect(new Headers(init?.headers).get("x-ratings-browser-mode")).toBe("ozon-composer");
+        const nested = endpoint.searchParams.get("url")!;
+        composerPaths.push(nested);
+        return new Response(JSON.stringify(productComposerPage(
+          "720002", "Бактоблис пробиотик для полости рта саше №30", 4.8, 27
+        )), { headers: { "content-type": "application/json" } });
+      }
+      const source = sourceUrlFromTranslate(endpoint);
+      if (!source.pathname.startsWith("/product/")) {
+        return new Response(translatedHtml(source, items, 1), { headers: { "content-type": "text/html" } });
+      }
+      const sku = source.pathname.match(/-(\d+)\/$/)![1]!;
+      if (sku === "720002") return new Response("upstream failed", { status: 502 });
+      return new Response(translatedProductHtml(source, sku, "Бактоблис саше №10", 4.9, 15), {
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const adapter = new OzonBrowserAdapter({
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+      detailDelayMs: 0,
+      detailRetryDelayMs: 0
+    });
+
+    const refs = await adapter.discover("Бактоблис", { ...context, brands: ["Бактоблис"] });
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context)));
+
+    expect(composerPaths).toEqual(["/product/product-720002/"]);
+    expect(observations).toMatchObject([
+      { listingId: "720001", reviews: 15, rating: 4.9, status: "ok", source: "ozon:search-html:google-translate" },
+      { listingId: "720002", reviews: 27, rating: 4.8, status: "ok", source: "ozon:composer-api:edgeone-browser:product-fallback" }
+    ]);
+  });
+
+  it("reuses completed search and product proofs when only the last Ozon card remains blocked", async () => {
+    const items = [
+      translatedTile("730001", "Бактоблис саше №10", "4.9", 11),
+      translatedTile("730002", "Бактоблис саше №30", "4.8", 12),
+      translatedTile("730003", "Бактоблис таблетки №20")
+    ];
+    let searchCalls = 0;
+    const detailCalls = new Map<string, number>();
+    let composerCalls = 0;
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const endpoint = new URL(String(input));
+      if (endpoint.hostname === "www.ozon.ru") {
+        composerCalls += 1;
+        return new Response("challenge", { status: 403 });
+      }
+      const source = sourceUrlFromTranslate(endpoint);
+      if (!source.pathname.startsWith("/product/")) {
+        searchCalls += 1;
+        return new Response(translatedHtml(source, items, 1), { headers: { "content-type": "text/html" } });
+      }
+      const sku = source.pathname.match(/-(\d+)\/$/)![1]!;
+      detailCalls.set(sku, (detailCalls.get(sku) ?? 0) + 1);
+      if (sku === "730003") return new Response("upstream failed", { status: 502 });
+      return new Response(translatedProductHtml(source, sku, `Бактоблис ${sku}`, 4.9, 10), {
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const adapter = new OzonBrowserAdapter({
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+      detailDelayMs: 0,
+      detailRetryDelayMs: 0
+    });
+    const runContext = { ...context, runId: "run-baktoblis", brands: ["Бактоблис"] };
+
+    await expect(adapter.discover("Бактоблис", runContext)).rejects.toThrow("product composer");
+    await expect(adapter.discover("Бактоблис", runContext)).rejects.toThrow("product composer");
+
+    expect(searchCalls).toBe(1);
+    expect(detailCalls.get("730001")).toBe(1);
+    expect(detailCalls.get("730002")).toBe(1);
+    expect(detailCalls.get("730003")).toBe(6);
+    expect(composerCalls).toBe(2);
+  });
+
+  it("fails closed when the product composer is bound to another Ozon SKU", async () => {
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const endpoint = new URL(String(input));
+      if (endpoint.hostname === "www.ozon.ru") {
+        return new Response(JSON.stringify(productComposerPage("740099", "Чужой товар", 5, 1)), {
+          headers: { "content-type": "application/json" }
+        });
+      }
+      const source = sourceUrlFromTranslate(endpoint);
+      if (!source.pathname.startsWith("/product/")) {
+        return new Response(translatedHtml(source, [translatedTile("740001", "Бактоблис саше №10")], 1), {
+          headers: { "content-type": "text/html" }
+        });
+      }
+      return new Response("upstream failed", { status: 502 });
+    });
+    const adapter = new OzonBrowserAdapter({
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+      detailDelayMs: 0,
+      detailRetryDelayMs: 0
+    });
+
+    await expect(adapter.discover("Бактоблис", { ...context, brands: ["Бактоблис"] }))
+      .rejects.toBeInstanceOf(ParserChangedError);
   });
 
   it("accepts zero products only with an explicit Ozon empty-state proof", async () => {

@@ -21,15 +21,19 @@ function collector(): CompanionCollector {
 }
 
 describe("local Ozon companion", () => {
-  it("allows only composer product-search URLs", () => {
+  it("allows only composer product-search and exact product URLs", () => {
     const valid = "https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=%2Fsearch%2F%3Ftext%3D%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB%26from_global%3Dtrue%26page%3D2";
     expect(assertAllowedOzonComposerUrl(valid).hostname).toBe("www.ozon.ru");
+    const exactProduct = "https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=%2Fproduct%2Fbaktoblis-sashe-123456789%2F";
+    expect(assertAllowedOzonComposerUrl(exactProduct).searchParams.get("url")).toBe("/product/baktoblis-sashe-123456789/");
     expect(() => assertAllowedOzonComposerUrl("https://example.com/api/composer-api.bx/page/json/v2?url=/search/?text=x"))
       .toThrow("only permits the Ozon composer");
     expect(() => assertAllowedOzonComposerUrl("https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=https://metadata.google.internal/"))
       .toThrow("relative path");
     expect(() => assertAllowedOzonComposerUrl("https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=/search/?text=x&url=https://example.com"))
       .toThrow("Unexpected Ozon composer parameter");
+    expect(() => assertAllowedOzonComposerUrl("https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=/product/baktoblis-123456789/?redirect=https://metadata.google.internal"))
+      .toThrow("only permits Ozon product search or an exact product card");
   });
 
   it("supports the production-origin private-network preflight", async () => {

@@ -56,8 +56,13 @@ export function assertAllowedOzonComposerUrl(input: string): URL {
     throw new TypeError("Ozon composer search URL must be a relative path");
   }
   const search = new URL(nested, OZON_ORIGIN);
-  if (search.origin !== OZON_ORIGIN || search.pathname !== SEARCH_PATH) {
-    throw new TypeError("Local companion only permits Ozon product search");
+  if (search.origin !== OZON_ORIGIN || search.hash) {
+    throw new TypeError("Local companion only permits an exact Ozon path");
+  }
+  const exactProduct = /^\/product\/[a-z0-9-]*\d{5,}\/$/i.test(search.pathname) && !search.search;
+  if (exactProduct) return endpoint;
+  if (search.pathname !== SEARCH_PATH) {
+    throw new TypeError("Local companion only permits Ozon product search or an exact product card");
   }
   if ([...search.searchParams.keys()].some((key) => !ALLOWED_SEARCH_PARAMETERS.has(key))) {
     throw new TypeError("Unexpected Ozon search parameter");

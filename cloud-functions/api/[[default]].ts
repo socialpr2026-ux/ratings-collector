@@ -1799,12 +1799,17 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     try {
       const search = new URL(nested, "https://www.ozon.ru");
       const page = search.searchParams.get("page") ?? "1";
-      ozonTarget = search.origin === "https://www.ozon.ru" &&
+      const safeSearch = search.origin === "https://www.ozon.ru" &&
         search.pathname === "/search/" &&
         (search.searchParams.get("text")?.trim().length ?? 0) > 0 &&
         (search.searchParams.get("text")?.trim().length ?? 0) <= 200 &&
+        search.searchParams.get("from_global") === "true" &&
         [...search.searchParams.keys()].every((key) => ["text", "from_global", "page"].includes(key)) &&
         /^\d+$/.test(page) && Number(page) >= 1 && Number(page) <= 100;
+      const safeProduct = search.origin === "https://www.ozon.ru" && !search.hash && !search.search &&
+        /^\/product\/[a-z0-9-]*\d{5,}\/$/i.test(search.pathname);
+      ozonTarget = target.searchParams.getAll("url").length === 1 &&
+        [...target.searchParams.keys()].every((key) => key === "url") && (safeSearch || safeProduct);
     } catch { /* invalid nested Ozon search URL */ }
   }
   if (target.protocol !== "https:" || !(reviewTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || pharmacyTranslatedTarget || aptekaRuTarget)) {

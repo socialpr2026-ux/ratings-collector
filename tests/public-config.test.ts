@@ -32,6 +32,25 @@ describe("new static collector gateways", () => {
     { INTERNAL_AGENT_TOKEN: token }
   );
 
+  it("proxies only exact Ozon composer search or product paths", async () => {
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      expect(url.hostname).toBe("www.ozon.ru");
+      expect(url.searchParams.get("url")).toBe("/product/baktoblis-sashe-123456789/");
+      return new Response('{"widgetStates":{}}', { headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", upstream);
+    const product = new URL("https://www.ozon.ru/api/composer-api.bx/page/json/v2");
+    product.searchParams.set("url", "/product/baktoblis-sashe-123456789/");
+
+    await expect(callGateway(product.toString())).resolves.toMatchObject({ status: 200 });
+
+    const unsafe = new URL("https://www.ozon.ru/api/composer-api.bx/page/json/v2");
+    unsafe.searchParams.set("url", "https://metadata.google.internal/latest/meta-data/");
+    await expect(callGateway(unsafe.toString())).resolves.toMatchObject({ status: 400 });
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
   it("uses a bounded exact-site index query for med-otzyv discovery", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));

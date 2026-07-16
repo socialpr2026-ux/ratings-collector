@@ -372,6 +372,22 @@ export function browserFetch(
       if (url.protocol !== "https:" || url.hostname !== "www.ozon.ru" || url.pathname !== "/api/composer-api.bx/page/json/v2") {
         throw new Error("Ozon browser mode is restricted to the fixed composer endpoint");
       }
+      if ([...url.searchParams.keys()].some((key) => key !== "url") || url.searchParams.getAll("url").length !== 1) {
+        throw new Error("Ozon composer request has unexpected parameters");
+      }
+      const nested = new URL(url.searchParams.get("url") ?? "", "https://www.ozon.ru");
+      const nestedPage = nested.searchParams.get("page");
+      const safeSearch = nested.origin === "https://www.ozon.ru" && nested.pathname === "/search/" &&
+        !nested.hash && (nested.searchParams.get("text")?.trim().length ?? 0) > 0 &&
+        (nested.searchParams.get("text")?.trim().length ?? 0) <= 160 &&
+        nested.searchParams.get("from_global") === "true" &&
+        (nestedPage === null || /^\d+$/.test(nestedPage) && Number(nestedPage) >= 2 && Number(nestedPage) <= 100) &&
+        [...nested.searchParams.keys()].every((key) => ["text", "from_global", "page"].includes(key));
+      const safeProduct = nested.origin === "https://www.ozon.ru" && !nested.hash && !nested.search &&
+        /^\/product\/[a-z0-9-]*\d{5,}\/$/i.test(nested.pathname);
+      if (!safeSearch && !safeProduct) {
+        throw new Error("Ozon composer request is restricted to product search or one exact product card");
+      }
       // First try a fixed, authenticated Cloud Function egress. It costs no
       // Sandbox GB-s and preserves the browser path as a fallback when Ozon
       // blocks that IP range too.
