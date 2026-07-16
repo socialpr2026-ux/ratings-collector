@@ -3,7 +3,8 @@ import {
   browserFetch,
   createLazySandboxAcquire,
   hasExplicitWildberriesNoResults,
-  shouldAutoRetryInitialCollection
+  shouldAutoRetryInitialCollection,
+  transientRecoveryDelayMs
 } from "../agents/ratings/index.js";
 import { AdapterBlockedError } from "../src/server/adapters/errors.js";
 
@@ -409,6 +410,18 @@ describe("ratings Agent lazy Sandbox routing", () => {
 });
 
 describe("ratings Agent initial recovery pass", () => {
+  it("cools down an Ozon transient retry but does not delay unrelated sites", () => {
+    expect(transientRecoveryDelayMs([
+      { domain: "ozon.ru", status: "blocked", message: "blocked: HTTP 502" }
+    ], 0)).toBe(750);
+    expect(transientRecoveryDelayMs([
+      { domain: "ozon.ru", status: "blocked", message: "blocked: HTTP 429" }
+    ], 3)).toBe(3000);
+    expect(transientRecoveryDelayMs([
+      { domain: "example.com", status: "blocked", message: "blocked: HTTP 502" }
+    ], 0)).toBe(0);
+  });
+
   it.each([408, 425, 429, 498, 499, 500, 502, 599])(
     "retries a proven transient HTTP %i failure on the initial collection",
     (statusCode) => {

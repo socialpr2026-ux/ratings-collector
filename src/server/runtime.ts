@@ -68,7 +68,12 @@ export async function createCollectorRuntime(options: {
   const repository = options.repository ?? await FileRepository.open();
   const evidence = options.evidence ?? new FileEvidenceStore();
   const fetchImpl = options.fetch ?? fetch;
-  const freeOzon = new OzonBrowserAdapter({ fetch: options.fetch });
+  const freeOzon = new OzonBrowserAdapter({
+    fetch: options.fetch,
+    detailConcurrency: 1,
+    detailDelayMs: 350,
+    detailRetryDelayMs: 750
+  });
   const freeWildberries = new WildberriesAdapter({ fetch: options.fetch });
   const freeYandex = new YandexAdapter({ fetch: options.reviewsFetch ?? options.fetch });
   let ozon: SiteAdapter = freeOzon;

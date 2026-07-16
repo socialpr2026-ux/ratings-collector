@@ -41,6 +41,17 @@ export function shouldAutoRetryInitialCollection(
 
 export const MAX_INITIAL_TRANSIENT_RECOVERY_PASSES = 3;
 
+export function transientRecoveryDelayMs(
+  partitions: Array<{ domain?: string; status: string; message?: string }>,
+  recoveryPass: number
+): number {
+  const ozonTransientFailure = partitions.some(({ domain, status, message = "" }) =>
+    domain === "ozon.ru" && status !== "complete" && status !== "no_results" &&
+    /\bcaptcha\b|капч|HTTP\s+(?:408|425|429|498|499|5\d{2})\b/i.test(message)
+  );
+  return ozonTransientFailure ? Math.min(3_000, 750 * (recoveryPass + 1)) : 0;
+}
+
 const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);
 
 function json(value: unknown, status = 200) {
@@ -675,6 +686,12 @@ export async function onRequest(context: AgentContext): Promise<Response> {
             // state. Successful partitions are checkpointed, so the second
             // through fourth passes touch only failed domain/brand pairs and cannot create
             // duplicate observations.
+            const recoveryDelay = transientRecoveryDelayMs(completed.partitions, recoveryPass);
+            if (recoveryDelay > 0) {
+              context.request.signal.throwIfAborted();
+              await new Promise((resolve) => setTimeout(resolve, recoveryDelay));
+              context.request.signal.throwIfAborted();
+            }
             runtime = await createCollectorRuntime(runtimeOptions());
             completed = await runtime.service.executeRun(run.id);
           }

@@ -98,6 +98,103 @@ function translatedProductHtml(
 }
 
 describe("Ozon browser collector", () => {
+  it("uses the requested brand for health and reuses that successful search page", async () => {
+    let searchCalls = 0;
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      const source = sourceUrlFromTranslate(new URL(String(input)));
+      if (source.pathname.startsWith("/product/")) {
+        return new Response(translatedProductHtml(
+          source, "303003", "Кагоцел таблетки 12 мг 20 шт", 4.9, 25
+        ), { headers: { "content-type": "text/html" } });
+      }
+      searchCalls += 1;
+      expect(source.searchParams.get("text")).toBe("Кагоцел");
+      return new Response(translatedHtml(source, [
+        translatedTile("303003", "Кагоцел таблетки 12 мг 20 шт", "4.9", 25)
+      ], 1), { headers: { "content-type": "text/html" } });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({ fetch, detailDelayMs: 0 });
+    const runContext = { ...context, brands: ["Кагоцел"] };
+
+    await expect(adapter.healthCheck(runContext)).resolves.toMatchObject({ ok: true });
+    await expect(adapter.discover("Кагоцел", runContext)).resolves.toHaveLength(1);
+    expect(searchCalls).toBe(1);
+  });
+
+  it("accepts an explicit empty result for the requested health brand", async () => {
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      const source = sourceUrlFromTranslate(new URL(String(input)));
+      expect(source.searchParams.get("text")).toBe("Редкий бренд");
+      return new Response(translatedHtml(source, [], 0, true), {
+        headers: { "content-type": "text/html" }
+      });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({ fetch, detailDelayMs: 0 });
+
+    await expect(adapter.healthCheck({ ...context, brands: ["Редкий бренд"] })).resolves.toMatchObject({ ok: true });
+    await expect(adapter.discover("Редкий бренд", context)).resolves.toEqual([]);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("serializes exact product proofs by default", async () => {
+    let activeDetails = 0;
+    let maximumActiveDetails = 0;
+    const items = Array.from({ length: 4 }, (_value, index) => {
+      const sku = String(304000 + index);
+      return translatedTile(sku, `Кагоцел таблетки 12 мг №${index + 10}`, "4.9", index + 1);
+    });
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      const source = sourceUrlFromTranslate(new URL(String(input)));
+      if (!source.pathname.startsWith("/product/")) {
+        return new Response(translatedHtml(source, items, 1), { headers: { "content-type": "text/html" } });
+      }
+      const sku = source.pathname.match(/-(\d+)\/$/)![1]!;
+      activeDetails += 1;
+      maximumActiveDetails = Math.max(maximumActiveDetails, activeDetails);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      activeDetails -= 1;
+      return new Response(translatedProductHtml(
+        source, sku, `Кагоцел таблетки 12 мг №${Number(sku) - 303990}`, 4.9, 10
+      ), { headers: { "content-type": "text/html" } });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({ fetch, detailDelayMs: 0 });
+
+    await expect(adapter.discover("Кагоцел", context)).resolves.toHaveLength(4);
+    expect(maximumActiveDetails).toBe(1);
+  });
+
+  it("retries only the transiently blocked SKU without refetching completed product proofs", async () => {
+    const items = [
+      translatedTile("305001", "Бактоблис таблетки №10", "4.9", 10),
+      translatedTile("305002", "Бактоблис таблетки №20", "4.9", 20),
+      translatedTile("305003", "Бактоблис таблетки №30", "4.9", 30)
+    ];
+    const detailCalls = new Map<string, number>();
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      const source = sourceUrlFromTranslate(new URL(String(input)));
+      if (!source.pathname.startsWith("/product/")) {
+        return new Response(translatedHtml(source, items, 1), { headers: { "content-type": "text/html" } });
+      }
+      const sku = source.pathname.match(/-(\d+)\/$/)![1]!;
+      const count = (detailCalls.get(sku) ?? 0) + 1;
+      detailCalls.set(sku, count);
+      if (sku === "305002" && count === 1) {
+        return new Response("temporary block", { status: 502, headers: { "content-type": "text/html" } });
+      }
+      return new Response(translatedProductHtml(
+        source, sku, `Бактоблис таблетки №${Number(sku) - 304991}`, 4.9, Number(sku) - 304991
+      ), { headers: { "content-type": "text/html" } });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({
+      fetch,
+      detailDelayMs: 0,
+      detailRetryDelayMs: 0
+    });
+
+    await expect(adapter.discover("Бактоблис", context)).resolves.toHaveLength(3);
+    expect(Object.fromEntries(detailCalls)).toEqual({ "305001": 1, "305002": 2, "305003": 1 });
+  });
+
   it("reports the real Google Translate, DOM and JSON-LD operations while they run", async () => {
     const activity = vi.fn(async (
       _event: Parameters<NonNullable<AdapterContext["activity"]>>[0]
@@ -349,32 +446,35 @@ describe("Ozon browser collector", () => {
     expect(observations.every((item) => item.source === "ozon:search-html:google-translate")).toBe(true);
   });
 
-  it("stops scheduling new detail proofs after the first failed product", async () => {
+  it("stops before the next detail proof when one SKU stays blocked after its retries", async () => {
     const items = Array.from({ length: 9 }, (_value, index) => {
       const sku = String(710000 + index);
       return translatedTile(sku, `Кагоцел 12 мг ${index + 10} шт`, "5.0", index + 1);
     });
-    let detailCalls = 0;
+    const detailCalls: string[] = [];
     const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
       const source = sourceUrlFromTranslate(new URL(String(input)));
       if (!source.pathname.startsWith("/product/")) {
         return new Response(translatedHtml(source, items, 1), { headers: { "content-type": "text/html" } });
       }
-      detailCalls += 1;
-      if (detailCalls === 1) return new Response("upstream failed", { status: 502, headers: { "content-type": "text/html" } });
-      await new Promise((resolve) => setTimeout(resolve, 5));
       const sku = source.pathname.match(/-(\d+)\/$/)![1]!;
+      detailCalls.push(sku);
+      if (sku === "710000") {
+        return new Response("upstream failed", { status: 502, headers: { "content-type": "text/html" } });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
       return new Response(translatedProductHtml(source, sku, `Кагоцел ${sku}`, 5, 1), {
         headers: { "content-type": "text/html" }
       });
     });
     const adapter = new OzonBrowserAdapter({
       fetch: fetchMock as unknown as typeof globalThis.fetch,
-      detailConcurrency: 4
+      detailDelayMs: 0,
+      detailRetryDelayMs: 0
     });
 
     await expect(adapter.discover("Кагоцел", context)).rejects.toThrow(/HTTP 502/);
-    expect(detailCalls).toBeLessThanOrEqual(4);
+    expect(detailCalls).toEqual(["710000", "710000", "710000"]);
   });
 
   it("accepts zero products only with an explicit Ozon empty-state proof", async () => {
