@@ -713,13 +713,15 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
       if (!value || typeof value !== "object") return undefined;
       const review = value as { id?: unknown; ratings?: unknown };
       const id = String(review.id ?? "");
-      const ratings = Array.isArray(review.ratings) ? review.ratings : [];
+      if (!Array.isArray(review.ratings)) return undefined;
+      const ratings = review.ratings;
       const scores = ratings.filter((item): item is { attribute_code?: unknown; value?: unknown } => Boolean(item && typeof item === "object"))
         .filter((item) => ["оценка", "rating"].includes(String(item.attribute_code ?? "").normalize("NFKC").trim().toLocaleLowerCase("ru-RU")));
-      const score = scores.length === 1 ? Number(scores[0].value) : Number.NaN;
-      if (!id || ids.has(id) || !Number.isInteger(score) || score < 1 || score > 5) return undefined;
+      if (!id || ids.has(id) || scores.length > 1) return undefined;
+      const score = scores.length === 1 ? Number(scores[0].value) : undefined;
+      if (score !== undefined && (!Number.isInteger(score) || score < 1 || score > 5)) return undefined;
       ids.add(id);
-      reviews.push({ id, ratings: [{ attribute_code: "Оценка", value: score }] });
+      reviews.push({ id, ratings: score === undefined ? [] : [{ attribute_code: "Оценка", value: score }] });
     }
     const compactState = JSON.stringify({ productView: { reviews } }).replace(/</g, "\\u003c");
     return `<html><head>${base}</head><body><h1>${escapeHtml(heading)}</h1><div allreviewsqty="${escapeHtml(total)}"></div>` +
@@ -844,12 +846,23 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
     const validRating = Number.isFinite(ratingValue) && ratingValue > 0 && ratingValue <= 5;
     if (!sku || sku.length > 80 || !/^[a-z0-9_.-]+$/i.test(sku) || !Number.isSafeInteger(reviewCount) || reviewCount < 0 ||
       rating && !validRating || reviewCount > 0 && !validRating) return undefined;
+    const feedbackList = root.find("#feedbackListContainer.product__feedbackList").first();
+    const feedbackItems = feedbackList.find(".product__feedbackItem[itemtype*='Review']");
+    const visibleTotal = root.find(".product__ratingText").first().text().match(/\((\d[\d\s\u00a0]*)\)/)?.[1]
+      ?.replace(/[\s\u00a0]/g, "");
+    if (reviewCount > 0 && (!feedbackList.length || feedbackItems.length === 0 || visibleTotal !== reviews)) return undefined;
+    const compactFeedback = reviewCount > 0
+      ? `<div class="product__ratingText">(${escapeHtml(reviews!)})</div>` +
+        `<div id="feedbackListContainer" class="product__feedbackList">${feedbackItems.toArray().map(() =>
+          `<article class="product__feedbackItem" itemscope itemtype="https://schema.org/Review"></article>`
+        ).join("")}</div>`
+      : "";
     return `<html><head>${base}<link rel="canonical" href="${escapeHtml(canonicalValue!)}"></head><body>` +
       `<script data-source-url="${escapeHtml(requested.source.toString())}"></script>` +
       `<div class="productPage__content product__item" itemscope itemtype="http://schema.org/Product">` +
       `<meta itemprop="sku" content="${escapeHtml(sku)}"><div itemprop="aggregateRating" itemscope>` +
       `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}` +
-      `<meta itemprop="reviewCount" content="${escapeHtml(reviews!)}"></div></div></body></html>`;
+      `<meta itemprop="reviewCount" content="${escapeHtml(reviews!)}"></div>${compactFeedback}</div></body></html>`;
   }
 
   if (requested.kind === "farmlend-search") {

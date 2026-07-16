@@ -831,6 +831,9 @@ describe("static pharmacy Translate gateway", () => {
       <div class="productPage__content product__item" itemscope itemtype="http://schema.org/Product">
         <meta itemprop="sku" content="14666"><div itemprop="aggregateRating" itemscope>
           <meta itemprop="ratingValue" content="5"><meta itemprop="reviewCount" content="29">
+        </div><div class="product__ratingText">Отзывы (29)</div>
+        <div id="feedbackListContainer" class="product__feedbackList">
+          <article class="product__feedbackItem" itemscope itemtype="https://schema.org/Review"></article>
         </div></div></body></html>`, { headers: { "content-type": "text/html; charset=utf-8" } }));
     vi.stubGlobal("fetch", upstream);
 
@@ -842,12 +845,28 @@ describe("static pharmacy Translate gateway", () => {
     expect(proof).toContain(`data-source-url="${source}"`);
     expect(proof).toContain('itemprop="sku" content="14666"');
     expect(proof).toContain('itemprop="reviewCount" content="29"');
+    expect(proof).toContain('id="feedbackListContainer"');
+    expect(proof).toContain('itemtype="https://schema.org/Review"');
     expect(proof).not.toContain(noise.slice(0, 100));
     expect(Number(response.headers.get("x-ratings-proof-bytes"))).toBeLessThan(2_000);
 
     const invalid = translated("www-asna-ru.translate.goog", "/cards/not-a-card");
     expect((await callGateway(invalid.toString())).status).toBe(400);
     expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a positive ASNA aggregate without matching visible feedback proof", async () => {
+    const source = "https://www.asna.ru/cards/kagotsel_12mg_n10_tab_niarmedik_plyus_ooo.html";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head>
+      <link rel="canonical" href="${source}"></head><body>
+      <div class="productPage__content product__item" itemscope itemtype="http://schema.org/Product">
+        <meta itemprop="sku" content="14666"><div itemprop="aggregateRating" itemscope>
+          <meta itemprop="ratingValue" content="5"><meta itemprop="reviewCount" content="29">
+        </div></div></body></html>`, { headers: { "content-type": "text/html" } })));
+
+    const response = await callGateway(translated("www-asna-ru.translate.goog", new URL(source).pathname).toString());
+
+    expect(response.status).toBe(502);
   });
 
   it("falls back to the exact first-party ASNA card when Google Translate returns 502", async () => {
@@ -859,6 +878,10 @@ describe("static pharmacy Translate gateway", () => {
         <div class="productPage__content product__item" itemscope itemtype="http://schema.org/Product">
           <meta itemprop="sku" content="36138"><div itemprop="aggregateRating" itemscope>
           <meta itemprop="ratingValue" content="4.9"><meta itemprop="reviewCount" content="17"></div>
+          <div class="product__ratingText">Отзывы (17)</div>
+          <div id="feedbackListContainer" class="product__feedbackList">
+            <article class="product__feedbackItem" itemscope itemtype="https://schema.org/Review"></article>
+          </div>
         </div></body></html>`, { headers: { "content-type": "text/html" } });
     });
     vi.stubGlobal("fetch", upstream);
@@ -952,22 +975,22 @@ describe("static pharmacy Translate gateway", () => {
     expect(incomplete.status).toBe(502);
   });
 
-  it("compacts the complete Bud Zdorov review state", async () => {
-    const source = "https://www.budzdorov.ru/product/otsillokoktsinum-granuly-6doz-2511";
+  it("compacts the complete Bud Zdorov review state when written reviews omit star scores", async () => {
+    const source = "https://www.budzdorov.ru/product/kagotsel-tab-12mg-no10-15027";
     const reviews = [
       { id: 1, ratings: [{ attribute_code: "Оценка", value: 5 }] },
-      { id: 2, ratings: [{ attribute_code: "Rating", value: 4 }] }
+      { id: 2, ratings: [] }
     ];
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"></head><body>
-      <h1>Оциллококцинум гранулы 6 доз</h1><div allreviewsqty="2"></div>
+      <h1>Кагоцел таблетки 0,012г №10</h1><div allreviewsqty="2"></div>
       <script>  window.__INITIAL_STATE__=${JSON.stringify({ productView: { reviews } })};(function(){var s;s=document.currentScript;}())</script>
     </body></html>`, { headers: { "content-type": "text/html" } })));
 
-    const response = await callGateway(translated("www-budzdorov-ru.translate.goog", "/product/otsillokoktsinum-granuly-6doz-2511").toString());
+    const response = await callGateway(translated("www-budzdorov-ru.translate.goog", "/product/kagotsel-tab-12mg-no10-15027").toString());
     const proof = await response.text();
     expect(response.status).toBe(200);
     expect(proof).toContain('allreviewsqty="2"');
-    expect(proof).toContain('"attribute_code":"Оценка","value":4');
+    expect(proof).toContain('{"id":"2","ratings":[]}');
   });
 
   it("preserves the exact slugged Bud Zdorov product path from family discovery", async () => {
