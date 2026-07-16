@@ -410,7 +410,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
 });
 
 describe("ratings Agent initial recovery pass", () => {
-  it("cools down an Ozon transient retry but does not delay unrelated sites", () => {
+  it("cools down transient retries for every shared collection route", () => {
     expect(transientRecoveryDelayMs([
       { domain: "ozon.ru", status: "blocked", message: "blocked: HTTP 502" }
     ], 0)).toBe(750);
@@ -418,7 +418,10 @@ describe("ratings Agent initial recovery pass", () => {
       { domain: "ozon.ru", status: "blocked", message: "blocked: HTTP 429" }
     ], 3)).toBe(3000);
     expect(transientRecoveryDelayMs([
-      { domain: "example.com", status: "blocked", message: "blocked: HTTP 502" }
+      { domain: "example.com", status: "blocked", message: "blocked: HTTP 503" }
+    ], 1)).toBe(1500);
+    expect(transientRecoveryDelayMs([
+      { domain: "example.com", status: "blocked", message: "parser_changed: missing selector" }
     ], 0)).toBe(0);
   });
 

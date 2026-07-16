@@ -45,11 +45,11 @@ export function transientRecoveryDelayMs(
   partitions: Array<{ domain?: string; status: string; message?: string }>,
   recoveryPass: number
 ): number {
-  const ozonTransientFailure = partitions.some(({ domain, status, message = "" }) =>
-    domain === "ozon.ru" && status !== "complete" && status !== "no_results" &&
+  const transientFailure = partitions.some(({ status, message = "" }) =>
+    status !== "complete" && status !== "no_results" &&
     /\bcaptcha\b|капч|HTTP\s+(?:408|425|429|498|499|5\d{2})\b/i.test(message)
   );
-  return ozonTransientFailure ? Math.min(3_000, 750 * (recoveryPass + 1)) : 0;
+  return transientFailure ? Math.min(3_000, 750 * (recoveryPass + 1)) : 0;
 }
 
 const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);

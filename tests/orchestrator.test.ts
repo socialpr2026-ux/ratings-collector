@@ -1111,4 +1111,40 @@ describe("run orchestration and fail-closed QA", () => {
     expect(run.qa?.ok).toBe(true);
     expect(maximumActive).toBe(1);
   });
+
+  it("serializes Yandex brand partitions to protect the shared Translate fallback", async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const adapter: SiteAdapter = {
+      id: "market.yandex.ru:test",
+      supportedDomains: ["market.yandex.ru"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active -= 1;
+        return [{
+          domain: "market.yandex.ru", platform: "yandex", listingId: brand, brand,
+          url: `https://market.yandex.ru/product/${encodeURIComponent(brand)}`, metadata: {}
+        }];
+      },
+      async collect(ref) {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: `${ref.brand} таблетки 100 мг №10`, reviews: 1, rating: 5,
+          status: "ok", capturedAt: new Date().toISOString()
+        };
+      }
+    };
+    const service = new RatingsService(new MemoryRepository(), async () => adapter);
+
+    await service.executeRun((await service.createRun({
+      ...request,
+      domains: ["market.yandex.ru"],
+      brands: ["Бренд А", "Бренд Б"]
+    })).id);
+
+    expect(maximumActive).toBe(1);
+  });
 });

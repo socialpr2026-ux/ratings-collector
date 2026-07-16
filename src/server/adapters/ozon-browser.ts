@@ -677,6 +677,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
     const capturedAt = this.now().toISOString();
     const matchedProducts = [...products.values()];
     const exactMetrics = new Map<string, ExactProductMetrics>();
+    const searchTileFallbacks = new Map<string, string>();
     await mapWithConcurrency(
       matchedProducts.filter((product) => product.source === TRANSLATE_SOURCE),
       this.detailConcurrency,
@@ -694,7 +695,29 @@ export class OzonBrowserAdapter implements SiteAdapter {
           title: product.title,
           metadata: { source: product.source }
         };
-        const exact = await this.fetchExactTranslatedProductWithRetry(ref, product.listingId, context);
+        let exact: ExactProductMetrics;
+        try {
+          exact = await this.fetchExactTranslatedProductWithRetry(ref, product.listingId, context);
+        } catch (error) {
+          if (!(error instanceof AdapterBlockedError)) throw error;
+          const hasBoundTileMetrics = product.reviews !== null && (
+            product.reviews === 0
+              ? product.rating === null
+              : product.rating !== null && product.rating > 0
+          );
+          if (!hasBoundTileMetrics) throw error;
+          searchTileFallbacks.set(product.listingId, error.message);
+          await reportActivity(context, {
+            operationId: `ozon:search-tile-fallback:${product.listingId}`,
+            stage: "collection",
+            label: "Ozon · данные поисковой карточки",
+            listingId: product.listingId,
+            channels: ["google_translate"],
+            status: "warning",
+            detail: "Точная страница временно недоступна; карточка сохранена для проверки"
+          });
+          return undefined;
+        }
         if (!matchesBrand(exact.product, requestedBrand)) {
           throw new ParserChangedError("Ozon translated product JSON-LD belongs to a different brand");
         }
@@ -704,6 +727,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
     );
     return matchedProducts.map((product): ProductRef => {
       const exact = exactMetrics.get(product.listingId);
+      const searchTileFallback = searchTileFallbacks.get(product.listingId);
       return {
       domain: PLATFORM_DOMAIN,
       platform: PLATFORM_ID,
@@ -719,6 +743,10 @@ export class OzonBrowserAdapter implements SiteAdapter {
         rawReviewCount: product.rawReviewCount,
         capturedAt,
         source: product.source,
+        ...(searchTileFallback ? {
+          exactProductFallback: "search_tile",
+          exactProductFallbackReason: searchTileFallback
+        } : {}),
         ...(exact ? {
           exactProductTitle: exact.product,
           exactProductListingId: product.listingId,
@@ -734,10 +762,12 @@ export class OzonBrowserAdapter implements SiteAdapter {
     const listingId = asSku(ref.listingId);
     let product = ref.title?.normalize("NFKC").trim();
     if (!listingId || !product) throw new ParserChangedError("Ozon composer ProductRef is incomplete");
-    const source = ref.metadata.source === TRANSLATE_SOURCE ? TRANSLATE_SOURCE : SOURCE;
+    const translatedSource = ref.metadata.source === TRANSLATE_SOURCE;
+    const searchTileFallback = translatedSource && ref.metadata.exactProductFallback === "search_tile";
+    const source = searchTileFallback ? `${TRANSLATE_SOURCE}:search-tile-fallback` : translatedSource ? TRANSLATE_SOURCE : SOURCE;
     let reviews = reviewCount(ref.metadata.reviewCount);
     let rawRating = rating(ref.metadata.rating);
-    if (source === TRANSLATE_SOURCE) {
+    if (translatedSource && !searchTileFallback) {
       const cachedTitle = asString(ref.metadata.exactProductTitle);
       const hasExactProof = ref.metadata.exactProductProof === EXACT_TRANSLATE_PROOF &&
         ref.metadata.exactProductListingId === listingId && cachedTitle !== undefined &&
@@ -759,9 +789,19 @@ export class OzonBrowserAdapter implements SiteAdapter {
       rawRating = exact.rawRating;
       if (exact.aggregateGroupId) ref.metadata.exactProductAggregateGroupId = exact.aggregateGroupId;
     }
+    if (searchTileFallback && (
+      reviews === null ||
+      (reviews === 0 ? rawRating !== null : rawRating === null || rawRating <= 0) ||
+      !matchesBrand(product, ref.brand)
+    )) {
+      throw new ParserChangedError("Ozon search-tile fallback is not bound to complete product metrics");
+    }
     let normalizedRating = rawRating === null ? null : normalizeRating(rawRating, 5);
     let status: Observation["status"];
-    if (reviews === 0) {
+    if (searchTileFallback) {
+      status = "needs_review";
+      if (reviews === 0) normalizedRating = null;
+    } else if (reviews === 0) {
       status = "no_reviews";
       normalizedRating = null;
     } else if (reviews === null || normalizedRating === null || normalizedRating === 0 || !matchesBrand(product, ref.brand)) {
