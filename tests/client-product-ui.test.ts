@@ -66,6 +66,11 @@ describe("Interfox Ratings product shell", () => {
     expect(appSource).toContain(': "Результат готов"');
   });
 
+  it("does not show a publication-disabled warning after a partial result was recorded", () => {
+    expect(appSource).toContain('const reviewSectionTitle = run?.status === "published"');
+    expect(appSource).toContain('(partitionSummary?.failed ?? 0) > 0 && run.status !== "published"');
+  });
+
   it("lets an operator repair and confirm every disputed product card", () => {
     expect(appSource).toContain('className={`product-edit');
     expect(appSource).toContain('placeholder="Например: раствор 2 мл №10"');

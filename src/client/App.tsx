@@ -775,12 +775,12 @@ export function App() {
     reviewItems.length
   ));
   const cleanReviewReady = Boolean(run?.status === "review" && reviewItems.length === 0 && failedPartitionCount === 0 && run.qa?.ok !== false);
-  const reviewSectionTitle = reviewItems.length > 0
-    ? "Проверьте спорные находки"
-    : failedPartitionCount > 0 || run?.qa?.ok === false
-      ? "Завершите сбор"
-      : run?.status === "published"
-        ? "Результат записан"
+  const reviewSectionTitle = run?.status === "published"
+    ? "Результат записан"
+    : reviewItems.length > 0
+      ? "Проверьте спорные находки"
+      : failedPartitionCount > 0 || run?.qa?.ok === false
+        ? "Завершите сбор"
         : "Результат готов";
   const canRetry = Boolean(run && canRetryFailedPartitions(run.status, partitionSummary?.failed ?? 0));
   const companionBrands = useMemo(() => run ? ozonCompanionEligibleBrands(run) : [], [run]);
@@ -1144,7 +1144,7 @@ export function App() {
           </div>}
         </div>
 
-        {(partitionSummary?.failed ?? 0) > 0 && <div className="collection-warning" role="status">
+        {(partitionSummary?.failed ?? 0) > 0 && run.status !== "published" && <div className="collection-warning" role="status">
           <span className="notice-icon" aria-hidden="true">!</span>
           <div><strong>{collectionIsContinuing ? busyAction === "continue" ? "Автоматически продолжаем с сохранённого места…" : "Повторно проверяем проблемные площадки…" : "Сбор неполный — публикация отключена"}</strong><p>{collectionIsContinuing ? "Готовые результаты остаются на месте. После завершения список и проверка публикации обновятся автоматически." : "Данные не будут записаны частично. Можно повторить только неуспешные площадки, не запуская весь сбор заново."}</p></div>
           <div className="collection-warning-actions">
