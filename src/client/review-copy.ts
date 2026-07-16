@@ -228,6 +228,15 @@ export function canRetryFailedPartitions(status: "queued" | "running" | "review"
   return failedPartitionCount > 0 && (status === "review" || status === "failed");
 }
 
+export function canPublishSuccessfulPartitions(
+  status: RunState["status"],
+  successfulPartitionCount: number,
+  failedPartitionCount: number,
+  reviewCount: number
+) {
+  return status === "review" && successfulPartitionCount > 0 && failedPartitionCount > 0 && reviewCount === 0;
+}
+
 /** Local Chrome is a reserve route, never a first choice or a parser workaround. */
 export function ozonCompanionEligibleBrands(
   run: Pick<RunState, "status" | "request" | "partitions">

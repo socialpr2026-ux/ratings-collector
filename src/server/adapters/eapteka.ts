@@ -172,7 +172,12 @@ function translatedSource(html: string, source: URL): ReturnType<typeof load> {
   return $;
 }
 
-function readerMetrics(markdown: string, source: URL): { title: string; reviews: number; rating: number | null; ratingCount: number } {
+function readerMetrics(
+  markdown: string,
+  source: URL,
+  listingId: string,
+  allowSourceBoundEmpty = false
+): { title: string; reviews: number; rating: number | null; ratingCount: number } {
   const titleLine = markdown.match(/^Title:\s*(.+)$/m)?.[1]?.trim();
   const sourceLine = markdown.match(/^URL Source:\s*(\S+)\s*$/m)?.[1];
   if (!titleLine || !sourceLine) throw new ParserChangedError(`${DOMAIN}: reader response has no title or source proof`);
@@ -189,6 +194,12 @@ function readerMetrics(markdown: string, source: URL): { title: string; reviews:
   const rating = parseRating(metric?.[3]);
   const ratingCount = parseNonNegativeInteger(metric?.[4]);
   if (reviews === undefined || ratingCount === undefined) {
+    const exactProductProof = new RegExp(`(?:^|\\n)\\s*Арт\\.\\s*${listingId}\\s*(?:\\n|$)`, "iu").test(markdown);
+    const visibleReviewSection = /^#{1,6}\s+(?:Отзывы|Написать отзыв)\b/imu.test(markdown) ||
+      /(?:^|\n)\s*Написать отзыв\s*(?:\n|$)/iu.test(markdown);
+    if (allowSourceBoundEmpty && exactProductProof && !visibleReviewSection) {
+      return { title, reviews: 0, rating: null, ratingCount: 0 };
+    }
     throw new ParserChangedError(`${DOMAIN}: reader did not prove a written-review and rating total`);
   }
   const metricTail = markdown.slice((metric?.index ?? markdown.length) + (metric?.[0].length ?? 0), (metric?.index ?? markdown.length) + 3_000);
@@ -362,7 +373,15 @@ export class EaptekaAdapter implements SiteAdapter {
     }
     this.assertUsable(response, html, requestUrl);
 
-    let page = parsedProductPage(html, listingId, requestUrl);
+    let page: ReturnType<typeof parsedProductPage>;
+    try {
+      page = parsedProductPage(html, listingId, requestUrl);
+    } catch (error) {
+      if (error instanceof ParserChangedError && /stale structured rating/i.test(error.message)) {
+        return this.collectFromReader(ref, listingId, requestUrl, capturedAt, context, true);
+      }
+      throw error;
+    }
     if (source === "eapteka-data-layer" && page.metrics.orphanedStructured) {
       try {
         ({ response, html } = await this.requestTranslated(requestUrl, context));
@@ -454,7 +473,8 @@ export class EaptekaAdapter implements SiteAdapter {
     listingId: string,
     requestUrl: string,
     capturedAt: string,
-    context: AdapterContext
+    context: AdapterContext,
+    allowSourceBoundEmpty = false
   ): Promise<Observation> {
     const source = new URL(requestUrl);
     const endpoint = readerProxyUrl(source);
@@ -466,7 +486,7 @@ export class EaptekaAdapter implements SiteAdapter {
     }
     const markdown = await readTextBounded(response, 2_000_000);
     if (!response.ok) throw new AdapterBlockedError(`${DOMAIN}: product reader returned HTTP ${response.status}`);
-    const parsed = readerMetrics(markdown, source);
+    const parsed = readerMetrics(markdown, source, listingId, allowSourceBoundEmpty);
     if (!matchesBrand(parsed.title, ref.brand)) {
       throw new ParserChangedError(`${DOMAIN}:${listingId}: reader returned another brand or product`);
     }

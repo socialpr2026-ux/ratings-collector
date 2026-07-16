@@ -644,9 +644,10 @@ const BUD_FORM_SLUG_ALIASES: Record<string, string> = {
   "оциллококцинум": "ocillokokcinum"
 };
 
-function budFormSlug(brand: string): string {
+function budFormSlugs(brand: string): string[] {
   const normalized = brand.normalize("NFKC").toLocaleLowerCase("ru-RU").replace(/ё/g, "е").trim();
-  return BUD_FORM_SLUG_ALIASES[normalized] ?? transliterate(brand);
+  const known = BUD_FORM_SLUG_ALIASES[normalized];
+  return known ? [known] : transliteratedSlugs(brand);
 }
 
 function budRef(value: string, expectedId?: string): { id: string; url: string } | undefined {
@@ -683,22 +684,36 @@ export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
       for (const ref of cached) refs.set(ref.listingId, { ...ref, metadata: { ...ref.metadata } });
       return [...refs.values()].sort((left, right) => (left.title ?? "").localeCompare(right.title ?? "", "ru"));
     }
-    const source = new URL(`https://www.${BUD_DOMAIN}/forms/${budFormSlug(brand)}`);
-    const page = await requestPage(source, context, this.fetchImpl, BUD_TRANSLATE_HOST);
     const liveRefs = new Map<string, ProductRef>();
-    page.$("a[href*='/product/']").each((_index, node) => {
-      const parsed = budRef(page.$(node).attr("href") ?? "");
-      const title = compactText(page.$(node).attr("title") || page.$(node).text());
-      if (!parsed || !matchesBrand(title, brand)) return;
-      liveRefs.set(parsed.id, {
-        domain: BUD_DOMAIN, platform: BUD_DOMAIN, listingId: parsed.id, brand,
-        url: parsed.url, title, metadata: { discovery: "translated-first-party-form-page" }
-      });
-    });
+    const slugs = budFormSlugs(brand);
+    let explicitNoResults = 0;
+    let successfulPages = 0;
+    let lastError: unknown;
+    for (const slug of slugs) {
+      try {
+        const source = new URL(`https://www.${BUD_DOMAIN}/forms/${slug}`);
+        const page = await requestPage(source, context, this.fetchImpl, BUD_TRANSLATE_HOST);
+        successfulPages += 1;
+        page.$("a[href*='/product/']").each((_index, node) => {
+          const parsed = budRef(page.$(node).attr("href") ?? "");
+          const title = compactText(page.$(node).attr("title") || page.$(node).text());
+          if (!parsed || !matchesBrand(title, brand)) return;
+          liveRefs.set(parsed.id, {
+            domain: BUD_DOMAIN, platform: BUD_DOMAIN, listingId: parsed.id, brand,
+            url: parsed.url, title, metadata: { discovery: "translated-first-party-form-page" }
+          });
+        });
+        if (liveRefs.size) break;
+        const text = compactText(page.$("main, body").text());
+        if (/ничего не найдено|товары не найдены|нет препаратов/i.test(text)) explicitNoResults += 1;
+      } catch (error) {
+        lastError = error;
+      }
+    }
     if (!liveRefs.size && !refs.size) {
-      const text = compactText(page.$("main, body").text());
-      if (/ничего не найдено|товары не найдены|нет препаратов/i.test(text)) return [];
-      throw new AdapterBlockedError(`${BUD_DOMAIN}: form page proved neither exact products nor no results`);
+      if (successfulPages === slugs.length && explicitNoResults === slugs.length) return [];
+      if (successfulPages === 0 && lastError instanceof Error) throw lastError;
+      throw new AdapterBlockedError(`${BUD_DOMAIN}: form pages proved neither exact products nor no results`);
     }
     if (liveRefs.size) {
       const snapshot = [...liveRefs.values()].map((ref) => ({ ...ref, metadata: { ...ref.metadata } }));

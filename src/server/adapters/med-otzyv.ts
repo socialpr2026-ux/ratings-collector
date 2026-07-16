@@ -96,12 +96,12 @@ export class MedOtzyvAdapter implements SiteAdapter {
   async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
     const checkedAt = new Date().toISOString();
     try {
-      const refs = await this.discover("Оциллококцинум", { ...context, previousIds: [], previousRefs: [] });
-      const exact = refs.find((ref) => ref.listingId === "34740" &&
-        typeof ref.metadata.reviewCount === "number" && Number.isSafeInteger(ref.metadata.reviewCount) && ref.metadata.reviewCount >= 0);
+      const brand = context.brands?.[0]?.trim() || "Оциллококцинум";
+      const refs = await this.discover(brand, { ...context, previousIds: [], previousRefs: [] });
+      const exact = refs.find((ref) => parsedProduct(ref.url)?.id === ref.listingId && matchesBrand(ref.title ?? brand, brand));
       return exact
-        ? { ok: true, checkedAt, message: `${DOMAIN}: exact indexed canary reviewCount=${exact.metadata.reviewCount}` }
-        : { ok: false, checkedAt, message: `${DOMAIN}: exact indexed canary changed` };
+        ? { ok: true, checkedAt, message: `${DOMAIN}: exact current route found for ${brand}` }
+        : { ok: false, checkedAt, message: `${DOMAIN}: exact current route changed for ${brand}` };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {

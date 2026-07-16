@@ -128,6 +128,18 @@ describe("RiglaAdapter", () => {
     expect(observation).toMatchObject({ reviews: 3, rating: 4.33, ratingCount: 3, status: "ok" });
   });
 
+  it("checks the requested Rigla brand instead of an unrelated fixed canary", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestedUrl(input);
+      expect(url.pathname).toBe("/forms/tsereton");
+      return new Response(fixtures.riglaForms.replaceAll("Кагоцел", "Церетон"), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await expect(new RiglaAdapter(new MemoryEvidenceStore(), fetchMock).healthCheck({
+      ...context, brands: ["Церетон"]
+    })).resolves.toMatchObject({ ok: true });
+  });
+
   it("fails closed when a written review has no single product rating", async () => {
     const malformed = fixtures.riglaProduct.replace('"ratings":[{"attribute_code":"Оценка","value":4}]', '"ratings":[]');
     const adapter = new RiglaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(malformed)) as unknown as typeof fetch);

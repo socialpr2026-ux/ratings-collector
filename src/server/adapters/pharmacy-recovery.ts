@@ -372,6 +372,13 @@ function polzaProductMetrics(
     ".reviews__empty, .reviews-empty, [data-empty-reviews]"
   ).length === 1 && /(?:отзывов\s+(?:пока\s+)?нет|нет\s+отзывов)/iu.test(reviewBlock.text());
   if (explicitEmpty) return { reviews: 0, rating: null };
+  // POLZAru keeps stale AggregateRating microdata on some exact product pages
+  // after removing their visible reviews. The page still renders its own
+  // source-bound "add review" modal, so absence of the product review block is
+  // an explicit current UI state rather than a truncated document.
+  const explicitStaleZero = reviewBlocks.length === 0 && reviewItems.length === 0 &&
+    $(".review-add-modal, .js-notify-add-modal").length > 0;
+  if (explicitStaleZero) return { reviews: 0, rating: null };
   if (!reviewBlocks.length && !reviewItems.length) return undefined;
   if (reviewBlocks.length !== 1) return undefined;
   const visibleTotal = exactInteger(reviewBlock.find(".reviews__amount").first().text());
@@ -584,10 +591,22 @@ export class AsnaAdapter implements SiteAdapter {
   async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
     const checkedAt = new Date().toISOString();
     try {
-      const source = new URL("https://www.asna.ru/cards/kagotsel_12mg_n10_tab_niarmedik_plyus_ooo.html");
-      const { $ } = await translatedPage(source, "www-asna-ru.translate.goog", context, this.fetchImpl, true);
-      if (!asnaProduct($)) throw new ParserChangedError("asna.ru canary has no exact aggregate product");
-      return { ok: true, checkedAt, message: "asna.ru: fixed translated product canary is healthy" };
+      const brand = context.brands?.[0]?.trim() || "Кагоцел";
+      const slugs = brandSlugs(brand);
+      const maps = await Promise.all([
+        sitemap("https://www.asna.ru/sitemap/sitemap_cards.xml", context, this.fetchImpl),
+        sitemap("https://www.asna.ru/sitemap/sitemap_cards1.xml", context, this.fetchImpl)
+      ]);
+      const complete = maps.every((xml) => /<urlset\b/i.test(xml) && /<\/urlset>/i.test(xml));
+      const hasRequestedCard = maps.some((xml) => [...xml.matchAll(/<loc>([^<]+)<\/loc>/gi)].some((match) => {
+        try {
+          const url = new URL(match[1].replace(/&amp;/gi, "&"));
+          const slug = url.pathname.match(/^\/cards\/([a-z0-9_.-]+)\.html$/i)?.[1];
+          return normalizeHost(url.hostname) === "asna.ru" && Boolean(slug && slugMatches(slug, slugs));
+        } catch { return false; }
+      }));
+      if (!complete || !hasRequestedCard) throw new ParserChangedError(`asna.ru sitemaps have no exact current card for ${brand}`);
+      return { ok: true, checkedAt, message: `asna.ru: complete card sitemaps contain ${brand}` };
     } catch (error) {
       return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
     }

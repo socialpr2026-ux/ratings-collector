@@ -129,6 +129,18 @@ describe("recovered first-party pharmacy adapters", () => {
     }, { region: "Москва" })).rejects.toThrow(/product aggregate is incomplete/);
   });
 
+  it("treats Polza stale microdata as zero only when the exact page renders its add-review UI", async () => {
+    const card = "https://polza.ru/catalog/tsereton-kapsuly-400-mg-56-sht_24136/";
+    const adapter = new PolzaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(translated(card, `
+      <main itemscope itemtype="https://schema.org/Product"><meta itemprop="sku" content="24136">
+        <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5"></div>
+      </main><div class="review-add-modal js-notify-add-modal"></div>`), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "polza.ru", platform: "polza.ru", listingId: "24136", brand: "Церетон", url: card, metadata: {}
+    }, { region: "Москва" })).resolves.toMatchObject({ reviews: 0, rating: null, status: "no_reviews" });
+  });
+
   it("derives the exact human Polza variant from a source-bound product URL", async () => {
     const family = "https://polza.ru/product/otsillokoktsinum/";
     const card = "https://polza.ru/catalog/otsillokoktsinum-granuly-1-g-6-doz_20630/";
@@ -236,6 +248,20 @@ describe("recovered first-party pharmacy adapters", () => {
     expect(refs.find((item) => item.listingId === "14666")?.title).toBe("Кагоцел 12 мг №10 таблетки");
     const result = await adapter.collect(refs[0], { region: "Москва" });
     expect(result).toMatchObject({ product: "Кагоцел 12 мг №10 таблетки", reviews: 29, rating: 5, status: "ok", source: "asna-product-microdata:google-translate" });
+  });
+
+  it("checks ASNA health against complete sitemaps for the requested brand, not stale unrelated metrics", async () => {
+    const card = "https://www.asna.ru/cards/tsereton_400mg_n28_kaps_soteks.html";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("sitemap_cards.xml")) return new Response(`<urlset><url><loc>${card}</loc></url></urlset>`);
+      if (url.pathname.endsWith("sitemap_cards1.xml")) return new Response("<urlset></urlset>");
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch;
+
+    await expect(new AsnaAdapter(new MemoryEvidenceStore(), fetchMock).healthCheck({
+      region: "Москва", brands: ["Церетон"]
+    })).resolves.toMatchObject({ ok: true, message: "asna.ru: complete card sitemaps contain Церетон" });
   });
 
   it("recovers a current ASNA family omitted from card sitemaps through the exact Google launcher", async () => {

@@ -265,6 +265,28 @@ describe("additional pharmacy adapters", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("tries the ts spelling used by the Cereton form without treating an empty alias as no results", async () => {
+    const productPath = "/product/tsereton-kaps-400mg-no28-330028";
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      const source = `https://www.budzdorov.ru${url.pathname}`;
+      if (url.pathname === "/forms/cereton") {
+        return new Response(translated(source, "<main>Каталог лекарств</main>"), { status: 200 });
+      }
+      expect(url.pathname).toBe("/forms/tsereton");
+      return new Response(translated(source,
+        `<main><a href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en" ` +
+        `title="Церетон капсулы 400 мг №28">Церетон</a></main>`
+      ), { status: 200 });
+    });
+    const adapter = new BudZdorovAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    await expect(adapter.discover("Церетон", context)).resolves.toMatchObject([
+      { listingId: "330028", url: `https://www.budzdorov.ru${productPath}` }
+    ]);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
   it("collects eTabl product state and drops its default rating when there are no reviews", async () => {
     const searchSource = "https://etabl.ru/search?query=%D0%9E%D1%86%D0%B8%D0%BB%D0%BB%D0%BE%D0%BA%D0%BE%D0%BA%D1%86%D0%B8%D0%BD%D1%83%D0%BC&limit=100";
     const productSource = "https://etabl.ru/product/otsillokoktsinum=187122000610";

@@ -3,6 +3,7 @@ import {
   BRAND_SHEET_COLUMNS_TEXT,
   brandSheetDestinationText,
   canConfirmObservation,
+  canPublishSuccessfulPartitions,
   canRetryFailedPartitions,
   finalProductLabel,
   friendlyErrorMessage,
@@ -193,5 +194,15 @@ describe("failed partition retry eligibility", () => {
     expect(canRetryFailedPartitions("running", 1)).toBe(false);
     expect(canRetryFailedPartitions("publishing", 1)).toBe(false);
     expect(canRetryFailedPartitions("published", 1)).toBe(false);
+  });
+});
+
+describe("completed-only publication eligibility", () => {
+  it("offers the action only after review when some checks passed and no cards remain unresolved", () => {
+    expect(canPublishSuccessfulPartitions("review", 4, 2, 0)).toBe(true);
+    expect(canPublishSuccessfulPartitions("review", 0, 2, 0)).toBe(false);
+    expect(canPublishSuccessfulPartitions("review", 4, 0, 0)).toBe(false);
+    expect(canPublishSuccessfulPartitions("review", 4, 2, 1)).toBe(false);
+    expect(canPublishSuccessfulPartitions("running", 4, 2, 0)).toBe(false);
   });
 });

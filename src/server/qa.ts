@@ -6,10 +6,28 @@ export type QaResult = { ok: boolean; blockers: string[]; warnings: string[] };
 export function validateRun(run: RunState): QaResult {
   const blockers: string[] = [];
   const warnings: string[] = [];
+  const excludedKeys = new Set<string>();
+  const excludedPartitions = new Set<string>();
+  for (const exclusion of run.publicationExclusions ?? []) {
+    const key = `${exclusion.domain}\u0000${exclusion.brand}`;
+    if (excludedKeys.has(key)) {
+      blockers.push(`Повторно исключён раздел: ${exclusion.domain} / ${exclusion.brand}`);
+      continue;
+    }
+    excludedKeys.add(key);
+    excludedPartitions.add(`${exclusion.domain}/${exclusion.brand}`);
+    warnings.push(`${exclusion.domain} / ${exclusion.brand}: исключено из этой публикации; текущий месяц останется пустым`);
+  }
   const expected = run.request.domains.length * run.request.brands.length;
   const expectedPartitions = new Set(
     run.request.domains.flatMap((domain) => run.request.brands.map((brand) => `${domain}\u0000${brand}`))
   );
+  for (const key of excludedKeys) {
+    if (!expectedPartitions.has(key)) {
+      const [domain, brand] = key.split("\u0000");
+      blockers.push(`Исключён посторонний раздел: ${domain} / ${brand}`);
+    }
+  }
   const actualPartitions = new Set<string>();
   if (run.progress.totalPartitions !== expected) {
     blockers.push(`Ожидалось разделов ${expected}, в прогрессе указано ${run.progress.totalPartitions}`);
@@ -25,7 +43,11 @@ export function validateRun(run: RunState): QaResult {
     if (!expectedPartitions.has(key)) blockers.push(`Лишний раздел: ${partition.domain} / ${partition.brand}`);
     if (actualPartitions.has(key)) blockers.push(`Дублирован раздел: ${partition.domain} / ${partition.brand}`);
     actualPartitions.add(key);
-    if (!['complete', 'no_results'].includes(partition.status)) {
+    const excluded = excludedKeys.has(key);
+    if (excluded && ['complete', 'no_results'].includes(partition.status)) {
+      blockers.push(`${partition.domain} / ${partition.brand}: успешно завершённый раздел нельзя исключить`);
+    }
+    if (!excluded && !['complete', 'no_results'].includes(partition.status)) {
       blockers.push(`${partition.domain} / ${partition.brand}: ${partition.message ?? partition.status}`);
     }
     if (partition.status === 'complete' && partition.discovered === 0) {
@@ -52,6 +74,9 @@ export function validateRun(run: RunState): QaResult {
       blockers.push(`${item.domain}:${item.listingId}: карточка вне запрошенного набора`);
     }
     const partitionKey = `${item.domain}\u0000${item.brand}`;
+    if (excludedKeys.has(partitionKey)) {
+      blockers.push(`${item.domain}:${item.listingId}: карточка исключённого раздела попала в публикацию`);
+    }
     observationsByPartition.set(partitionKey, (observationsByPartition.get(partitionKey) ?? 0) + 1);
     const key = productKey(item.domain, item.listingId);
     if (seen.has(key)) blockers.push(`Дубликат устойчивого ID: ${key}`);
@@ -107,6 +132,7 @@ export function validateRun(run: RunState): QaResult {
   // technical error log is retained on the run, but repeating it in QA made
   // the same quota/parser failure appear two or three times to the employee.
   for (const error of run.errors) {
+    if (excludedPartitions.has(error.partition)) continue;
     if (failedPartitionErrors.has(error.partition)) continue;
     blockers.push(`${error.partition}: ${error.message}`);
   }

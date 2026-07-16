@@ -293,6 +293,13 @@ export type RunState = {
   observations: Observation[];
   partitions: PartitionResult[];
   errors: Array<{ partition: string; message: string }>;
+  /** Failed domain/brand partitions explicitly omitted by the employee. */
+  publicationExclusions?: Array<{
+    domain: string;
+    brand: string;
+    reason: string;
+    excludedAt: string;
+  }>;
   payloadHash?: string;
   qa?: { ok: boolean; blockers: string[]; warnings: string[] };
   publication?: PublicationRecord;
