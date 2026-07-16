@@ -244,6 +244,28 @@ describe("additional pharmacy adapters", () => {
     expect(new URL(String(fetchSpy.mock.calls[1][0])).pathname).toBe(productPath);
   });
 
+  it("falls back to the translated letter index when the brand form was removed", async () => {
+    const formSource = "https://www.budzdorov.ru/forms/baktoblis";
+    const letterSource = "https://www.budzdorov.ru/letter/%D0%91";
+    const productPath = "/product/baktoblis-tab-dlya-rassasyv-30g-no30-109834";
+    const letter = translated(letterSource, `<main class="alphabet-forms">
+      <a class="alphabet-forms__item-link" href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">
+        <span>Бактоблис таблетки для рассасывания 30г №30</span>
+      </a></main>`);
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/forms/baktoblis") return new Response("missing", { status: 404 });
+      expect(url.pathname).toBe("/letter/%D0%91");
+      return new Response(letter, { status: 200, headers: { "content-type": "text/html" } });
+    });
+
+    await expect(new BudZdorovAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch)
+      .discover("Бактоблис", context)).resolves.toMatchObject([
+      { listingId: "109834", url: `https://www.budzdorov.ru${productPath}` }
+    ]);
+    expect(new URL(String(fetchSpy.mock.calls[0][0])).pathname).toBe(new URL(formSource).pathname);
+  });
+
   it("checks the requested Bud Zdorov brand and reuses its successful discovery in the same run", async () => {
     const brand = "\u041a\u0430\u0433\u043e\u0446\u0435\u043b";
     const formSource = "https://www.budzdorov.ru/forms/kagocel";

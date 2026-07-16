@@ -444,6 +444,21 @@ export class RiglaAdapter extends PharmacyAdapter {
       });
       if (refs.size) break;
     }
+    if (!refs.size && provedMissing === slugs.length) {
+      const initial = brand.normalize("NFKC").trim().charAt(0).toLocaleUpperCase("ru-RU");
+      if (initial) {
+        const source = `${RIGLA_ORIGIN}/letter/${encodeURIComponent(initial)}`;
+        const result = await requestHtml(source, context, this.fetchImpl);
+        assertUsable(RIGLA_DOMAIN, result);
+        const $ = load(result.html);
+        $(".alphabet-forms a[href*='/product/'], a.alphabet-forms__item-link[href*='/product/']").each((_index, node) => {
+          const parsed = riglaProduct($(node).attr("href") ?? "");
+          const title = compactText($(node).attr("title") || $(node).text());
+          if (!parsed || !matchesBrand(title, brand)) return;
+          refs.set(parsed.id, productRef(RIGLA_DOMAIN, parsed.id, brand, parsed.url, title, "rigla-letter-index"));
+        });
+      }
+    }
     appendPrevious(refs, RIGLA_DOMAIN, brand, context, riglaProduct);
     if (!refs.size && provedMissing === slugs.length) return [];
     if (!refs.size) throw new AdapterBlockedError(`${RIGLA_DOMAIN}: страницы форм не доказали результат поиска`);

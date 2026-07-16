@@ -710,6 +710,26 @@ export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
         lastError = error;
       }
     }
+    if (!liveRefs.size && successfulPages === 0) {
+      const initial = brand.normalize("NFKC").trim().charAt(0).toLocaleUpperCase("ru-RU");
+      if (initial) {
+        try {
+          const source = new URL(`https://www.${BUD_DOMAIN}/letter/${encodeURIComponent(initial)}`);
+          const page = await requestPage(source, context, this.fetchImpl, BUD_TRANSLATE_HOST);
+          page.$(".alphabet-forms a[href*='/product/'], a.alphabet-forms__item-link[href*='/product/']").each((_index, node) => {
+            const parsed = budRef(page.$(node).attr("href") ?? "");
+            const title = compactText(page.$(node).attr("title") || page.$(node).text());
+            if (!parsed || !matchesBrand(title, brand)) return;
+            liveRefs.set(parsed.id, {
+              domain: BUD_DOMAIN, platform: BUD_DOMAIN, listingId: parsed.id, brand,
+              url: parsed.url, title, metadata: { discovery: "translated-first-party-letter-index" }
+            });
+          });
+        } catch (error) {
+          lastError = error;
+        }
+      }
+    }
     if (!liveRefs.size && !refs.size) {
       if (successfulPages === slugs.length && explicitNoResults === slugs.length) return [];
       if (successfulPages === 0 && lastError instanceof Error) throw lastError;

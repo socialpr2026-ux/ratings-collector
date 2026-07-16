@@ -116,6 +116,24 @@ describe("OkaptekaAdapter", () => {
 });
 
 describe("RiglaAdapter", () => {
+  it("falls back to the complete letter index when the brand form was removed", async () => {
+    const letter = `<!doctype html><html><body><div class="alphabet-forms">
+      <a class="alphabet-forms__item-link" href="/product/baktoblis-tab-dlya-rassasyv-30g-no30-109834"><span>Бактоблис таблетки для рассасывания 30г №30</span></a>
+      <a class="alphabet-forms__item-link" href="/product/baktoblis-poroshok-dlya-vzr-i-det-ot-15let-sashe-paket-1500mg-no15-bad-5005556"><span>Бактоблис порошок саше 1500мг №15</span></a>
+    </div></body></html>`;
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestedUrl(input);
+      return url.pathname.startsWith("/forms/")
+        ? new Response("missing", { status: 404 })
+        : new Response(letter, { status: 200 });
+    });
+
+    const refs = await new RiglaAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch).discover("Бактоблис", context);
+
+    expect(refs.map((item) => item.listingId)).toEqual(["5005556", "109834"]);
+    expect(new URL(String(fetchSpy.mock.calls.at(-1)?.[0])).pathname).toBe("/letter/%D0%91");
+  });
+
   it("uses the public forms page for discovery and complete SSR review objects for metrics", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = requestedUrl(input);
