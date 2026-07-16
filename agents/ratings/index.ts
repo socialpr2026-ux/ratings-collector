@@ -9,7 +9,7 @@ import { readAgentJson } from "../../src/server/utils/agent-request.js";
 import { safeErrorMessage } from "../../src/server/utils/error-message.js";
 import { loadPlaywright } from "../../src/server/utils/playwright-runtime.js";
 import { playwrightCdpBaseUrl } from "../../src/server/utils/sandbox-cdp.js";
-import { assertSafePublicDestination, isPrivateNetworkAddress, readTextBounded } from "../../src/server/utils/safe-fetch.js";
+import { assertSafePublicDestination, isPrivateNetworkAddress } from "../../src/server/utils/safe-fetch.js";
 
 type BrowserApi = { cdpUrl: string };
 type SandboxCommands = { run(command: string): Promise<unknown> };
@@ -76,16 +76,6 @@ function normalizedVisibleText(value: string): string {
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim()
     .replace(/\s+/g, " ");
-}
-
-function isCompleteYandexSitemap(url: URL, response: Response): Promise<boolean> {
-  if (!response.ok || !url.pathname.startsWith("/ugcpub/")) return Promise.resolve(response.ok);
-  const expected = url.pathname === "/ugcpub/sitemap.xml"
-    ? { open: /<sitemapindex\b/i, close: /<\/sitemapindex\s*>/i }
-    : { open: /<urlset\b/i, close: /<\/urlset\s*>/i };
-  return readTextBounded(response.clone(), 12_000_000, 20_000)
-    .then((body) => expected.open.test(body) && expected.close.test(body))
-    .catch(() => false);
 }
 
 export function hasExplicitWildberriesNoResults(bodyText: string, query: string): boolean {
@@ -336,14 +326,18 @@ export function browserFetch(
         throw error;
       }
     }
-    if (staticProxy && (fixedYandexTarget || fixedZdravcityTarget)) {
+    if (staticProxy && fixedYandexTarget) {
+      // EdgeOne's direct egress can leave an exact Yandex sitemap or product
+      // request pending until the adapter's 90-second discovery deadline.
+      // The fixed Function route is the proven collector path for these
+      // allowlisted URLs, so use it immediately. Its response still passes
+      // through the adapter's strict XML/product proof and fail-closed checks.
+      return fetchViaStaticProxy(url, request.signal);
+    }
+    if (staticProxy && fixedZdravcityTarget) {
       try {
         const direct = await fetch(request);
-        const yandexSitemapIncomplete = fixedYandexTarget && url.pathname.startsWith("/ugcpub/")
-          ? !await isCompleteYandexSitemap(url, direct)
-          : false;
-        const shouldFallback = yandexSitemapIncomplete ||
-          [403, 408, 425, 429].includes(direct.status) || direct.status >= 500;
+        const shouldFallback = [403, 408, 425, 429].includes(direct.status) || direct.status >= 500;
         if (!shouldFallback) return direct;
         const proxied = await fetchViaStaticProxy(url, request.signal);
         if (proxied.ok) {

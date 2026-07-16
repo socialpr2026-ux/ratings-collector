@@ -313,7 +313,33 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("falls back when direct Yandex egress returns a successful but incomplete sitemap", async () => {
+  it("uses fixed function egress before a hanging direct Yandex request", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input instanceof Request) return new Promise<Response>(() => undefined);
+      expect(input).toBe("https://ratings.example/api/internal/static-review-fetch");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        url: "https://reviews.yandex.ru/ugcpub/sitemap.xml"
+      });
+      return new Response("<?xml version=\"1.0\"?><sitemapindex></sitemapindex>", {
+        headers: { "content-type": "application/xml" }
+      });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch("https://reviews.yandex.ru/ugcpub/sitemap.xml");
+
+    expect(response.ok).toBe(true);
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(directFetch.mock.calls[0]?.[0]).not.toBeInstanceOf(Request);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("does not probe direct Yandex egress before the complete fixed-route sitemap", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => input instanceof Request
       ? new Response("<html><body>temporary edge response</body></html>", {
@@ -334,10 +360,9 @@ describe("ratings Agent lazy Sandbox routing", () => {
     const response = await routedFetch(target);
 
     expect(await response.text()).toContain("test--1792372750");
-    expect(directFetch).toHaveBeenCalledTimes(2);
-    expect(directFetch.mock.calls[0]?.[0]).toBeInstanceOf(Request);
-    expect(directFetch.mock.calls[1]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
-    expect(JSON.parse(String((directFetch.mock.calls[1]?.[1] as RequestInit).body))).toEqual({ url: target });
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(directFetch.mock.calls[0]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+    expect(JSON.parse(String((directFetch.mock.calls[0]?.[1] as RequestInit).body))).toEqual({ url: target });
     expect(run).not.toHaveBeenCalled();
   });
 
