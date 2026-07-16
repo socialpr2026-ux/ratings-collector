@@ -4,6 +4,7 @@ import { COMPANY_BRANDS, INITIAL_BRANDS, INITIAL_DOMAINS } from "../../src/share
 import type { RunState } from "../../src/shared/types.js";
 import { authenticate, authConfig, type AuthUser } from "../../src/server/auth.js";
 import { BlobEvidenceStore, BlobRepository } from "../../src/server/blob-repository.js";
+import { reconcileStaleCollectionCheckpoint } from "../../src/server/collection-checkpoint.js";
 import { RatingsService } from "../../src/server/orchestrator.js";
 import type { RepositoryRpc } from "../../src/server/remote-repository.js";
 import { prepareBrowserPublication, reconcileBrowserPublication } from "../../src/server/sheets/publication-state.js";
@@ -2692,6 +2693,7 @@ export default async function onRequest(context: Context): Promise<Response> {
       let run = await service.getRun(decodeURIComponent(runMatch[1]));
       if (!run) return json({ error: "Запуск не найден" }, 404);
       assertOwner(run, user);
+      if (reconcileStaleCollectionCheckpoint(run)) await repository.saveRun(run);
       if (run.status !== "published") run = await reconcileBrowserPublication(repository, run);
       return json(pagedRun(run, url));
     }
