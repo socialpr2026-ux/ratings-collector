@@ -244,6 +244,32 @@ describe("additional pharmacy adapters", () => {
     expect(new URL(String(fetchSpy.mock.calls[1][0])).pathname).toBe(productPath);
   });
 
+  it("keeps Bud Zdorov's complete written-review count when some reviews have no star score", async () => {
+    const productPath = "/product/kagotsel-tab-12mg-no10-15027";
+    const productSource = `https://www.budzdorov.ru${productPath}`;
+    const reviews = [
+      { id: 9094, ratings: [{ attribute_code: "Оценка", value: 5 }] },
+      { id: 8892, ratings: [{ attribute_code: "Оценка", value: 5 }] },
+      { id: 8015, ratings: [] },
+      { id: 4688, ratings: [{ attribute_code: "Оценка", value: 5 }] },
+      { id: 1345, ratings: [{ attribute_code: "Оценка", value: 5 }] },
+      { id: 1250, ratings: [] }
+    ];
+    const product = translated(productSource,
+      `<h1>Кагоцел таблетки 0,012г №10</h1><div allreviewsqty="6"></div>` +
+      `<script>window.__INITIAL_STATE__=${JSON.stringify({ productView: { reviews } })};document.currentScript.remove()</script>`);
+    const ref = {
+      domain: "budzdorov.ru", platform: "budzdorov.ru", listingId: "15027", brand: "Кагоцел",
+      url: productSource, metadata: {}
+    };
+
+    await expect(new BudZdorovAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(product, { status: 200 })) as unknown as typeof fetch).collect(ref, context))
+      .resolves.toMatchObject({
+        listingId: "15027", reviews: 6, rating: null, ratingUnavailable: true, status: "ok"
+      });
+  });
+
   it("accepts Bud Zdorov's current self-removing state script but rejects an unknown executable suffix", async () => {
     const productPath = "/product/baktoblis-plyus-tabdlya-rassas-950mg-no30-ddet-starshe-3-kh-let-i-vzr-bad-5005555";
     const productSource = `https://www.budzdorov.ru${productPath}`;

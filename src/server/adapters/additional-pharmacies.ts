@@ -781,18 +781,31 @@ export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
     }
     const ids = new Set<string>();
     let sum = 0;
+    let ratedReviews = 0;
     for (const review of reviews) {
       const id = String(review.id ?? "");
-      const scores = (review.ratings ?? []).filter((item) => String(item.attribute_code ?? "").toLocaleLowerCase("ru-RU") === "оценка");
-      const score = scores.length === 1 ? exactRating(scores[0].value) : undefined;
-      if (!id || ids.has(id) || score === undefined) {
+      if (!id || ids.has(id) || !Array.isArray(review.ratings)) {
         throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: review identities or scores are incomplete`);
       }
       ids.add(id);
+      const scores = review.ratings.filter((item) =>
+        String(item.attribute_code ?? "").toLocaleLowerCase("ru-RU") === "оценка"
+      );
+      if (scores.length === 0) continue;
+      const score = scores.length === 1 ? exactRating(scores[0].value) : undefined;
+      if (score === undefined) {
+        throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: review identities or scores are incomplete`);
+      }
       sum += score;
+      ratedReviews += 1;
     }
-    const value = reviews.length ? Math.round(sum / reviews.length * 10) / 10 : null;
-    return observation(this.evidence, ref, page, {
+    // Bud Zdorov allows a written product review without a star rating. The
+    // complete, unique review list still proves feedback count, but a partial
+    // set of scores does not prove the product's aggregate rating.
+    const value = reviews.length && ratedReviews === reviews.length
+      ? Math.round(sum / reviews.length * 10) / 10
+      : null;
+    const result = await observation(this.evidence, ref, page, {
       domain: BUD_DOMAIN,
       title,
       canonicalUrl: parsedRef.url,
@@ -800,6 +813,8 @@ export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
       rating: value,
       source: "budzdorov-complete-review-state:google-translate"
     });
+    if (reviews.length > 0 && ratedReviews < reviews.length) result.ratingUnavailable = true;
+    return result;
   }
 }
 
