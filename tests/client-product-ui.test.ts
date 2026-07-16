@@ -14,9 +14,10 @@ describe("Interfox Ratings product shell", () => {
     expect(appSource).not.toContain("Без Google API-ключей");
   });
 
-  it("keeps both footer wordmark parts on one text baseline", () => {
-    expect(appSource).toContain('<span className="footer-brand"><strong>Interfox</strong><span>Ratings</span></span>');
+  it("keeps the footer wordmark on one baseline with a one-pixel optical correction", () => {
+    expect(appSource).toContain('<span className="footer-brand"><strong>Interfox</strong><span className="footer-ratings">Ratings</span></span>');
     expect(stylesSource).toMatch(/\.footer-brand\s*\{[^}]*display:\s*inline-flex;[^}]*align-items:\s*baseline;/);
+    expect(stylesSource).toMatch(/\.footer-ratings\s*\{[^}]*position:\s*relative;[^}]*top:\s*1px;/);
   });
 
   it("presents the three business categories in the employee workflow order", () => {
