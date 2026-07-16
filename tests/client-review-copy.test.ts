@@ -30,6 +30,12 @@ describe("review summary copy", () => {
     );
   });
 
+  it("explains that completed brand partitions remain publishable", () => {
+    expect(reviewIntroText(0, 1, true)).toBe(
+      "Спорных карточек нет, но сбор завершён не полностью. Не завершено проверок: 1. Готовые сочетания площадок и брендов можно записать отдельно."
+    );
+  });
+
   it("keeps the normal clean-run message when every partition completed", () => {
     expect(reviewIntroText(0, 0)).toBe(
       "Все карточки определены. Результат готов к записи в таблицу."
@@ -105,8 +111,16 @@ describe("plain-language feedback", () => {
       "ozon.ru / Даксабрис: quota_exceeded: квота исчерпана",
       "irecommend.ru:11557796: статус needs_review"
     ])).toEqual([
-      "ozon.ru: исчерпан доступный лимит сбора (2 проверки).",
+      "ozon.ru / Тикализис, Даксабрис: исчерпан доступный лимит сбора.",
       "irecommend.ru: проверьте найденную карточку выше."
+    ]);
+  });
+
+  it("keeps the failed brand visible when other brands from the same site succeeded", () => {
+    expect(summarizeIssues([
+      "ozon.ru / Церетон: blocked: storefront did not complete"
+    ])).toEqual([
+      "ozon.ru / Церетон: площадка не дала завершить автоматический сбор."
     ]);
   });
 
