@@ -93,6 +93,42 @@ describe("EaptekaAdapter", () => {
     expect(evidence.items.size).toBe(1);
   });
 
+  it("accepts Eapteka's source-bound singular rating wording when the review header omits the count", async () => {
+    const title = "БактоБЛИС без сахара таблетки для рассасывания массой 810 мг 30 шт";
+    const fetchMock = vi.fn(async () => new Response(`<html><body><h1>${title}</h1>
+      <script>dataLayer.push({item_reviews_count:1,item_rating:4});</script>
+      <section class="sec-item__reviews" data-entity-reviews="525541"
+        data-offer='{"itemId":525541,"itemCount":1,"itemRating":4}'>
+        <h4 class="sec-item__reviews-header">${title}: отзывы покупателей и фармацевтов</h4>
+        <div class="sec-item__rating-value">4</div><p>на основе 1 оценки</p>
+        <div class="reviews-application-container"></div>
+      </section></body></html>`, { status: 200 })) as unknown as typeof fetch;
+
+    const observation = await new EaptekaAdapter(new MemoryEvidenceStore(), fetchMock).collect({
+      domain: "eapteka.ru", platform: "eapteka.ru", listingId: "525541", brand: "Бактоблис",
+      url: "https://www.eapteka.ru/goods/id525541/", metadata: {}
+    }, context);
+
+    expect(observation).toMatchObject({ reviews: 1, rating: 4, ratingCount: 1, status: "ok" });
+  });
+
+  it("fails closed when Eapteka's visible review and rating totals disagree", async () => {
+    const title = "БактоБЛИС таблетки 30 шт";
+    const adapter = new EaptekaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(`<html><body><h1>${title}</h1>
+      <script>dataLayer.push({item_reviews_count:2,item_rating:5});</script>
+      <section class="sec-item__reviews" data-entity-reviews="525541"
+        data-offer='{"itemId":525541,"itemCount":2,"itemRating":5}'>
+        <h4 class="sec-item__reviews-header">${title}: 2 отзыва покупателей</h4>
+        <div class="sec-item__rating-value">5</div><p>на основе 1 оценки</p>
+        <div class="reviews-application-container"></div>
+      </section></body></html>`, { status: 200 })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "eapteka.ru", platform: "eapteka.ru", listingId: "525541", brand: "Бактоблис",
+      url: "https://www.eapteka.ru/goods/id525541/", metadata: {}
+    }, context)).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
   it("ignores Eapteka's stale dataLayer rating when the product has no visible review section", async () => {
     const productUrl = "https://www.eapteka.ru/goods/id217962/";
     const productBody = `<h1>Церетон капсулы 400 мг 14 шт</h1>
@@ -247,6 +283,16 @@ URL Source: ${productUrl}
     const health = await adapter.healthCheck(context);
     expect(health).toMatchObject({ ok: false });
     expect(health.message).toContain("parser_changed");
+  });
+
+  it("keeps the direct health canary healthy when exact listing cards no longer expose search aggregates", async () => {
+    const fetchMock = vi.fn(async () => new Response(`<html><body>
+      <article class="listing-card"><a href="/goods/id208826/" title="Кагоцел таблетки 12 мг 10 шт">Кагоцел</a></article>
+    </body></html>`, { status: 200 })) as unknown as typeof fetch;
+
+    await expect(new EaptekaAdapter(new MemoryEvidenceStore(), fetchMock).healthCheck(context)).resolves.toMatchObject({
+      ok: true, message: "eapteka.ru: direct search is healthy"
+    });
   });
 
   it("recovers a cloud-blocked search and product through fixed source-bound routes", async () => {
