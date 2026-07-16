@@ -447,7 +447,7 @@ describe("Ozon browser collector", () => {
     expect(observations.every((item) => item.source === "ozon:search-html:google-translate")).toBe(true);
   });
 
-  it("stops before the next detail proof when one SKU stays blocked after its retries", async () => {
+  it("keeps proven search-tile metrics for review when one exact product page stays blocked", async () => {
     const items = Array.from({ length: 9 }, (_value, index) => {
       const sku = String(710000 + index);
       return translatedTile(sku, `Кагоцел 12 мг ${index + 10} шт`, "5.0", index + 1);
@@ -474,8 +474,26 @@ describe("Ozon browser collector", () => {
       detailRetryDelayMs: 0
     });
 
-    await expect(adapter.discover("Кагоцел", context)).rejects.toThrow(/HTTP 502/);
-    expect(detailCalls).toEqual(["710000", "710000", "710000"]);
+    const refs = await adapter.discover("Кагоцел", context);
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context)));
+
+    expect(refs).toHaveLength(9);
+    expect(detailCalls).toEqual([
+      "710000", "710000", "710000",
+      "710001", "710002", "710003", "710004", "710005", "710006", "710007", "710008"
+    ]);
+    expect(refs[0]?.metadata).toMatchObject({
+      exactProductFallback: "search_tile",
+      exactProductFallbackReason: expect.stringMatching(/HTTP 502/)
+    });
+    expect(observations[0]).toMatchObject({
+      listingId: "710000",
+      reviews: 1,
+      rating: 5,
+      status: "needs_review",
+      source: "ozon:search-html:google-translate:search-tile-fallback"
+    });
+    expect(observations.slice(1).every((item) => item.status === "ok")).toBe(true);
   });
 
   it("accepts zero products only with an explicit Ozon empty-state proof", async () => {

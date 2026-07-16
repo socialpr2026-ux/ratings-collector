@@ -144,11 +144,10 @@ async function forEachWithConcurrency<T>(
 }
 
 function brandConcurrency(domain: string): number {
-  // Ozon is serialized so the live Apify fallback quota is checked between
-  // capped Actor calls. WB keeps its own request queue, while Yandex reuses one
-  // browser-backed cache. A generated SiteProfile carries one domain-wide rate
-  // limit, so unknown domains must not run several brand partitions at once.
-  return domain === "wildberries.ru" || domain === "market.yandex.ru" ? 4 : 1;
+  // WB keeps its own low-rate request queue. Ozon and Yandex can both fall back
+  // to a shared Google Translate route, so their brands stay serialized. A
+  // generated SiteProfile also carries one domain-wide rate limit.
+  return domain === "wildberries.ru" ? 4 : 1;
 }
 
 const SUCCESSFUL_PARTITION_STATUSES = new Set(["complete", "no_results"]);
