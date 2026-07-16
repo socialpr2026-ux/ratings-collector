@@ -18,7 +18,10 @@ const SOURCE = "ozon:composer-api:edgeone-browser";
 const TRANSLATE_SOURCE = "ozon:search-html:google-translate";
 const DEFAULT_MAX_PAGES = 50;
 const DEFAULT_MAX_DOCUMENT_BYTES = 15_000_000;
-const DEFAULT_DETAIL_CONCURRENCY = 4;
+const DEFAULT_DETAIL_CONCURRENCY = 1;
+const DEFAULT_DETAIL_DELAY_MS = 350;
+const DEFAULT_DETAIL_RETRY_DELAY_MS = 750;
+const MAX_DETAIL_ATTEMPTS = 3;
 const MAX_TRANSLATE_REDIRECTS = 2;
 const EXACT_TRANSLATE_PROOF = "ozon:product-json-ld:google-translate";
 
@@ -73,6 +76,8 @@ export type OzonBrowserAdapterOptions = {
   maxPages?: number;
   maxDocumentBytes?: number;
   detailConcurrency?: number;
+  detailDelayMs?: number;
+  detailRetryDelayMs?: number;
   now?: () => Date;
   /** Test-only escape hatch for composer-specific fixtures. Production stays translate-first. */
   translateEnabled?: boolean;
@@ -439,7 +444,7 @@ type ExactProductMetrics = {
 async function mapWithConcurrency<T, R>(
   values: readonly T[],
   concurrency: number,
-  mapper: (value: T) => Promise<R>
+  mapper: (value: T, index: number) => Promise<R>
 ): Promise<R[]> {
   const results = new Array<R>(values.length);
   let cursor = 0;
@@ -449,7 +454,7 @@ async function mapWithConcurrency<T, R>(
     while (!stopped && cursor < values.length) {
       const index = cursor++;
       try {
-        results[index] = await mapper(values[index]!);
+        results[index] = await mapper(values[index]!, index);
       } catch (error) {
         if (!stopped) firstError = error;
         stopped = true;
@@ -578,6 +583,9 @@ export class OzonBrowserAdapter implements SiteAdapter {
   private readonly now: () => Date;
   private readonly translateEnabled: boolean;
   private readonly detailConcurrency: number;
+  private readonly detailDelayMs: number;
+  private readonly detailRetryDelayMs: number;
+  private readonly searchPageCache = new Map<string, SearchPage>();
 
   constructor(options: OzonBrowserAdapterOptions = {}) {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
@@ -586,20 +594,31 @@ export class OzonBrowserAdapter implements SiteAdapter {
     this.now = options.now ?? (() => new Date());
     this.translateEnabled = options.translateEnabled ?? true;
     this.detailConcurrency = options.detailConcurrency ?? DEFAULT_DETAIL_CONCURRENCY;
+    this.detailDelayMs = options.detailDelayMs ?? DEFAULT_DETAIL_DELAY_MS;
+    this.detailRetryDelayMs = options.detailRetryDelayMs ?? DEFAULT_DETAIL_RETRY_DELAY_MS;
     if (!Number.isInteger(this.maxPages) || this.maxPages < 1 || this.maxPages > 100) {
       throw new RangeError("Ozon browser maxPages must be an integer from 1 to 100");
     }
     if (!Number.isInteger(this.detailConcurrency) || this.detailConcurrency < 1 || this.detailConcurrency > 8) {
       throw new RangeError("Ozon detailConcurrency must be an integer from 1 to 8");
     }
+    if (!Number.isInteger(this.detailDelayMs) || this.detailDelayMs < 0 || this.detailDelayMs > 5_000) {
+      throw new RangeError("Ozon detailDelayMs must be an integer from 0 to 5000");
+    }
+    if (!Number.isInteger(this.detailRetryDelayMs) || this.detailRetryDelayMs < 0 || this.detailRetryDelayMs > 10_000) {
+      throw new RangeError("Ozon detailRetryDelayMs must be an integer from 0 to 10000");
+    }
   }
 
   async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
     const checkedAt = this.now().toISOString();
     try {
-      const page = await this.fetchSearchPage("Арбидол", 1, context, "health_check");
-      if (page.rawItemCount === 0) throw new ParserChangedError("Ozon canary search returned no tiles");
-      return { ok: true, checkedAt, message: "Ozon composer search schema is valid" };
+      const brand = context.brands?.[0]?.normalize("NFKC").trim() || "Арбидол";
+      const page = await this.fetchSearchPage(brand, 1, context, "health_check");
+      if (page.rawItemCount === 0 && page.totalPages !== 0) {
+        throw new ParserChangedError("Ozon canary search proved neither products nor an empty result");
+      }
+      return { ok: true, checkedAt, message: `Ozon search schema is valid for ${brand}` };
     } catch (error) {
       return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
     }
@@ -661,7 +680,11 @@ export class OzonBrowserAdapter implements SiteAdapter {
     await mapWithConcurrency(
       matchedProducts.filter((product) => product.source === TRANSLATE_SOURCE),
       this.detailConcurrency,
-      async (product) => {
+      async (product, index) => {
+        if (index > 0 && this.detailDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, this.detailDelayMs));
+          context.signal?.throwIfAborted();
+        }
         const ref: ProductRef = {
           domain: PLATFORM_DOMAIN,
           platform: PLATFORM_ID,
@@ -671,7 +694,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
           title: product.title,
           metadata: { source: product.source }
         };
-        const exact = await this.fetchExactTranslatedProduct(ref, product.listingId, context);
+        const exact = await this.fetchExactTranslatedProductWithRetry(ref, product.listingId, context);
         if (!matchesBrand(exact.product, requestedBrand)) {
           throw new ParserChangedError("Ozon translated product JSON-LD belongs to a different brand");
         }
@@ -727,7 +750,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
             rawRating,
             aggregateGroupId: asString(ref.metadata.exactProductAggregateGroupId)
           }
-        : await this.fetchExactTranslatedProduct(ref, listingId, context);
+        : await this.fetchExactTranslatedProductWithRetry(ref, listingId, context);
       if (!matchesBrand(exact.product, ref.brand)) {
         throw new ParserChangedError("Ozon translated product JSON-LD belongs to a different brand");
       }
@@ -828,16 +851,59 @@ export class OzonBrowserAdapter implements SiteAdapter {
     });
   }
 
+  private async fetchExactTranslatedProductWithRetry(
+    ref: ProductRef,
+    listingId: string,
+    context: AdapterContext
+  ): Promise<ExactProductMetrics> {
+    let lastFailure: AdapterBlockedError | undefined;
+    for (let attempt = 1; attempt <= MAX_DETAIL_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.fetchExactTranslatedProduct(ref, listingId, context);
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        if (!(error instanceof AdapterBlockedError) || attempt === MAX_DETAIL_ATTEMPTS) throw error;
+        lastFailure = error;
+        const delay = this.detailRetryDelayMs * attempt;
+        await reportActivity(context, {
+          operationId: `ozon:translate-product-retry:${listingId}:${attempt}`,
+          stage: "collection",
+          label: "Пауза перед повтором карточки Ozon",
+          listingId,
+          channels: ["google_translate"],
+          status: "active",
+          detail: `Попытка ${attempt + 1} из ${MAX_DETAIL_ATTEMPTS}`
+        });
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+        context.signal?.throwIfAborted();
+      }
+    }
+    throw lastFailure ?? new AdapterBlockedError("Ozon product proof did not complete");
+  }
+
   private async fetchSearchPage(
     brand: string,
     page: number,
     context: AdapterContext,
     stage: "health_check" | "discovery" = "discovery"
   ): Promise<SearchPage> {
+    const cacheKey = [
+      context.runId ?? "unscoped",
+      context.region,
+      brand.normalize("NFKC").toLocaleLowerCase("ru-RU"),
+      page
+    ].join("\u0000");
+    const cached = this.searchPageCache.get(cacheKey);
+    if (cached) {
+      if (stage === "discovery") this.searchPageCache.delete(cacheKey);
+      return cached;
+    }
     let translateFailure: AdapterBlockedError | ParserChangedError | undefined;
     if (this.translateEnabled) {
       try {
-        return await this.fetchTranslatedSearchPage(brand, page, context, stage);
+        const translated = await this.fetchTranslatedSearchPage(brand, page, context, stage);
+        if (stage === "health_check") this.searchPageCache.set(cacheKey, translated);
+        return translated;
       } catch (error) {
         if (context.signal?.aborted) throw error;
         translateFailure = error instanceof ParserChangedError || error instanceof AdapterBlockedError
@@ -847,7 +913,9 @@ export class OzonBrowserAdapter implements SiteAdapter {
     }
 
     try {
-      return await this.fetchComposerSearchPage(brand, page, context, stage);
+      const composer = await this.fetchComposerSearchPage(brand, page, context, stage);
+      if (stage === "health_check") this.searchPageCache.set(cacheKey, composer);
+      return composer;
     } catch (composerFailure) {
       if (!translateFailure) throw composerFailure;
       const message = `Ozon translated search: ${translateFailure.message}; composer browser: ${composerFailure instanceof Error ? composerFailure.message : String(composerFailure)}`;
