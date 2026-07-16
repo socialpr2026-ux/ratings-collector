@@ -144,6 +144,15 @@ function brandSlugs(brand: string): string[] {
   return [...new Set(aliasesForBrand(brand).map(latinSlug).filter(Boolean))];
 }
 
+function riglaBrandSlugs(brand: string): string[] {
+  const aliases = aliasesForBrand(brand);
+  const siteSpecific = aliases
+    .filter((alias) => /ц/i.test(alias))
+    .map((alias) => latinSlug(alias.toLocaleLowerCase("ru-RU").replaceAll("ц", "тс")))
+    .filter(Boolean);
+  return [...new Set([...siteSpecific, ...aliases.map(latinSlug).filter(Boolean)])];
+}
+
 async function evidenceObservation(
   evidence: EvidenceStore,
   input: {
@@ -411,12 +420,15 @@ export class RiglaAdapter extends PharmacyAdapter {
   readonly id = "pharmacy:rigla:v1";
   readonly supportedDomains = [RIGLA_DOMAIN, `www.${RIGLA_DOMAIN}`] as const;
 
-  healthCheck(context: AdapterContext): Promise<AdapterHealth> { return this.canary("Кагоцел", context); }
+  healthCheck(context: AdapterContext): Promise<AdapterHealth> {
+    return this.canary(context.brands?.[0]?.trim() || "Кагоцел", context);
+  }
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = new Map<string, ProductRef>();
     let provedMissing = 0;
-    for (const slug of brandSlugs(brand)) {
+    const slugs = riglaBrandSlugs(brand);
+    for (const slug of slugs) {
       const source = `${RIGLA_ORIGIN}/forms/${slug}`;
       const result = await requestHtml(source, context, this.fetchImpl);
       if (result.status === 404 || result.status === 410) { provedMissing += 1; continue; }
@@ -433,7 +445,7 @@ export class RiglaAdapter extends PharmacyAdapter {
       if (refs.size) break;
     }
     appendPrevious(refs, RIGLA_DOMAIN, brand, context, riglaProduct);
-    if (!refs.size && provedMissing === brandSlugs(brand).length) return [];
+    if (!refs.size && provedMissing === slugs.length) return [];
     if (!refs.size) throw new AdapterBlockedError(`${RIGLA_DOMAIN}: страницы форм не доказали результат поиска`);
     return [...refs.values()].sort((a, b) => (a.title ?? "").localeCompare(b.title ?? "", "ru") || a.listingId.localeCompare(b.listingId));
   }

@@ -155,7 +155,30 @@ describe("EaptekaAdapter", () => {
     await expect(adapter.collect({
       domain: "eapteka.ru", platform: "eapteka.ru", listingId: "217962", brand: "Церетон",
       url: productUrl, metadata: {}
-    }, context)).rejects.toThrow(/source-bound empty review proof/);
+    }, context)).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
+  it("uses an independent exact reader to prove zero when stale Eapteka counters have no review UI", async () => {
+    const productUrl = "https://www.eapteka.ru/goods/id217962/";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestedUrl(input);
+      if (url.hostname === "www.eapteka.ru") return new Response(`<h1>Церетон капсулы 400 мг 14 шт</h1>
+        <script>dataLayer.push({item_reviews_count:2,item_rating:5});</script>`, { status: 200 });
+      if (url.hostname === "r.jina.ai") return new Response(`Title: Церетон капсулы 400 мг 14 шт - купить
+URL Source: ${productUrl}
+
+Арт. 217962
+
+## Инструкция`, { status: 200 });
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch;
+
+    const result = await new EaptekaAdapter(new MemoryEvidenceStore(), fetchMock).collect({
+      domain: "eapteka.ru", platform: "eapteka.ru", listingId: "217962", brand: "Церетон",
+      url: productUrl, metadata: {}
+    }, context);
+
+    expect(result).toMatchObject({ reviews: 0, rating: null, ratingCount: 0, status: "no_reviews", source: "eapteka-reader-product" });
   });
 
   it("publishes a proved zero as no_reviews and leaves rating empty", async () => {

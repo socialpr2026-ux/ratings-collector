@@ -168,4 +168,21 @@ describe("partition completeness QA", () => {
       "example.com / Бренд: quota_exceeded: месячная квота исчерпана"
     ]);
   });
+
+  it("accepts an explicitly excluded failed partition only after its partial observations are removed", () => {
+    const run = runWithCounts(1, 0, false);
+    run.partitions[0] = { ...run.partitions[0], status: "blocked", message: "HTTP 502" };
+    run.publicationExclusions = [{
+      domain: "example.com", brand: "Бренд", reason: "HTTP 502", excludedAt: new Date().toISOString()
+    }];
+
+    expect(validateRun(run)).toMatchObject({
+      ok: true,
+      blockers: [],
+      warnings: [expect.stringContaining("текущий месяц останется пустым")]
+    });
+
+    run.observations = runWithCounts(1, 1).observations;
+    expect(validateRun(run).blockers.join(" ")).toContain("карточка исключённого раздела");
+  });
 });

@@ -2435,9 +2435,13 @@ export default async function onRequest(context: Context): Promise<Response> {
       return json(pagedRun(run, url));
     }
     if (context.request.method === "POST" && publishMatch) {
-      const run = await service.getRun(decodeURIComponent(publishMatch[1]));
+      let run = await service.getRun(decodeURIComponent(publishMatch[1]));
       if (!run) return json({ error: "Запуск не найден" }, 404);
       assertOwner(run, user);
+      const body = await context.request.json().catch(() => ({})) as { excludeFailedPartitions?: boolean };
+      if (body.excludeFailedPartitions === true) {
+        run = await service.excludeFailedPartitionsFromPublication(run.id);
+      }
       const intent = await prepareBrowserPublication(repository, service, run);
       return json(pagedRun(intent.run, url), intent.shouldPublish ? 202 : 200);
     }

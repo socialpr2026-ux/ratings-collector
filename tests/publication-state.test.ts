@@ -39,6 +39,25 @@ function service(repository: MemoryRepository) {
 }
 
 describe("anonymous browser publication state", () => {
+  it("publishes successful partitions after explicitly excluding failures and removes their partial cards", async () => {
+    const repository = new MemoryRepository();
+    const ratings = service(repository);
+    const current = run();
+    current.request.domains = ["example.com", "blocked.example"];
+    current.progress = { totalPartitions: 2, completedPartitions: 2 };
+    current.partitions.push({ domain: "blocked.example", brand: "Brand", status: "blocked", discovered: 1, collected: 0, message: "HTTP 502" });
+    current.observations.push({ ...current.observations[0], domain: "blocked.example", platform: "blocked", listingId: "bad", canonicalUrl: "https://blocked.example/products/bad" });
+    current.payloadHash = "incomplete";
+    await repository.saveRun(current);
+
+    const scoped = await ratings.excludeFailedPartitionsFromPublication(current.id);
+
+    expect(scoped.observations.map((item) => item.domain)).toEqual(["example.com"]);
+    expect(scoped.publicationExclusions).toMatchObject([{ domain: "blocked.example", brand: "Brand" }]);
+    expect(scoped.qa).toMatchObject({ ok: true, blockers: [] });
+    await expect(prepareBrowserPublication(repository, ratings, scoped)).resolves.toMatchObject({ shouldPublish: true });
+  });
+
   it("reserves, commits and deduplicates the same month payload", async () => {
     const repository = new MemoryRepository();
     const ratings = service(repository);

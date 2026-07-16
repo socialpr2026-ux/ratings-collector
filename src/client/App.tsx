@@ -8,6 +8,7 @@ import {
   BRAND_SHEET_COLUMNS_TEXT,
   brandSheetDestinationText,
   canConfirmObservation,
+  canPublishSuccessfulPartitions,
   canRetryFailedPartitions,
   finalProductLabel,
   friendlyErrorMessage,
@@ -635,12 +636,15 @@ export function App() {
     }
   }
 
-  async function publish() {
+  async function publish(excludeFailedPartitions = false) {
     if (!run) return;
     setBusyAction("publish");
     setError("");
     try {
-      const intent = await api(`/api/runs/${run.id}/publish`, { method: "POST", body: "{}" }) as RunState;
+      const intent = await api(`/api/runs/${run.id}/publish`, {
+        method: "POST",
+        body: JSON.stringify({ excludeFailedPartitions })
+      }) as RunState;
       setRun(intent);
       if (intent.status === "publishing") {
         if (!config?.agentMode) throw new Error("Запись в таблицу пока доступна только в облачной версии сервиса");
@@ -719,7 +723,12 @@ export function App() {
     return new Map(items.map((item, index) => [productKey(item), labels[index]]));
   }, [run?.observations]);
   const publicationSummary = useMemo(() => {
-    const items = run?.observations.filter((item) => ["ok", "no_reviews"].includes(item.status)) ?? [];
+    const successfulKeys = new Set((run?.partitions ?? [])
+      .filter((partition) => ["complete", "no_results"].includes(partition.status))
+      .map((partition) => `${partition.domain}\u0000${partition.brand}`));
+    const items = run?.observations.filter((item) =>
+      ["ok", "no_reviews"].includes(item.status) && successfulKeys.has(`${item.domain}\u0000${item.brand}`)
+    ) ?? [];
     return {
       cards: items.length,
       brands: new Set(items.map((item) => item.brand)).size,
@@ -758,6 +767,13 @@ export function App() {
     failed: run.partitions.filter((item) => !["complete", "no_results"].includes(item.status)).length
   } : undefined, [run]);
   const failedPartitionCount = partitionSummary?.failed ?? 0;
+  const successfulPartitionCount = (partitionSummary?.complete ?? 0) + (partitionSummary?.empty ?? 0);
+  const canPublishCompletedOnly = Boolean(run && canPublishSuccessfulPartitions(
+    run.status,
+    successfulPartitionCount,
+    failedPartitionCount,
+    reviewItems.length
+  ));
   const cleanReviewReady = Boolean(run?.status === "review" && reviewItems.length === 0 && failedPartitionCount === 0 && run.qa?.ok !== false);
   const reviewSectionTitle = reviewItems.length > 0
     ? "Проверьте спорные находки"
@@ -1242,7 +1258,7 @@ export function App() {
       {run?.qa && <section id="publish-status" className={`card publish-card ${run.qa.ok ? "publish-ready" : "publish-blocked"}`} aria-labelledby="publish-title">
         <div className="publish-summary">
           <span className="publish-icon" aria-hidden="true">{run.qa.ok ? "✓" : "!"}</span>
-          <div><p className="section-number">Шаг 4</p><h2 id="publish-title">{run.status === "published" ? "Готово — таблица обновлена" : run.qa.ok ? "Всё готово к записи" : "Сначала устраните замечания"}</h2><p>{run.status === "published" ? `Данные за ${formatMonth(run.request.month)} сохранены в ${brandSheetDestinationText(publicationSummary.brands)}: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")}.` : run.qa.ok ? `Будет записано: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")} за ${formatMonth(run.request.month)} ${BRAND_SHEET_COLUMNS_TEXT}` : "Разберите отмеченные карточки или повторите проблемные площадки. Частичный результат в таблицу не попадёт."}</p></div>
+          <div><p className="section-number">Шаг 4</p><h2 id="publish-title">{run.status === "published" ? "Готово — таблица обновлена" : run.qa.ok ? "Всё готово к записи" : canPublishCompletedOnly ? "Готовые площадки можно записать" : "Сначала устраните замечания"}</h2><p>{run.status === "published" ? `Данные за ${formatMonth(run.request.month)} сохранены в ${brandSheetDestinationText(publicationSummary.brands)}: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")}.` : run.qa.ok ? `Будет записано: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")} за ${formatMonth(run.request.month)} ${BRAND_SHEET_COLUMNS_TEXT}` : canPublishCompletedOnly ? `Будут записаны только ${publicationSummary.cards} ${plural(publicationSummary.cards, "готовая карточка", "готовые карточки", "готовых карточек")} с ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадки", "площадок", "площадок")}. Неуспешные площадки останутся пустыми за текущий месяц; их ошибки не станут нулями.` : "Разберите отмеченные карточки или повторите проблемные площадки."}</p></div>
         </div>
 
         {visibleBlockers.length > 0 && <div className="issue-list"><strong>Что нужно исправить</strong><ul>{visibleBlockers.map((item) => <li key={item}>{item}</li>)}</ul></div>}
@@ -1252,7 +1268,15 @@ export function App() {
           <a className="button button-quiet" href={run.request.sheetUrl} target="_blank" rel="noreferrer" aria-label="Открыть исходную Google Таблицу в новой вкладке">Открыть таблицу <span aria-hidden="true">↗</span></a>
           {run.status === "published"
             ? <button className="button button-primary" type="button" onClick={prepareNextMonth}>Подготовить следующий месяц <span aria-hidden="true">→</span></button>
-            : <button className="button button-primary" type="button" disabled={!run.qa.ok || busy || run.status === "failed"} onClick={publish}>{busyAction === "publish" ? "Записываем…" : "Записать в таблицу"} <span aria-hidden="true">→</span></button>}
+            : <>
+              {canPublishCompletedOnly && <button
+                className="button button-secondary"
+                type="button"
+                disabled={busy}
+                onClick={() => publish(true)}
+              >{busyAction === "publish" ? "Записываем готовые данные…" : "Записать готовые площадки"}</button>}
+              <button className="button button-primary" type="button" disabled={!run.qa.ok || busy || run.status === "failed"} onClick={() => publish(false)}>{busyAction === "publish" ? "Записываем…" : "Записать в таблицу"} <span aria-hidden="true">→</span></button>
+            </>}
         </div>
       </section>}
     </main>

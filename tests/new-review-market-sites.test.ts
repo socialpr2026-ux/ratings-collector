@@ -167,6 +167,18 @@ describe("Med-otzyv exact indexed adapter", () => {
     });
   });
 
+  it("checks Med-otzyv health with the requested Cereton route when the unrelated canary index is blocked", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/__external_search__") return new Response("blocked", { status: 502 });
+      throw new Error(`Unexpected URL ${url}`);
+    }) as unknown as typeof fetch;
+
+    await expect(new MedOtzyvAdapter(new MemoryEvidenceStore(), fetchMock).healthCheck({
+      ...context, brands: ["Церетон"]
+    })).resolves.toMatchObject({ ok: true, message: "med-otzyv.ru: exact current route found for Церетон" });
+  });
+
   it("recovers a blocked Cereton source only from a fresh exact indexed title for the same medicine ID", async () => {
     let searchCalls = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {

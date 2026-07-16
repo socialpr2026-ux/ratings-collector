@@ -236,6 +236,7 @@ export class RatingsService {
       partition
     ]));
     const isRetry = run.status !== "queued" && run.partitions.length > 0;
+    if (isRetry) run.publicationExclusions = undefined;
     const retryTargets = isRetry
       ? expectedPartitions.filter(({ key }) => !SUCCESSFUL_PARTITION_STATUSES.has(previousPartitions.get(key)?.status ?? ""))
       : expectedPartitions;
@@ -763,6 +764,43 @@ export class RatingsService {
     }));
     await this.repository.saveProducts(spreadsheetId, records);
     await this.repository.saveSnapshot(spreadsheetId, run.request.month, run.observations);
+  }
+
+  async excludeFailedPartitionsFromPublication(id: string): Promise<RunState> {
+    const run = await this.requireRun(id);
+    if (!(["review", "failed"] as RunState["status"][]).includes(run.status)) {
+      throw new Error(`Нельзя изменить состав публикации из статуса ${run.status}`);
+    }
+    const failed = run.partitions.filter((partition) =>
+      !SUCCESSFUL_PARTITION_STATUSES.has(partition.status)
+    );
+    const successful = run.partitions.filter((partition) =>
+      SUCCESSFUL_PARTITION_STATUSES.has(partition.status)
+    );
+    if (!failed.length) return run;
+    if (!successful.length) throw new Error("Нет ни одной успешно проверенной площадки для записи");
+
+    const failedKeys = new Set(failed.map((partition) => partitionKey(partition.domain, partition.brand)));
+    const excludedAt = new Date().toISOString();
+    run.publicationExclusions = failed.map((partition) => ({
+      domain: partition.domain,
+      brand: partition.brand,
+      reason: partition.message ?? partition.status,
+      excludedAt
+    }));
+    run.observations = run.observations.filter((item) =>
+      !failedKeys.has(partitionKey(item.domain, item.brand))
+    );
+    run.payloadHash = stableHash({
+      request: run.request,
+      observations: run.observations,
+      publicationExclusions: run.publicationExclusions
+    });
+    run.status = "review";
+    run.qa = validateRun(run);
+    run.updatedAt = excludedAt;
+    await this.repository.saveRun(run);
+    return run;
   }
 
   async assertApprovedProfiles(run: RunState): Promise<void> {
