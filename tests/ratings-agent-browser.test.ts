@@ -480,6 +480,9 @@ describe("ratings Agent initial recovery pass", () => {
     expect(shouldAutoRetryInitialCollection("queued", [
       { status: "blocked", message: "parser_changed: HTTP 502 appeared in malformed evidence" }
     ])).toBe(false);
+    expect(shouldAutoRetryInitialCollection("queued", [
+      { status: "blocked", message: "Ozon exact product proof is unavailable: translated detail HTTP 502" }
+    ])).toBe(false);
     expect(shouldAutoRetryInitialCollection("review", [
       { status: "error", message: "HTTP 502" }
     ])).toBe(false);

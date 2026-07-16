@@ -250,6 +250,7 @@ export type RunActivityChannel =
   | "direct"
   | "first_party_api"
   | "google_translate"
+  | "yandex_translate"
   | "reader_proxy"
   | "gateway"
   | "browser"

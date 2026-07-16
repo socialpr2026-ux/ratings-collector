@@ -70,6 +70,8 @@ export async function createCollectorRuntime(options: {
   const fetchImpl = options.fetch ?? fetch;
   const freeOzon = new OzonBrowserAdapter({
     fetch: options.fetch,
+    yandexTranslateEnabled: false,
+    googleComposerEnabled: true,
     detailConcurrency: 1,
     detailDelayMs: 350,
     detailRetryDelayMs: 750

@@ -125,6 +125,7 @@ const activityChannelLabels = {
   direct: "Прямой запрос",
   first_party_api: "API площадки",
   google_translate: "Google Translate SSR",
+  yandex_translate: "Яндекс Переводчик",
   reader_proxy: "Reader proxy",
   gateway: "Cloud gateway",
   browser: "Chromium",

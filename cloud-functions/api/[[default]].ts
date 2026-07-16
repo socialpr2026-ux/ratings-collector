@@ -9,7 +9,7 @@ import type { RepositoryRpc } from "../../src/server/remote-repository.js";
 import { prepareBrowserPublication, reconcileBrowserPublication } from "../../src/server/sheets/publication-state.js";
 import { safeErrorMessage } from "../../src/server/utils/error-message.js";
 import { matchesBrand } from "../../src/server/utils/normalize.js";
-import { readTextBounded, safeFetch } from "../../src/server/utils/safe-fetch.js";
+import { assertSafePublicDestination, readTextBounded, safeFetch } from "../../src/server/utils/safe-fetch.js";
 import { readerMarkdownToHtml, readerProxyUrl } from "../../src/server/utils/reader-proxy.js";
 import { importOzonCompanionResult, issueOzonCompanionSession } from "../../src/server/companion-import.js";
 
@@ -66,6 +66,18 @@ type AptekaRuTarget = {
 
 type OzonTranslateTarget = {
   kind: "search" | "category" | "product";
+  source: URL;
+  sku?: string;
+};
+
+type OzonTranslatedComposerTarget = {
+  kind: "search" | "product";
+  source: URL;
+  sku?: string;
+};
+
+type OzonYandexComposerTarget = {
+  composer: URL;
   source: URL;
   sku?: string;
 };
@@ -1002,6 +1014,74 @@ function parseOzonTranslateTarget(target: URL): OzonTranslateTarget | undefined 
   return { kind: isSearch ? "search" : "category", source };
 }
 
+function parseOzonTranslatedComposerTarget(target: URL): OzonTranslatedComposerTarget | undefined {
+  if (
+    target.protocol !== "https:" || target.hostname !== OZON_TRANSLATE_HOST || target.port ||
+    target.username || target.password || target.hash ||
+    target.pathname !== "/api/composer-api.bx/page/json/v2" ||
+    singleSearchParameter(target, "_x_tr_sl") !== "ru" ||
+    singleSearchParameter(target, "_x_tr_tl") !== "en" ||
+    singleSearchParameter(target, "_x_tr_hl") !== "en" ||
+    target.searchParams.getAll("url").length !== 1 ||
+    [...target.searchParams.keys()].some((key) => !OZON_TRANSLATE_PARAMETERS.has(key) && key !== "url") ||
+    [...target.searchParams.keys()].some((key) => target.searchParams.getAll(key).length !== 1)
+  ) return undefined;
+  const nested = singleSearchParameter(target, "url") ?? "";
+  let source: URL;
+  try { source = new URL(nested, `https://${OZON_SOURCE_HOST}`); }
+  catch { return undefined; }
+  const sku = source.pathname.match(/^\/product\/[a-z0-9-]*-(\d+)\/$/i)?.[1];
+  if (source.origin !== `https://${OZON_SOURCE_HOST}` || source.hash || nested !== `${source.pathname}${source.search}`) {
+    return undefined;
+  }
+  const page = source.searchParams.get("page") ?? "1";
+  const safeSearch = source.pathname === "/search/" &&
+    (source.searchParams.get("text")?.normalize("NFKC").trim().length ?? 0) > 0 &&
+    (source.searchParams.get("text")?.normalize("NFKC").trim().length ?? 0) <= 200 &&
+    source.searchParams.get("from_global") === "true" &&
+    [...source.searchParams.keys()].every((key) => ["text", "from_global", "page"].includes(key)) &&
+    /^\d+$/.test(page) && Number(page) >= 1 && Number(page) <= 100;
+  if (safeSearch) return { kind: "search", source };
+  return sku && !source.search ? { kind: "product", source, sku } : undefined;
+}
+
+function parseOzonYandexComposerTarget(target: URL): OzonYandexComposerTarget | undefined {
+  if (
+    target.protocol !== "https:" || target.hostname !== "translate.yandex.ru" || target.port ||
+    target.username || target.password || target.hash || target.pathname !== "/translate" ||
+    singleSearchParameter(target, "lang") !== "ru-en" || target.searchParams.getAll("url").length !== 1 ||
+    [...target.searchParams.keys()].some((key) => !["lang", "url"].includes(key)) ||
+    [...target.searchParams.keys()].some((key) => target.searchParams.getAll(key).length !== 1)
+  ) return undefined;
+  let composer: URL;
+  try { composer = new URL(singleSearchParameter(target, "url") ?? ""); }
+  catch { return undefined; }
+  if (
+    composer.protocol !== "https:" || composer.hostname !== OZON_SOURCE_HOST || composer.port ||
+    composer.username || composer.password || composer.hash ||
+    composer.pathname !== "/api/composer-api.bx/page/json/v2" ||
+    composer.searchParams.getAll("url").length !== 1 ||
+    [...composer.searchParams.keys()].some((key) => key !== "url")
+  ) return undefined;
+  const nested = singleSearchParameter(composer, "url") ?? "";
+  let source: URL;
+  try { source = new URL(nested, `https://${OZON_SOURCE_HOST}`); }
+  catch { return undefined; }
+  if (source.origin !== `https://${OZON_SOURCE_HOST}` || source.hash || nested !== `${source.pathname}${source.search}`) {
+    return undefined;
+  }
+  const page = source.searchParams.get("page") ?? "1";
+  const safeSearch = source.pathname === "/search/" &&
+    (source.searchParams.get("text")?.normalize("NFKC").trim().length ?? 0) > 0 &&
+    (source.searchParams.get("text")?.normalize("NFKC").trim().length ?? 0) <= 200 &&
+    source.searchParams.get("from_global") === "true" &&
+    [...source.searchParams.keys()].every((key) => ["text", "from_global", "page"].includes(key)) &&
+    /^\d+$/.test(page) && Number(page) >= 1 && Number(page) <= 100;
+  const sku = source.pathname.match(/^\/product\/[a-z0-9-]*-(\d+)\/$/i)?.[1];
+  const safeProduct = Boolean(sku) && !source.search;
+  return safeSearch || safeProduct ? { composer, source, ...(sku ? { sku } : {}) } : undefined;
+}
+
 function ozonJsonLdEntries(value: unknown): Array<Record<string, unknown>> {
   if (Array.isArray(value)) return value.flatMap(ozonJsonLdEntries);
   if (!value || typeof value !== "object") return [];
@@ -1791,6 +1871,8 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       /^\/p_[a-z0-9][a-z0-9-]*-\d+\.html$/i.test(target.pathname)
     );
   const ozonTranslatedTarget = parseOzonTranslateTarget(target);
+  const ozonTranslatedComposerTarget = parseOzonTranslatedComposerTarget(target);
+  const ozonYandexComposerTarget = parseOzonYandexComposerTarget(target);
   const pharmacyTranslatedTarget = parsePharmacyTranslateTarget(target);
   const aptekaRuTarget = parseAptekaRuTarget(target);
   let ozonTarget = false;
@@ -1812,8 +1894,178 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         [...target.searchParams.keys()].every((key) => key === "url") && (safeSearch || safeProduct);
     } catch { /* invalid nested Ozon search URL */ }
   }
-  if (target.protocol !== "https:" || !(reviewTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || pharmacyTranslatedTarget || aptekaRuTarget)) {
+  if (target.protocol !== "https:" || !(reviewTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
+  }
+  if (ozonTranslatedComposerTarget) {
+    await assertSafePublicDestination(target.toString());
+    let upstream = await fetch(target.toString(), {
+      method: "GET",
+      redirect: "manual",
+      headers: { accept: "application/json, text/plain, */*", "accept-language": "ru-RU,ru;q=0.9" },
+      signal: AbortSignal.timeout(60_000)
+    });
+    if ([301, 302, 303, 307, 308].includes(upstream.status)) {
+      if (ozonTranslatedComposerTarget.kind !== "search") {
+        return json({ error: "Ozon translated product composer redirected unexpectedly" }, 502);
+      }
+      let redirected: URL;
+      try { redirected = new URL(upstream.headers.get("location") ?? ""); }
+      catch { return json({ error: "Ozon translated composer returned an invalid category redirect" }, 502); }
+      const nestedCategory = singleSearchParameter(redirected, "url") ?? "";
+      let categorySource: URL;
+      try { categorySource = new URL(nestedCategory, `https://${OZON_SOURCE_HOST}`); }
+      catch { return json({ error: "Ozon translated composer returned an invalid category source" }, 502); }
+      const allowedOuterKeys = new Set(["page_changed", "url", "_x_tr_sl", "_x_tr_tl", "_x_tr_hl"]);
+      const allowedCategoryKeys = new Set([
+        "brand_was_predicted", "category_was_predicted", "deny_category_prediction",
+        "from_global", "page", "text"
+      ]);
+      const requestedPage = ozonTranslatedComposerTarget.source.searchParams.get("page") ?? "1";
+      const categoryPage = categorySource.searchParams.get("page") ?? "1";
+      const safeCategoryRedirect = redirected.origin === target.origin && redirected.pathname === target.pathname &&
+        !redirected.username && !redirected.password && !redirected.hash &&
+        singleSearchParameter(redirected, "page_changed") === "true" &&
+        singleSearchParameter(redirected, "_x_tr_sl") === "ru" &&
+        singleSearchParameter(redirected, "_x_tr_tl") === "en" &&
+        singleSearchParameter(redirected, "_x_tr_hl") === "en" &&
+        redirected.searchParams.getAll("url").length === 1 &&
+        [...redirected.searchParams.keys()].every((key) => allowedOuterKeys.has(key)) &&
+        [...redirected.searchParams.keys()].every((key) => redirected.searchParams.getAll(key).length === 1) &&
+        categorySource.origin === `https://${OZON_SOURCE_HOST}` &&
+        /^\/category\/[a-z0-9-]+-\d{2,}(?:\/[a-z0-9-]+-\d{2,})?\/$/i.test(categorySource.pathname) &&
+        !categorySource.hash && [...categorySource.searchParams.keys()].every((key) => allowedCategoryKeys.has(key)) &&
+        [...categorySource.searchParams.keys()].every((key) => categorySource.searchParams.getAll(key).length === 1) &&
+        categorySource.searchParams.get("brand_was_predicted") === "true" &&
+        categorySource.searchParams.get("category_was_predicted") === "true" &&
+        categorySource.searchParams.get("deny_category_prediction") === "true" &&
+        categorySource.searchParams.get("from_global") === "true" &&
+        categorySource.searchParams.get("text") === ozonTranslatedComposerTarget.source.searchParams.get("text") &&
+        /^\d+$/.test(categoryPage) && categoryPage === requestedPage;
+      if (!safeCategoryRedirect) {
+        return json({ error: "Ozon translated composer category redirect changed the requested brand or page" }, 502);
+      }
+      await assertSafePublicDestination(redirected.toString());
+      upstream = await fetch(redirected.toString(), {
+        method: "GET",
+        redirect: "manual",
+        headers: { accept: "application/json, text/plain, */*", "accept-language": "ru-RU,ru;q=0.9" },
+        signal: AbortSignal.timeout(60_000)
+      });
+    }
+    const body = await readTextBounded(upstream, 12_000_000, 60_000);
+    if (!upstream.ok || !/json/i.test(upstream.headers.get("content-type") ?? "")) {
+      return json({ error: `Ozon translated composer did not return exact JSON (HTTP ${upstream.status})` }, 502);
+    }
+    return new Response(body, {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "google-translate-ozon-composer"
+      }
+    });
+  }
+  if (ozonYandexComposerTarget) {
+    await assertSafePublicDestination(target.toString());
+    const redirectResponse = await fetch(target.toString(), {
+      method: "GET",
+      redirect: "manual",
+      headers: { accept: "application/json, text/plain, */*", "accept-language": "ru-RU,ru;q=0.9" },
+      signal: AbortSignal.timeout(60_000)
+    });
+    if (![301, 302, 303, 307, 308].includes(redirectResponse.status)) {
+      return json({ error: `Yandex Ozon composer did not return its fixed redirect (HTTP ${redirectResponse.status})` }, 502);
+    }
+    const location = redirectResponse.headers.get("location");
+    let redirected: URL;
+    try { redirected = new URL(location ?? ""); }
+    catch { return json({ error: "Yandex Ozon composer returned an invalid redirect" }, 502); }
+    const redirectedNested = singleSearchParameter(redirected, "url") ?? "";
+    let redirectedSource: URL;
+    try { redirectedSource = new URL(redirectedNested, `https://${OZON_SOURCE_HOST}`); }
+    catch { return json({ error: "Yandex Ozon composer returned an invalid source redirect" }, 502); }
+    const expectedPath = /^\/proxy_u\/[a-z0-9.-]+\/https\/www\.ozon\.ru\/api\/composer-api\.bx\/page\/json\/v2$/i;
+    const requestedPage = ozonYandexComposerTarget.source.searchParams.get("page") ?? "1";
+    const redirectedPage = redirectedSource.searchParams.get("page") ?? "1";
+    const sameSearch = ozonYandexComposerTarget.source.pathname === "/search/" &&
+      redirectedSource.origin === `https://${OZON_SOURCE_HOST}` && redirectedSource.pathname === "/search/" &&
+      !redirectedSource.hash && [...redirectedSource.searchParams.keys()].every((key) => ["text", "from_global", "page"].includes(key)) &&
+      [...redirectedSource.searchParams.keys()].every((key) => redirectedSource.searchParams.getAll(key).length === 1) &&
+      redirectedSource.searchParams.get("text") === ozonYandexComposerTarget.source.searchParams.get("text") &&
+      redirectedSource.searchParams.get("from_global") === "true" && redirectedPage === requestedPage;
+    const sameProduct = Boolean(ozonYandexComposerTarget.sku) &&
+      redirectedSource.origin === `https://${OZON_SOURCE_HOST}` &&
+      redirectedSource.pathname === ozonYandexComposerTarget.source.pathname &&
+      !redirectedSource.search && !redirectedSource.hash;
+    if (
+      redirected.protocol !== "https:" || redirected.hostname !== "translated.turbopages.org" ||
+      redirected.port || redirected.username || redirected.password || redirected.hash ||
+      !expectedPath.test(redirected.pathname) || redirected.searchParams.getAll("url").length !== 1 ||
+      [...redirected.searchParams.keys()].some((key) => key !== "url") ||
+      (!sameSearch && !sameProduct)
+    ) return json({ error: "Yandex Ozon composer redirect is outside the exact requested product or search" }, 502);
+    await assertSafePublicDestination(redirected.toString());
+    let upstream = await fetch(redirected.toString(), {
+      method: "GET",
+      redirect: "manual",
+      headers: { accept: "application/json, text/plain, */*", "accept-language": "ru-RU,ru;q=0.9" },
+      signal: AbortSignal.timeout(60_000)
+    });
+    if ([301, 302, 303, 307, 308].includes(upstream.status)) {
+      const categoryLocation = upstream.headers.get("location");
+      let categoryRedirect: URL;
+      try { categoryRedirect = new URL(categoryLocation ?? ""); }
+      catch { return json({ error: "Yandex Ozon composer returned an invalid category redirect" }, 502); }
+      const nestedCategory = singleSearchParameter(categoryRedirect, "url") ?? "";
+      let categorySource: URL;
+      try { categorySource = new URL(nestedCategory, `https://${OZON_SOURCE_HOST}`); }
+      catch { return json({ error: "Yandex Ozon composer returned an invalid category source" }, 502); }
+      const allowedCategoryKeys = new Set([
+        "brand_was_predicted", "category_was_predicted", "deny_category_prediction",
+        "from_global", "page", "text"
+      ]);
+      const categoryPage = categorySource.searchParams.get("page") ?? "1";
+      const safeCategoryRedirect = ozonYandexComposerTarget.source.pathname === "/search/" &&
+        categoryRedirect.origin === redirected.origin && categoryRedirect.pathname === redirected.pathname &&
+        !categoryRedirect.username && !categoryRedirect.password && !categoryRedirect.hash &&
+        singleSearchParameter(categoryRedirect, "page_changed") === "true" &&
+        categoryRedirect.searchParams.getAll("url").length === 1 &&
+        [...categoryRedirect.searchParams.keys()].every((key) => ["page_changed", "url"].includes(key)) &&
+        [...categoryRedirect.searchParams.keys()].every((key) => categoryRedirect.searchParams.getAll(key).length === 1) &&
+        categorySource.origin === `https://${OZON_SOURCE_HOST}` &&
+        /^\/category\/[a-z0-9-]+-\d{2,}(?:\/[a-z0-9-]+-\d{2,})?\/$/i.test(categorySource.pathname) &&
+        !categorySource.hash && [...categorySource.searchParams.keys()].every((key) => allowedCategoryKeys.has(key)) &&
+        [...categorySource.searchParams.keys()].every((key) => categorySource.searchParams.getAll(key).length === 1) &&
+        categorySource.searchParams.get("brand_was_predicted") === "true" &&
+        categorySource.searchParams.get("category_was_predicted") === "true" &&
+        categorySource.searchParams.get("deny_category_prediction") === "true" &&
+        categorySource.searchParams.get("from_global") === "true" &&
+        categorySource.searchParams.get("text") === ozonYandexComposerTarget.source.searchParams.get("text") &&
+        /^\d+$/.test(categoryPage) && categoryPage === requestedPage;
+      if (!safeCategoryRedirect) {
+        return json({ error: "Yandex Ozon composer category redirect changed the requested brand or page" }, 502);
+      }
+      await assertSafePublicDestination(categoryRedirect.toString());
+      upstream = await fetch(categoryRedirect.toString(), {
+        method: "GET",
+        redirect: "manual",
+        headers: { accept: "application/json, text/plain, */*", "accept-language": "ru-RU,ru;q=0.9" },
+        signal: AbortSignal.timeout(60_000)
+      });
+    }
+    const body = await readTextBounded(upstream, 12_000_000, 60_000);
+    if (!upstream.ok || !/json/i.test(upstream.headers.get("content-type") ?? "")) {
+      return json({ error: `Yandex Ozon composer did not return exact JSON (HTTP ${upstream.status})` }, 502);
+    }
+    return new Response(body, {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "yandex-translate-ozon-composer"
+      }
+    });
   }
   if (medOtzyvProductTarget) {
     try {
@@ -2359,7 +2611,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     method: "GET",
     redirect: "follow",
     headers: {
-      accept: wildberriesTarget || ozonTarget
+      accept: wildberriesTarget || ozonTarget || ozonTranslatedComposerTarget
         ? "application/json, text/plain, */*"
         : yandexTarget && target.pathname.startsWith("/ugcpub/")
           ? "application/xml,text/xml"
@@ -2370,8 +2622,11 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         referer: "https://www.wildberries.ru/"
       } : {})
     }
-  });
+  }, fetch, ozonTranslatedComposerTarget ? 0 : 4);
   const text = await readTextBounded(upstream, 12_000_000, 60_000);
+  if (upstream.ok && ozonTranslatedComposerTarget && !/json/i.test(upstream.headers.get("content-type") ?? "")) {
+    return json({ error: "Ozon translated composer did not return exact JSON" }, 502);
+  }
   if (upstream.ok && yandexTarget && YANDEX_MODEL_SITEMAP_PATH.test(target.pathname)) {
     const compact = compactYandexModelSitemap(text, target);
     if (!compact) return json({ error: "Yandex model sitemap did not prove a complete exact shard" }, 502);
@@ -2390,7 +2645,8 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     status: upstream.status,
     headers: {
       "content-type": upstream.headers.get("content-type") ?? "text/html; charset=utf-8",
-      "cache-control": "no-store"
+      "cache-control": "no-store",
+      ...(ozonTranslatedComposerTarget ? { "x-ratings-source": "google-translate-ozon-composer" } : {})
     }
   });
 }

@@ -12,6 +12,8 @@ import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 
 const SEARCH_ENDPOINT = "https://www.ozon.ru/api/composer-api.bx/page/json/v2";
 const TRANSLATE_ORIGIN = "https://www-ozon-ru.translate.goog";
+const TRANSLATED_COMPOSER_ENDPOINT = `${TRANSLATE_ORIGIN}/api/composer-api.bx/page/json/v2`;
+const YANDEX_TRANSLATE_ENDPOINT = "https://translate.yandex.ru/translate";
 const PLATFORM_DOMAIN = "ozon.ru";
 const PLATFORM_ID = "ozon";
 const SOURCE = "ozon:composer-api:edgeone-browser";
@@ -23,6 +25,7 @@ const DEFAULT_DETAIL_DELAY_MS = 350;
 const DEFAULT_DETAIL_RETRY_DELAY_MS = 750;
 const MAX_DETAIL_ATTEMPTS = 3;
 const MAX_TRANSLATE_REDIRECTS = 2;
+const TRANSLATED_COMPOSER_RETRY_DELAY_MS = 8_000;
 const EXACT_TRANSLATE_PROOF = "ozon:product-json-ld:google-translate";
 const EXACT_COMPOSER_PROOF = "ozon:product-composer-json";
 
@@ -82,6 +85,10 @@ export type OzonBrowserAdapterOptions = {
   now?: () => Date;
   /** Test-only escape hatch for composer-specific fixtures. Production stays translate-first. */
   translateEnabled?: boolean;
+  /** Explicitly enables the fixed Yandex Translate composer route before Google Translate. */
+  yandexTranslateEnabled?: boolean;
+  /** Enables compact Google Translate composer JSON as the primary Ozon route. */
+  googleComposerEnabled?: boolean;
 };
 
 function isObject(value: unknown): value is JsonObject {
@@ -229,6 +236,16 @@ function parseSearchPage(value: unknown): SearchPage {
   return { items, rawItemCount: raw.length, totalPages: totalPages(value) };
 }
 
+function skuFromProductReviewUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  try {
+    const path = new URL(value, "https://www.ozon.ru").pathname;
+    return asSku(path.match(/^\/product\/[a-z0-9-]*-(\d{5,})\/reviews\/$/i)?.[1]);
+  } catch {
+    return undefined;
+  }
+}
+
 function exactScoreText(value: unknown): { reviews: number; rawRating: number | null } | undefined {
   const text = asString(value)?.replace(/\s+/g, " ");
   if (!text) return undefined;
@@ -242,6 +259,15 @@ function exactScoreText(value: unknown): { reviews: number; rawRating: number | 
   return reviews !== null && reviews > 0 && rawRating !== null && rawRating > 0
     ? { reviews, rawRating }
     : undefined;
+}
+
+function exactUnavailableScoreCount(value: unknown): number | undefined {
+  const text = asString(value)?.replace(/\s+/g, " ");
+  if (!text) return undefined;
+  const match = text.match(/^[\u2022\u00b7]\s*([\d\s\u00a0\u202f]+)\s*\u043e\u0442\u0437\u044b\u0432(?:\u0430|\u043e\u0432)?$/iu);
+  if (!match) return undefined;
+  const reviews = exactNonNegativeInteger(match[1]!.replace(/[\s\u00a0\u202f]+/g, ""));
+  return reviews !== null && reviews > 0 ? reviews : undefined;
 }
 
 function collectBoundVariantIds(value: unknown, listingId: string, result: Set<string>, depth = 0): void {
@@ -289,23 +315,49 @@ function parseExactComposerProduct(value: unknown, listingId: string): ExactProd
 
   let reviews: number | null = null;
   let rawRating: number | null = null;
+  let ratingUnavailable = false;
   if (structuredScores.length === 1) {
     const score = structuredScores[0]!;
+    if (score.isHidden !== false) {
+      throw new ParserChangedError("Ozon product composer review score is hidden or ambiguous");
+    }
     reviews = exactNonNegativeInteger(score.reviewsCount);
     rawRating = rating(score.totalScore);
-    if (reviews === null || (reviews === 0 ? rawRating !== null && rawRating !== 0 : rawRating === null || rawRating <= 0)) {
+    const constants = isObject(score.constants) ? score.constants : undefined;
+    const emptyScoreText = asString(constants?.emptyScoreText)?.toLocaleLowerCase("ru-RU");
+    ratingUnavailable = reviews !== null && reviews > 0 && rawRating === 0 &&
+      Object.hasOwn(score, "score") && (score.score === null || score.score === "") &&
+      (emptyScoreText === "\u043d\u0435\u0442 \u043e\u0446\u0435\u043d\u043e\u043a" || emptyScoreText === "no ratings");
+    if (
+      reviews === null ||
+      (reviews === 0 ? rawRating !== null && rawRating !== 0 : rawRating === null || rawRating < 0) ||
+      (reviews > 0 && rawRating === 0 && !ratingUnavailable)
+    ) {
       throw new ParserChangedError("Ozon product composer review score is incomplete");
     }
     if (reviews === 0) rawRating = null;
   }
 
-  const singleScores = parsedWidgets(value, "webSingleProductScore").filter((state) => skuFromUrl(state.link) === listingId);
+  const singleScores = parsedWidgets(value, "webSingleProductScore").filter((state) =>
+    (skuFromUrl(state.link) ?? skuFromProductReviewUrl(state.link)) === listingId ||
+    structuredScores.length === 1 && reviews === 0 &&
+      /^\?tab=reviews#comments--offset-\d+$/i.test(asString(state.anchorUrl) ?? "")
+  );
   if (singleScores.length > 1) throw new ParserChangedError("Ozon product composer exposes multiple visible score widgets");
   const visibleScore = singleScores.length === 1 ? exactScoreText(singleScores[0]!.text) : undefined;
   if (structuredScores.length === 0) {
     if (!visibleScore) throw new ParserChangedError("Ozon product composer has no exact review score proof");
     reviews = visibleScore.reviews;
     rawRating = visibleScore.rawRating;
+  } else if (ratingUnavailable) {
+    const score = singleScores[0];
+    const visibleReviews = exactUnavailableScoreCount(score?.text);
+    if (
+      singleScores.length !== 1 || score?.icon !== "ic_s_star_off_filled" ||
+      visibleReviews !== reviews
+    ) {
+      throw new ParserChangedError("Ozon product composer unavailable rating proof is incomplete");
+    }
   } else if (visibleScore && (visibleScore.reviews !== reviews || visibleScore.rawRating !== rawRating)) {
     throw new ParserChangedError("Ozon product composer structured and visible review scores disagree");
   }
@@ -318,8 +370,9 @@ function parseExactComposerProduct(value: unknown, listingId: string): ExactProd
   return {
     product: headings[0]!,
     reviews: reviews!,
-    rating: rawRating === null ? null : normalizeRating(rawRating, 5),
+    rating: rawRating === null || ratingUnavailable ? null : normalizeRating(rawRating, 5),
     rawRating,
+    ...(ratingUnavailable ? { ratingUnavailable: true } : {}),
     proof: EXACT_COMPOSER_PROOF,
     ...(aggregateGroupId ? { aggregateGroupId } : {})
   };
@@ -490,6 +543,24 @@ function translatedProxyUrl(target: URL): URL {
   return proxy;
 }
 
+function translatedComposerUrl(pathname: string): URL {
+  const endpoint = new URL(TRANSLATED_COMPOSER_ENDPOINT);
+  endpoint.searchParams.set("url", pathname);
+  endpoint.searchParams.set("_x_tr_sl", "ru");
+  endpoint.searchParams.set("_x_tr_tl", "en");
+  endpoint.searchParams.set("_x_tr_hl", "en");
+  return endpoint;
+}
+
+function yandexComposerUrl(path: string): URL {
+  const composer = new URL(SEARCH_ENDPOINT);
+  composer.searchParams.set("url", path);
+  const endpoint = new URL(YANDEX_TRANSLATE_ENDPOINT);
+  endpoint.searchParams.set("url", composer.toString());
+  endpoint.searchParams.set("lang", "ru-en");
+  return endpoint;
+}
+
 function translatedRedirect(html: string): URL | undefined {
   const encoded = html.match(/location\.replace\(("(?:\\.|[^"\\])*")\)/)?.[1];
   if (!encoded) return undefined;
@@ -543,6 +614,7 @@ type ExactProductMetrics = {
   reviews: number;
   rating: number | null;
   rawRating: number | null;
+  ratingUnavailable?: true;
   aggregateGroupId?: string;
   proof?: typeof EXACT_COMPOSER_PROOF;
 };
@@ -688,6 +760,8 @@ export class OzonBrowserAdapter implements SiteAdapter {
   private readonly maxDocumentBytes: number;
   private readonly now: () => Date;
   private readonly translateEnabled: boolean;
+  private readonly yandexTranslateEnabled: boolean;
+  private readonly googleComposerEnabled: boolean;
   private readonly detailConcurrency: number;
   private readonly detailDelayMs: number;
   private readonly detailRetryDelayMs: number;
@@ -701,6 +775,8 @@ export class OzonBrowserAdapter implements SiteAdapter {
     this.maxDocumentBytes = options.maxDocumentBytes ?? DEFAULT_MAX_DOCUMENT_BYTES;
     this.now = options.now ?? (() => new Date());
     this.translateEnabled = options.translateEnabled ?? true;
+    this.yandexTranslateEnabled = options.yandexTranslateEnabled ?? false;
+    this.googleComposerEnabled = options.googleComposerEnabled ?? false;
     this.detailConcurrency = options.detailConcurrency ?? DEFAULT_DETAIL_CONCURRENCY;
     this.detailDelayMs = options.detailDelayMs ?? DEFAULT_DETAIL_DELAY_MS;
     this.detailRetryDelayMs = options.detailRetryDelayMs ?? DEFAULT_DETAIL_RETRY_DELAY_MS;
@@ -800,8 +876,26 @@ export class OzonBrowserAdapter implements SiteAdapter {
     const capturedAt = this.now().toISOString();
     const exactMetrics = new Map<string, ExactProductMetrics>();
     const searchTileFallbacks = new Map<string, string>();
+    const metricFrequency = new Map<string, number>();
+    for (const product of matchedProducts) {
+      if (product.reviews === null || product.reviews <= 0 || product.rating === null || product.rating <= 0) continue;
+      const key = `${product.reviews}\u0000${product.rating}`;
+      metricFrequency.set(key, (metricFrequency.get(key) ?? 0) + 1);
+    }
+    const needsExactPrefetch = (product: SearchTile): boolean => {
+      if (product.source === TRANSLATE_SOURCE) return true;
+      if (!this.googleComposerEnabled) return false;
+      const incomplete = product.reviews === null || (
+        product.reviews === 0
+          ? product.rating !== null && product.rating !== 0
+          : product.rating === null
+      );
+      if (incomplete) return true;
+      if (product.reviews === null || product.reviews <= 0 || product.rating === null || product.rating <= 0) return false;
+      return (metricFrequency.get(`${product.reviews}\u0000${product.rating}`) ?? 0) > 1;
+    };
     await mapWithConcurrency(
-      matchedProducts.filter((product) => product.source === TRANSLATE_SOURCE),
+      matchedProducts.filter(needsExactPrefetch),
       this.detailConcurrency,
       async (product, index) => {
         if (index > 0 && this.detailDelayMs > 0) {
@@ -817,7 +911,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
           title: product.title,
           metadata: { source: product.source }
         };
-        let exact: ExactProductMetrics;
+        let exact: ExactProductMetrics | undefined;
         const proofCacheKey = `${runScope}\u0000${product.listingId}`;
         const cachedExact = this.exactProductCache.get(proofCacheKey);
         if (cachedExact) {
@@ -825,37 +919,70 @@ export class OzonBrowserAdapter implements SiteAdapter {
           return cachedExact;
         }
         try {
-          exact = await this.fetchExactTranslatedProductWithRetry(ref, product.listingId, context);
-        } catch (translateError) {
-          if (!(translateError instanceof AdapterBlockedError)) throw translateError;
+          exact = this.googleComposerEnabled
+            ? await this.fetchExactTranslatedComposerProduct(ref, product.listingId, context)
+            : this.yandexTranslateEnabled
+              ? await this.fetchExactYandexComposerProduct(ref, product.listingId, context)
+              : undefined;
+          if (!exact) throw new AdapterBlockedError("Primary composer is disabled");
+        } catch (primaryError) {
+          if (!(primaryError instanceof AdapterBlockedError) && !(primaryError instanceof ParserChangedError)) throw primaryError;
           try {
-            exact = await this.fetchExactComposerProduct(ref, product.listingId, context);
-          } catch (composerError) {
-            const message = `translated detail: ${translateError.message}; product composer: ${composerError instanceof Error ? composerError.message : String(composerError)}`;
-            const hasBoundTileMetrics = product.reviews !== null && (
-              product.reviews === 0
-                ? product.rating === null
-                : product.rating !== null && product.rating > 0
-            );
-            if (!hasBoundTileMetrics) {
-              if (composerError instanceof ParserChangedError) {
-                throw new ParserChangedError(`Ozon exact product proof changed: ${message}`);
+            exact = await this.fetchExactTranslatedProductWithRetry(ref, product.listingId, context);
+          } catch (translateError) {
+            if (!(translateError instanceof AdapterBlockedError)) throw translateError;
+            let composerError: unknown;
+            try {
+              if (this.googleComposerEnabled) {
+                exact = await this.fetchExactComposerProduct(ref, product.listingId, context);
+              } else {
+                exact = await this.fetchExactTranslatedComposerProductWithRetry(ref, product.listingId, context);
               }
-              throw new AdapterBlockedError(`Ozon exact product proof is unavailable: ${message}`);
+            } catch (secondaryComposerError) {
+              if (this.googleComposerEnabled) {
+                composerError = secondaryComposerError;
+              } else {
+                try {
+                  exact = await this.fetchExactComposerProduct(ref, product.listingId, context);
+                } catch (browserComposerError) {
+                  const message = `translated composer: ${secondaryComposerError instanceof Error ? secondaryComposerError.message : String(secondaryComposerError)}; browser composer: ${browserComposerError instanceof Error ? browserComposerError.message : String(browserComposerError)}`;
+                  composerError = secondaryComposerError instanceof ParserChangedError || browserComposerError instanceof ParserChangedError
+                    ? new ParserChangedError(message)
+                    : new AdapterBlockedError(message);
+                }
+              }
             }
-            searchTileFallbacks.set(product.listingId, message);
-            await reportActivity(context, {
-              operationId: `ozon:search-tile-fallback:${product.listingId}`,
-              stage: "collection",
-              label: "Ozon · данные поисковой карточки",
-              listingId: product.listingId,
-              channels: ["google_translate"],
-              status: "warning",
-              detail: "Точная страница временно недоступна; карточка сохранена для проверки"
-            });
-            return undefined;
+            if (composerError) {
+              const message = `primary composer: ${primaryError.message}; translated detail: ${translateError.message}; product composer: ${composerError instanceof Error ? composerError.message : String(composerError)}`;
+              if (this.googleComposerEnabled && /HTTP\s+502|request failed|non-JSON/i.test(message)) {
+                throw new AdapterBlockedError(`Ozon exact product proof is unavailable: ${message}`);
+              }
+              const hasBoundTileMetrics = product.reviews !== null && (
+                product.reviews === 0
+                  ? product.rating === null
+                  : product.rating !== null && product.rating > 0
+              );
+              if (!hasBoundTileMetrics) {
+                if (composerError instanceof ParserChangedError) {
+                  throw new ParserChangedError(`Ozon exact product proof changed: ${message}`);
+                }
+                throw new AdapterBlockedError(`Ozon exact product proof is unavailable: ${message}`);
+              }
+              searchTileFallbacks.set(product.listingId, message);
+              await reportActivity(context, {
+                operationId: `ozon:search-tile-fallback:${product.listingId}`,
+                stage: "collection",
+                label: "Ozon · данные поисковой карточки",
+                listingId: product.listingId,
+                channels: ["yandex_translate", "google_translate"],
+                status: "warning",
+                detail: "Точная страница временно недоступна; карточка сохранена для проверки"
+              });
+              return undefined;
+            }
           }
         }
+        if (!exact) throw new AdapterBlockedError("Ozon exact product proof did not return a product");
         if (!matchesBrand(exact.product, requestedBrand)) {
           throw new ParserChangedError("Ozon exact product proof belongs to a different brand");
         }
@@ -890,6 +1017,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
           exactProductTitle: exact.product,
           exactProductListingId: product.listingId,
           exactProductProof: exact.proof ?? EXACT_TRANSLATE_PROOF,
+          ...(exact.ratingUnavailable ? { exactProductRatingUnavailable: true } : {}),
           ...(exact.aggregateGroupId ? { exactProductAggregateGroupId: exact.aggregateGroupId } : {})
         } : {})
       }
@@ -902,7 +1030,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
     let product = ref.title?.normalize("NFKC").trim();
     if (!listingId || !product) throw new ParserChangedError("Ozon composer ProductRef is incomplete");
     const translatedSource = ref.metadata.source === TRANSLATE_SOURCE;
-    const searchTileFallback = translatedSource && ref.metadata.exactProductFallback === "search_tile";
+    const searchTileFallback = ref.metadata.exactProductFallback === "search_tile";
     const composerProductProof = ref.metadata.exactProductProof === EXACT_COMPOSER_PROOF;
     const source = searchTileFallback
       ? `${TRANSLATE_SOURCE}:search-tile-fallback`
@@ -911,17 +1039,23 @@ export class OzonBrowserAdapter implements SiteAdapter {
         : translatedSource ? TRANSLATE_SOURCE : SOURCE;
     let reviews = reviewCount(ref.metadata.reviewCount);
     let rawRating = rating(ref.metadata.rating);
+    let ratingUnavailable = reviews !== null && reviews > 0 && rawRating === 0;
     if (translatedSource && !searchTileFallback) {
       const cachedTitle = asString(ref.metadata.exactProductTitle);
       const hasExactProof = [EXACT_TRANSLATE_PROOF, EXACT_COMPOSER_PROOF].includes(String(ref.metadata.exactProductProof)) &&
         ref.metadata.exactProductListingId === listingId && cachedTitle !== undefined &&
-        reviews !== null && (reviews === 0 ? rawRating === null : rawRating !== null && rawRating > 0);
+        reviews !== null && (
+          reviews === 0
+            ? rawRating === null
+            : rawRating !== null && (rawRating > 0 || rawRating === 0 && ref.metadata.exactProductRatingUnavailable === true)
+        );
       const exact = hasExactProof
         ? {
             product: cachedTitle,
             reviews: reviews!,
-            rating: rawRating === null ? null : normalizeRating(rawRating, 5),
+            rating: rawRating === null || ratingUnavailable ? null : normalizeRating(rawRating, 5),
             rawRating,
+            ...(ratingUnavailable ? { ratingUnavailable: true as const } : {}),
             aggregateGroupId: asString(ref.metadata.exactProductAggregateGroupId)
           }
         : await this.fetchExactTranslatedProductWithRetry(ref, listingId, context);
@@ -931,6 +1065,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
       product = exact.product;
       reviews = exact.reviews;
       rawRating = exact.rawRating;
+      ratingUnavailable = exact.ratingUnavailable === true || reviews > 0 && rawRating === 0;
       if (exact.aggregateGroupId) ref.metadata.exactProductAggregateGroupId = exact.aggregateGroupId;
     }
     if (searchTileFallback && (
@@ -940,13 +1075,16 @@ export class OzonBrowserAdapter implements SiteAdapter {
     )) {
       throw new ParserChangedError("Ozon search-tile fallback is not bound to complete product metrics");
     }
-    let normalizedRating = rawRating === null ? null : normalizeRating(rawRating, 5);
+    let normalizedRating = rawRating === null || ratingUnavailable ? null : normalizeRating(rawRating, 5);
     let status: Observation["status"];
     if (searchTileFallback) {
       status = "needs_review";
       if (reviews === 0) normalizedRating = null;
     } else if (reviews === 0) {
       status = "no_reviews";
+      normalizedRating = null;
+    } else if (ratingUnavailable) {
+      status = matchesBrand(product, ref.brand) ? "ok" : "needs_review";
       normalizedRating = null;
     } else if (reviews === null || normalizedRating === null || normalizedRating === 0 || !matchesBrand(product, ref.brand)) {
       status = "needs_review";
@@ -964,6 +1102,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
       reviews,
       rating: normalizedRating,
       ...(rawRating === null ? {} : { rawRating, rawRatingScale: 5 }),
+      ...(ratingUnavailable ? { ratingUnavailable: true } : {}),
       ...(asString(ref.metadata.exactProductAggregateGroupId)
         ? { aggregateGroupId: asString(ref.metadata.exactProductAggregateGroupId)! }
         : {}),
@@ -1046,7 +1185,10 @@ export class OzonBrowserAdapter implements SiteAdapter {
         return await this.fetchExactTranslatedProduct(ref, listingId, context);
       } catch (error) {
         if (context.signal?.aborted) throw error;
-        if (!(error instanceof AdapterBlockedError) || attempt === MAX_DETAIL_ATTEMPTS) throw error;
+        if (
+          !(error instanceof AdapterBlockedError) || attempt === MAX_DETAIL_ATTEMPTS ||
+          /returned HTTP 502/i.test(error.message)
+        ) throw error;
         lastFailure = error;
         const delay = this.detailRetryDelayMs * attempt;
         await reportActivity(context, {
@@ -1133,6 +1275,169 @@ export class OzonBrowserAdapter implements SiteAdapter {
     });
   }
 
+  private async fetchExactYandexComposerProduct(
+    ref: ProductRef,
+    listingId: string,
+    context: AdapterContext
+  ): Promise<ExactProductMetrics> {
+    return withActivity(context, {
+      operationId: `ozon:yandex-composer-product:${listingId}`,
+      stage: "collection",
+      label: "Яндекс Переводчик · точная карточка Ozon",
+      listingId,
+      channels: ["yandex_translate", "first_party_api"],
+      detail: "Официальный JSON карточки"
+    }, async () => {
+      const target = new URL(canonicalUrl(ref.url, listingId));
+      if (
+        target.protocol !== "https:" || target.hostname !== "www.ozon.ru" || target.search || target.hash ||
+        !/^\/product\/[a-z0-9-]+\/$/i.test(target.pathname) || skuFromUrl(target.toString()) !== listingId
+      ) {
+        throw new ParserChangedError("Ozon Yandex composer ProductRef is outside the fixed product path");
+      }
+      const endpoint = yandexComposerUrl(target.pathname);
+      let response: Response;
+      try {
+        response = await this.fetchImpl(endpoint, {
+          method: "GET",
+          headers: {
+            accept: "application/json",
+            "accept-language": "ru-RU,ru;q=0.9",
+            "cache-control": "no-cache"
+          },
+          signal: context.signal
+        });
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        throw new AdapterBlockedError(`Ozon Yandex product composer request failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const declaredLength = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declaredLength) && declaredLength > this.maxDocumentBytes) {
+        throw new ParserChangedError("Ozon Yandex product composer response exceeded the document safety limit");
+      }
+      const body = await response.text();
+      if (body.length > this.maxDocumentBytes) {
+        throw new ParserChangedError("Ozon Yandex product composer response exceeded the document safety limit");
+      }
+      if ([403, 407, 423, 429, 498, 502, 503, 504].includes(response.status) || blockedBody(body)) {
+        throw new AdapterBlockedError(`Ozon blocked the Yandex product composer (HTTP ${response.status})`);
+      }
+      if (!response.ok) throw new AdapterBlockedError(`Ozon Yandex product composer returned HTTP ${response.status}`);
+      if (!/json/i.test(response.headers.get("content-type") ?? "")) {
+        throw new ParserChangedError("Ozon Yandex product composer returned non-JSON data");
+      }
+      return withActivity(context, {
+        operationId: `ozon:parse-yandex-composer:${listingId}`,
+        stage: "parsing",
+        label: "Ozon JSON · рейтинг и отзывы",
+        listingId,
+        channels: ["yandex_translate", "first_party_api"],
+        parsers: ["api_json"]
+      }, async () => {
+        try {
+          return parseExactComposerProduct(JSON.parse(body) as unknown, listingId);
+        } catch (error) {
+          if (error instanceof ParserChangedError) throw error;
+          throw new ParserChangedError("Ozon Yandex product composer returned invalid JSON");
+        }
+      });
+    });
+  }
+
+  private async fetchExactTranslatedComposerProduct(
+    ref: ProductRef,
+    listingId: string,
+    context: AdapterContext
+  ): Promise<ExactProductMetrics> {
+    return withActivity(context, {
+      operationId: `ozon:translated-composer-product:${listingId}`,
+      stage: "collection",
+      label: "Google Translate API · точная карточка Ozon",
+      listingId,
+      channels: ["google_translate", "first_party_api"],
+      detail: "Компактный JSON вместо тяжёлой страницы товара"
+    }, async () => {
+      const target = new URL(canonicalUrl(ref.url, listingId));
+      if (
+        target.protocol !== "https:" || target.hostname !== "www.ozon.ru" || target.search || target.hash ||
+        !/^\/product\/[a-z0-9-]+\/$/i.test(target.pathname) || skuFromUrl(target.toString()) !== listingId
+      ) {
+        throw new ParserChangedError("Ozon translated composer ProductRef is outside the fixed product path");
+      }
+      const endpoint = translatedComposerUrl(target.pathname);
+      let response: Response;
+      try {
+        response = await this.fetchImpl(endpoint, {
+          method: "GET",
+          headers: {
+            accept: "application/json",
+            "accept-language": "ru-RU,ru;q=0.9",
+            "cache-control": "no-cache"
+          },
+          signal: context.signal
+        });
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        throw new AdapterBlockedError(`Ozon translated composer request failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const declaredLength = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declaredLength) && declaredLength > this.maxDocumentBytes) {
+        throw new ParserChangedError("Ozon translated composer response exceeded the document safety limit");
+      }
+      const body = await response.text();
+      if (body.length > this.maxDocumentBytes) {
+        throw new ParserChangedError("Ozon translated composer response exceeded the document safety limit");
+      }
+      if ([403, 407, 423, 429, 498, 503].includes(response.status) || blockedBody(body)) {
+        throw new AdapterBlockedError(`Ozon blocked the translated composer (HTTP ${response.status})`);
+      }
+      if (!response.ok) throw new AdapterBlockedError(`Ozon translated composer returned HTTP ${response.status}`);
+      if (!/json/i.test(response.headers.get("content-type") ?? "")) {
+        throw new ParserChangedError("Ozon translated composer returned non-JSON data");
+      }
+      return withActivity(context, {
+        operationId: `ozon:parse-translated-composer:${listingId}`,
+        stage: "parsing",
+        label: "Ozon JSON · рейтинг и отзывы",
+        listingId,
+        channels: ["google_translate", "first_party_api"],
+        parsers: ["api_json"]
+      }, async () => {
+        try {
+          return parseExactComposerProduct(JSON.parse(body) as unknown, listingId);
+        } catch (error) {
+          if (error instanceof ParserChangedError) throw error;
+          throw new ParserChangedError("Ozon translated composer returned invalid JSON");
+        }
+      });
+    });
+  }
+
+  private async fetchExactTranslatedComposerProductWithRetry(
+    ref: ProductRef,
+    listingId: string,
+    context: AdapterContext
+  ): Promise<ExactProductMetrics> {
+    try {
+      return await this.fetchExactTranslatedComposerProduct(ref, listingId, context);
+    } catch (error) {
+      if (context.signal?.aborted || !(error instanceof AdapterBlockedError) ||
+        !/(?:request failed|HTTP\s+(?:429|5\d{2}))/i.test(error.message)) throw error;
+      await reportActivity(context, {
+        operationId: `ozon:translated-composer-retry:${listingId}`,
+        stage: "collection",
+        label: "Пауза перед повтором Ozon JSON",
+        listingId,
+        channels: ["google_translate", "first_party_api"],
+        status: "active",
+        detail: "Одна повторная попытка через 8 секунд"
+      });
+      await new Promise((resolve) => setTimeout(resolve, TRANSLATED_COMPOSER_RETRY_DELAY_MS));
+      context.signal?.throwIfAborted();
+      return this.fetchExactTranslatedComposerProduct(ref, listingId, context);
+    }
+  }
+
   private async fetchSearchPage(
     brand: string,
     page: number,
@@ -1150,6 +1455,33 @@ export class OzonBrowserAdapter implements SiteAdapter {
       if (stage === "discovery") this.searchPageCache.delete(cacheKey);
       return cached;
     }
+    let googleComposerFailure: AdapterBlockedError | ParserChangedError | undefined;
+    if (this.googleComposerEnabled) {
+      try {
+        const composer = await this.fetchGoogleComposerSearchPage(brand, page, context, stage);
+        if (stage === "health_check") this.searchPageCache.set(cacheKey, composer);
+        return composer;
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        googleComposerFailure = error instanceof ParserChangedError || error instanceof AdapterBlockedError
+          ? error
+          : new ParserChangedError(`Ozon Google composer search failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    let yandexFailure: AdapterBlockedError | ParserChangedError | undefined;
+    if (this.yandexTranslateEnabled) {
+      try {
+        const yandex = await this.fetchYandexComposerSearchPage(brand, page, context, stage);
+        if (stage === "health_check") this.searchPageCache.set(cacheKey, yandex);
+        return yandex;
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        yandexFailure = error instanceof ParserChangedError || error instanceof AdapterBlockedError
+          ? error
+          : new ParserChangedError(`Ozon Yandex search failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
     let translateFailure: AdapterBlockedError | ParserChangedError | undefined;
     if (this.translateEnabled) {
       try {
@@ -1169,13 +1501,139 @@ export class OzonBrowserAdapter implements SiteAdapter {
       if (stage === "health_check") this.searchPageCache.set(cacheKey, composer);
       return composer;
     } catch (composerFailure) {
-      if (!translateFailure) throw composerFailure;
-      const message = `Ozon translated search: ${translateFailure.message}; composer browser: ${composerFailure instanceof Error ? composerFailure.message : String(composerFailure)}`;
-      if (translateFailure instanceof ParserChangedError || composerFailure instanceof ParserChangedError) {
+      if (!translateFailure && !yandexFailure && !googleComposerFailure) throw composerFailure;
+      const message = `Ozon Google composer: ${googleComposerFailure?.message ?? "disabled"}; Yandex composer: ${yandexFailure?.message ?? "disabled"}; Google translated search: ${translateFailure?.message ?? "disabled"}; composer browser: ${composerFailure instanceof Error ? composerFailure.message : String(composerFailure)}`;
+      if (googleComposerFailure instanceof ParserChangedError || yandexFailure instanceof ParserChangedError || translateFailure instanceof ParserChangedError || composerFailure instanceof ParserChangedError) {
         throw new ParserChangedError(message);
       }
       throw new AdapterBlockedError(message);
     }
+  }
+
+  private async fetchGoogleComposerSearchPage(
+    brand: string,
+    page: number,
+    context: AdapterContext,
+    stage: "health_check" | "discovery"
+  ): Promise<SearchPage> {
+    return withActivity(context, {
+      operationId: `ozon:google-composer-search:${page}`,
+      stage,
+      label: "Google Translate API · выдача Ozon",
+      channels: ["google_translate", "first_party_api"],
+      detail: `Основной компактный канал · страница ${page}`
+    }, async () => {
+      const search = new URL("https://www.ozon.ru/search/");
+      search.searchParams.set("text", brand);
+      search.searchParams.set("from_global", "true");
+      if (page > 1) search.searchParams.set("page", String(page));
+      const endpoint = translatedComposerUrl(`${search.pathname}${search.search}`);
+      let response: Response;
+      try {
+        response = await this.fetchImpl(endpoint, {
+          method: "GET",
+          headers: {
+            accept: "application/json",
+            "accept-language": "ru-RU,ru;q=0.9",
+            "cache-control": "no-cache"
+          },
+          signal: context.signal
+        });
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        throw new AdapterBlockedError(`Ozon Google composer request failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const declaredLength = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declaredLength) && declaredLength > this.maxDocumentBytes) {
+        throw new ParserChangedError("Ozon Google composer response exceeded the document safety limit");
+      }
+      const body = await response.text();
+      if (body.length > this.maxDocumentBytes) throw new ParserChangedError("Ozon Google composer response exceeded the document safety limit");
+      if ([403, 407, 423, 429, 498, 502, 503, 504].includes(response.status) || blockedBody(body)) {
+        throw new AdapterBlockedError(`Ozon blocked the Google composer (HTTP ${response.status})`);
+      }
+      if (!response.ok) throw new AdapterBlockedError(`Ozon Google composer returned HTTP ${response.status}`);
+      if (!/json/i.test(response.headers.get("content-type") ?? "")) {
+        throw new ParserChangedError("Ozon Google composer returned non-JSON data");
+      }
+      return withActivity(context, {
+        operationId: `ozon:parse-google-composer-search:${page}`,
+        stage: "parsing",
+        label: "Ozon JSON · карточки выдачи",
+        channels: ["google_translate", "first_party_api"],
+        parsers: ["api_json"],
+        detail: `Страница ${page}`
+      }, async () => {
+        try { return parseSearchPage(JSON.parse(body) as unknown); }
+        catch (error) {
+          if (error instanceof ParserChangedError) throw error;
+          throw new ParserChangedError("Ozon Google composer returned invalid search JSON");
+        }
+      });
+    });
+  }
+
+  private async fetchYandexComposerSearchPage(
+    brand: string,
+    page: number,
+    context: AdapterContext,
+    stage: "health_check" | "discovery"
+  ): Promise<SearchPage> {
+    return withActivity(context, {
+      operationId: `ozon:yandex-composer-search:${page}`,
+      stage,
+      label: "Яндекс Переводчик · выдача Ozon",
+      channels: ["yandex_translate", "first_party_api"],
+      detail: `Основной канал · страница ${page}`
+    }, async () => {
+      const search = new URL("https://www.ozon.ru/search/");
+      search.searchParams.set("text", brand);
+      search.searchParams.set("from_global", "true");
+      if (page > 1) search.searchParams.set("page", String(page));
+      const endpoint = yandexComposerUrl(`${search.pathname}${search.search}`);
+      let response: Response;
+      try {
+        response = await this.fetchImpl(endpoint, {
+          method: "GET",
+          headers: {
+            accept: "application/json",
+            "accept-language": "ru-RU,ru;q=0.9",
+            "cache-control": "no-cache"
+          },
+          signal: context.signal
+        });
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        throw new AdapterBlockedError(`Ozon Yandex composer request failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const declaredLength = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declaredLength) && declaredLength > this.maxDocumentBytes) {
+        throw new ParserChangedError("Ozon Yandex composer response exceeded the document safety limit");
+      }
+      const body = await response.text();
+      if (body.length > this.maxDocumentBytes) throw new ParserChangedError("Ozon Yandex composer response exceeded the document safety limit");
+      if ([403, 407, 423, 429, 498, 503].includes(response.status) || blockedBody(body)) {
+        throw new AdapterBlockedError(`Ozon blocked the Yandex composer (HTTP ${response.status})`);
+      }
+      if (!response.ok) throw new AdapterBlockedError(`Ozon Yandex composer returned HTTP ${response.status}`);
+      if (!/json/i.test(response.headers.get("content-type") ?? "")) {
+        throw new ParserChangedError("Ozon Yandex composer returned non-JSON data");
+      }
+      return withActivity(context, {
+        operationId: `ozon:parse-yandex-composer-search:${page}`,
+        stage: "parsing",
+        label: "Ozon JSON · карточки выдачи",
+        channels: ["yandex_translate", "first_party_api"],
+        parsers: ["api_json"],
+        detail: `Страница ${page}`
+      }, async () => {
+        try { return parseSearchPage(JSON.parse(body) as unknown); }
+        catch (error) {
+          if (error instanceof ParserChangedError) throw error;
+          throw new ParserChangedError("Ozon Yandex composer returned invalid search JSON");
+        }
+      });
+    });
   }
 
   private async fetchTranslatedSearchPage(
