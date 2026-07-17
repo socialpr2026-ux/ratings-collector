@@ -158,6 +158,35 @@ describe("RiglaAdapter", () => {
     })).resolves.toMatchObject({ ok: true });
   });
 
+  it("treats a complete operative letter index as healthy when it explicitly has no requested product", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestedUrl(input);
+      return url.pathname.startsWith("/forms/")
+        ? new Response("missing", { status: 404 })
+        : new Response('<html><body><div class="alphabet-forms"></div></body></html>');
+    }) as unknown as typeof fetch;
+    const adapter = new RiglaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    await expect(adapter.healthCheck({ ...context, brands: ["Тикализис"] })).resolves.toMatchObject({
+      ok: true,
+      message: "pharmacy:rigla:v1: complete letter index proved no current product for Тикализис"
+    });
+    await expect(adapter.discover("Тикализис", context)).resolves.toEqual([]);
+  });
+
+  it("keeps an ambiguous Rigla letter page blocked instead of turning it into no_results", async () => {
+    const adapter = new RiglaAdapter(new MemoryEvidenceStore(), vi.fn(async (input: RequestInfo | URL) =>
+      new Response(requestedUrl(input).pathname.startsWith("/forms/") ? "missing" : "<html><main></main></html>", {
+        status: requestedUrl(input).pathname.startsWith("/forms/") ? 404 : 200
+      })
+    ) as unknown as typeof fetch);
+
+    await expect(adapter.healthCheck({ ...context, brands: ["Тикализис"] })).resolves.toMatchObject({
+      ok: false,
+      message: "rigla.ru: letter index is incomplete"
+    });
+  });
+
   it("fails closed when a written review has no single product rating", async () => {
     const malformed = fixtures.riglaProduct.replace('"ratings":[{"attribute_code":"Оценка","value":4}]', '"ratings":[]');
     const adapter = new RiglaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(malformed)) as unknown as typeof fetch);

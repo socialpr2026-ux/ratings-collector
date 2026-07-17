@@ -420,13 +420,23 @@ export class RiglaAdapter extends PharmacyAdapter {
   readonly id = "pharmacy:rigla:v1";
   readonly supportedDomains = [RIGLA_DOMAIN, `www.${RIGLA_DOMAIN}`] as const;
 
-  healthCheck(context: AdapterContext): Promise<AdapterHealth> {
-    return this.canary(context.brands?.[0]?.trim() || "Кагоцел", context);
+  async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
+    const checkedAt = new Date().toISOString();
+    const brand = context.brands?.[0]?.trim() || "Кагоцел";
+    try {
+      const refs = await this.discover(brand, { ...context, previousIds: [], previousRefs: [] });
+      return refs.length
+        ? { ok: true, checkedAt, message: `${this.id}: operative discovery found ${refs.length} product card(s)` }
+        : { ok: true, checkedAt, message: `${this.id}: complete letter index proved no current product for ${brand}` };
+    } catch (error) {
+      return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = new Map<string, ProductRef>();
     let provedMissing = 0;
+    let completeLetterIndex = false;
     const slugs = riglaBrandSlugs(brand);
     for (const slug of slugs) {
       const source = `${RIGLA_ORIGIN}/forms/${slug}`;
@@ -451,6 +461,10 @@ export class RiglaAdapter extends PharmacyAdapter {
         const result = await requestHtml(source, context, this.fetchImpl);
         assertUsable(RIGLA_DOMAIN, result);
         const $ = load(result.html);
+        if ($(".alphabet-forms").length !== 1) {
+          throw new ParserChangedError(`${RIGLA_DOMAIN}: letter index is incomplete`);
+        }
+        completeLetterIndex = true;
         $(".alphabet-forms a[href*='/product/'], a.alphabet-forms__item-link[href*='/product/']").each((_index, node) => {
           const parsed = riglaProduct($(node).attr("href") ?? "");
           const title = compactText($(node).attr("title") || $(node).text());
@@ -460,7 +474,7 @@ export class RiglaAdapter extends PharmacyAdapter {
       }
     }
     appendPrevious(refs, RIGLA_DOMAIN, brand, context, riglaProduct);
-    if (!refs.size && provedMissing === slugs.length) return [];
+    if (!refs.size && provedMissing === slugs.length && completeLetterIndex) return [];
     if (!refs.size) throw new AdapterBlockedError(`${RIGLA_DOMAIN}: страницы форм не доказали результат поиска`);
     return [...refs.values()].sort((a, b) => (a.title ?? "").localeCompare(b.title ?? "", "ru") || a.listingId.localeCompare(b.listingId));
   }

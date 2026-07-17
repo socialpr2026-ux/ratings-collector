@@ -618,6 +618,58 @@ describe("first-party review-site adapters", () => {
     expect(requested[0].searchParams.get("query")).toBe("Кагоцел");
   });
 
+  it("accepts an exact iRecommend search identity without requiring aggregate metrics in the search card", async () => {
+    const adapter = adapterFor("irecommend.ru", (async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      expect(url.pathname).toBe("/srch");
+      return new Response(`<ul class="srch-result-nodes"><li>
+        <div class="ProductTizer" data-type="2" data-nid="24681012">
+          <div class="title"><a href="/content/lekarstvennyi-preparat-tikalizis">Лекарственный препарат Тикализис</a></div>
+        </div>
+      </li></ul>`);
+    }) as typeof fetch);
+
+    await expect(adapter.healthCheck({ region: "Москва", brands: ["Тикализис"] })).resolves.toMatchObject({
+      ok: true,
+      message: "irecommend.ru search proved exact product 24681012"
+    });
+  });
+
+  it("keeps malformed or foreign iRecommend search identity unhealthy", async () => {
+    const adapter = adapterFor("irecommend.ru", (async () => new Response(`
+      <ul class="srch-result-nodes"><li>
+        <div class="ProductTizer" data-type="2" data-nid="not-numeric">
+          <div class="title"><a href="/content/lekarstvennyi-preparat-kagotsel">Лекарственный препарат Кагоцел</a></div>
+        </div>
+      </li></ul>`
+    )) as typeof fetch);
+
+    await expect(adapter.healthCheck({ region: "Москва", brands: ["Тикализис"] })).resolves.toMatchObject({ ok: false });
+  });
+
+  it("rejects a numeric same-site iRecommend product whose title belongs to another brand", async () => {
+    const adapter = adapterFor("irecommend.ru", (async () => new Response(`
+      <ul class="srch-result-nodes"><li>
+        <div class="ProductTizer" data-type="2" data-nid="135637">
+          <div class="title"><a href="/content/protivovirusnye-sredstva-kagotsel">Лекарственный препарат Кагоцел</a></div>
+        </div>
+      </li></ul>`
+    )) as typeof fetch);
+
+    await expect(adapter.healthCheck({ region: "Москва", brands: ["Тикализис"] })).resolves.toMatchObject({ ok: false });
+  });
+
+  it("treats an explicit iRecommend search no-results proof as healthy", async () => {
+    const adapter = adapterFor("irecommend.ru", (async () => new Response(
+      "<h1>Тикализис</h1><main>Не нашли? Попробуйте поиск по сайту</main>"
+    )) as typeof fetch);
+
+    await expect(adapter.healthCheck({ region: "Москва", brands: ["Тикализис"] })).resolves.toMatchObject({
+      ok: true,
+      message: "irecommend.ru search proved no current product for Тикализис"
+    });
+  });
+
   it("accepts a confirmed iRecommend vote count as feedback", async () => {
     const adapter = adapterFor("irecommend.ru", (async () => new Response(
       `<h1>Противовирусные средства Кагоцел — отзывы</h1>` +

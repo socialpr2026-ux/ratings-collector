@@ -585,28 +585,25 @@ function asnaProduct($: CheerioAPI): ParsedProduct | undefined {
 export class AsnaAdapter implements SiteAdapter {
   readonly id = "asna.ru:translate-v1";
   readonly supportedDomains = ["asna.ru", "www.asna.ru"] as const;
+  private readonly successfulDiscovery = new Map<string, ProductRef[]>();
 
   constructor(private readonly evidence: EvidenceStore, private readonly fetchImpl: typeof fetch = fetch) {}
+
+  private discoveryKey(brand: string, context: AdapterContext): string | undefined {
+    const runId = context.runId?.trim();
+    return runId ? `${runId}:${brand.normalize("NFKC").toLocaleLowerCase("ru-RU").trim()}` : undefined;
+  }
 
   async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
     const checkedAt = new Date().toISOString();
     try {
       const brand = context.brands?.[0]?.trim() || "Кагоцел";
-      const slugs = brandSlugs(brand);
-      const maps = await Promise.all([
-        sitemap("https://www.asna.ru/sitemap/sitemap_cards.xml", context, this.fetchImpl),
-        sitemap("https://www.asna.ru/sitemap/sitemap_cards1.xml", context, this.fetchImpl)
-      ]);
-      const complete = maps.every((xml) => /<urlset\b/i.test(xml) && /<\/urlset>/i.test(xml));
-      const hasRequestedCard = maps.some((xml) => [...xml.matchAll(/<loc>([^<]+)<\/loc>/gi)].some((match) => {
-        try {
-          const url = new URL(match[1].replace(/&amp;/gi, "&"));
-          const slug = url.pathname.match(/^\/cards\/([a-z0-9_.-]+)\.html$/i)?.[1];
-          return normalizeHost(url.hostname) === "asna.ru" && Boolean(slug && slugMatches(slug, slugs));
-        } catch { return false; }
-      }));
-      if (!complete || !hasRequestedCard) throw new ParserChangedError(`asna.ru sitemaps have no exact current card for ${brand}`);
-      return { ok: true, checkedAt, message: `asna.ru: complete card sitemaps contain ${brand}` };
+      const refs = await this.discover(brand, { ...context, previousIds: [], previousRefs: [] });
+      return {
+        ok: true,
+        checkedAt,
+        message: `asna.ru operative discovery proved ${refs.length} current product card(s) for ${brand}`
+      };
     } catch (error) {
       return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
     }
@@ -614,6 +611,13 @@ export class AsnaAdapter implements SiteAdapter {
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = new Map(asnaPreviousRefs(brand, context).map((ref) => [ref.listingId, ref]));
+    const cacheKey = this.discoveryKey(brand, context);
+    const cached = cacheKey ? this.successfulDiscovery.get(cacheKey) : undefined;
+    if (cached) {
+      this.successfulDiscovery.delete(cacheKey!);
+      for (const ref of cached) refs.set(ref.listingId, { ...ref, metadata: { ...ref.metadata } });
+      return [...refs.values()].sort((left, right) => left.listingId.localeCompare(right.listingId));
+    }
     const slugs = brandSlugs(brand);
     const maps = await Promise.allSettled([
       sitemap("https://www.asna.ru/sitemap/sitemap_cards.xml", context, this.fetchImpl),
@@ -681,7 +685,11 @@ export class AsnaAdapter implements SiteAdapter {
     if (refs.size === 0) {
       throw new AdapterBlockedError(`asna.ru: card sitemaps have no provable current product for ${brand}`);
     }
-    return [...refs.values()].sort((left, right) => left.listingId.localeCompare(right.listingId));
+    const discovered = [...refs.values()].sort((left, right) => left.listingId.localeCompare(right.listingId));
+    if (cacheKey) {
+      this.successfulDiscovery.set(cacheKey, discovered.map((ref) => ({ ...ref, metadata: { ...ref.metadata } })));
+    }
+    return discovered;
   }
 
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
