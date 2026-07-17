@@ -79,7 +79,7 @@ describe("YandexAdapter discovery", () => {
       if (url === INDEX) return xmlResponse(sitemapIndex(maps));
       inFlight += 1;
       peak = Math.max(peak, inFlight);
-      // Thirty-two workers still inspect all 319 shards. The caller owns the
+      // Four workers still inspect all 319 shards. The caller owns the
       // run deadline, so a healthy complete pass is not cut off mid-scan.
       await new Promise((resolve) => setTimeout(resolve, 30));
       inFlight -= 1;
@@ -93,7 +93,7 @@ describe("YandexAdapter discovery", () => {
       { listingId: "170000001", brand: "Бактоблис" }
     ]);
     expect(fetch).toHaveBeenCalledTimes(320);
-    expect(peak).toBe(32);
+    expect(peak).toBe(4);
   });
 
   it("propagates the caller deadline instead of returning partial sitemap matches", async () => {

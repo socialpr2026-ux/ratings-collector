@@ -133,11 +133,10 @@ export class YandexAdapter implements SiteAdapter {
     this.maxSitemaps = boundedInteger(options.maxSitemaps, 400, 1, 400);
     this.maxCandidates = boundedInteger(options.maxCandidates, 300, 1, 2_000);
     this.maxDocumentBytes = boundedInteger(options.maxDocumentBytes, 12_000_000, 10_000, 25_000_000);
-    // EdgeOne compacts and validates every shard before it reaches the adapter,
-    // so a bounded set of thirty-two workers keeps the current 319-shard cold
-    // scan inside the discovery deadline without caching across runs or
-    // weakening the complete-sitemap proof.
-    this.sitemapConcurrency = boundedInteger(options.sitemapConcurrency, 32, 1, 32);
+    // Edge/cloud egress is throttled when many multi-MB sitemap shards arrive
+    // together. Four workers preserve the complete scan without overloading the
+    // fixed gateway or turning a transient shard failure into a false result.
+    this.sitemapConcurrency = boundedInteger(options.sitemapConcurrency, 4, 1, 12);
     this.cacheTtlMs = boundedInteger(options.cacheTtlMs, 30 * 60_000, 0, 24 * 60 * 60_000);
     this.sitemapRetryAttempts = boundedInteger(options.sitemapRetryAttempts, 3, 1, 5);
     this.sitemapRetryBaseMs = boundedInteger(options.sitemapRetryBaseMs, 250, 0, 10_000);
