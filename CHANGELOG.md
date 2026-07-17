@@ -2,6 +2,13 @@
 
 Изменения проекта публикуются автоматически через Release Please на основе Conventional Commits.
 
+## [1.0.0](https://github.com/socialpr2026-ux/ratings-collector/compare/v0.3.2...v1.0.0) (2026-07-17)
+
+
+### Bug Fixes
+
+* stabilize Interfox Ratings collection ([369a5eb](https://github.com/socialpr2026-ux/ratings-collector/commit/369a5eba07b42ddfe0b096284efe9087b44d7701))
+
 ## [0.3.2](https://github.com/socialpr2026-ux/ratings-collector/compare/v0.3.1...v0.3.2) (2026-07-16)
 
 
