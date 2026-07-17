@@ -260,8 +260,8 @@ describe("recovered first-party pharmacy adapters", () => {
         return new Response(asnaCard(card, "20046", 3), { headers: { "content-type": "text/html" } });
       }
       throw new Error(`unexpected ${url}`);
-    }) as unknown as typeof fetch;
-    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock);
+    });
+    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock as unknown as typeof fetch);
     const healthContext = { region: "Москва", brands: ["Tsereton"], runId: "asna-health-run" };
 
     await expect(adapter.healthCheck(healthContext)).resolves.toMatchObject({
@@ -290,8 +290,8 @@ describe("recovered first-party pharmacy adapters", () => {
       }
       if (url.hostname === "translate.google.com") return new Response("blocked", { status: 502 });
       throw new Error(`unexpected ${url}`);
-    }) as unknown as typeof fetch;
-    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock);
+    });
+    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock as unknown as typeof fetch);
     const healthContext = { region: "Москва", brands: ["Tsereton"], runId: "asna-retry-run" };
 
     await expect(adapter.healthCheck(healthContext)).resolves.toMatchObject({ ok: false });
