@@ -876,6 +876,32 @@ describe("static pharmacy Translate gateway", () => {
     expect(upstream).toHaveBeenCalledOnce();
   });
 
+  it("accepts ASNA's apex canonical only for the exact requested www card path", async () => {
+    const requested = "https://www.asna.ru/cards/tsereton_400mg_n28_kaps_soteks.html";
+    const canonical = "https://asna.ru/cards/tsereton_400mg_n28_kaps_soteks.html";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${canonical}">
+      <link rel="canonical" href="${canonical}"></head><body>
+      <div class="productPage__content product__item" itemscope itemtype="http://schema.org/Product">
+        <meta itemprop="sku" content="36138"><div itemprop="aggregateRating" itemscope>
+          <meta itemprop="ratingValue" content="4.9"><meta itemprop="reviewCount" content="17">
+        </div><div class="product__ratingText">Отзывы (17)</div>
+        <div id="feedbackListContainer" class="product__feedbackList">
+          <article class="product__feedbackItem" itemscope itemtype="https://schema.org/Review"></article>
+        </div></div></body></html>`, { headers: { "content-type": "text/html; charset=utf-8" } })));
+
+    const response = await callGateway(translated("www-asna-ru.translate.goog", new URL(requested).pathname).toString());
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('itemprop="sku" content="36138"');
+
+    const other = canonical.replace("tsereton_400mg_n28_kaps_soteks", "tserakson_500mg_n28_tab_soteks");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${other}">
+      <link rel="canonical" href="${other}"></head><body></body></html>`, {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    })));
+    expect((await callGateway(translated("www-asna-ru.translate.goog", new URL(requested).pathname).toString())).status).toBe(502);
+  });
+
   it("rejects a positive ASNA aggregate without matching visible feedback proof", async () => {
     const source = "https://www.asna.ru/cards/kagotsel_12mg_n10_tab_niarmedik_plyus_ooo.html";
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head>

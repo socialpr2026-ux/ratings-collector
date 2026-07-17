@@ -311,6 +311,23 @@ function translatedSourceMatches(value: string | undefined, requested: URL): boo
   }
 }
 
+function asnaSourceMatches(value: string | undefined, requested: URL): boolean {
+  if (!value) return false;
+  try {
+    const normalize = (url: URL) => {
+      const copy = new URL(url.toString());
+      if (!["asna.ru", "www.asna.ru"].includes(copy.hostname) || copy.protocol !== "https:" || copy.port ||
+        copy.username || copy.password || copy.hash) return undefined;
+      copy.hostname = "www.asna.ru";
+      return exactUrlSignature(copy);
+    };
+    const candidate = normalize(new URL(value));
+    return candidate !== undefined && candidate === normalize(requested);
+  } catch {
+    return false;
+  }
+}
+
 function megamarketSource(target: URL): URL {
   const source = new URL(target.pathname, "https://megamarket.ru");
   for (const key of ["q", "page"] as const) {
@@ -600,7 +617,8 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
   if (/(?:captcha|access denied|unusual traffic|подозрительн\w*\s+активност|проверка\s+браузера|Target URL returned error)/i.test(title) ||
     /<(?:iframe|form|input)\b[^>]*(?:captcha|challenge)/i.test(html.slice(0, 150_000))) return undefined;
   const baseValue = $("base[href]").first().attr("href");
-  if (!translatedSourceMatches(baseValue, requested.source)) return undefined;
+  const sourceMatches = requested.kind === "asna-product" ? asnaSourceMatches : translatedSourceMatches;
+  if (!sourceMatches(baseValue, requested.source)) return undefined;
   const base = `<base href="${escapeHtml(requested.source.toString())}">`;
 
   if (requested.kind === "apteka-preparation" || requested.kind === "apteka-product") {
@@ -842,7 +860,7 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
 
   if (requested.kind === "asna-product") {
     const canonicalValue = $("link[rel='canonical'][href]").first().attr("href");
-    if (!translatedSourceMatches(canonicalValue, requested.source)) return undefined;
+    if (!asnaSourceMatches(canonicalValue, requested.source)) return undefined;
     const roots = $(".productPage__content.product__item[itemscope]");
     if (roots.length !== 1) return undefined;
     const root = roots.first();
