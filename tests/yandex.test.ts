@@ -68,7 +68,7 @@ describe("YandexAdapter discovery", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
-  it("scans a live-sized 319-shard index with sixteen bounded same-run workers", async () => {
+  it("scans every shard in a live-sized cold index within the bounded deadline", async () => {
     const maps = Array.from({ length: 319 }, (_value, index) =>
       `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
     );
@@ -79,19 +79,22 @@ describe("YandexAdapter discovery", () => {
       if (url === INDEX) return xmlResponse(sitemapIndex(maps));
       inFlight += 1;
       peak = Math.max(peak, inFlight);
-      await new Promise((resolve) => setTimeout(resolve, 2));
+      // At the former 16-worker bound this complete scan needs at least 600ms
+      // and fails closed. Thirty-two workers still inspect all 319 shards while
+      // completing inside the unchanged deadline.
+      await new Promise((resolve) => setTimeout(resolve, 30));
       inFlight -= 1;
       return xmlResponse(modelSitemap(url === maps[17]
         ? ["https://reviews.yandex.ru/product/baktoblis-sashe--170000001"]
         : []));
     }) as unknown as typeof globalThis.fetch;
-    const adapter = new YandexAdapter({ fetch, maxSitemaps: 319, discoveryTimeoutMs: 2_000 });
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 319, discoveryTimeoutMs: 450 });
 
     await expect(adapter.discover("Бактоблис", context())).resolves.toMatchObject([
       { listingId: "170000001", brand: "Бактоблис" }
     ]);
     expect(fetch).toHaveBeenCalledTimes(320);
-    expect(peak).toBe(16);
+    expect(peak).toBe(32);
   });
 
   it("fails a timed-out partial sitemap scan closed instead of returning no results", async () => {
