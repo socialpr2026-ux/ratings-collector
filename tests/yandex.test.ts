@@ -68,7 +68,7 @@ describe("YandexAdapter discovery", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
-  it("scans a live-sized 319-shard index with bounded parallelism", async () => {
+  it("scans a live-sized 319-shard index with sixteen bounded same-run workers", async () => {
     const maps = Array.from({ length: 319 }, (_value, index) =>
       `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
     );
@@ -91,8 +91,7 @@ describe("YandexAdapter discovery", () => {
       { listingId: "170000001", brand: "Бактоблис" }
     ]);
     expect(fetch).toHaveBeenCalledTimes(320);
-    expect(peak).toBeGreaterThan(1);
-    expect(peak).toBeLessThanOrEqual(12);
+    expect(peak).toBe(16);
   });
 
   it("fails a timed-out partial sitemap scan closed instead of returning no results", async () => {
