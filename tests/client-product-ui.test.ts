@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { SITE_CATALOG, parseDomainList, updateDomainSelection } from "../src/client/site-catalog.js";
 
 const appSource = readFileSync(new URL("../src/client/App.tsx", import.meta.url), "utf8");
+const stylesSource = readFileSync(new URL("../src/client/styles.css", import.meta.url), "utf8");
 
 describe("Interfox Ratings product shell", () => {
   it("uses the Interfox product name without implementation copy in the main interface", () => {
@@ -11,6 +12,11 @@ describe("Interfox Ratings product shell", () => {
     expect(appSource).toContain('<span className="ratings-wordmark">Ratings</span>');
     expect(appSource).not.toContain("Ежемесячное обновление таблицы");
     expect(appSource).not.toContain("Без Google API-ключей");
+  });
+
+  it("keeps both footer wordmark parts on one text baseline", () => {
+    expect(appSource).toContain('<span className="footer-brand"><strong>Interfox</strong><span>Ratings</span></span>');
+    expect(stylesSource).toMatch(/\.footer-brand\s*\{[^}]*display:\s*inline-flex;[^}]*align-items:\s*baseline;/);
   });
 
   it("presents the three business categories in the employee workflow order", () => {

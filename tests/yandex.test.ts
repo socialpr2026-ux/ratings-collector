@@ -68,7 +68,7 @@ describe("YandexAdapter discovery", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
-  it("scans a live-sized 319-shard index with bounded parallelism", async () => {
+  it("scans every shard in a live-sized cold index without a synthetic whole-pass deadline", async () => {
     const maps = Array.from({ length: 319 }, (_value, index) =>
       `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
     );
@@ -79,37 +79,104 @@ describe("YandexAdapter discovery", () => {
       if (url === INDEX) return xmlResponse(sitemapIndex(maps));
       inFlight += 1;
       peak = Math.max(peak, inFlight);
-      await new Promise((resolve) => setTimeout(resolve, 2));
+      // Four workers still inspect all 319 shards. The caller owns the
+      // run deadline, so a healthy complete pass is not cut off mid-scan.
+      await new Promise((resolve) => setTimeout(resolve, 30));
       inFlight -= 1;
       return xmlResponse(modelSitemap(url === maps[17]
         ? ["https://reviews.yandex.ru/product/baktoblis-sashe--170000001"]
         : []));
     }) as unknown as typeof globalThis.fetch;
-    const adapter = new YandexAdapter({ fetch, maxSitemaps: 319, discoveryTimeoutMs: 2_000 });
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 319 });
 
     await expect(adapter.discover("Бактоблис", context())).resolves.toMatchObject([
       { listingId: "170000001", brand: "Бактоблис" }
     ]);
     expect(fetch).toHaveBeenCalledTimes(320);
-    expect(peak).toBeGreaterThan(1);
-    expect(peak).toBeLessThanOrEqual(12);
+    expect(peak).toBe(4);
   });
 
-  it("fails a timed-out partial sitemap scan closed instead of returning no results", async () => {
+  it("aggregates an exhaustive 319-shard batch proof without handing every shard back to the Agent", async () => {
+    const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const maps = Array.from({ length: 319 }, (_value, index) =>
+      `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
+    );
+    const batches: string[][] = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      if (url !== batchEndpoint) throw new Error(`Unexpected per-shard handoff: ${url}`);
+      const request = JSON.parse(String(init?.body)) as { sitemaps: string[]; brands: Array<{ brand: string }> };
+      batches.push(request.sitemaps);
+      const match = request.sitemaps.includes(maps[17]!);
+      return new Response(JSON.stringify({
+        processed: request.sitemaps.length,
+        firstSitemap: request.sitemaps[0],
+        lastSitemap: request.sitemaps.at(-1),
+        matches: match ? [{
+          brand: request.brands[0]!.brand,
+          url: "https://reviews.yandex.ru/product/oscillococcinum--170000001",
+          sitemap: maps[17]
+        }] : []
+      }), { headers: { "content-type": "application/json" } });
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
+    fetch.yandexBatchEndpoint = batchEndpoint;
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 319 });
+
+    await expect(adapter.discover("oscillococcinum", context())).resolves.toMatchObject([
+      { listingId: "170000001", brand: "oscillococcinum" }
+    ]);
+    expect(batches.flat()).toEqual(maps);
+    expect(batches.every((batch) => batch.length >= 1 && batch.length <= 8)).toBe(true);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(40);
+    expect(fetchMock.mock.calls.filter(([input]) => maps.includes(String(input)))).toHaveLength(0);
+    expect(fetch).toHaveBeenCalledTimes(41);
+  });
+
+  it("rejects a partial batch aggregate even when an earlier chunk contained a match", async () => {
+    const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const maps = Array.from({ length: 9 }, (_value, index) =>
+      `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
+    );
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      const request = JSON.parse(String(init?.body)) as { sitemaps: string[]; brands: Array<{ brand: string }> };
+      if (request.sitemaps.length === 1) return new Response("transient shard failure", { status: 502 });
+      return new Response(JSON.stringify({
+        processed: request.sitemaps.length,
+        firstSitemap: request.sitemaps[0],
+        lastSitemap: request.sitemaps.at(-1),
+        matches: [{
+          brand: request.brands[0]!.brand,
+          url: "https://reviews.yandex.ru/product/oscillococcinum--170000001",
+          sitemap: request.sitemaps[0]
+        }]
+      }), { headers: { "content-type": "application/json" } });
+    }) as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
+    fetch.yandexBatchEndpoint = batchEndpoint;
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 9 });
+
+    await expect(adapter.discover("oscillococcinum", context())).rejects.toBeInstanceOf(AdapterBlockedError);
+  });
+
+  it("propagates the caller deadline instead of returning partial sitemap matches", async () => {
+    const deadline = new AbortController();
     const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : input.toString();
       if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A]));
+      if (init?.signal?.aborted) throw init.signal.reason;
       return await new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
       });
     }) as unknown as typeof globalThis.fetch;
-    const adapter = new YandexAdapter({
-      fetch, maxSitemaps: 1, sitemapRetryAttempts: 1, discoveryTimeoutMs: 10
-    });
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 1, sitemapRetryAttempts: 1 });
 
-    const error = await adapter.discover("Бактоблис", context()).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(AdapterBlockedError);
-    expect((error as Error).message).toContain("partial sitemap matches were discarded");
+    const discovery = adapter.discover("Бактоблис", context({ signal: deadline.signal }));
+    deadline.abort(new Error("run_deadline_exceeded"));
+
+    await expect(discovery).rejects.toThrow("run_deadline_exceeded");
   });
 
   it("fails closed before scanning when the sitemap index exceeds the cap", async () => {

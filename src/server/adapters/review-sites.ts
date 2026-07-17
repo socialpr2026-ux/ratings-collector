@@ -608,20 +608,29 @@ export class ReviewSiteAdapter implements SiteAdapter {
         // must not block an otherwise provable requested product.
         const canaryBrand = context.brands?.find((brand) => brand.trim()) ?? "Кагоцел";
         const refs = await this.discoverIrecommend(canaryBrand, context);
+        if (refs.length === 0) {
+          return {
+            ok: true,
+            checkedAt,
+            message: `irecommend.ru search proved no current product for ${canaryBrand}`
+          };
+        }
         const proved = refs.find((ref) => {
-          const reviews = ref.metadata.reviewCount;
-          const rating = ref.metadata.rating;
-          return /^\d+$/.test(ref.listingId) && typeof reviews === "number" &&
-            Number.isInteger(reviews) && reviews >= 0 &&
-            (reviews === 0 || typeof rating === "number" && Number.isFinite(rating) && rating > 0 && rating <= 5);
+          try {
+            const target = new URL(ref.url);
+            return /^\d+$/.test(ref.listingId) && sameSite(target, "irecommend.ru") &&
+              this.definition.isProductUrl(target) && matchesBrand(ref.title ?? "", canaryBrand);
+          } catch {
+            return false;
+          }
         });
         if (!proved) {
-          return { ok: false, checkedAt, message: "irecommend.ru search canary has no proven review counter" };
+          return { ok: false, checkedAt, message: "irecommend.ru search has no exact product identity proof" };
         }
         return {
           ok: true,
           checkedAt,
-          message: `irecommend.ru search canary reviewCount=${proved.metadata.reviewCount}, rating=${proved.metadata.rating ?? "n/a"}`
+          message: `irecommend.ru search proved exact product ${proved.listingId}`
         };
       }
       if (this.definition.domain === "uteka.ru") {

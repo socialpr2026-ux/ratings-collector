@@ -9,7 +9,7 @@ import { readAgentJson } from "../../src/server/utils/agent-request.js";
 import { safeErrorMessage } from "../../src/server/utils/error-message.js";
 import { loadPlaywright } from "../../src/server/utils/playwright-runtime.js";
 import { playwrightCdpBaseUrl } from "../../src/server/utils/sandbox-cdp.js";
-import { assertSafePublicDestination, isPrivateNetworkAddress, readTextBounded } from "../../src/server/utils/safe-fetch.js";
+import { assertSafePublicDestination, isPrivateNetworkAddress } from "../../src/server/utils/safe-fetch.js";
 
 type BrowserApi = { cdpUrl: string };
 type SandboxCommands = { run(command: string): Promise<unknown> };
@@ -55,6 +55,8 @@ export function transientRecoveryDelayMs(
 }
 
 const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);
+const YANDEX_BATCH_ENDPOINT = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+type YandexBatchCapableFetch = typeof fetch & { yandexBatchEndpoint?: string };
 
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
@@ -76,16 +78,6 @@ function normalizedVisibleText(value: string): string {
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim()
     .replace(/\s+/g, " ");
-}
-
-function isCompleteYandexSitemap(url: URL, response: Response): Promise<boolean> {
-  if (!response.ok || !url.pathname.startsWith("/ugcpub/")) return Promise.resolve(response.ok);
-  const expected = url.pathname === "/ugcpub/sitemap.xml"
-    ? { open: /<sitemapindex\b/i, close: /<\/sitemapindex\s*>/i }
-    : { open: /<urlset\b/i, close: /<\/urlset\s*>/i };
-  return readTextBounded(response.clone(), 12_000_000, 20_000)
-    .then((body) => expected.open.test(body) && expected.close.test(body))
-    .catch(() => false);
 }
 
 export function hasExplicitWildberriesNoResults(bodyText: string, query: string): boolean {
@@ -143,6 +135,23 @@ export function browserFetch(
       },
       body: JSON.stringify({ url: url.toString() }),
       signal
+    });
+  };
+  const fetchYandexBatchViaStaticProxy = async (request: Request) => {
+    if (!staticProxy) throw new Error("Static proxy is not configured");
+    const text = await request.text();
+    if (text.length > 100_000) throw new Error("Yandex batch request exceeds the internal safety limit");
+    let batch: unknown;
+    try { batch = JSON.parse(text); }
+    catch { throw new Error("Yandex batch request is not valid JSON"); }
+    return fetch(staticProxy.endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${staticProxy.token}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ url: request.url, yandexBatch: batch }),
+      signal: request.signal
     });
   };
   const fetchWildberriesViaStaticProxy = async (url: URL, signal: AbortSignal) => {
@@ -260,10 +269,12 @@ export function browserFetch(
     }
     return wildberriesPage;
   };
-  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const routedFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
     const host = url.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
+    const fixedYandexBatchTarget = staticProxy && request.method === "POST" &&
+      url.toString() === YANDEX_BATCH_ENDPOINT;
     const fixedWildberriesTarget = !shouldUseHardenedBrowser(request) && (
       url.hostname === "search.wb.ru" && [
         "/exactmatch/ru/common/v14/search",
@@ -292,6 +303,9 @@ export function browserFetch(
           [...url.searchParams.keys()].every((key) => key === "slugs") &&
           url.searchParams.get("slugs")!.split(",").every((slug) => /^[a-z0-9-]{3,80}$/i.test(slug))
       );
+    if (fixedYandexBatchTarget) {
+      return fetchYandexBatchViaStaticProxy(request);
+    }
     if (staticProxy && [
       "translate.yandex.ru",
       "www-ozon-ru.translate.goog",
@@ -336,14 +350,18 @@ export function browserFetch(
         throw error;
       }
     }
-    if (staticProxy && (fixedYandexTarget || fixedZdravcityTarget)) {
+    if (staticProxy && fixedYandexTarget) {
+      // EdgeOne's direct egress can leave an exact Yandex sitemap or product
+      // request pending until the adapter's 90-second discovery deadline.
+      // The fixed Function route is the proven collector path for these
+      // allowlisted URLs, so use it immediately. Its response still passes
+      // through the adapter's strict XML/product proof and fail-closed checks.
+      return fetchViaStaticProxy(url, request.signal);
+    }
+    if (staticProxy && fixedZdravcityTarget) {
       try {
         const direct = await fetch(request);
-        const yandexSitemapIncomplete = fixedYandexTarget && url.pathname.startsWith("/ugcpub/")
-          ? !await isCompleteYandexSitemap(url, direct)
-          : false;
-        const shouldFallback = yandexSitemapIncomplete ||
-          [403, 408, 425, 429].includes(direct.status) || direct.status >= 500;
+        const shouldFallback = [403, 408, 425, 429].includes(direct.status) || direct.status >= 500;
         if (!shouldFallback) return direct;
         const proxied = await fetchViaStaticProxy(url, request.signal);
         if (proxied.ok) {
@@ -646,7 +664,9 @@ export function browserFetch(
     });
     await queue;
     return response;
-  }) as typeof fetch;
+  }) as YandexBatchCapableFetch;
+  if (staticProxy) routedFetch.yandexBatchEndpoint = YANDEX_BATCH_ENDPOINT;
+  return routedFetch;
 }
 
 export async function onRequest(context: AgentContext): Promise<Response> {

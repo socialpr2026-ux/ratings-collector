@@ -5,7 +5,7 @@ import {
   RiglaAdapter,
   ZdravcityAdapter
 } from "../src/server/adapters/pharmacies.js";
-import { ParserChangedError } from "../src/server/adapters/errors.js";
+import { AdapterBlockedError, ParserChangedError } from "../src/server/adapters/errors.js";
 import { MemoryEvidenceStore } from "../src/server/evidence.js";
 
 const context = { runId: "run-pharmacies", region: "Москва" };
@@ -71,6 +71,18 @@ const fixtures = {
 };
 
 describe("OkaptekaAdapter", () => {
+  it("accepts only the exact current empty-product phrase as brand-scoped no results", async () => {
+    const source = "https://okapteka.ru/pg/%D0%A2%D0%B8%D0%BA%D0%B0%D0%BB%D0%B8%D0%B7%D0%B8%D1%81/";
+    const exact = `<!doctype html><html><head><base href="${source}"></head><body><main>Не найдено ни одного товара.</main></body></html>`;
+    const ambiguous = `<!doctype html><html><head><base href="${source}"></head><body><main>Товары временно не показаны.</main></body></html>`;
+
+    const exactAdapter = new OkaptekaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(exact)) as unknown as typeof fetch);
+    await expect(exactAdapter.discover("Тикализис", context)).resolves.toEqual([]);
+
+    const ambiguousAdapter = new OkaptekaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(ambiguous)) as unknown as typeof fetch);
+    await expect(ambiguousAdapter.discover("Тикализис", context)).rejects.toBeInstanceOf(AdapterBlockedError);
+  });
+
   it("discovers every brand variant and derives written-review totals per product", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = requestedUrl(input);
@@ -156,6 +168,35 @@ describe("RiglaAdapter", () => {
     await expect(new RiglaAdapter(new MemoryEvidenceStore(), fetchMock).healthCheck({
       ...context, brands: ["Церетон"]
     })).resolves.toMatchObject({ ok: true });
+  });
+
+  it("treats a complete operative letter index as healthy when it explicitly has no requested product", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestedUrl(input);
+      return url.pathname.startsWith("/forms/")
+        ? new Response("missing", { status: 404 })
+        : new Response('<html><body><div class="alphabet-forms"></div></body></html>');
+    }) as unknown as typeof fetch;
+    const adapter = new RiglaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    await expect(adapter.healthCheck({ ...context, brands: ["Тикализис"] })).resolves.toMatchObject({
+      ok: true,
+      message: "pharmacy:rigla:v1: complete letter index proved no current product for Тикализис"
+    });
+    await expect(adapter.discover("Тикализис", context)).resolves.toEqual([]);
+  });
+
+  it("keeps an ambiguous Rigla letter page blocked instead of turning it into no_results", async () => {
+    const adapter = new RiglaAdapter(new MemoryEvidenceStore(), vi.fn(async (input: RequestInfo | URL) =>
+      new Response(requestedUrl(input).pathname.startsWith("/forms/") ? "missing" : "<html><main></main></html>", {
+        status: requestedUrl(input).pathname.startsWith("/forms/") ? 404 : 200
+      })
+    ) as unknown as typeof fetch);
+
+    await expect(adapter.healthCheck({ ...context, brands: ["Тикализис"] })).resolves.toMatchObject({
+      ok: false,
+      message: "rigla.ru: letter index is incomplete"
+    });
   });
 
   it("fails closed when a written review has no single product rating", async () => {

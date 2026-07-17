@@ -250,18 +250,55 @@ describe("recovered first-party pharmacy adapters", () => {
     expect(result).toMatchObject({ product: "Кагоцел 12 мг №10 таблетки", reviews: 29, rating: 5, status: "ok", source: "asna-product-microdata:google-translate" });
   });
 
-  it("checks ASNA health against complete sitemaps for the requested brand, not stale unrelated metrics", async () => {
+  it("health-checks ASNA through operative discovery and reuses only the successful run-local proof", async () => {
     const card = "https://www.asna.ru/cards/tsereton_400mg_n28_kaps_soteks.html";
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
       if (url.pathname.endsWith("sitemap_cards.xml")) return new Response(`<urlset><url><loc>${card}</loc></url></urlset>`);
       if (url.pathname.endsWith("sitemap_cards1.xml")) return new Response("<urlset></urlset>");
+      if (url.hostname === "www-asna-ru.translate.goog") {
+        return new Response(asnaCard(card, "20046", 3), { headers: { "content-type": "text/html" } });
+      }
       throw new Error(`unexpected ${url}`);
-    }) as unknown as typeof fetch;
+    });
+    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock as unknown as typeof fetch);
+    const healthContext = { region: "Москва", brands: ["Tsereton"], runId: "asna-health-run" };
 
-    await expect(new AsnaAdapter(new MemoryEvidenceStore(), fetchMock).healthCheck({
-      region: "Москва", brands: ["Церетон"]
-    })).resolves.toMatchObject({ ok: true, message: "asna.ru: complete card sitemaps contain Церетон" });
+    await expect(adapter.healthCheck(healthContext)).resolves.toMatchObject({
+      ok: true,
+      message: "asna.ru operative discovery proved 1 current product card(s) for Tsereton"
+    });
+    const callsAfterHealth = fetchMock.mock.calls.length;
+    await expect(adapter.discover("Tsereton", healthContext)).resolves.toMatchObject([{ listingId: "20046", url: card }]);
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterHealth);
+    await expect(adapter.discover("Tsereton", healthContext)).resolves.toMatchObject([{ listingId: "20046", url: card }]);
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterHealth);
+  });
+
+  it("does not cache a blocked ASNA operative discovery", async () => {
+    const card = "https://www.asna.ru/cards/tsereton_400mg_n28_kaps_soteks.html";
+    let blocked = true;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www.asna.ru" && url.pathname.startsWith("/sitemap/")) {
+        return new Response(blocked ? "<urlset></urlset>" : `<urlset><url><loc>${card}</loc></url></urlset>`);
+      }
+      if (url.hostname === "www-asna-ru.translate.goog") {
+        return blocked
+          ? new Response("blocked", { status: 502 })
+          : new Response(asnaCard(card, "20046", 3), { headers: { "content-type": "text/html" } });
+      }
+      if (url.hostname === "translate.google.com") return new Response("blocked", { status: 502 });
+      throw new Error(`unexpected ${url}`);
+    });
+    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock as unknown as typeof fetch);
+    const healthContext = { region: "Москва", brands: ["Tsereton"], runId: "asna-retry-run" };
+
+    await expect(adapter.healthCheck(healthContext)).resolves.toMatchObject({ ok: false });
+    const failedCalls = fetchMock.mock.calls.length;
+    blocked = false;
+    await expect(adapter.healthCheck(healthContext)).resolves.toMatchObject({ ok: true });
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(failedCalls);
   });
 
   it("recovers a current ASNA family omitted from card sitemaps through the exact Google launcher", async () => {

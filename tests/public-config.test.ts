@@ -785,6 +785,27 @@ describe("static pharmacy Translate gateway", () => {
     return target;
   };
 
+  it("accepts only Okapteka's exact brand-scoped empty-product proof", async () => {
+    const source = "https://okapteka.ru/pg/%D0%A2%D0%B8%D0%BA%D0%B0%D0%BB%D0%B8%D0%B7%D0%B8%D1%81/";
+    const target = translated("okapteka-ru.translate.goog", "/pg/%D0%A2%D0%B8%D0%BA%D0%B0%D0%BB%D0%B8%D0%B7%D0%B8%D1%81/");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      `<html><head><base href="${source}"></head><body><main>Не найдено ни одного товара.</main></body></html>`,
+      { headers: { "content-type": "text/html; charset=utf-8" } }
+    )));
+
+    const exact = await callGateway(target.toString());
+    expect(exact.status).toBe(200);
+    expect(await exact.text()).toContain("Не найдено ни одного товара");
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      `<html><head><base href="${source}"></head><body><main>Товары временно не показаны.</main></body></html>`,
+      { headers: { "content-type": "text/html; charset=utf-8" } }
+    )));
+    const ambiguous = await callGateway(target.toString());
+    expect(ambiguous.status).toBe(502);
+    expect(await ambiguous.text()).toContain("did not prove the requested source and metrics");
+  });
+
   it("accepts and compacts source-bound Farmlend product metrics", async () => {
     const noise = "x".repeat(500_000);
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head>
@@ -1010,6 +1031,21 @@ describe("static pharmacy Translate gateway", () => {
     expect(proof).not.toContain('href="https://www.budzdorov.ru/product/2511"');
   });
 
+  it("allows the exact one-letter Bud Zdorov fallback index and rejects broader letter paths", async () => {
+    const source = "https://www.budzdorov.ru/letter/%D0%A2";
+    const productPath = "/product/tikalizis-tab-90mg-no60-7654321";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"></head><body>
+      <div class="alphabet-forms"><a class="alphabet-forms__item-link"
+        href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en"
+        title="Тикализис таблетки 90 мг №60">Тикализис таблетки 90 мг №60</a></div>
+    </body></html>`, { headers: { "content-type": "text/html" } })));
+
+    const response = await callGateway(translated("www-budzdorov-ru.translate.goog", "/letter/%D0%A2").toString());
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain(`href="https://www.budzdorov.ru${productPath}"`);
+    expect((await callGateway(translated("www-budzdorov-ru.translate.goog", "/letter/%D0%A2%D0%B8%D0%BA").toString())).status).toBe(400);
+  });
+
   it("allows only exact Apteka.ru product paths and compacts their Product aggregate", async () => {
     const source = "https://apteka.ru/product/oczillokokczinum-30-sht-granuly-5e3268eaca7bdc000192d316/";
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"><link rel="canonical" href="${source}">
@@ -1230,6 +1266,121 @@ describe("fixed first-party collection egress", () => {
       expect(response.status).toBe(502);
       expect(await response.text()).toContain("did not prove a complete exact shard");
     }
+  });
+
+  it("returns only matched URLs after proving every exact Yandex batch shard", async () => {
+    const endpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const sitemaps = [
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_690000000-699999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_700000000-709999999-0.xml"
+    ];
+    const callBatch = () => staticReviewFetch(new Request(
+      "https://ratings.example/api/internal/static-review-fetch",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          url: endpoint,
+          yandexBatch: {
+            sitemaps,
+            brands: [{ brand: "oscillococcinum", tokens: ["oscillococcinum", "otsillokoktsinum"] }]
+          }
+        })
+      }
+    ), { INTERNAL_AGENT_TOKEN: token });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const locations = url === sitemaps[0]
+        ? ["https://reviews.yandex.ru/product/otsillokoktsinum--695940046", "https://reviews.yandex.ru/product/ingavirin--695940047"]
+        : ["https://reviews.yandex.ru/product/oscillococcinum-granuly--705940046"];
+      return new Response(`<urlset>${locations.map((location) => `<url><loc>${location}</loc></url>`).join("")}</urlset>`, {
+        headers: { "content-type": "application/xml" }
+      });
+    }));
+
+    const response = await callBatch();
+    const proof = await response.json() as { processed: number; matches: Array<{ url: string }> };
+    expect(response.status).toBe(200);
+    expect(proof.processed).toBe(2);
+    expect(proof.matches.map(({ url }) => url)).toEqual([
+      "https://reviews.yandex.ru/product/otsillokoktsinum--695940046",
+      "https://reviews.yandex.ru/product/oscillococcinum-granuly--705940046"
+    ]);
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => new Response(
+      String(input) === sitemaps[1] ? "<urlset>" : "<urlset></urlset>",
+      { headers: { "content-type": "application/xml" } }
+    )));
+    const incomplete = await callBatch();
+    expect(incomplete.status).toBe(502);
+    expect(await incomplete.text()).not.toContain('"processed":2');
+  });
+
+  it("retries only a transiently truncated Yandex batch shard and accepts its complete second proof", async () => {
+    const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_1220000000-1229999999-0.xml";
+    const upstream = vi.fn(async () => upstream.mock.calls.length === 1
+      ? new Response("<urlset>", { headers: { "content-type": "application/xml" } })
+      : new Response(
+        "<urlset><url><loc>https://reviews.yandex.ru/product/oscillococcinum--1225000000</loc></url></urlset>",
+        { headers: { "content-type": "application/xml" } }
+      ));
+    vi.stubGlobal("fetch", upstream);
+    const response = await staticReviewFetch(new Request(
+      "https://ratings.example/api/internal/static-review-fetch",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          url: "https://reviews.yandex.ru/ugcpub/__ratings_batch__",
+          yandexBatch: {
+            sitemaps: [sitemap],
+            brands: [{ brand: "oscillococcinum", tokens: ["oscillococcinum"] }]
+          }
+        })
+      }
+    ), { INTERNAL_AGENT_TOKEN: token });
+    const proof = await response.json() as { processed: number; matches: Array<{ url: string }> };
+
+    expect(response.status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(2);
+    expect(proof.processed).toBe(1);
+    expect(proof.matches).toEqual([{
+      brand: "oscillococcinum",
+      url: "https://reviews.yandex.ru/product/oscillococcinum--1225000000",
+      sitemap
+    }]);
+  });
+
+  it("treats an exact indexed Yandex batch shard HTTP 404 as a complete empty proof only", async () => {
+    const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_5880000000-5889999999-0.xml";
+    const callBatch = () => staticReviewFetch(new Request(
+      "https://ratings.example/api/internal/static-review-fetch",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          url: "https://reviews.yandex.ru/ugcpub/__ratings_batch__",
+          yandexBatch: {
+            sitemaps: [sitemap],
+            brands: [{ brand: "oscillococcinum", tokens: ["oscillococcinum"] }]
+          }
+        })
+      }
+    ), { INTERNAL_AGENT_TOKEN: token });
+    const missingFetch = vi.fn(async () => new Response("missing", { status: 404 }));
+    vi.stubGlobal("fetch", missingFetch);
+
+    const missing = await callBatch();
+    expect(missing.status).toBe(200);
+    expect(await missing.json()).toMatchObject({ processed: 1, matches: [] });
+    expect(missingFetch).toHaveBeenCalledOnce();
+
+    const blockedFetch = vi.fn(async () => new Response("blocked", { status: 403 }));
+    vi.stubGlobal("fetch", blockedFetch);
+    const blocked = await callBatch();
+    expect(blocked.status).toBe(502);
+    expect(await blocked.text()).not.toContain('"processed":1');
+    expect(blockedFetch).toHaveBeenCalledOnce();
   });
 
   it("routes bounded Zdravcity paths through source-bound translated SSR", async () => {

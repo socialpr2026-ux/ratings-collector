@@ -654,6 +654,7 @@ tbody tr:hover { background: #fbfaff; }
 .publish-icon { background: var(--brand); }
 .publish-actions { border-top-color: #e7e3f1; }
 footer { color: #716b80; }
+.footer-brand { display: inline-flex; align-items: baseline; gap: .35em; line-height: 1; }
 .footer-brand strong { color: var(--brand); font-family: Orbitron, Inter, sans-serif; font-weight: 500; }
 
 @media (max-width: 960px) {
