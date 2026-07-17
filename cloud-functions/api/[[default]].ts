@@ -52,7 +52,7 @@ const YANDEX_MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_(\d+)-(\d+)-\d+\.xml
 type PharmacyTranslateTarget = {
   kind: "farmlend-search" | "farmlend-product" | "okapteka-group" | "okapteka-reviews" | "asna-product" |
     "polza-family" | "polza-product" | "nfapteka-search" | "nfapteka-product" |
-    "budzdorov-family" | "budzdorov-product" | "etabl-search" | "etabl-product" |
+    "budzdorov-family" | "budzdorov-letter" | "budzdorov-product" | "etabl-search" | "etabl-product" |
     "apteka-preparation" | "apteka-product";
   source: URL;
   productId?: string;
@@ -234,6 +234,14 @@ function parsePharmacyTranslateTarget(target: URL): PharmacyTranslateTarget | un
   if (target.hostname === BUDZDOROV_TRANSLATE_HOST) {
     if ([...target.searchParams.keys()].some((key) => !PHARMACY_TRANSLATE_PARAMETERS.has(key))) return undefined;
     if (/^\/forms\/[a-z0-9][a-z0-9-]*$/i.test(target.pathname)) return { kind: "budzdorov-family", source };
+    const letter = target.pathname.match(/^\/letter\/([^/]+)$/i)?.[1];
+    if (letter) {
+      let decoded: string;
+      try { decoded = decodeURIComponent(letter).normalize("NFKC"); }
+      catch { return undefined; }
+      if (!/^[а-яё]$/iu.test(decoded)) return undefined;
+      return { kind: "budzdorov-letter", source };
+    }
     const product = target.pathname.match(/^\/product\/(?:[a-z0-9-]+-)?(\d+)$/i);
     return product ? { kind: "budzdorov-product", source, productId: product[1] } : undefined;
   }
@@ -677,7 +685,7 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
       `${compactReviews.length ? `<div id="review">${compactReviews.join("")}</div>` : ""}</body></html>`;
   }
 
-  if (requested.kind === "budzdorov-family") {
+  if (requested.kind === "budzdorov-family" || requested.kind === "budzdorov-letter") {
     const products = new Map<string, { pathname: string; title: string }>();
     $("a[href*='/product/']").each((_index, node) => {
       const titleText = ($(node).attr("title") || $(node).text()).normalize("NFKC").replace(/\s+/g, " ").trim();

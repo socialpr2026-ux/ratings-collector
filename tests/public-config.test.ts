@@ -1010,6 +1010,21 @@ describe("static pharmacy Translate gateway", () => {
     expect(proof).not.toContain('href="https://www.budzdorov.ru/product/2511"');
   });
 
+  it("allows the exact one-letter Bud Zdorov fallback index and rejects broader letter paths", async () => {
+    const source = "https://www.budzdorov.ru/letter/%D0%A2";
+    const productPath = "/product/tikalizis-tab-90mg-no60-7654321";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"></head><body>
+      <div class="alphabet-forms"><a class="alphabet-forms__item-link"
+        href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en"
+        title="Тикализис таблетки 90 мг №60">Тикализис таблетки 90 мг №60</a></div>
+    </body></html>`, { headers: { "content-type": "text/html" } })));
+
+    const response = await callGateway(translated("www-budzdorov-ru.translate.goog", "/letter/%D0%A2").toString());
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain(`href="https://www.budzdorov.ru${productPath}"`);
+    expect((await callGateway(translated("www-budzdorov-ru.translate.goog", "/letter/%D0%A2%D0%B8%D0%BA").toString())).status).toBe(400);
+  });
+
   it("allows only exact Apteka.ru product paths and compacts their Product aggregate", async () => {
     const source = "https://apteka.ru/product/oczillokokczinum-30-sht-granuly-5e3268eaca7bdc000192d316/";
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"><link rel="canonical" href="${source}">
