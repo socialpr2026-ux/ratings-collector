@@ -5,7 +5,7 @@ import {
   RiglaAdapter,
   ZdravcityAdapter
 } from "../src/server/adapters/pharmacies.js";
-import { ParserChangedError } from "../src/server/adapters/errors.js";
+import { AdapterBlockedError, ParserChangedError } from "../src/server/adapters/errors.js";
 import { MemoryEvidenceStore } from "../src/server/evidence.js";
 
 const context = { runId: "run-pharmacies", region: "Москва" };
@@ -71,6 +71,18 @@ const fixtures = {
 };
 
 describe("OkaptekaAdapter", () => {
+  it("accepts only the exact current empty-product phrase as brand-scoped no results", async () => {
+    const source = "https://okapteka.ru/pg/%D0%A2%D0%B8%D0%BA%D0%B0%D0%BB%D0%B8%D0%B7%D0%B8%D1%81/";
+    const exact = `<!doctype html><html><head><base href="${source}"></head><body><main>Не найдено ни одного товара.</main></body></html>`;
+    const ambiguous = `<!doctype html><html><head><base href="${source}"></head><body><main>Товары временно не показаны.</main></body></html>`;
+
+    const exactAdapter = new OkaptekaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(exact)) as unknown as typeof fetch);
+    await expect(exactAdapter.discover("Тикализис", context)).resolves.toEqual([]);
+
+    const ambiguousAdapter = new OkaptekaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(ambiguous)) as unknown as typeof fetch);
+    await expect(ambiguousAdapter.discover("Тикализис", context)).rejects.toBeInstanceOf(AdapterBlockedError);
+  });
+
   it("discovers every brand variant and derives written-review totals per product", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = requestedUrl(input);

@@ -299,7 +299,7 @@ export class OkaptekaAdapter extends PharmacyAdapter {
     appendPrevious(refs, OK_DOMAIN, brand, context, okProduct);
     if (!refs.size) {
       const text = compactText($.root().text());
-      if (/ничего не найдено|товары не найдены|no products found/i.test(text)) return [];
+      if (/не найдено ни одного товара|ничего не найдено|товары не найдены|no products found/i.test(text)) return [];
       throw new AdapterBlockedError(`${OK_DOMAIN}: страница бренда не доказала ни карточки, ни отсутствие результатов`);
     }
     return [...refs.values()].sort((a, b) => (a.title ?? "").localeCompare(b.title ?? "", "ru") || a.listingId.localeCompare(b.listingId));

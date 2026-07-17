@@ -925,7 +925,7 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
       } catch { /* ignore unrelated links */ }
     });
     const pageText = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();
-    const empty = pageText.match(/(?:ничего не найдено|товары не найдены|no products found)/i)?.[0];
+    const empty = pageText.match(/(?:не найдено ни одного товара|ничего не найдено|товары не найдены|no products found)/i)?.[0];
     if (!anchors.length && !empty) return undefined;
     return `<html><head>${base}</head><body>${anchors.join("")}${empty ? `<p>${escapeHtml(empty)}</p>` : ""}</body></html>`;
   }

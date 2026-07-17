@@ -785,6 +785,27 @@ describe("static pharmacy Translate gateway", () => {
     return target;
   };
 
+  it("accepts only Okapteka's exact brand-scoped empty-product proof", async () => {
+    const source = "https://okapteka.ru/pg/%D0%A2%D0%B8%D0%BA%D0%B0%D0%BB%D0%B8%D0%B7%D0%B8%D1%81/";
+    const target = translated("okapteka-ru.translate.goog", "/pg/%D0%A2%D0%B8%D0%BA%D0%B0%D0%BB%D0%B8%D0%B7%D0%B8%D1%81/");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      `<html><head><base href="${source}"></head><body><main>Не найдено ни одного товара.</main></body></html>`,
+      { headers: { "content-type": "text/html; charset=utf-8" } }
+    )));
+
+    const exact = await callGateway(target.toString());
+    expect(exact.status).toBe(200);
+    expect(await exact.text()).toContain("Не найдено ни одного товара");
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      `<html><head><base href="${source}"></head><body><main>Товары временно не показаны.</main></body></html>`,
+      { headers: { "content-type": "text/html; charset=utf-8" } }
+    )));
+    const ambiguous = await callGateway(target.toString());
+    expect(ambiguous.status).toBe(502);
+    expect(await ambiguous.text()).toContain("did not prove the requested source and metrics");
+  });
+
   it("accepts and compacts source-bound Farmlend product metrics", async () => {
     const noise = "x".repeat(500_000);
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head>
