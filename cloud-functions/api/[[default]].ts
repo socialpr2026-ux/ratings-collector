@@ -1821,6 +1821,39 @@ function yandexProductMatchesTokens(input: string, tokens: string[]): boolean {
   } catch { return false; }
 }
 
+class NonRetryableYandexBatchShardError extends Error {}
+
+async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string> {
+  const target = new URL(sitemap);
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const upstream = await safeFetch(target.toString(), {
+        method: "GET",
+        redirect: "follow",
+        headers: { accept: "application/xml,text/xml", "accept-language": "ru-RU,ru;q=0.9" }
+      }, fetch, 4, 60_000);
+      if (!upstream.ok) {
+        await upstream.body?.cancel().catch(() => undefined);
+        const message = `Yandex batch shard returned HTTP ${upstream.status}`;
+        if (![408, 425, 429].includes(upstream.status) && upstream.status < 500) {
+          throw new NonRetryableYandexBatchShardError(message);
+        }
+        throw new Error(message);
+      }
+      const xml = await readTextBounded(upstream, 12_000_000, 60_000);
+      const compact = compactYandexModelSitemap(xml, target);
+      if (!compact) throw new Error("Yandex batch shard did not prove complete exact XML");
+      return compact;
+    } catch (error) {
+      lastError = error;
+      if (error instanceof NonRetryableYandexBatchShardError || attempt === 3) break;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 100));
+    }
+  }
+  throw new Error(`Yandex batch shard remained unproven: ${sitemap}: ${safeErrorMessage(lastError)}`);
+}
+
 async function collectYandexBatch(batch: YandexBatchRequest): Promise<{
   processed: number;
   firstSitemap: string;
@@ -1834,16 +1867,7 @@ async function collectYandexBatch(batch: YandexBatchRequest): Promise<{
       const index = cursor++;
       if (index >= batch.sitemaps.length) return;
       const sitemap = batch.sitemaps[index]!;
-      const target = new URL(sitemap);
-      const upstream = await safeFetch(target.toString(), {
-        method: "GET",
-        redirect: "follow",
-        headers: { accept: "application/xml,text/xml", "accept-language": "ru-RU,ru;q=0.9" }
-      }, fetch, 4, 60_000);
-      const xml = await readTextBounded(upstream, 12_000_000, 60_000);
-      if (!upstream.ok) throw new Error(`Yandex batch shard returned HTTP ${upstream.status}: ${sitemap}`);
-      const compact = compactYandexModelSitemap(xml, target);
-      if (!compact) throw new Error(`Yandex batch shard did not prove complete exact XML: ${sitemap}`);
+      const compact = await fetchCompleteYandexBatchShard(sitemap);
       const $ = load(compact, { xmlMode: true });
       for (const node of $("urlset").children("url").toArray()) {
         const productUrl = $(node).children("loc").first().text().trim();

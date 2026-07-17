@@ -1316,6 +1316,41 @@ describe("fixed first-party collection egress", () => {
     expect(await incomplete.text()).not.toContain('"processed":2');
   });
 
+  it("retries only a transiently truncated Yandex batch shard and accepts its complete second proof", async () => {
+    const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_1220000000-1229999999-0.xml";
+    const upstream = vi.fn(async () => upstream.mock.calls.length === 1
+      ? new Response("<urlset>", { headers: { "content-type": "application/xml" } })
+      : new Response(
+        "<urlset><url><loc>https://reviews.yandex.ru/product/oscillococcinum--1225000000</loc></url></urlset>",
+        { headers: { "content-type": "application/xml" } }
+      ));
+    vi.stubGlobal("fetch", upstream);
+    const response = await staticReviewFetch(new Request(
+      "https://ratings.example/api/internal/static-review-fetch",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          url: "https://reviews.yandex.ru/ugcpub/__ratings_batch__",
+          yandexBatch: {
+            sitemaps: [sitemap],
+            brands: [{ brand: "oscillococcinum", tokens: ["oscillococcinum"] }]
+          }
+        })
+      }
+    ), { INTERNAL_AGENT_TOKEN: token });
+    const proof = await response.json() as { processed: number; matches: Array<{ url: string }> };
+
+    expect(response.status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(2);
+    expect(proof.processed).toBe(1);
+    expect(proof.matches).toEqual([{
+      brand: "oscillococcinum",
+      url: "https://reviews.yandex.ru/product/oscillococcinum--1225000000",
+      sitemap
+    }]);
+  });
+
   it("routes bounded Zdravcity paths through source-bound translated SSR", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(input.toString());
