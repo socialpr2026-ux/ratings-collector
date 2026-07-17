@@ -1351,6 +1351,38 @@ describe("fixed first-party collection egress", () => {
     }]);
   });
 
+  it("treats an exact indexed Yandex batch shard HTTP 404 as a complete empty proof only", async () => {
+    const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_5880000000-5889999999-0.xml";
+    const callBatch = () => staticReviewFetch(new Request(
+      "https://ratings.example/api/internal/static-review-fetch",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          url: "https://reviews.yandex.ru/ugcpub/__ratings_batch__",
+          yandexBatch: {
+            sitemaps: [sitemap],
+            brands: [{ brand: "oscillococcinum", tokens: ["oscillococcinum"] }]
+          }
+        })
+      }
+    ), { INTERNAL_AGENT_TOKEN: token });
+    const missingFetch = vi.fn(async () => new Response("missing", { status: 404 }));
+    vi.stubGlobal("fetch", missingFetch);
+
+    const missing = await callBatch();
+    expect(missing.status).toBe(200);
+    expect(await missing.json()).toMatchObject({ processed: 1, matches: [] });
+    expect(missingFetch).toHaveBeenCalledOnce();
+
+    const blockedFetch = vi.fn(async () => new Response("blocked", { status: 403 }));
+    vi.stubGlobal("fetch", blockedFetch);
+    const blocked = await callBatch();
+    expect(blocked.status).toBe(502);
+    expect(await blocked.text()).not.toContain('"processed":1');
+    expect(blockedFetch).toHaveBeenCalledOnce();
+  });
+
   it("routes bounded Zdravcity paths through source-bound translated SSR", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(input.toString());

@@ -1835,6 +1835,9 @@ async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string> {
       }, fetch, 4, 60_000);
       if (!upstream.ok) {
         await upstream.body?.cancel().catch(() => undefined);
+        if (upstream.status === 404) {
+          return `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>`;
+        }
         const message = `Yandex batch shard returned HTTP ${upstream.status}`;
         if (![408, 425, 429].includes(upstream.status) && upstream.status < 500) {
           throw new NonRetryableYandexBatchShardError(message);
