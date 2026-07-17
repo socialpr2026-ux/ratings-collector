@@ -313,6 +313,43 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("forwards one synthetic Yandex batch as one static proof request without Sandbox or shard handoffs", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      processed: 2,
+      firstSitemap: "a",
+      lastSitemap: "b",
+      matches: []
+    }), { headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    }) as typeof fetch & { yandexBatchEndpoint?: string };
+    const payload = {
+      sitemaps: [
+        "https://reviews.yandex.ru/ugcpub/sitemap_model_0-9999999-0.xml",
+        "https://reviews.yandex.ru/ugcpub/sitemap_model_10000000-19999999-0.xml"
+      ],
+      brands: [{ brand: "oscillococcinum", tokens: ["oscillococcinum"] }]
+    };
+
+    const response = await routedFetch(routedFetch.yandexBatchEndpoint!, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    expect(response.status).toBe(200);
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(directFetch.mock.calls[0]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+    expect(JSON.parse(String((directFetch.mock.calls[0]?.[1] as RequestInit).body))).toEqual({
+      url: "https://reviews.yandex.ru/ugcpub/__ratings_batch__",
+      yandexBatch: payload
+    });
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("uses fixed function egress before a hanging direct Yandex request", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

@@ -18,6 +18,10 @@ const DIRECT_SOURCE = "yandex_reviews_json_ld";
 const TRANSLATE_SOURCE = "yandex_reviews_json_ld_google_translate";
 const MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_\d+-\d+-\d+\.xml$/i;
 const MODEL_ID_AT_END = /--(\d+)(?:[/?#]|$)/;
+const YANDEX_BATCH_CHUNK_SIZE = 8;
+const YANDEX_BATCH_CONCURRENCY = 2;
+
+type YandexBatchCapableFetch = typeof globalThis.fetch & { yandexBatchEndpoint?: string };
 
 type JsonObject = Record<string, unknown>;
 
@@ -33,6 +37,13 @@ type BrandDiscovery = {
 };
 
 type DiscoveryBatch = Map<string, ProductRef[] | AdapterBlockedError>;
+
+type YandexBatchProof = {
+  processed: number;
+  firstSitemap: string;
+  lastSitemap: string;
+  matches: Array<{ brand: string; url: string; sitemap: string }>;
+};
 
 type ProductPage =
   | { kind: "missing"; requestUrl: string }
@@ -234,6 +245,8 @@ export class YandexAdapter implements SiteAdapter {
       );
     }
     const selected = prioritizeSitemaps(sitemapUrls, context.previousIds ?? []);
+    const batchEndpoint = ((context.fetch ?? this.fallbackFetch) as YandexBatchCapableFetch).yandexBatchEndpoint;
+    if (batchEndpoint) return this.scanDiscoveryBatchViaGateway(batchEndpoint, selected, brands, context);
     const discoveries = new Map<string, BrandDiscovery>(brands.map((candidate) => [
       brandKey(candidate),
       { brand: candidate, refs: new Map() }
@@ -264,6 +277,67 @@ export class YandexAdapter implements SiteAdapter {
       }
     );
 
+    return new Map([...discoveries].map(([key, discovery]) => [
+      key,
+      discovery.error ?? [...discovery.refs.values()].sort((a, b) =>
+        (a.title ?? "").localeCompare(b.title ?? "", "ru") || compareIds(a.listingId, b.listingId)
+      )
+    ]));
+  }
+
+  private async scanDiscoveryBatchViaGateway(
+    endpoint: string,
+    sitemapUrls: string[],
+    brands: string[],
+    context: AdapterContext
+  ): Promise<DiscoveryBatch> {
+    const fetcher = context.fetch ?? this.fallbackFetch;
+    const chunks = chunked(sitemapUrls, YANDEX_BATCH_CHUNK_SIZE);
+    const discoveries = new Map<string, BrandDiscovery>(brands.map((brand) => [
+      brandKey(brand),
+      { brand, refs: new Map() }
+    ]));
+    await mapWithConcurrency(chunks, YANDEX_BATCH_CONCURRENCY, async (sitemaps) => {
+      let response: Response;
+      try {
+        response = await fetcher(endpoint, {
+          method: "POST",
+          redirect: "error",
+          signal: context.signal,
+          headers: { "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify({
+            sitemaps,
+            brands: brands.map((brand) => ({ brand, tokens: yandexBrandTokens(brand) }))
+          })
+        });
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        throw new AdapterBlockedError(`Yandex batch proof request failed: ${errorMessage(error)}`);
+      }
+      if (!response.ok) {
+        throw new AdapterBlockedError(`Yandex batch proof failed with HTTP ${response.status}`);
+      }
+      let proof: YandexBatchProof;
+      try {
+        proof = JSON.parse(await readBoundedBody(response, 500_000, endpoint, 60_000)) as YandexBatchProof;
+      } catch (error) {
+        throw new AdapterBlockedError(`Yandex batch proof is unreadable: ${errorMessage(error)}`);
+      }
+      if (!validYandexBatchProof(proof, sitemaps, brands)) {
+        throw new AdapterBlockedError("Yandex batch proof is incomplete or source-unbound");
+      }
+      for (const match of proof.matches) {
+        const discovery = discoveries.get(brandKey(match.brand))!;
+        const listingId = extractModelId(match.url)!;
+        discovery.refs.set(listingId, productRefFromSitemap(listingId, match.url, discovery.brand, match.sitemap));
+        if (discovery.refs.size > this.maxCandidates) {
+          discovery.error = new AdapterBlockedError(
+            `Yandex discovery for ${discovery.brand} found more than ${this.maxCandidates} distinct models`
+          );
+          discovery.refs.clear();
+        }
+      }
+    });
     return new Map([...discoveries].map(([key, discovery]) => [
       key,
       discovery.error ?? [...discovery.refs.values()].sort((a, b) =>
@@ -859,6 +933,33 @@ function urlMatchesBrand(input: string, brand: string): boolean {
       .filter(Boolean)
       .some((candidate) => ` ${slug} `.includes(` ${candidate} `));
   });
+}
+
+function yandexBrandTokens(brand: string): string[] {
+  const tokens = aliasesForBrand(brand).flatMap((alias) => [
+    normalizeForSlug(alias),
+    normalizeForSlug(transliterateForYandex(alias))
+  ]).filter((token) => token.length >= 2);
+  return [...new Set(tokens)];
+}
+
+function validYandexBatchProof(proof: unknown, sitemaps: string[], brands: string[]): proof is YandexBatchProof {
+  if (!proof || typeof proof !== "object" || Array.isArray(proof)) return false;
+  const value = proof as Partial<YandexBatchProof>;
+  if (value.processed !== sitemaps.length || value.firstSitemap !== sitemaps[0] ||
+    value.lastSitemap !== sitemaps.at(-1) || !Array.isArray(value.matches)) return false;
+  const brandKeys = new Set(brands.map(brandKey));
+  const sitemapSet = new Set(sitemaps);
+  return value.matches.every((match) => Boolean(match) && typeof match === "object" &&
+    typeof match.brand === "string" && brandKeys.has(brandKey(match.brand)) &&
+    typeof match.url === "string" && isAllowedProductUrl(match.url) && urlMatchesBrand(match.url, match.brand) &&
+    typeof match.sitemap === "string" && sitemapSet.has(match.sitemap));
+}
+
+function chunked<T>(values: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size) result.push(values.slice(index, index + size));
+  return result;
 }
 
 function normalizedSlug(input: string): string {

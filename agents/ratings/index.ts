@@ -55,6 +55,8 @@ export function transientRecoveryDelayMs(
 }
 
 const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);
+const YANDEX_BATCH_ENDPOINT = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+type YandexBatchCapableFetch = typeof fetch & { yandexBatchEndpoint?: string };
 
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
@@ -133,6 +135,23 @@ export function browserFetch(
       },
       body: JSON.stringify({ url: url.toString() }),
       signal
+    });
+  };
+  const fetchYandexBatchViaStaticProxy = async (request: Request) => {
+    if (!staticProxy) throw new Error("Static proxy is not configured");
+    const text = await request.text();
+    if (text.length > 100_000) throw new Error("Yandex batch request exceeds the internal safety limit");
+    let batch: unknown;
+    try { batch = JSON.parse(text); }
+    catch { throw new Error("Yandex batch request is not valid JSON"); }
+    return fetch(staticProxy.endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${staticProxy.token}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ url: request.url, yandexBatch: batch }),
+      signal: request.signal
     });
   };
   const fetchWildberriesViaStaticProxy = async (url: URL, signal: AbortSignal) => {
@@ -250,10 +269,12 @@ export function browserFetch(
     }
     return wildberriesPage;
   };
-  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const routedFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
     const host = url.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
+    const fixedYandexBatchTarget = staticProxy && request.method === "POST" &&
+      url.toString() === YANDEX_BATCH_ENDPOINT;
     const fixedWildberriesTarget = !shouldUseHardenedBrowser(request) && (
       url.hostname === "search.wb.ru" && [
         "/exactmatch/ru/common/v14/search",
@@ -282,6 +303,9 @@ export function browserFetch(
           [...url.searchParams.keys()].every((key) => key === "slugs") &&
           url.searchParams.get("slugs")!.split(",").every((slug) => /^[a-z0-9-]{3,80}$/i.test(slug))
       );
+    if (fixedYandexBatchTarget) {
+      return fetchYandexBatchViaStaticProxy(request);
+    }
     if (staticProxy && [
       "translate.yandex.ru",
       "www-ozon-ru.translate.goog",
@@ -640,7 +664,9 @@ export function browserFetch(
     });
     await queue;
     return response;
-  }) as typeof fetch;
+  }) as YandexBatchCapableFetch;
+  if (staticProxy) routedFetch.yandexBatchEndpoint = YANDEX_BATCH_ENDPOINT;
+  return routedFetch;
 }
 
 export async function onRequest(context: AgentContext): Promise<Response> {

@@ -48,6 +48,7 @@ const NFAPTEKA_TRANSLATE_HOST = "nfapteka-ru.translate.goog";
 const BUDZDOROV_TRANSLATE_HOST = "www-budzdorov-ru.translate.goog";
 const ETABL_TRANSLATE_HOST = "etabl-ru.translate.goog";
 const YANDEX_MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_(\d+)-(\d+)-\d+\.xml$/i;
+const YANDEX_BATCH_ENDPOINT = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
 
 type PharmacyTranslateTarget = {
   kind: "farmlend-search" | "farmlend-product" | "okapteka-group" | "okapteka-reviews" | "asna-product" |
@@ -1768,6 +1769,106 @@ function compactYandexModelSitemap(xml: string, requested: URL): string | undefi
     `</urlset>`;
 }
 
+type YandexBatchRequest = {
+  sitemaps: string[];
+  brands: Array<{ brand: string; tokens: string[] }>;
+};
+
+function parseYandexBatchRequest(value: unknown): YandexBatchRequest | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).some((key) => !["sitemaps", "brands"].includes(key)) ||
+    !Array.isArray(input.sitemaps) || input.sitemaps.length < 1 || input.sitemaps.length > 8 ||
+    !Array.isArray(input.brands) || input.brands.length < 1 || input.brands.length > 200) return undefined;
+  const sitemaps = input.sitemaps.filter((item): item is string => typeof item === "string");
+  if (sitemaps.length !== input.sitemaps.length || new Set(sitemaps).size !== sitemaps.length ||
+    sitemaps.some((item) => {
+      try {
+        const url = new URL(item);
+        return url.protocol !== "https:" || url.hostname !== "reviews.yandex.ru" || Boolean(url.port || url.username || url.password || url.search || url.hash) ||
+          !YANDEX_MODEL_SITEMAP_PATH.test(url.pathname);
+      } catch { return true; }
+    })) return undefined;
+  const brands: YandexBatchRequest["brands"] = [];
+  for (const item of input.brands) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+    const candidate = item as Record<string, unknown>;
+    if (Object.keys(candidate).some((key) => !["brand", "tokens"].includes(key)) ||
+      typeof candidate.brand !== "string" || candidate.brand.trim() !== candidate.brand ||
+      candidate.brand.length < 2 || candidate.brand.length > 160 ||
+      !Array.isArray(candidate.tokens) || candidate.tokens.length < 1 || candidate.tokens.length > 20) return undefined;
+    const tokens = candidate.tokens.filter((token): token is string => typeof token === "string");
+    if (tokens.length !== candidate.tokens.length || new Set(tokens).size !== tokens.length ||
+      tokens.some((token) => token.length < 2 || token.length > 160 || !/^[a-zа-я0-9]+(?: [a-zа-я0-9]+)*$/iu.test(token))) return undefined;
+    brands.push({ brand: candidate.brand, tokens });
+  }
+  if (new Set(brands.map(({ brand }) => brand)).size !== brands.length) return undefined;
+  return { sitemaps, brands };
+}
+
+function yandexProductMatchesTokens(input: string, tokens: string[]): boolean {
+  try {
+    const url = new URL(input);
+    const slug = decodeURIComponent(url.pathname.split("/").filter(Boolean).at(-1) ?? "")
+      .replace(/--\d+$/, "")
+      .normalize("NFKC")
+      .toLocaleLowerCase("ru-RU")
+      .replace(/ё/g, "е")
+      .replace(/[^a-zа-я0-9]+/giu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return Boolean(slug) && tokens.some((token) => ` ${slug} `.includes(` ${token} `));
+  } catch { return false; }
+}
+
+async function collectYandexBatch(batch: YandexBatchRequest): Promise<{
+  processed: number;
+  firstSitemap: string;
+  lastSitemap: string;
+  matches: Array<{ brand: string; url: string; sitemap: string }>;
+}> {
+  const matches: Array<{ brand: string; url: string; sitemap: string }> = [];
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(2, batch.sitemaps.length) }, async () => {
+    for (;;) {
+      const index = cursor++;
+      if (index >= batch.sitemaps.length) return;
+      const sitemap = batch.sitemaps[index]!;
+      const target = new URL(sitemap);
+      const upstream = await safeFetch(target.toString(), {
+        method: "GET",
+        redirect: "follow",
+        headers: { accept: "application/xml,text/xml", "accept-language": "ru-RU,ru;q=0.9" }
+      }, fetch, 4, 60_000);
+      const xml = await readTextBounded(upstream, 12_000_000, 60_000);
+      if (!upstream.ok) throw new Error(`Yandex batch shard returned HTTP ${upstream.status}: ${sitemap}`);
+      const compact = compactYandexModelSitemap(xml, target);
+      if (!compact) throw new Error(`Yandex batch shard did not prove complete exact XML: ${sitemap}`);
+      const $ = load(compact, { xmlMode: true });
+      for (const node of $("urlset").children("url").toArray()) {
+        const productUrl = $(node).children("loc").first().text().trim();
+        for (const brand of batch.brands) {
+          if (yandexProductMatchesTokens(productUrl, brand.tokens)) {
+            matches.push({ brand: brand.brand, url: productUrl, sitemap });
+          }
+        }
+      }
+    }
+  });
+  await Promise.all(workers);
+  const sitemapOrder = new Map(batch.sitemaps.map((sitemap, index) => [sitemap, index]));
+  matches.sort((left, right) =>
+    (sitemapOrder.get(left.sitemap)! - sitemapOrder.get(right.sitemap)!) ||
+    left.url.localeCompare(right.url, "en") || left.brand.localeCompare(right.brand, "ru")
+  );
+  return {
+    processed: batch.sitemaps.length,
+    firstSitemap: batch.sitemaps[0]!,
+    lastSitemap: batch.sitemaps.at(-1)!,
+    matches
+  };
+}
+
 function compactMedOtzyvProductHtml(html: string, requested: URL): string | undefined {
   if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
   const $ = load(html);
@@ -1840,8 +1941,11 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
   const configured = env.INTERNAL_AGENT_TOKEN?.trim() ?? "";
   const supplied = (request.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
   if (configured.length < 32 || !secureEqual(configured, supplied)) return json({ error: "Internal authorization failed" }, 401);
-  const body = await request.json() as { url?: string };
+  const body = await request.json() as { url?: string; yandexBatch?: unknown };
   const target = new URL(String(body.url ?? ""));
+  const yandexBatchTarget = target.toString() === YANDEX_BATCH_ENDPOINT;
+  const yandexBatch = yandexBatchTarget ? parseYandexBatchRequest(body.yandexBatch) : undefined;
+  if (yandexBatchTarget && !yandexBatch) return json({ error: "Invalid Yandex batch proof request" }, 400);
   const host = target.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
   const irecommendTarget = parseIrecommendTarget(target);
   const ruOtzyvTarget = parseRuOtzyvTarget(target);
@@ -1916,8 +2020,15 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         [...target.searchParams.keys()].every((key) => key === "url") && (safeSearch || safeProduct);
     } catch { /* invalid nested Ozon search URL */ }
   }
-  if (target.protocol !== "https:" || !(reviewTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget)) {
+  if (target.protocol !== "https:" || !(yandexBatch || reviewTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
+  }
+  if (yandexBatch) {
+    try {
+      return json(await collectYandexBatch(yandexBatch));
+    } catch (error) {
+      return json({ error: safeErrorMessage(error) }, 502);
+    }
   }
   if (ozonTranslatedComposerTarget) {
     await assertSafePublicDestination(target.toString());

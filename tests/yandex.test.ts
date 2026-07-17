@@ -96,6 +96,71 @@ describe("YandexAdapter discovery", () => {
     expect(peak).toBe(4);
   });
 
+  it("aggregates an exhaustive 319-shard batch proof without handing every shard back to the Agent", async () => {
+    const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const maps = Array.from({ length: 319 }, (_value, index) =>
+      `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
+    );
+    const batches: string[][] = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      if (url !== batchEndpoint) throw new Error(`Unexpected per-shard handoff: ${url}`);
+      const request = JSON.parse(String(init?.body)) as { sitemaps: string[]; brands: Array<{ brand: string }> };
+      batches.push(request.sitemaps);
+      const match = request.sitemaps.includes(maps[17]!);
+      return new Response(JSON.stringify({
+        processed: request.sitemaps.length,
+        firstSitemap: request.sitemaps[0],
+        lastSitemap: request.sitemaps.at(-1),
+        matches: match ? [{
+          brand: request.brands[0]!.brand,
+          url: "https://reviews.yandex.ru/product/oscillococcinum--170000001",
+          sitemap: maps[17]
+        }] : []
+      }), { headers: { "content-type": "application/json" } });
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
+    fetch.yandexBatchEndpoint = batchEndpoint;
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 319 });
+
+    await expect(adapter.discover("oscillococcinum", context())).resolves.toMatchObject([
+      { listingId: "170000001", brand: "oscillococcinum" }
+    ]);
+    expect(batches.flat()).toEqual(maps);
+    expect(batches.every((batch) => batch.length >= 1 && batch.length <= 8)).toBe(true);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(40);
+    expect(fetchMock.mock.calls.filter(([input]) => maps.includes(String(input)))).toHaveLength(0);
+    expect(fetch).toHaveBeenCalledTimes(41);
+  });
+
+  it("rejects a partial batch aggregate even when an earlier chunk contained a match", async () => {
+    const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const maps = Array.from({ length: 9 }, (_value, index) =>
+      `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
+    );
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      const request = JSON.parse(String(init?.body)) as { sitemaps: string[]; brands: Array<{ brand: string }> };
+      if (request.sitemaps.length === 1) return new Response("transient shard failure", { status: 502 });
+      return new Response(JSON.stringify({
+        processed: request.sitemaps.length,
+        firstSitemap: request.sitemaps[0],
+        lastSitemap: request.sitemaps.at(-1),
+        matches: [{
+          brand: request.brands[0]!.brand,
+          url: "https://reviews.yandex.ru/product/oscillococcinum--170000001",
+          sitemap: request.sitemaps[0]
+        }]
+      }), { headers: { "content-type": "application/json" } });
+    }) as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
+    fetch.yandexBatchEndpoint = batchEndpoint;
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 9 });
+
+    await expect(adapter.discover("oscillococcinum", context())).rejects.toBeInstanceOf(AdapterBlockedError);
+  });
+
   it("propagates the caller deadline instead of returning partial sitemap matches", async () => {
     const deadline = new AbortController();
     const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {

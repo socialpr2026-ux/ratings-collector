@@ -1268,6 +1268,54 @@ describe("fixed first-party collection egress", () => {
     }
   });
 
+  it("returns only matched URLs after proving every exact Yandex batch shard", async () => {
+    const endpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const sitemaps = [
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_690000000-699999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_700000000-709999999-0.xml"
+    ];
+    const callBatch = () => staticReviewFetch(new Request(
+      "https://ratings.example/api/internal/static-review-fetch",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          url: endpoint,
+          yandexBatch: {
+            sitemaps,
+            brands: [{ brand: "oscillococcinum", tokens: ["oscillococcinum", "otsillokoktsinum"] }]
+          }
+        })
+      }
+    ), { INTERNAL_AGENT_TOKEN: token });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const locations = url === sitemaps[0]
+        ? ["https://reviews.yandex.ru/product/otsillokoktsinum--695940046", "https://reviews.yandex.ru/product/ingavirin--695940047"]
+        : ["https://reviews.yandex.ru/product/oscillococcinum-granuly--705940046"];
+      return new Response(`<urlset>${locations.map((location) => `<url><loc>${location}</loc></url>`).join("")}</urlset>`, {
+        headers: { "content-type": "application/xml" }
+      });
+    }));
+
+    const response = await callBatch();
+    const proof = await response.json() as { processed: number; matches: Array<{ url: string }> };
+    expect(response.status).toBe(200);
+    expect(proof.processed).toBe(2);
+    expect(proof.matches.map(({ url }) => url)).toEqual([
+      "https://reviews.yandex.ru/product/otsillokoktsinum--695940046",
+      "https://reviews.yandex.ru/product/oscillococcinum-granuly--705940046"
+    ]);
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => new Response(
+      String(input) === sitemaps[1] ? "<urlset>" : "<urlset></urlset>",
+      { headers: { "content-type": "application/xml" } }
+    )));
+    const incomplete = await callBatch();
+    expect(incomplete.status).toBe(502);
+    expect(await incomplete.text()).not.toContain('"processed":2');
+  });
+
   it("routes bounded Zdravcity paths through source-bound translated SSR", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(input.toString());
