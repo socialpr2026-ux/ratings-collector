@@ -57,8 +57,6 @@ export type YandexAdapterOptions = {
   sitemapRetryAttempts?: number;
   sitemapRetryBaseMs?: number;
   sitemapReadTimeoutMs?: number;
-  /** Whole discovery deadline. A partial sitemap scan is rejected, never returned as no results. */
-  discoveryTimeoutMs?: number;
   now?: () => Date;
   sleep?: (milliseconds: number) => Promise<void>;
 };
@@ -117,7 +115,6 @@ export class YandexAdapter implements SiteAdapter {
   private readonly sitemapRetryAttempts: number;
   private readonly sitemapRetryBaseMs: number;
   private readonly sitemapReadTimeoutMs: number;
-  private readonly discoveryTimeoutMs: number;
   private readonly now: () => Date;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private indexCache?: Cached<string[]>;
@@ -149,7 +146,6 @@ export class YandexAdapter implements SiteAdapter {
     // verified transfer can legitimately take more than 20 seconds; keep the
     // safety deadline, but do not misclassify a healthy shard as blocked.
     this.sitemapReadTimeoutMs = boundedInteger(options.sitemapReadTimeoutMs, 60_000, 1, 120_000);
-    this.discoveryTimeoutMs = boundedInteger(options.discoveryTimeoutMs, 90_000, 1, 300_000);
     this.now = options.now ?? (() => new Date());
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
@@ -229,35 +225,6 @@ export class YandexAdapter implements SiteAdapter {
   }
 
   private async scanDiscoveryBatch(
-    brands: string[],
-    context: AdapterContext
-  ): Promise<DiscoveryBatch> {
-    const deadline = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      deadline.abort();
-    }, this.discoveryTimeoutMs);
-    const relayAbort = () => deadline.abort(context.signal?.reason);
-    if (context.signal?.aborted) relayAbort();
-    else context.signal?.addEventListener("abort", relayAbort, { once: true });
-    const boundedContext = { ...context, signal: deadline.signal };
-    try {
-      return await this.scanDiscoveryBatchWithinDeadline(brands, boundedContext);
-    } catch (error) {
-      if (timedOut) {
-        throw new AdapterBlockedError(
-          `Yandex discovery exceeded ${this.discoveryTimeoutMs}ms; partial sitemap matches were discarded`
-        );
-      }
-      throw error;
-    } finally {
-      clearTimeout(timer);
-      context.signal?.removeEventListener("abort", relayAbort);
-    }
-  }
-
-  private async scanDiscoveryBatchWithinDeadline(
     brands: string[],
     context: AdapterContext
   ): Promise<DiscoveryBatch> {

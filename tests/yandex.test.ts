@@ -68,7 +68,7 @@ describe("YandexAdapter discovery", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
-  it("scans every shard in a live-sized cold index within the bounded deadline", async () => {
+  it("scans every shard in a live-sized cold index without a synthetic whole-pass deadline", async () => {
     const maps = Array.from({ length: 319 }, (_value, index) =>
       `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
     );
@@ -79,16 +79,15 @@ describe("YandexAdapter discovery", () => {
       if (url === INDEX) return xmlResponse(sitemapIndex(maps));
       inFlight += 1;
       peak = Math.max(peak, inFlight);
-      // At the former 16-worker bound this complete scan needs at least 600ms
-      // and fails closed. Thirty-two workers still inspect all 319 shards while
-      // completing inside the unchanged deadline.
+      // Thirty-two workers still inspect all 319 shards. The caller owns the
+      // run deadline, so a healthy complete pass is not cut off mid-scan.
       await new Promise((resolve) => setTimeout(resolve, 30));
       inFlight -= 1;
       return xmlResponse(modelSitemap(url === maps[17]
         ? ["https://reviews.yandex.ru/product/baktoblis-sashe--170000001"]
         : []));
     }) as unknown as typeof globalThis.fetch;
-    const adapter = new YandexAdapter({ fetch, maxSitemaps: 319, discoveryTimeoutMs: 450 });
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 319 });
 
     await expect(adapter.discover("Бактоблис", context())).resolves.toMatchObject([
       { listingId: "170000001", brand: "Бактоблис" }
@@ -97,21 +96,22 @@ describe("YandexAdapter discovery", () => {
     expect(peak).toBe(32);
   });
 
-  it("fails a timed-out partial sitemap scan closed instead of returning no results", async () => {
+  it("propagates the caller deadline instead of returning partial sitemap matches", async () => {
+    const deadline = new AbortController();
     const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : input.toString();
       if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A]));
+      if (init?.signal?.aborted) throw init.signal.reason;
       return await new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
       });
     }) as unknown as typeof globalThis.fetch;
-    const adapter = new YandexAdapter({
-      fetch, maxSitemaps: 1, sitemapRetryAttempts: 1, discoveryTimeoutMs: 10
-    });
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 1, sitemapRetryAttempts: 1 });
 
-    const error = await adapter.discover("Бактоблис", context()).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(AdapterBlockedError);
-    expect((error as Error).message).toContain("partial sitemap matches were discarded");
+    const discovery = adapter.discover("Бактоблис", context({ signal: deadline.signal }));
+    deadline.abort(new Error("run_deadline_exceeded"));
+
+    await expect(discovery).rejects.toThrow("run_deadline_exceeded");
   });
 
   it("fails closed before scanning when the sitemap index exceeds the cap", async () => {
