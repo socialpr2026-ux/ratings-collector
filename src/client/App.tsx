@@ -30,6 +30,7 @@ import {
 } from "./site-catalog.js";
 import {
   collectWithCheckpointContinuation,
+  pollSavedCollectionAttempt,
   type AutomaticContinuationNotice
 } from "./checkpoint-resume.js";
 
@@ -402,29 +403,17 @@ export function App() {
 
   async function pollCollectionAttempt(
     id: string,
-    previousUpdatedAt: string,
+    checkpoint: RunState,
     triggerError: () => Error | undefined,
     triggerFinished: () => boolean
   ) {
-    let lastUpdatedAt = previousUpdatedAt;
-    let unchangedPollsAfterFailure = 0;
-    for (;;) {
-      const next = await fetchRun(id);
-      setRun(next);
-      const retryHasStarted = next.updatedAt !== previousUpdatedAt || pendingStatuses.has(next.status);
-      if (!pendingStatuses.has(next.status) && (retryHasStarted || triggerFinished())) return next;
-      const failure = triggerError();
-      if (failure) {
-        if (next.updatedAt === lastUpdatedAt) unchangedPollsAfterFailure += 1;
-        else unchangedPollsAfterFailure = 0;
-        lastUpdatedAt = next.updatedAt;
-        // A lost Agent response may precede its final failed checkpoint. Keep
-        // polling while the server is still advancing, but never hang forever
-        // on a stale `running` marker.
-        if (unchangedPollsAfterFailure >= 4) return next;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 2500));
-    }
+    return pollSavedCollectionAttempt({
+      checkpoint,
+      readCheckpoint: () => fetchRun(id),
+      triggerError,
+      triggerFinished,
+      onCheckpoint: setRun
+    });
   }
 
   async function executeCollectionAttempt(id: string, checkpoint: RunState) {
@@ -441,7 +430,7 @@ export function App() {
       .finally(() => { triggerFinished = true; });
     const polled = await pollCollectionAttempt(
       id,
-      checkpoint.updatedAt,
+      checkpoint,
       () => triggerFailure,
       () => triggerFinished
     );
@@ -459,7 +448,7 @@ export function App() {
         if (firstAttempt && initialAttemptAlreadyStarted) {
           firstAttempt = false;
           return {
-            run: await pollCollectionAttempt(initial.id, checkpoint.updatedAt, () => undefined, () => false)
+            run: await pollCollectionAttempt(initial.id, checkpoint, () => undefined, () => false)
           };
         }
         firstAttempt = false;

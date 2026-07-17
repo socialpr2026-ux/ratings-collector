@@ -145,7 +145,14 @@ export function summarizeIssues(values: readonly string[]): string[] {
 export function friendlyErrorMessage(error: unknown, action: UserAction) {
   const raw = (error instanceof Error ? error.message : String(error ?? "")).trim();
   if (!raw) return actionFallbacks[action];
-  if (/failed to fetch|network(?:error)?|fetch failed|timeout|timed out|econn|socket hang up/i.test(raw)) {
+  const networkFailure = /failed to fetch|network(?:error)?|fetch failed|timeout|timed out|econn|socket hang up/i.test(raw);
+  const ambiguousRetryAck = action === "retry" && (
+    networkFailure || /POST\s+\/ratings\b.*(?:status(?:\s+code)?\s+404|HTTP\s+404)|proxy.*(?:404|5\d\d)/i.test(raw)
+  );
+  if (ambiguousRetryAck) {
+    return "Сервис не подтвердил повторный запуск. Сохранённый результат не изменён — повторите позже.";
+  }
+  if (networkFailure) {
     return "Нет связи с сервисом. Проверьте интернет и повторите.";
   }
   if (isQuotaIssue(raw)) {

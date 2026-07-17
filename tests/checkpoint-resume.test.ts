@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { RunState } from "../src/shared/types.js";
 import {
+  AMBIGUOUS_TRIGGER_GRACE_POLLS,
   MAX_AUTOMATIC_CONTINUATIONS,
   checkpointContinuationDecision,
-  collectWithCheckpointContinuation
+  collectWithCheckpointContinuation,
+  pollSavedCollectionAttempt
 } from "../src/client/checkpoint-resume.js";
 
 function run(input: Partial<RunState> & { completed: number; updatedAt: string }): RunState {
@@ -155,5 +157,105 @@ describe("automatic checkpoint continuation loop", () => {
     }));
 
     expect(result).toMatchObject({ run: { status: "review" }, continuations: 0, error: leaseError });
+  });
+
+  it("keeps an advanced saved failure authoritative over a lost Agent HTTP acknowledgement", async () => {
+    const initial = run({
+      status: "review",
+      completed: 99,
+      updatedAt: "2026-07-17T13:47:08.000Z",
+      errors: []
+    });
+    const savedFailure = run({
+      status: "failed",
+      completed: 99,
+      updatedAt: "2026-07-17T13:58:15.000Z",
+      errors: [{ partition: "asna.ru/Церетон", message: "blocked: exact ASNA discovery remained unproven" }]
+    });
+    const trigger = vi.fn(async () => ({
+      run: savedFailure,
+      error: new Error("POST /ratings returned status code 404")
+    }));
+
+    const result = await collectWithCheckpointContinuation(initial, trigger);
+
+    expect(trigger).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      run: {
+        status: "failed",
+        errors: [{ partition: "asna.ru/Церетон", message: "blocked: exact ASNA discovery remained unproven" }]
+      },
+      error: undefined,
+      continuations: 0
+    });
+  });
+});
+
+describe("ambiguous collection POST recovery", () => {
+  it("follows saved activity to terminal without issuing a duplicate attempt", async () => {
+    const initial = run({
+      status: "review",
+      completed: 99,
+      updatedAt: "2026-07-17T10:00:00.000Z",
+      errors: []
+    });
+    const unchanged = structuredClone(initial);
+    const active = run({
+      status: "running",
+      completed: 99,
+      updatedAt: "2026-07-17T10:00:01.000Z",
+      errors: []
+    });
+    const completed = run({
+      status: "review",
+      completed: 100,
+      updatedAt: "2026-07-17T10:00:20.000Z",
+      errors: []
+    });
+    const delayedUnchangedReads = Array.from({ length: 25 }, () => structuredClone(unchanged));
+    const checkpoints = [...delayedUnchangedReads, active, active, active, active, completed];
+    const readCheckpoint = vi.fn(async () => checkpoints.shift()!);
+    const trigger = vi.fn(async () => { throw new Error("Failed to fetch"); });
+    let triggerFailure: Error | undefined;
+
+    const result = await collectWithCheckpointContinuation(initial, async (checkpoint) => {
+      await trigger().catch((error) => { triggerFailure = error as Error; });
+      return {
+        run: await pollSavedCollectionAttempt({
+          checkpoint,
+          readCheckpoint,
+          triggerError: () => triggerFailure,
+          triggerFinished: () => true,
+          wait: async () => undefined
+        }),
+        error: triggerFailure
+      };
+    });
+
+    expect(trigger).toHaveBeenCalledTimes(1);
+    expect(readCheckpoint).toHaveBeenCalledTimes(30);
+    expect(result).toMatchObject({ run: { status: "review", progress: { completedPartitions: 100 } }, error: undefined });
+  });
+
+  it("keeps the trigger error when no saved checkpoint proves the attempt started", async () => {
+    const initial = run({
+      status: "review",
+      completed: 99,
+      updatedAt: "2026-07-17T10:00:00.000Z",
+      errors: []
+    });
+    const readCheckpoint = vi.fn(async () => structuredClone(initial));
+    const triggerFailure = new Error("Failed to fetch");
+
+    const result = await pollSavedCollectionAttempt({
+      checkpoint: initial,
+      readCheckpoint,
+      triggerError: () => triggerFailure,
+      triggerFinished: () => true,
+      wait: async () => undefined
+    });
+
+    expect(result).toEqual(initial);
+    expect(readCheckpoint).toHaveBeenCalledTimes(AMBIGUOUS_TRIGGER_GRACE_POLLS);
   });
 });

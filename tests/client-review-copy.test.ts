@@ -79,6 +79,10 @@ describe("setup readiness copy", () => {
 describe("plain-language feedback", () => {
   it("hides infrastructure wording in common errors", () => {
     expect(friendlyErrorMessage(new Error("Failed to fetch"), "start")).toBe("Нет связи с сервисом. Проверьте интернет и повторите.");
+    expect(friendlyErrorMessage(new Error("Failed to fetch"), "retry"))
+      .toBe("Сервис не подтвердил повторный запуск. Сохранённый результат не изменён — повторите позже.");
+    expect(friendlyErrorMessage(new Error("POST /ratings returned status code 404"), "retry"))
+      .toBe("Сервис не подтвердил повторный запуск. Сохранённый результат не изменён — повторите позже.");
     expect(friendlyErrorMessage("quota_exceeded: Apify limit reached", "start")).toBe("Доступный лимит сбора исчерпан. Повторите позже или временно уберите эту площадку.");
     expect(friendlyErrorMessage("POST /api/runs returned status code 500", "start")).toBe("Не удалось запустить сбор. Проверьте настройки и повторите.");
     expect(friendlyErrorMessage("permission denied", "publish")).toContain("доступ «Редактор»");
