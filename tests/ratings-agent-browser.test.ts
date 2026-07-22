@@ -447,7 +447,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       const forwarded = JSON.parse(String(init?.body)) as { yandexBatch: { sitemaps: string[] } };
-      return directFetch.mock.calls.length === 1
+      return directFetch.mock.calls.length <= 2
         ? new Response(JSON.stringify({ error: "one shard remained unproven" }), { status: 502 })
         : new Response(JSON.stringify({
           processed: 2,
@@ -472,7 +472,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ processed: 2, firstSitemap: "first", lastSitemap: "second" });
-    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(directFetch).toHaveBeenCalledTimes(3);
     expect(run).not.toHaveBeenCalled();
   });
 

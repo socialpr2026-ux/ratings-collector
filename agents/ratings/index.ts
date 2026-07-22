@@ -159,7 +159,7 @@ export function browserFetch(
           body: JSON.stringify({ url: request.url, yandexBatch: payload }),
           signal: request.signal
         });
-        if (response.status !== 502 || attempt >= 2) return response;
+        if (response.status !== 502 || attempt >= 3) return response;
         await response.body?.cancel().catch(() => undefined);
         request.signal.throwIfAborted();
         // Retry only the exact failed pair. This avoids restarting the complete
