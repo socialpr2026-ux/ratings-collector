@@ -30,6 +30,7 @@ describe("site picker catalog", () => {
       "uteka.ru",
       "megapteka.ru",
       "vapteke.ru",
+      "apteka.magnit.ru",
       "apteka.ru",
       "nfapteka.ru",
       "budzdorov.ru",
@@ -46,7 +47,7 @@ describe("site picker catalog", () => {
       availability: "temporarily_blocked"
     });
     expect(SELECTABLE_CATALOG_DOMAINS).toEqual(expect.arrayContaining([
-      "apteka.ru", "nfapteka.ru", "budzdorov.ru", "etabl.ru", "eapteka.ru", "vapteke.ru"
+      "apteka.ru", "nfapteka.ru", "budzdorov.ru", "etabl.ru", "eapteka.ru", "vapteke.ru", "apteka.magnit.ru"
     ]));
     expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("apteka-april.ru");
     expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("polza.ru");
