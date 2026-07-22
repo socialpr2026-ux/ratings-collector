@@ -91,6 +91,21 @@ describe("additional pharmacy adapters", () => {
     }, context)).rejects.toBeInstanceOf(ParserChangedError);
   });
 
+  it("uses a fixed Ozerki canary instead of blocking on the first requested brand", async () => {
+    const familyUrl = "https://ozerki.ru/alphabet/a/akvaoptik/";
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      expect(new URL(String(input)).toString()).toBe(familyUrl);
+      return new Response("<html><body><h1>АкваОптик</h1></body></html>", { status: 200 });
+    });
+    const adapter = new OzerkiAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    await expect(adapter.healthCheck({ ...context, brands: ["Таустин", "АкваОптик"] })).resolves.toMatchObject({
+      ok: true,
+      message: "ozerki.ru: fixed exact family canary is available"
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("collects exact Apteka.ru variants from Product JSON-LD and keeps ratingCount separate", async () => {
     const id = "5e3268eaca7bdc000192d316";
     const productUrl = `https://apteka.ru/product/oczillokokczinum-30-sht-granuly-${id}/`;

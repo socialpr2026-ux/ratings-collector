@@ -491,9 +491,9 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
 ];
 
 // These sites cannot currently provide a product-bound review aggregate:
-// Medum blocks the free paths, while Eapteka and Polza removed product reviews.
+// Medum blocks the free paths, while Polza removed product reviews.
 // Keep every path explicit and fail closed instead of publishing zeroes.
-export const BLOCKED_FREE_MODE_DOMAINS = ["medum.ru", "eapteka.ru", "polza.ru"] as const;
+export const BLOCKED_FREE_MODE_DOMAINS = ["medum.ru", "polza.ru"] as const;
 export const UNPROVEN_AGGREGATE_DOMAINS = [] as const;
 const PRAVOGOLOSA_HEALTH_CANARY = "ratingscollector-healthcheck-7f4c2a";
 

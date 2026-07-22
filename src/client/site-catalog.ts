@@ -51,7 +51,7 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
       { domain: "uteka.ru", label: "Ютека" },
       { domain: "megapteka.ru", label: "Мегаптека" },
       { domain: "medum.ru", label: "Medum", availability: "temporarily_blocked", note: "Сайт сейчас блокирует автоматический доступ" },
-      { domain: "eapteka.ru", label: "ЕАПТЕКА", availability: "temporarily_blocked", note: "Отзывы на сайте отключены" },
+      { domain: "eapteka.ru", label: "ЕАПТЕКА" },
       { domain: "polza.ru", label: "POLZAru", availability: "temporarily_blocked", note: "Отзывы на сайте отключены" },
       { domain: "asna.ru", label: "АСНА" },
       { domain: "farmlend.ru", label: "Фармленд" },

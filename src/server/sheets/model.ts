@@ -421,7 +421,7 @@ export function buildSheetDocument(
   const summaryHeaderRow = values.length;
   add("summaryHeader", summaryHeader);
   merges.push({ startRow: summaryHeaderRow, endRow: summaryHeaderRow + 1, startColumn: 0, endColumn: 3 });
-  const labels = ["Всего отзывов / оценок", "Карточки с рейтингом ≥4 баллов", "Карточки с рейтингом <4 баллов", "Карточки без отзывов / оценок"];
+  const labels = ["Всего отзывов / оценок", "Карточки с рейтингом ≥4,5 баллов", "Карточки с рейтингом <4,5 баллов", "Карточки без отзывов / оценок"];
   labels.forEach((label, metricIndex) => {
     const row: SheetScalar[] = [label]; const formula: Array<string | null> = [];
     months.forEach((_month, index) => {
@@ -433,8 +433,8 @@ export function buildSheetDocument(
       const ratingArray = `{${ratingCells.join(";")}}`;
       const formulasForMetric = [
         reviewCells.length ? `=SUM(${reviewCells.join(";")})` : "=0",
-        ratingCells.length ? `=COUNTIFS(${ratingArray};">=4";${reviewArray};">0")` : "=0",
-        ratingCells.length ? `=COUNTIFS(${ratingArray};"<4";${ratingArray};"<>";${reviewArray};">0")` : "=0",
+        ratingCells.length ? `=COUNTIFS(${ratingArray};">=4,5";${reviewArray};">0")` : "=0",
+        ratingCells.length ? `=COUNTIFS(${ratingArray};"<4,5";${ratingArray};"<>";${reviewArray};">0")` : "=0",
         ratingCells.length ? `=COUNTIFS(${reviewArray};0;${reviewArray};"<>";${ratingArray};"")` : "=0"
       ];
       formula[4 + index * 2] = formulasForMetric[metricIndex];

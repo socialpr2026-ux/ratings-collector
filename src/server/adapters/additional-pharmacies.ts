@@ -887,13 +887,11 @@ export class OzerkiAdapter extends AdditionalPharmacyAdapter {
 
   async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
     const checkedAt = new Date().toISOString();
-    const brand = context.brands?.[0]?.trim();
-    if (!brand) return { ok: false, checkedAt, message: `${OZERKI_DOMAIN}: requested brand is missing` };
     try {
-      const refs = await this.discover(brand, { ...context, previousIds: [], previousRefs: [] });
+      const refs = await this.discover("АкваОптик", { ...context, previousIds: [], previousRefs: [] });
       return refs.length
-        ? { ok: true, checkedAt, message: `${OZERKI_DOMAIN}: exact requested family is available` }
-        : { ok: false, checkedAt, message: `${OZERKI_DOMAIN}: requested family returned no products` };
+        ? { ok: true, checkedAt, message: `${OZERKI_DOMAIN}: fixed exact family canary is available` }
+        : { ok: false, checkedAt, message: `${OZERKI_DOMAIN}: fixed family canary returned no products` };
     } catch (error) {
       return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
     }

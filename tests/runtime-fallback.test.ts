@@ -541,7 +541,7 @@ describe("collector runtime fallback integration", () => {
     expect(requestedUrls.every((url) => url.hostname === "example.com")).toBe(true);
   });
 
-  it("keeps Eapteka and Polza blocked without making a request or publishing zeroes", async () => {
+  it("keeps Polza blocked without making a request or publishing zeroes", async () => {
     const fetchMock = vi.fn(async () => {
       throw new Error("blocked domains must not be requested");
     }) as unknown as typeof fetch;
@@ -553,12 +553,11 @@ describe("collector runtime fallback integration", () => {
 
     const run = await runtime.service.executeRun((await runtime.service.createRun({
       ...request,
-      domains: ["eapteka.ru", "polza.ru"],
+      domains: ["polza.ru"],
       brands: ["Бактоблис"]
     })).id);
 
     expect(run.partitions).toMatchObject([
-      { domain: "eapteka.ru", status: "blocked", discovered: 0, collected: 0 },
       { domain: "polza.ru", status: "blocked", discovered: 0, collected: 0 }
     ]);
     expect(run.partitions.every((partition) => partition.message?.includes("blocked_free_mode"))).toBe(true);
