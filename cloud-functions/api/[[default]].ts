@@ -1880,16 +1880,24 @@ function yandexProductMatchesTokens(input: string, tokens: string[]): boolean {
 
 class NonRetryableYandexBatchShardError extends Error {}
 
+const YANDEX_BATCH_SHARD_ATTEMPT_MS = 35_000;
+
 async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string> {
   const target = new URL(sitemap);
   let lastError: unknown;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const startedAt = Date.now();
+    const attemptAbort = new AbortController();
+    const attemptTimer = setTimeout(() => {
+      attemptAbort.abort(new Error("Yandex batch shard attempt deadline exceeded"));
+    }, YANDEX_BATCH_SHARD_ATTEMPT_MS);
     try {
       const upstream = await safeFetch(target.toString(), {
         method: "GET",
         redirect: "follow",
+        signal: attemptAbort.signal,
         headers: { accept: "application/xml,text/xml", "accept-language": "ru-RU,ru;q=0.9" }
-      }, fetch, 4, 60_000);
+      }, fetch, 4, YANDEX_BATCH_SHARD_ATTEMPT_MS);
       if (!upstream.ok) {
         await upstream.body?.cancel().catch(() => undefined);
         if (upstream.status === 404) {
@@ -1901,7 +1909,8 @@ async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string> {
         }
         throw new Error(message);
       }
-      const xml = await readTextBounded(upstream, 12_000_000, 60_000);
+      const remainingMs = Math.max(1, YANDEX_BATCH_SHARD_ATTEMPT_MS - (Date.now() - startedAt));
+      const xml = await readTextBounded(upstream, 12_000_000, remainingMs);
       const compact = compactYandexModelSitemap(xml, target);
       if (!compact) throw new Error("Yandex batch shard did not prove complete exact XML");
       return compact;
@@ -1909,6 +1918,8 @@ async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string> {
       lastError = error;
       if (error instanceof NonRetryableYandexBatchShardError || attempt === 3) break;
       await new Promise((resolve) => setTimeout(resolve, attempt * 100));
+    } finally {
+      clearTimeout(attemptTimer);
     }
   }
   throw new Error(`Yandex batch shard remained unproven: ${sitemap}: ${safeErrorMessage(lastError)}`);

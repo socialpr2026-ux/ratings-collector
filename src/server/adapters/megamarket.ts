@@ -108,11 +108,12 @@ export class MegamarketAdapter implements SiteAdapter {
 
   async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
     const checkedAt = new Date().toISOString();
+    const brand = context.brands?.[0]?.trim() || "Оциллококцинум";
     try {
-      const source = new URL("https://megamarket.ru/catalog/details/ocillokokcinum-granuly-1-g-1-doz-6-sht-100024500008/");
-      const result = await requestHtml(translated(source), context, this.fetchImpl);
-      const parsed = this.parseProduct(result.html, source, "Оциллококцинум", "100024500008");
-      return { ok: true, checkedAt, message: `${DOMAIN}: canary ${parsed.reviews}/${parsed.rating}` };
+      const refs = await this.discover(brand, { ...context, previousIds: [], previousRefs: [] });
+      return refs.length
+        ? { ok: true, checkedAt, message: `${DOMAIN}: operative discovery found ${refs.length} product card(s)` }
+        : { ok: true, checkedAt, message: `${DOMAIN}: complete search proved no current product for ${brand}` };
     } catch (error) {
       return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
     }

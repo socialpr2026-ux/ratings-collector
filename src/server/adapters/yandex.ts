@@ -18,7 +18,10 @@ const DIRECT_SOURCE = "yandex_reviews_json_ld";
 const TRANSLATE_SOURCE = "yandex_reviews_json_ld_google_translate";
 const MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_\d+-\d+-\d+\.xml$/i;
 const MODEL_ID_AT_END = /--(\d+)(?:[/?#]|$)/;
-const YANDEX_BATCH_CHUNK_SIZE = 8;
+// The gateway has two shard workers and a 120-second platform ceiling. Keep
+// each call to one worker wave so a slow shard can exhaust its own bounded
+// retries without timing out an otherwise complete multi-shard proof.
+const YANDEX_BATCH_CHUNK_SIZE = 2;
 const YANDEX_BATCH_CONCURRENCY = 2;
 
 type YandexBatchCapableFetch = typeof globalThis.fetch & { yandexBatchEndpoint?: string };

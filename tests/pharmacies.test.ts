@@ -210,6 +210,21 @@ describe("RiglaAdapter", () => {
 });
 
 describe("ZdravcityAdapter", () => {
+  it("checks the requested brand instead of an unrelated fixed canary", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestedUrl(input);
+      expect(url.pathname).toBe("/g_cereton/");
+      return new Response(fixtures.zdravGroup
+        .replaceAll("Кагоцел", "Церетон")
+        .replaceAll("КАГОЦЕЛ", "ЦЕРЕТОН")
+        .replaceAll("kagocel", "cereton"));
+    }) as unknown as typeof fetch;
+
+    await expect(new ZdravcityAdapter(new MemoryEvidenceStore(), fetchMock).healthCheck({
+      ...context, brands: ["Церетон"]
+    })).resolves.toMatchObject({ ok: true, message: "pharmacy:zdravcity:v1: operative discovery found 1 product card(s)" });
+  });
+
   it("keeps the stable UUID and separates visible written reviews from the structured counter", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = requestedUrl(input);

@@ -145,15 +145,46 @@ export function browserFetch(
     let batch: unknown;
     try { batch = JSON.parse(text); }
     catch { throw new Error("Yandex batch request is not valid JSON"); }
-    return fetch(staticProxy.endpoint, {
+    const input = batch && typeof batch === "object" && !Array.isArray(batch)
+      ? batch as { sitemaps?: unknown; brands?: unknown }
+      : undefined;
+    const requestProof = (payload: unknown) => fetch(staticProxy.endpoint, {
       method: "POST",
       headers: {
         authorization: `Bearer ${staticProxy.token}`,
         "content-type": "application/json"
       },
-      body: JSON.stringify({ url: request.url, yandexBatch: batch }),
+      body: JSON.stringify({ url: request.url, yandexBatch: payload }),
       signal: request.signal
     });
+    const splitTimedOutProof = async (payload: { sitemaps: string[]; brands?: unknown }): Promise<Response> => {
+      const response = await requestProof(payload);
+      if (response.status !== 504 || payload.sitemaps.length <= 1) return response;
+      await response.body?.cancel().catch(() => undefined);
+      request.signal.throwIfAborted();
+
+      const middle = Math.ceil(payload.sitemaps.length / 2);
+      const left = await splitTimedOutProof({ ...payload, sitemaps: payload.sitemaps.slice(0, middle) });
+      if (!left.ok) return left;
+      const leftProof = await left.json() as { processed?: unknown; firstSitemap?: unknown; lastSitemap?: unknown; matches?: unknown };
+      const right = await splitTimedOutProof({ ...payload, sitemaps: payload.sitemaps.slice(middle) });
+      if (!right.ok) return right;
+      const rightProof = await right.json() as { processed?: unknown; firstSitemap?: unknown; lastSitemap?: unknown; matches?: unknown };
+      if (!Array.isArray(leftProof.matches) || !Array.isArray(rightProof.matches)) {
+        return json({ error: "Split Yandex batch proof is unreadable" }, 502);
+      }
+      return json({
+        processed: Number(leftProof.processed) + Number(rightProof.processed),
+        firstSitemap: leftProof.firstSitemap,
+        lastSitemap: rightProof.lastSitemap,
+        matches: [...leftProof.matches, ...rightProof.matches]
+      });
+    };
+    if (input && Array.isArray(input.sitemaps) && input.sitemaps.length > 1 &&
+      input.sitemaps.every((item): item is string => typeof item === "string")) {
+      return splitTimedOutProof({ ...input, sitemaps: input.sitemaps });
+    }
+    return requestProof(batch);
   };
   const fetchWildberriesViaStaticProxy = async (url: URL, signal: AbortSignal) => {
     const first = await fetchViaStaticProxy(url, signal);

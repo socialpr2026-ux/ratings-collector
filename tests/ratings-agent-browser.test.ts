@@ -369,6 +369,58 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("splits only a timed-out Yandex batch and recombines complete proofs", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const forwarded = JSON.parse(String(init?.body)) as {
+        yandexBatch: { sitemaps: string[]; brands: Array<{ brand: string }> };
+      };
+      const sitemaps = forwarded.yandexBatch.sitemaps;
+      if (sitemaps.length === 4) return new Response("function timeout", { status: 504 });
+      return new Response(JSON.stringify({
+        processed: sitemaps.length,
+        firstSitemap: sitemaps[0],
+        lastSitemap: sitemaps.at(-1),
+        matches: sitemaps[0] === "a" ? [{
+          brand: forwarded.yandexBatch.brands[0]!.brand,
+          url: "https://reviews.yandex.ru/product/cereton--123",
+          sitemap: "a"
+        }] : []
+      }), { headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    }) as typeof fetch & { yandexBatchEndpoint?: string };
+    const payload = {
+      sitemaps: ["a", "b", "c", "d"],
+      brands: [{ brand: "Церетон", tokens: ["cereton"] }]
+    };
+
+    const response = await routedFetch(routedFetch.yandexBatchEndpoint!, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const proof = await response.json() as {
+      processed: number;
+      firstSitemap: string;
+      lastSitemap: string;
+      matches: Array<{ brand: string; url: string; sitemap: string }>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(proof).toEqual({
+      processed: 4,
+      firstSitemap: "a",
+      lastSitemap: "d",
+      matches: [{ brand: "Церетон", url: "https://reviews.yandex.ru/product/cereton--123", sitemap: "a" }]
+    });
+    expect(directFetch).toHaveBeenCalledTimes(3);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("uses fixed function egress before a hanging direct Yandex request", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
