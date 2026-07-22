@@ -297,13 +297,28 @@ export class YandexAdapter implements SiteAdapter {
       brandKey(brand),
       { brand, refs: new Map() }
     ]));
-    await mapWithConcurrency(chunks, YANDEX_BATCH_CONCURRENCY, async (sitemaps) => {
+    // A failed chunk must cancel and settle its in-flight siblings before the
+    // caller can retry. Otherwise a retry starts while the previous gateway
+    // requests are still consuming the same egress/function budget, producing
+    // repeated 502s without weakening the complete-proof requirement.
+    const batchAbort = new AbortController();
+    let callerAborted = false;
+    const relayAbort = () => {
+      callerAborted = true;
+      batchAbort.abort(context.signal?.reason);
+    };
+    if (context.signal?.aborted) relayAbort();
+    else context.signal?.addEventListener("abort", relayAbort, { once: true });
+    let cursor = 0;
+    let failure: unknown;
+
+    const processChunk = async (sitemaps: string[]): Promise<void> => {
       let response: Response;
       try {
         response = await fetcher(endpoint, {
           method: "POST",
           redirect: "error",
-          signal: context.signal,
+          signal: batchAbort.signal,
           headers: { "content-type": "application/json", accept: "application/json" },
           body: JSON.stringify({
             sitemaps,
@@ -311,7 +326,7 @@ export class YandexAdapter implements SiteAdapter {
           })
         });
       } catch (error) {
-        if (context.signal?.aborted) throw error;
+        if (callerAborted) throw error;
         throw new AdapterBlockedError(`Yandex batch proof request failed: ${errorMessage(error)}`);
       }
       if (!response.ok) {
@@ -337,7 +352,30 @@ export class YandexAdapter implements SiteAdapter {
           discovery.refs.clear();
         }
       }
-    });
+    };
+
+    const worker = async (): Promise<void> => {
+      while (failure === undefined && !batchAbort.signal.aborted) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= chunks.length) return;
+        try {
+          await processChunk(chunks[index]!);
+        } catch (error) {
+          failure ??= error;
+          if (!batchAbort.signal.aborted) batchAbort.abort(error);
+          return;
+        }
+      }
+    };
+
+    try {
+      await Promise.all(Array.from({ length: Math.min(YANDEX_BATCH_CONCURRENCY, chunks.length) }, worker));
+      if (failure !== undefined) throw failure;
+      if (callerAborted) throw context.signal?.reason ?? new DOMException("aborted", "AbortError");
+    } finally {
+      context.signal?.removeEventListener("abort", relayAbort);
+    }
     return new Map([...discoveries].map(([key, discovery]) => [
       key,
       discovery.error ?? [...discovery.refs.values()].sort((a, b) =>

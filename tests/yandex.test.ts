@@ -161,6 +161,39 @@ describe("YandexAdapter discovery", () => {
     await expect(adapter.discover("oscillococcinum", context())).rejects.toBeInstanceOf(AdapterBlockedError);
   });
 
+  it("cancels an in-flight sibling when a Cereton batch proof fails", async () => {
+    const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const maps = Array.from({ length: 16 }, (_value, index) =>
+      `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
+    );
+    let siblingAborted = false;
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      const request = JSON.parse(String(init?.body)) as { sitemaps: string[] };
+      if (request.sitemaps[0] === maps[0]) return new Response("gateway unavailable", { status: 502 });
+      return await new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) throw new Error("missing batch abort signal");
+        const onAbort = () => {
+          siblingAborted = true;
+          reject(signal.reason ?? new DOMException("aborted", "AbortError"));
+        };
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      });
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
+    fetch.yandexBatchEndpoint = batchEndpoint;
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: maps.length });
+
+    await expect(adapter.discover("Церетон", context())).rejects.toMatchObject({
+      message: "Yandex batch proof failed with HTTP 502"
+    });
+    expect(siblingAborted).toBe(true);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(2);
+  });
+
   it("propagates the caller deadline instead of returning partial sitemap matches", async () => {
     const deadline = new AbortController();
     const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
