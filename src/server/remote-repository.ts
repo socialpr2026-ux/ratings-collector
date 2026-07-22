@@ -3,6 +3,7 @@ import type { Observation, ProductRecord, PublicationRecord, RunState, SiteProfi
 import type { Repository } from "./repository.js";
 
 export type RepositoryRpc =
+  | { action: "findRuns"; brand: string; limit?: number }
   | { action: "getRun"; id: string }
   | { action: "saveRun"; run: RunState }
   | { action: "getProfile"; domain: string }
@@ -22,6 +23,7 @@ export type RepositoryRpc =
   | { action: "putEvidence"; payload: unknown };
 
 const RETRYABLE_ACTIONS = new Set<RepositoryRpc["action"]>([
+  "findRuns",
   "getRun",
   "saveRun",
   "getProfile",

@@ -20,6 +20,35 @@ export function ratingsBlobStore(): Store {
 export class BlobRepository implements Repository {
   constructor(private readonly store: Store = ratingsBlobStore()) {}
 
+  async findRecentRunsByBrand(brand: string, limit = 5): Promise<Array<{
+    id: string;
+    status: RunState["status"];
+    updatedAt: string;
+    brands: string[];
+    completedPartitions: number;
+    totalPartitions: number;
+  }>> {
+    const normalized = brand.normalize("NFKC").toLocaleLowerCase("ru-RU").trim();
+    if (normalized.length < 2 || normalized.length > 160) throw new Error("Invalid run brand lookup");
+    const boundedLimit = Math.max(1, Math.min(20, Math.trunc(limit) || 5));
+    const { blobs } = await this.store.list({ prefix: "runs/", consistency: "strong" });
+    const runs = await Promise.all(blobs.map((item) => this.store.get(item.key, strongJson) as Promise<RunState | null>));
+    return runs
+      .filter((run): run is RunState => Boolean(run?.request.brands.some((item) =>
+        item.normalize("NFKC").toLocaleLowerCase("ru-RU").trim() === normalized
+      )))
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+      .slice(0, boundedLimit)
+      .map((run) => ({
+        id: run.id,
+        status: run.status,
+        updatedAt: run.updatedAt,
+        brands: [...run.request.brands],
+        completedPartitions: run.progress.completedPartitions,
+        totalPartitions: run.progress.totalPartitions
+      }));
+  }
+
   async getRun(id: string): Promise<RunState | undefined> {
     return (await this.store.get(`runs/${segment(id)}.json`, strongJson) as RunState | null) ?? undefined;
   }

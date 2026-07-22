@@ -1974,6 +1974,7 @@ async function repositoryRpc(request: Request, env: Record<string, string | unde
   const body = await request.json() as RepositoryRpc;
   let result: unknown;
   switch (body.action) {
+    case "findRuns": result = await repository.findRecentRunsByBrand(body.brand, body.limit); break;
     case "getRun": result = await repository.getRun(body.id); break;
     case "saveRun": {
       const previous = await repository.getRun(body.run.id);
