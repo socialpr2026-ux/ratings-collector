@@ -4,7 +4,8 @@ import {
   AptekaRuAdapter,
   BudZdorovAdapter,
   EtablAdapter,
-  NfAptekaAdapter
+  NfAptekaAdapter,
+  OzerkiAdapter
 } from "../src/server/adapters/additional-pharmacies.js";
 import { AdapterBlockedError, ParserChangedError } from "../src/server/adapters/errors.js";
 import { MemoryEvidenceStore } from "../src/server/evidence.js";
@@ -35,6 +36,61 @@ function nfReviewList(title: string, ratings: number[]) {
 }
 
 describe("additional pharmacy adapters", () => {
+  it("discovers one exact Ozerki family and keeps its aggregate bound to that family", async () => {
+    const brand = "\u0410\u043a\u0432\u0430\u041e\u043f\u0442\u0438\u043a";
+    const familyUrl = "https://ozerki.ru/alphabet/a/akvaoptik/";
+    const html = `<!doctype html><html><head><base href="${familyUrl}"></head><body>
+      <h1>${brand}</h1><div id="feedbackAnchor"><div itemprop="aggregateRating" itemscope itemtype="https://schema.org/AggregateRating">
+        <meta itemprop="reviewCount" content="2"><meta itemprop="ratingCount" content="2"><meta itemprop="ratingValue" content="5">
+        <article itemprop="review">Отзыв 1</article><article itemprop="review">Отзыв 2</article>
+      </div></div><div itemprop="aggregateRating"><meta itemprop="reviewCount" content="99"></div>
+      <article class="variant">${brand} раствор 5 мл</article><article class="variant">${brand} раствор 10 мл</article>
+    </body></html>`;
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      expect(new URL(String(input)).toString()).toBe(familyUrl);
+      return new Response(html, { status: 200, headers: { "content-type": "text/html" } });
+    });
+    const adapter = new OzerkiAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    const refs = await adapter.discover(brand, context);
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toMatchObject({
+      domain: "ozerki.ru",
+      listingId: "family-akvaoptik",
+      url: familyUrl,
+      metadata: { discovery: "ozerki-exact-family-page" }
+    });
+    await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({
+      listingId: "family-akvaoptik",
+      reviews: 2,
+      writtenReviewCount: 2,
+      ratingCount: 2,
+      rating: 5,
+      status: "ok",
+      aggregateGroupId: "ozerki:family:family-akvaoptik",
+      productEvidence: { scope: "product_family" },
+      source: "ozerki-family-aggregate-microdata"
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails closed when Ozerki family counts are not backed by exact review markup", async () => {
+    const brand = "\u0410\u043a\u0432\u0430\u041e\u043f\u0442\u0438\u043a";
+    const familyUrl = "https://ozerki.ru/alphabet/a/akvaoptik/";
+    const html = `<!doctype html><html><head><base href="${familyUrl}"></head><body>
+      <h1>${brand}</h1><div id="feedbackAnchor"><div itemprop="aggregateRating" itemscope itemtype="https://schema.org/AggregateRating">
+        <meta itemprop="reviewCount" content="2"><meta itemprop="ratingCount" content="2"><meta itemprop="ratingValue" content="5">
+      </div></div>
+    </body></html>`;
+    const adapter = new OzerkiAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(html, { status: 200, headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "ozerki.ru", platform: "ozerki.ru", listingId: "family-akvaoptik", brand,
+      url: familyUrl, metadata: {}
+    }, context)).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
   it("collects exact Apteka.ru variants from Product JSON-LD and keeps ratingCount separate", async () => {
     const id = "5e3268eaca7bdc000192d316";
     const productUrl = `https://apteka.ru/product/oczillokokczinum-30-sht-granuly-${id}/`;

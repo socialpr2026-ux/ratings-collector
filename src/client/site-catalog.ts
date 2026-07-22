@@ -57,6 +57,7 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
       { domain: "farmlend.ru", label: "Фармленд" },
       { domain: "okapteka.ru", label: "ОК Аптека" },
       { domain: "rigla.ru", label: "Ригла" },
+      { domain: "ozerki.ru", label: "Озерки" },
       { domain: "zdravcity.ru", label: "Здравсити" },
       { domain: "apteka.ru", label: "Apteka.ru" },
       { domain: "nfapteka.ru", label: "Надежда-Фарм" },

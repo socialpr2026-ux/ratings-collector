@@ -3,6 +3,7 @@ import type { AdapterContext, Observation, ProductRef, SiteAdapter } from "../sr
 import { AdapterQuotaError } from "../src/server/adapters/errors.js";
 import { RatingsService } from "../src/server/orchestrator.js";
 import { MemoryRepository } from "../src/server/repository.js";
+import { hasDeterministicAggregateProof, isKnownReviewAggregateDomain } from "../src/shared/review-aggregates.js";
 
 const request = { sheetUrl: "https://docs.google.com/spreadsheets/d/test_sheet/edit", month: "2026-07", region: "Москва", domains: ["example.com"], brands: ["Бренд"] };
 class FakeAdapter implements SiteAdapter {
@@ -14,6 +15,19 @@ class FakeAdapter implements SiteAdapter {
 }
 
 describe("run orchestration and fail-closed QA", () => {
+  it("accepts Ozerki as a deterministic source-bound family aggregate", () => {
+    const observation: Observation = {
+      domain: "ozerki.ru", platform: "ozerki.ru", listingId: "family-akvaoptik", brand: "АкваОптик",
+      canonicalUrl: "https://ozerki.ru/alphabet/a/akvaoptik/", product: "АкваОптик — раствор для линз",
+      reviews: 2, rating: 5, status: "ok", capturedAt: new Date().toISOString(),
+      evidenceRef: "blob:ratings-state:ozerki-proof", source: "ozerki-family-aggregate-microdata",
+      productEvidence: { scope: "product_family", signals: [{ source: "url", text: "https://ozerki.ru/alphabet/a/akvaoptik/" }], variants: [], identifiers: [], imageUrls: [], instructionUrls: [] },
+      productIdentity: { label: "АкваОптик — раствор для линз", granularity: "family", confidence: "exact", missing: [], reasons: [] }
+    };
+    expect(isKnownReviewAggregateDomain("ozerki.ru")).toBe(true);
+    expect(hasDeterministicAggregateProof(observation)).toBe(true);
+  });
+
   it("keeps an explicit transient health-check access failure blocked instead of parser_changed", async () => {
     const service = new RatingsService(new MemoryRepository(), async () => ({
       id: "transient-health",

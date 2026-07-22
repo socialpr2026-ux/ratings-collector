@@ -81,7 +81,7 @@ const MARKETPLACE_DOMAINS = new Set([
 
 const PHARMACY_DOMAINS = new Set([
   "uteka.ru", "megapteka.ru", "medum.ru", "eapteka.ru", "polza.ru", "asna.ru",
-  "farmlend.ru", "okapteka.ru", "rigla.ru", "zdravcity.ru", "apteka.ru", "nfapteka.ru",
+  "farmlend.ru", "okapteka.ru", "rigla.ru", "ozerki.ru", "zdravcity.ru", "apteka.ru", "nfapteka.ru",
   "budzdorov.ru", "etabl.ru", "apteka-april.ru"
 ]);
 
@@ -107,6 +107,7 @@ const PLATFORM_LABELS: Readonly<Record<string, string>> = {
   "farmlend.ru": "Фармленд",
   "okapteka.ru": "ОК Аптека",
   "rigla.ru": "Ригла",
+  "ozerki.ru": "Озерки",
   "zdravcity.ru": "Здравсити",
   "apteka.ru": "Apteka.ru",
   "nfapteka.ru": "Надежда-Фарм",

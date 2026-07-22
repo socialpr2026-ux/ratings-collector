@@ -349,6 +349,28 @@ describe("Google Sheets model", () => {
     expect(document.values.filter((_, index) => document.rowKinds[index] === "product")).toHaveLength(2);
   });
 
+  it("collapses shared family metrics into one row when a source exposes several variants", () => {
+    const brand = "АкваОптик";
+    const records: ProductRecord[] = ["120", "450"].map((listingId) => ({
+      key: `ozerki.ru:family-${listingId}`, domain: "ozerki.ru", listingId: `family-${listingId}`, brand,
+      platform: "ozerki.ru", canonicalUrl: "https://ozerki.ru/alphabet/a/akvaoptik/",
+      product: `раствор ${listingId} мл`, aggregateGroupId: "ozerki:family:family-akvaoptik",
+      productIdentity: { label: `${brand} — раствор ${listingId} мл`, granularity: "family", confidence: "exact", missing: [], reasons: [] },
+      firstSeenMonth: "2026-07", lastSeenMonth: "2026-07"
+    }));
+    const snapshots = Object.fromEntries(records.map((record) => [record.key, {
+      domain: record.domain, platform: record.platform, listingId: record.listingId, brand,
+      canonicalUrl: record.canonicalUrl, product: record.product, reviews: 2, rating: 5,
+      status: "ok", capturedAt: new Date().toISOString(), aggregateGroupId: record.aggregateGroupId,
+      productIdentity: record.productIdentity
+    } satisfies Observation]));
+    const document = buildSheetDocument({ values: [] }, { ...request, domains: ["ozerki.ru"], brands: [brand] }, records, { "2026-07": snapshots });
+    const rows = document.values.filter((_, index) => document.rowKinds[index] === "product");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.[2]).toContain(brand);
+    expect(rows[0]?.slice(4)).toEqual([2, 5]);
+  });
+
   it("renders only three report sections and preserves platform order inside each section", () => {
     const domains = [
       "wildberries.ru", "otzovik.com", "ozon.ru", "uteka.ru", "irecommend.ru", "eapteka.ru"

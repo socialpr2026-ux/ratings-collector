@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { load, type CheerioAPI } from "cheerio";
-import type { AdapterContext, AdapterHealth, Observation, ProductRef, SiteAdapter } from "../../shared/types.js";
+import type { AdapterContext, AdapterHealth, Observation, ProductEvidence, ProductRef, SiteAdapter } from "../../shared/types.js";
 import type { EvidenceStore } from "../evidence.js";
 import { matchesBrand, normalizeText } from "../utils/normalize.js";
-import { titleProductEvidence } from "../utils/product-evidence.js";
+import { extractPageProductEvidence, titleProductEvidence } from "../utils/product-evidence.js";
 import { readTextBounded, safeFetch } from "../utils/safe-fetch.js";
 import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 import { canonicalProductDescriptor } from "../utils/product-name.js";
@@ -158,10 +158,13 @@ async function observation(
   evidence: EvidenceStore,
   ref: ProductRef,
   page: HtmlPage,
-  input: { domain: string; title: string; canonicalUrl: string; reviews: number; rating: number | null; ratingCount?: number | null; source: string }
+  input: {
+    domain: string; title: string; canonicalUrl: string; reviews: number; rating: number | null;
+    ratingCount?: number | null; source: string; productEvidence?: ProductEvidence; aggregateGroupId?: string;
+  }
 ): Promise<Observation> {
   const capturedAt = new Date().toISOString();
-  const productEvidence = titleProductEvidence(input.title, { type: "product_id", value: ref.listingId }, input.canonicalUrl);
+  const productEvidence = input.productEvidence ?? titleProductEvidence(input.title, { type: "product_id", value: ref.listingId }, input.canonicalUrl);
   const parsed = {
     listingId: ref.listingId,
     title: input.title,
@@ -196,6 +199,7 @@ async function observation(
     status: feedbackCount === 0 ? "no_reviews" : "ok",
     capturedAt,
     evidenceRef,
+    aggregateGroupId: input.aggregateGroupId,
     productEvidence,
     source: input.source
   };
@@ -860,12 +864,112 @@ export class AptekaAprilAdapter extends AdditionalPharmacyAdapter {
   }
 }
 
+const OZERKI_DOMAIN = "ozerki.ru";
+const OZERKI_FAMILY = /^\/alphabet\/([a-z0-9-]+)\/([a-z0-9-]+)\/?$/i;
+
+function ozerkiFamilyRef(value: string, expectedId?: string): { id: string; url: string } | undefined {
+  try {
+    const url = new URL(value, `https://${OZERKI_DOMAIN}/`);
+    if (url.protocol !== "https:" || host(url.hostname) !== OZERKI_DOMAIN || url.search || url.hash) return undefined;
+    const match = url.pathname.match(OZERKI_FAMILY);
+    if (!match) return undefined;
+    const id = `family-${match[2]}`;
+    if (expectedId && expectedId !== id) return undefined;
+    return { id, url: `https://${OZERKI_DOMAIN}/alphabet/${match[1]}/${match[2]}/` };
+  } catch {
+    return undefined;
+  }
+}
+
+export class OzerkiAdapter extends AdditionalPharmacyAdapter {
+  readonly id = "ozerki.ru:family-reviews-v1";
+  readonly supportedDomains = [OZERKI_DOMAIN, `www.${OZERKI_DOMAIN}`] as const;
+
+  async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
+    const checkedAt = new Date().toISOString();
+    const brand = context.brands?.[0]?.trim();
+    if (!brand) return { ok: false, checkedAt, message: `${OZERKI_DOMAIN}: requested brand is missing` };
+    try {
+      const refs = await this.discover(brand, { ...context, previousIds: [], previousRefs: [] });
+      return refs.length
+        ? { ok: true, checkedAt, message: `${OZERKI_DOMAIN}: exact requested family is available` }
+        : { ok: false, checkedAt, message: `${OZERKI_DOMAIN}: requested family returned no products` };
+    } catch (error) {
+      return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
+    const previous = historicalRefs(OZERKI_DOMAIN, brand, context, ozerkiFamilyRef);
+    for (const slug of transliteratedSlugs(brand)) {
+      const initial = slug[0];
+      if (!initial) continue;
+      const source = new URL(`https://${OZERKI_DOMAIN}/alphabet/${initial}/${slug}/`);
+      const page = await requestPage(source, context, this.fetchImpl);
+      const title = compactText(page.$("h1").first().text());
+      if (!matchesBrand(title, brand)) {
+        throw new ParserChangedError(`${OZERKI_DOMAIN}: exact family page is not bound to ${brand}`);
+      }
+      const parsed = ozerkiFamilyRef(source.toString());
+      if (!parsed) throw new ParserChangedError(`${OZERKI_DOMAIN}: invalid exact family URL`);
+      previous.set(parsed.id, {
+        domain: OZERKI_DOMAIN,
+        platform: OZERKI_DOMAIN,
+        listingId: parsed.id,
+        brand,
+        url: parsed.url,
+        title,
+        metadata: { discovery: "ozerki-exact-family-page" }
+      });
+      return [...previous.values()];
+    }
+    throw new ParserChangedError(`${OZERKI_DOMAIN}: no bounded family slug for ${brand}`);
+  }
+
+  async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
+    const parsedRef = ozerkiFamilyRef(ref.url, ref.listingId);
+    if (!parsedRef) throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: invalid family URL or ID`);
+    const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl);
+    const title = compactText(page.$("h1").first().text());
+    if (!matchesBrand(title, ref.brand)) {
+      throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: family brand changed`);
+    }
+    const feedback = page.$("#feedbackAnchor");
+    const aggregate = feedback.find("[itemprop='aggregateRating']");
+    if (feedback.length !== 1 || aggregate.length !== 1) {
+      throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: source-bound family aggregate is missing`);
+    }
+    const reviews = exactInteger(aggregate.find("meta[itemprop='reviewCount']").first().attr("content"));
+    const ratingCount = exactInteger(aggregate.find("meta[itemprop='ratingCount']").first().attr("content"));
+    const value = exactRating(aggregate.find("meta[itemprop='ratingValue']").first().attr("content"));
+    if (reviews === undefined || ratingCount === undefined || value === undefined ||
+      reviews === 0 || ratingCount === 0 || feedback.find("[itemprop='review']").length === 0) {
+      throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: family feedback proof is incomplete`);
+    }
+    return observation(this.evidence, ref, page, {
+      domain: OZERKI_DOMAIN,
+      title,
+      canonicalUrl: parsedRef.url,
+      reviews,
+      rating: value,
+      ratingCount,
+      source: "ozerki-family-aggregate-microdata",
+      aggregateGroupId: `ozerki:family:${parsedRef.id}`,
+      productEvidence: {
+        ...extractPageProductEvidence(page.html, parsedRef.url, ref.brand, { forceFamily: true }),
+        scope: "product_family"
+      }
+    });
+  }
+}
+
 export function createAdditionalPharmacyAdapters(evidence: EvidenceStore, fetchImpl?: typeof fetch): SiteAdapter[] {
   return [
     new AptekaRuAdapter(evidence, fetchImpl),
     new NfAptekaAdapter(evidence, fetchImpl),
     new BudZdorovAdapter(evidence, fetchImpl),
     new EtablAdapter(evidence, fetchImpl),
+    new OzerkiAdapter(evidence, fetchImpl),
     new AptekaAprilAdapter(evidence, fetchImpl)
   ];
 }
