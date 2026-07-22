@@ -886,6 +886,13 @@ export class AptekaAprilAdapter extends AdditionalPharmacyAdapter {
 
 const OZERKI_DOMAIN = "ozerki.ru";
 const OZERKI_FAMILY = /^\/alphabet\/([a-z0-9-]+)\/([a-z0-9-]+)\/?$/i;
+const OZERKI_PRODUCT = /^\/catalog\/product\/([a-z0-9-]+)\/?$/i;
+const OZERKI_BOUNDED_PRODUCTS = [{
+  brand: "Бивиарт",
+  id: "370912",
+  title: "Бивиарт Ультра",
+  url: "https://ozerki.ru/catalog/product/biviart-ultra-rastvor-oftalmologicheskiy-uvlazhnyayushchiy-fl-kap-10ml-1-370912/"
+}] as const;
 
 function ozerkiFamilyRef(value: string, expectedId?: string): { id: string; url: string } | undefined {
   try {
@@ -896,6 +903,36 @@ function ozerkiFamilyRef(value: string, expectedId?: string): { id: string; url:
     const id = `family-${match[2]}`;
     if (expectedId && expectedId !== id) return undefined;
     return { id, url: `https://${OZERKI_DOMAIN}/alphabet/${match[1]}/${match[2]}/` };
+  } catch {
+    return undefined;
+  }
+}
+
+function ozerkiProductRef(value: string, expectedId?: string): { id: string; url: string } | undefined {
+  try {
+    const url = new URL(value, `https://${OZERKI_DOMAIN}/`);
+    const hostname = url.hostname.toLocaleLowerCase("en-US");
+    if (url.protocol !== "https:" ||
+      hostname !== OZERKI_DOMAIN && !hostname.endsWith(`.${OZERKI_DOMAIN}`) ||
+      url.search || url.hash) return undefined;
+    const match = url.pathname.match(OZERKI_PRODUCT);
+    if (!match) return undefined;
+    const embeddedId = match[1].match(/-(\d+)$/)?.[1];
+    if (embeddedId && expectedId && embeddedId !== expectedId) return undefined;
+    const id = expectedId ?? embeddedId;
+    if (!id) return undefined;
+    return { id, url: `https://${OZERKI_DOMAIN}/catalog/product/${match[1]}/` };
+  } catch {
+    return undefined;
+  }
+}
+
+function ozerkiCanonicalProductRef(value: string | undefined, expectedId: string): { id: string; url: string } | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value, `https://${OZERKI_DOMAIN}/`);
+    if (host(url.hostname) !== OZERKI_DOMAIN) return undefined;
+    return ozerkiProductRef(url.toString(), expectedId);
   } catch {
     return undefined;
   }
@@ -918,6 +955,25 @@ export class OzerkiAdapter extends AdditionalPharmacyAdapter {
   }
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
+    const boundedProducts = OZERKI_BOUNDED_PRODUCTS.filter((product) =>
+      normalizeText(product.brand) === normalizeText(brand)
+    );
+    if (boundedProducts.length) {
+      const refs = historicalRefs(OZERKI_DOMAIN, brand, context, ozerkiProductRef);
+      for (const product of boundedProducts) {
+        refs.set(product.id, {
+          domain: OZERKI_DOMAIN,
+          platform: OZERKI_DOMAIN,
+          listingId: product.id,
+          brand,
+          url: product.url,
+          title: product.title,
+          metadata: { discovery: "ozerki-bounded-exact-product" }
+        });
+      }
+      return [...refs.values()].sort((left, right) => left.listingId.localeCompare(right.listingId));
+    }
+
     const previous = historicalRefs(OZERKI_DOMAIN, brand, context, ozerkiFamilyRef);
     for (const slug of transliteratedSlugs(brand)) {
       const initial = slug[0];
@@ -945,8 +1001,64 @@ export class OzerkiAdapter extends AdditionalPharmacyAdapter {
   }
 
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
+    const productRef = ozerkiProductRef(ref.url, ref.listingId);
+    if (productRef) {
+      const page = await requestPage(new URL(productRef.url), context, this.fetchImpl);
+      const canonicalLinks = page.$("link[rel='canonical'][href]");
+      const canonicalRef = canonicalLinks.length === 1
+        ? ozerkiCanonicalProductRef(canonicalLinks.first().attr("href"), productRef.id)
+        : undefined;
+      if (!canonicalRef || canonicalRef.url !== productRef.url) {
+        throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: exact product canonical is missing or changed`);
+      }
+
+      const products = jsonLdProducts(page.$).filter((item) => String(item.sku ?? "") === productRef.id);
+      if (products.length !== 1) {
+        throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: exact Product JSON-LD is missing or ambiguous`);
+      }
+      const product = products[0];
+      const structuredUrl = ozerkiCanonicalProductRef(
+        typeof product.url === "string" ? product.url : undefined,
+        productRef.id
+      );
+      const title = compactText(String(product.name ?? ""));
+      const heading = compactText(page.$("h1").first().text());
+      if (!structuredUrl || structuredUrl.url !== productRef.url ||
+        !matchesBrand(title, ref.brand) || !matchesBrand(heading, ref.brand)) {
+        throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: Product JSON-LD is not bound to the exact product`);
+      }
+
+      const aggregate = product.aggregateRating;
+      if (!aggregate || typeof aggregate !== "object") {
+        throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: source-bound product aggregate is missing`);
+      }
+      const record = aggregate as Record<string, unknown>;
+      const reviews = exactInteger(record.reviewCount);
+      const ratingCount = exactInteger(record.ratingCount);
+      const value = exactRating(record.ratingValue);
+      if (record["@type"] !== "AggregateRating" || reviews === undefined || ratingCount === undefined ||
+        value === undefined || reviews === 0 || ratingCount === 0) {
+        throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: product feedback proof is incomplete`);
+      }
+
+      return observation(this.evidence, ref, page, {
+        domain: OZERKI_DOMAIN,
+        title,
+        canonicalUrl: productRef.url,
+        reviews,
+        rating: value,
+        ratingCount,
+        source: "ozerki-product-aggregate-jsonld",
+        productEvidence: titleProductEvidence(
+          title,
+          { type: "product_id", value: productRef.id },
+          productRef.url
+        )
+      });
+    }
+
     const parsedRef = ozerkiFamilyRef(ref.url, ref.listingId);
-    if (!parsedRef) throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: invalid family URL or ID`);
+    if (!parsedRef) throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: invalid family or product URL or ID`);
     const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl);
     const title = compactText(page.$("h1").first().text());
     if (!matchesBrand(title, ref.brand)) {

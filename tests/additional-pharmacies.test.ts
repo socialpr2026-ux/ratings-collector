@@ -91,6 +91,105 @@ describe("additional pharmacy adapters", () => {
     }, context)).rejects.toBeInstanceOf(ParserChangedError);
   });
 
+  it("discovers and collects the bounded exact Ozerki product AggregateRating", async () => {
+    const brand = "Бивиарт";
+    const productUrl = "https://ozerki.ru/catalog/product/biviart-ultra-rastvor-oftalmologicheskiy-uvlazhnyayushchiy-fl-kap-10ml-1-370912/";
+    const html = `<!doctype html><html><head><link rel="canonical" href="${productUrl}">
+      <script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "Product",
+        sku: "370912",
+        name: "Бивиарт Ультра 0,3% раствор офтальмологический увлажняющий 10 мл",
+        url: productUrl,
+        aggregateRating: {
+          "@type": "AggregateRating",
+          ratingValue: 5,
+          reviewCount: 1,
+          ratingCount: 1
+        }
+      })}</script></head><body><h1>Бивиарт Ультра 0,3% раствор 10 мл в Москве</h1></body></html>`;
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      expect(new URL(String(input)).toString()).toBe(productUrl);
+      return new Response(html, { status: 200, headers: { "content-type": "text/html" } });
+    });
+    const adapter = new OzerkiAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    const refs = await adapter.discover(brand, context);
+    expect(refs).toEqual([expect.objectContaining({
+      listingId: "370912",
+      brand,
+      url: productUrl,
+      metadata: { discovery: "ozerki-bounded-exact-product" }
+    })]);
+    await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({
+      listingId: "370912",
+      reviews: 1,
+      writtenReviewCount: 1,
+      ratingCount: 1,
+      rating: 5,
+      status: "ok",
+      canonicalUrl: productUrl,
+      productEvidence: {
+        scope: "listing",
+        identifiers: [{ type: "product_id", value: "370912" }]
+      },
+      source: "ozerki-product-aggregate-jsonld"
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed for an exact Ozerki product without a source-bound aggregate", async () => {
+    const brand = "Бивиарт";
+    const productUrl = "https://ozerki.ru/catalog/product/biviart-soft-rastvor-flakon-kapelnitsa-uvlazhnyayuschiy-10-ml/";
+    const html = `<!doctype html><html><head><link rel="canonical" href="${productUrl}">
+      <script type="application/ld+json">${JSON.stringify({
+        "@type": "Product",
+        sku: "370998",
+        name: "Бивиарт Софт раствор офтальмологический 10 мл",
+        url: productUrl
+      })}</script></head><body><h1>Бивиарт Софт раствор офтальмологический 10 мл</h1>
+      <p>Поделитесь своим мнением</p></body></html>`;
+    const adapter = new OzerkiAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(html, { status: 200, headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "ozerki.ru",
+      platform: "ozerki.ru",
+      listingId: "370998",
+      brand,
+      url: productUrl,
+      metadata: {}
+    }, context)).rejects.toThrow("source-bound product aggregate is missing");
+  });
+
+  it("collapses regional Ozerki duplicates and rejects a noncanonical product page", async () => {
+    const brand = "Бивиарт";
+    const productUrl = "https://ozerki.ru/catalog/product/biviart-ultra-rastvor-oftalmologicheskiy-uvlazhnyayushchiy-fl-kap-10ml-1-370912/";
+    const regionalUrl = productUrl.replace("https://ozerki.ru/", "https://spb.ozerki.ru/");
+    const wrongCanonical = productUrl.replace("-370912/", "-370998/");
+    const html = `<!doctype html><html><head><link rel="canonical" href="${wrongCanonical}">
+      <script type="application/ld+json">${JSON.stringify({
+        "@type": "Product",
+        sku: "370912",
+        name: "Бивиарт Ультра 0,3% раствор 10 мл",
+        url: productUrl,
+        aggregateRating: { "@type": "AggregateRating", ratingValue: 5, reviewCount: 1, ratingCount: 1 }
+      })}</script></head><body><h1>Бивиарт Ультра 0,3% раствор 10 мл</h1></body></html>`;
+    const adapter = new OzerkiAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(html, { status: 200, headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+
+    const refs = await adapter.discover(brand, {
+      ...context,
+      previousRefs: [
+        { listingId: "370912", url: productUrl },
+        { listingId: "370912", url: regionalUrl }
+      ]
+    });
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toMatchObject({ listingId: "370912", url: productUrl });
+    await expect(adapter.collect(refs[0], context)).rejects.toThrow("exact product canonical is missing or changed");
+  });
+
   it("uses a fixed Ozerki canary instead of blocking on the first requested brand", async () => {
     const familyUrl = "https://ozerki.ru/alphabet/a/akvaoptik/";
     const fetchSpy = vi.fn(async (input: string | URL | Request) => {
