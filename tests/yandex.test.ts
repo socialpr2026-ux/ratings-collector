@@ -128,10 +128,10 @@ describe("YandexAdapter discovery", () => {
       { listingId: "170000001", brand: "oscillococcinum" }
     ]);
     expect(batches.flat()).toEqual(maps);
-    expect(batches.every((batch) => batch.length >= 1 && batch.length <= 2)).toBe(true);
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(Math.ceil(maps.length / 2));
+    expect(batches.every((batch) => batch.length >= 1 && batch.length <= 4)).toBe(true);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(Math.ceil(maps.length / 4));
     expect(fetchMock.mock.calls.filter(([input]) => maps.includes(String(input)))).toHaveLength(0);
-    expect(fetch).toHaveBeenCalledTimes(1 + Math.ceil(maps.length / 2));
+    expect(fetch).toHaveBeenCalledTimes(1 + Math.ceil(maps.length / 4));
   });
 
   it("rejects a partial batch aggregate even when an earlier chunk contained a match", async () => {

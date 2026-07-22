@@ -1880,7 +1880,7 @@ function yandexProductMatchesTokens(input: string, tokens: string[]): boolean {
 
 class NonRetryableYandexBatchShardError extends Error {}
 
-const YANDEX_BATCH_SHARD_ATTEMPT_MS = 30_000;
+const YANDEX_BATCH_SHARD_ATTEMPT_MS = 25_000;
 const YANDEX_BATCH_SHARD_ATTEMPTS = 2;
 
 async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string> {
