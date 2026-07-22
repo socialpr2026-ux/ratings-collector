@@ -9,6 +9,7 @@ import { readAgentJson } from "../../src/server/utils/agent-request.js";
 import { safeErrorMessage } from "../../src/server/utils/error-message.js";
 import { loadPlaywright } from "../../src/server/utils/playwright-runtime.js";
 import { playwrightCdpBaseUrl } from "../../src/server/utils/sandbox-cdp.js";
+import { agentInternalEndpoint } from "../../src/server/utils/agent-internal-endpoint.js";
 import { assertSafePublicDestination, isPrivateNetworkAddress } from "../../src/server/utils/safe-fetch.js";
 
 type BrowserApi = { cdpUrl: string };
@@ -687,7 +688,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
   try {
     const body = await readAgentJson<{ runId?: string }>(context.request);
     if (!body.runId || !/^[0-9a-f-]{36}$/i.test(body.runId)) throw new Error("Некорректный runId");
-    const endpoint = new URL("/api/internal/repository", context.request.url).toString();
+    const endpoint = agentInternalEndpoint(context.request, "/api/internal/repository");
     const repository = new RemoteRepository(endpoint, context.env.INTERNAL_AGENT_TOKEN ?? "");
     const lease = await repository.acquireLease(`execute-run:${body.runId}`, 3_700_000);
     try {
@@ -716,7 +717,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
           repository,
           evidence: new RemoteEvidenceStore(repository),
           fetch: browserFetch(context.sandbox, {
-            endpoint: new URL("/api/internal/static-review-fetch", context.request.url).toString(),
+            endpoint: agentInternalEndpoint(context.request, "/api/internal/static-review-fetch"),
             token: context.env.INTERNAL_AGENT_TOKEN ?? ""
           }),
           env: context.env,
