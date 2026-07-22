@@ -15,8 +15,8 @@ function translated(source: string, body: string) {
   return `<!doctype html><html><head><base href="${source}"><script data-source-url="${source}"></script></head><body>${body}</body></html>`;
 }
 
-function aptekaSelectedVariant(url: string, title: string, count: number, rating: number) {
-  return `<div class="variantButton" aria-selected="true"><a class="variantButton__link" href="${url}" aria-label="${title}"></a>` +
+function aptekaSelectedVariant(url: string, title: string, count: number, rating: number, selected = true) {
+  return `<div class="variantButton"${selected ? ' aria-selected="true"' : ""}><a class="variantButton__link" href="${url}" aria-label="${title}"></a>` +
     `<div class="variantButton__rating"><div class="ItemRating"><span class="ItemRating__label">${rating}</span>` +
     `<span class="caption3">(<span>${count}</span> reviews)</span></div></div></div>`;
 }
@@ -242,6 +242,24 @@ describe("additional pharmacy adapters", () => {
     expect(new URL(String(fetchSpy.mock.calls[0][0])).pathname).toBe("/forms/ocillokokcinum");
     await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({ reviews: 3, rating: 4.7, status: "ok" });
     expect(new URL(String(fetchSpy.mock.calls[1][0])).pathname).toBe(productPath);
+  });
+
+  it("collects an exact Apteka.ru variant when SSR omits the transient selected attribute", async () => {
+    const id = "5e3268eaca7bdc000192d316";
+    const productUrl = `https://apteka.ru/product/oczillokokczinum-30-sht-granuly-${id}/`;
+    const title = "Оциллококцинум 30 шт. гранулы";
+    const product = `<!doctype html><html><head><base href="${productUrl}"><script type="application/ld+json">${JSON.stringify({
+      "@context": "https://schema.org", "@type": "Product", sku: id, name: title,
+      aggregateRating: { "@type": "AggregateRating", reviewCount: 44, ratingValue: 4.9 }
+    })}</script></head><body>${aptekaSelectedVariant(productUrl, title, 44, 4.9, false)}</body></html>`;
+    const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(product, {
+      status: 200, headers: { "content-type": "text/html" }
+    })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "apteka.ru", platform: "apteka.ru", listingId: id, brand: "Оциллококцинум",
+      url: productUrl, title, metadata: {}
+    }, context)).resolves.toMatchObject({ reviews: 44, rating: 4.9, status: "ok" });
   });
 
   it("keeps Bud Zdorov's complete written-review count when some reviews have no star score", async () => {

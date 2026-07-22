@@ -260,12 +260,22 @@ function aptekaVisibleFeedback(
   expectedUrl: string,
   expectedTitle: string
 ): { count: number; rating: number } | undefined {
-  const selected = $(".variantButton[aria-selected='true']");
-  if (selected.length !== 1) return undefined;
+  const expectedPath = new URL(expectedUrl).pathname;
+  // Apteka.ru intermittently omits `aria-selected` from its SSR variants.
+  // The exact product link and title still bind the visible rating to one
+  // concrete variant, so recover only that unique, source-bound card.
+  const candidates = $(".variantButton").filter((_index, element) => {
+    const link = $(element).find("a.variantButton__link[href][aria-label]").first();
+    const source = sourceHref(link.attr("href"), APTEKA_DOMAIN);
+    const title = compactText(link.attr("aria-label") ?? "");
+    return source?.pathname === expectedPath && normalizeText(title) === normalizeText(expectedTitle);
+  });
+  if (candidates.length !== 1) return undefined;
+  const selected = candidates.first();
   const link = selected.find("a.variantButton__link[href][aria-label]").first();
   const source = sourceHref(link.attr("href"), APTEKA_DOMAIN);
   const title = compactText(link.attr("aria-label") ?? "");
-  if (!source || source.pathname !== new URL(expectedUrl).pathname || normalizeText(title) !== normalizeText(expectedTitle)) {
+  if (!source || source.pathname !== expectedPath || normalizeText(title) !== normalizeText(expectedTitle)) {
     return undefined;
   }
   const metric = selected.find(".variantButton__rating .ItemRating");
