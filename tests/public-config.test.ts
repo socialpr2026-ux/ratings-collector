@@ -1078,7 +1078,10 @@ describe("static pharmacy Translate gateway", () => {
       <script type="application/ld+json">${JSON.stringify({
         "@type": "Product", sku: "5e3268eaca7bdc000192d316", name: "Оциллококцинум 30 шт. гранулы",
         aggregateRating: { ratingValue: 4.9, reviewCount: 44, ratingCount: 57 }
-      })}</script></head><body><h1>Оциллококцинум 30 шт. гранулы</h1></body></html>`, {
+      })}</script></head><body><h1>Оциллококцинум 30 шт. гранулы</h1>
+      <div class="variantButton" aria-selected="true"><a class="variantButton__link" href="${source}" aria-label="Оциллококцинум 30 шт. гранулы"></a>
+        <div class="variantButton__rating"><div class="ItemRating"><span class="ItemRating__label">4.9</span><span class="caption3">(<span>57</span> reviews)</span></div></div>
+      </div></body></html>`, {
       headers: { "content-type": "text/html" }
     })));
 
@@ -1088,6 +1091,7 @@ describe("static pharmacy Translate gateway", () => {
     expect(response.headers.get("x-ratings-source")).toBe("google-translate-pharmacy-ssr");
     expect(proof).toContain('"reviewCount":44');
     expect(proof).toContain('"ratingCount":57');
+    expect(proof).toContain('class="variantButton" aria-selected="true"');
     expect((await callGateway("https://apteka.ru/search?q=Оциллококцинум")).status).toBe(400);
   });
 

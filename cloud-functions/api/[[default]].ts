@@ -1688,6 +1688,27 @@ function compactAptekaRuHtml(html: string, requested: AptekaRuTarget): string | 
   const counts = [reviewCount, ratingCount].filter((value) => /^\d+$/.test(value)).map(Number);
   const ratingValue = Number(String(metrics.ratingValue ?? "").replace(",", "."));
   if (!counts.length || Math.max(...counts) > 0 && (!Number.isFinite(ratingValue) || ratingValue <= 0 || ratingValue > 5)) return undefined;
+  const feedbackCount = Math.max(...counts);
+  let variantProof = "";
+  if (feedbackCount > 0) {
+    const normalizedProductName = String(product.name).normalize("NFKC").replace(/\s+/g, " ").trim();
+    const candidates = $(".variantButton, .variantButtonExp").filter((_index, element) => {
+      const node = $(element);
+      const link = node.find("a.variantButton__link[href][aria-label], a.variantButtonExp__link[href][aria-label]").first();
+      const title = (link.attr("aria-label") ?? "").normalize("NFKC").replace(/\s+/g, " ").trim();
+      let url: URL;
+      try { url = new URL(link.attr("href") ?? "", requested.source); }
+      catch { return false; }
+      if (url.pathname !== requested.source.pathname || title !== normalizedProductName) return false;
+      const count = Number(node.find(".variantButton__rating .caption3 span, .variantButtonExp__rating .caption3 span").first().text().replace(/[\s\u00a0\u202f]+/g, ""));
+      const rating = Number(node.find(".variantButton__rating .ItemRating__label, .variantButtonExp__rating .ItemRating__label").first().text().replace(",", ".").replace(/[\s\u00a0\u202f]+/g, ""));
+      return Number.isSafeInteger(count) && count === feedbackCount && Number.isFinite(rating) && rating === ratingValue;
+    });
+    if (candidates.length !== 1) return undefined;
+    variantProof = `<div class="variantButton" aria-selected="true"><a class="variantButton__link" href="${escapeHtml(requested.source.toString())}" aria-label="${escapeHtml(normalizedProductName)}"></a>` +
+      `<div class="variantButton__rating"><div class="ItemRating"><span class="ItemRating__label">${ratingValue}</span>` +
+      `<span class="caption3">(<span>${feedbackCount}</span> reviews)</span></div></div></div>`;
+  }
   const compactProduct = {
     "@context": "https://schema.org", "@type": "Product", sku: requested.productId, name: product.name,
     aggregateRating: {
@@ -1699,7 +1720,7 @@ function compactAptekaRuHtml(html: string, requested: AptekaRuTarget): string | 
   };
   return `<html><head>${base}<link rel="canonical" href="${escapeHtml(requested.source.toString())}">` +
     `<script type="application/ld+json">${JSON.stringify(compactProduct).replace(/</g, "\\u003c")}</script>` +
-    `</head><body><h1>${escapeHtml(String(product.name))}</h1></body></html>`;
+    `</head><body><h1>${escapeHtml(String(product.name))}</h1>${variantProof}</body></html>`;
 }
 
 /**
