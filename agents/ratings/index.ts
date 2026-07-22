@@ -355,15 +355,20 @@ export function browserFetch(
       "www-budzdorov-ru.translate.goog",
       "megamarket-ru.translate.goog"
     ].includes(url.hostname)) {
-      const first = await fetchViaStaticProxy(url, request.signal);
-      if (![429, 502, 503, 504].includes(first.status)) return first;
-      await first.body?.cancel().catch(() => undefined);
-      request.signal.throwIfAborted();
-      // One bounded retry covers a transient Function/upstream hand-off. A
-      // second failure is returned unchanged and remains fail-closed.
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      request.signal.throwIfAborted();
-      return fetchViaStaticProxy(url, request.signal);
+      const maxAttempts = url.hostname === "megamarket-ru.translate.goog" ? 3 : 2;
+      for (let attempt = 1; ; attempt += 1) {
+        const response = await fetchViaStaticProxy(url, request.signal);
+        if (![429, 502, 503, 504].includes(response.status) || attempt >= maxAttempts) return response;
+        await response.body?.cancel().catch(() => undefined);
+        request.signal.throwIfAborted();
+        // Megamarket's translated product renderer intermittently returns two
+        // consecutive 502s for a valid card. A third bounded attempt with a
+        // short increasing cooldown recovers that exact route; every final
+        // failure remains unchanged and fail-closed.
+        const delayMs = url.hostname === "megamarket-ru.translate.goog" ? attempt * 500 : 200;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        request.signal.throwIfAborted();
+      }
     }
     if (staticProxy && fixedAptekaTarget) {
       return fetchViaStaticProxy(url, request.signal);

@@ -217,6 +217,28 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("recovers a Megamarket product after two transient translated-route failures", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => directFetch.mock.calls.length <= 2
+      ? new Response("transient translated product failure", { status: 502 })
+      : new Response("compact Megamarket product proof", {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const target = "https://megamarket-ru.translate.goog/catalog/details/cereton-rastvor-250-mg-ml-4-ml-5-sht-100024500895/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+
+    const response = await routedFetch(target);
+
+    expect(await response.text()).toBe("compact Megamarket product proof");
+    expect(directFetch).toHaveBeenCalledTimes(3);
+    expect(directFetch.mock.calls.every(([input]) => input === "https://ratings.example/api/internal/static-review-fetch")).toBe(true);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("routes the exact pharmacy Translate hosts through fixed function egress without Sandbox", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("compact pharmacy proof", {
