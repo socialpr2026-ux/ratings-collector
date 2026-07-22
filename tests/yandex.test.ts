@@ -171,7 +171,9 @@ describe("YandexAdapter discovery", () => {
       const url = input instanceof Request ? input.url : input.toString();
       if (url === INDEX) return xmlResponse(sitemapIndex(maps));
       const request = JSON.parse(String(init?.body)) as { sitemaps: string[] };
-      if (request.sitemaps[0] === maps[0]) return new Response("gateway unavailable", { status: 502 });
+      if (request.sitemaps[0] === maps[0]) return new Response(JSON.stringify({
+        error: `Yandex batch shard remained unproven: ${maps[0]}`
+      }), { status: 502, headers: { "content-type": "application/json" } });
       return await new Promise<Response>((_resolve, reject) => {
         const signal = init?.signal;
         if (!signal) throw new Error("missing batch abort signal");
@@ -188,7 +190,7 @@ describe("YandexAdapter discovery", () => {
     const adapter = new YandexAdapter({ fetch, maxSitemaps: maps.length });
 
     await expect(adapter.discover("Церетон", context())).rejects.toMatchObject({
-      message: "Yandex batch proof failed with HTTP 502"
+      message: `Yandex batch proof failed with HTTP 502: Yandex batch shard remained unproven: ${maps[0]}`
     });
     expect(siblingAborted).toBe(true);
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(2);

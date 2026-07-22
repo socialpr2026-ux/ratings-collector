@@ -334,7 +334,12 @@ export class YandexAdapter implements SiteAdapter {
         throw new AdapterBlockedError(`Yandex batch proof request failed: ${errorMessage(error)}`);
       }
       if (!response.ok) {
-        throw new AdapterBlockedError(`Yandex batch proof failed with HTTP ${response.status}`);
+        let detail = "";
+        try {
+          const body = JSON.parse(await readBoundedBody(response, 10_000, endpoint, 5_000)) as { error?: unknown };
+          if (typeof body.error === "string" && body.error.trim()) detail = `: ${body.error.trim().slice(0, 600)}`;
+        } catch { /* status remains sufficient when the gateway body is unreadable */ }
+        throw new AdapterBlockedError(`Yandex batch proof failed with HTTP ${response.status}${detail}`);
       }
       let proof: YandexBatchProof;
       try {
