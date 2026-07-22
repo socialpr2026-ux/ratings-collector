@@ -266,6 +266,25 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(directFetch.mock.calls.every(([input]) => input === "https://ratings.example/api/internal/static-review-fetch")).toBe(true);
   });
 
+  it("routes only bounded ASNA card sitemaps through fixed function egress", async () => {
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response("<urlset></urlset>", { headers: { "content-type": "application/xml" } })
+    );
+    vi.stubGlobal("fetch", directFetch);
+    const run = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "t".repeat(32)
+    });
+
+    const target = "https://www.asna.ru/sitemap/sitemap_cards1.xml?slugs=cereton%2Ctsereton";
+    expect(await (await routedFetch(target)).text()).toBe("<urlset></urlset>");
+    expect(run).not.toHaveBeenCalled();
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(directFetch.mock.calls[0]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+    expect(JSON.parse(String((directFetch.mock.calls[0]?.[1] as RequestInit).body))).toEqual({ url: target });
+  });
+
   it("retries one transient ASNA function failure and remains fail-closed without Sandbox", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (_input: RequestInfo | URL) => directFetch.mock.calls.length === 1

@@ -1123,6 +1123,29 @@ describe("static pharmacy Translate gateway", () => {
     expect(proof).not.toContain("drug-x");
   });
 
+  it("filters an exact ASNA card sitemap before it leaves the fixed gateway", async () => {
+    const match = "https://asna.ru/cards/tsereton_400mg_n56_kaps_soteks.html";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe("https://www.asna.ru/sitemap/sitemap_cards1.xml");
+      return new Response(`<urlset><url><loc>${match}</loc></url>` +
+        `<url><loc>https://www.asna.ru/cards/unrelated_400mg_n10.html</loc></url></urlset>`, {
+        headers: { "content-type": "application/xml" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const target = "https://www.asna.ru/sitemap/sitemap_cards1.xml?slugs=cereton%2Ctsereton";
+    const response = await callGateway(target);
+    const proof = await response.text();
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("asna-first-party-card-sitemap");
+    expect(proof).toContain("https://www.asna.ru/cards/tsereton_400mg_n56_kaps_soteks.html");
+    expect(proof).not.toContain("unrelated_400mg_n10");
+
+    expect((await callGateway(`${target}&extra=1`)).status).toBe(400);
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
   it("canonicalizes translated Apteka.ru preparation links to the source host", async () => {
     const source = "https://apteka.ru/preparation/otsillokoktsinum/";
     const id = "5e3268eaca7bdc000192d316";

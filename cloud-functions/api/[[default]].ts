@@ -66,6 +66,11 @@ type AptekaRuTarget = {
   slugs?: string[];
 };
 
+type AsnaSitemapTarget = {
+  source: URL;
+  slugs: string[];
+};
+
 type OzonTranslateTarget = {
   kind: "search" | "category" | "product";
   source: URL;
@@ -300,6 +305,19 @@ function parseAptekaRuTarget(target: URL): AptekaRuTarget | undefined {
   }
   const product = target.pathname.match(/^\/product\/[a-z0-9-]+-([a-f0-9]{24})\/$/i);
   return product ? { kind: "product", source: new URL(target.toString()), productId: product[1] } : undefined;
+}
+
+function parseAsnaSitemapTarget(target: URL): AsnaSitemapTarget | undefined {
+  if (target.protocol !== "https:" || target.hostname !== "www.asna.ru" || target.port || target.username ||
+    target.password || target.hash || !["/sitemap/sitemap_cards.xml", "/sitemap/sitemap_cards1.xml"].includes(target.pathname)) {
+    return undefined;
+  }
+  if ([...target.searchParams.keys()].some((key) => key !== "slugs") || target.searchParams.getAll("slugs").length !== 1) {
+    return undefined;
+  }
+  const slugs = target.searchParams.get("slugs")!.split(",");
+  if (!slugs.length || slugs.length > 12 || slugs.some((slug) => !/^[a-z0-9][a-z0-9-]{0,79}$/i.test(slug))) return undefined;
+  return { source: new URL(target.pathname, "https://www.asna.ru"), slugs: [...new Set(slugs)] };
 }
 
 function translatedSourceMatches(value: string | undefined, requested: URL): boolean {
@@ -2046,6 +2064,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
   const ozonYandexComposerTarget = parseOzonYandexComposerTarget(target);
   const pharmacyTranslatedTarget = parsePharmacyTranslateTarget(target);
   const aptekaRuTarget = parseAptekaRuTarget(target);
+  const asnaSitemapTarget = parseAsnaSitemapTarget(target);
   let ozonTarget = false;
   if (target.hostname === "www.ozon.ru" && target.pathname === "/api/composer-api.bx/page/json/v2") {
     const nested = target.searchParams.get("url") ?? "";
@@ -2065,7 +2084,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         [...target.searchParams.keys()].every((key) => key === "url") && (safeSearch || safeProduct);
     } catch { /* invalid nested Ozon search URL */ }
   }
-  if (target.protocol !== "https:" || !(yandexBatch || reviewTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget)) {
+  if (target.protocol !== "https:" || !(yandexBatch || reviewTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget || asnaSitemapTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
   }
   if (yandexBatch) {
@@ -2452,6 +2471,45 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         "x-ratings-source": "apteka-first-party-ssr",
         "x-ratings-original-bytes": String(new TextEncoder().encode(html).byteLength),
         "x-ratings-proof-bytes": String(new TextEncoder().encode(compactHtml).byteLength)
+      }
+    });
+  }
+  if (asnaSitemapTarget) {
+    const upstream = await safeFetch(asnaSitemapTarget.source.toString(), {
+      method: "GET",
+      redirect: "manual",
+      headers: { accept: "application/xml,text/xml", "accept-language": "ru-RU,ru;q=0.9" }
+    }, fetch, 0, 60_000);
+    const xml = await readTextBounded(upstream, 12_000_000, 60_000);
+    if (!upstream.ok) {
+      return new Response(xml, {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "application/xml; charset=utf-8" }
+      });
+    }
+    if (!/<urlset\b/i.test(xml)) return json({ error: "ASNA card sitemap is invalid" }, 502);
+    const locations: string[] = [];
+    for (const match of xml.matchAll(/<loc>([^<]+)<\/loc>/gi)) {
+      let card: URL;
+      try { card = new URL(match[1].replace(/&amp;/gi, "&")); }
+      catch { continue; }
+      const slug = card.pathname.match(/^\/cards\/([a-z0-9_.-]+)\.html$/i)?.[1];
+      if (card.protocol !== "https:" || !["asna.ru", "www.asna.ru"].includes(card.hostname) || !slug ||
+        !asnaSitemapTarget.slugs.some((candidate) => slug === candidate || slug.startsWith(`${candidate}_`) || slug.startsWith(`${candidate}-`))) continue;
+      card.hostname = "www.asna.ru";
+      card.search = "";
+      card.hash = "";
+      locations.push(card.toString());
+    }
+    if (locations.length > 100) return json({ error: "ASNA sitemap filter is too broad" }, 400);
+    const compactXml = `<?xml version="1.0" encoding="UTF-8"?><urlset data-source-url="${escapeHtml(target.toString())}">` +
+      locations.map((location) => `<url><loc>${escapeHtml(location)}</loc></url>`).join("") + `</urlset>`;
+    return new Response(compactXml, {
+      status: 200,
+      headers: {
+        "content-type": "application/xml; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "asna-first-party-card-sitemap"
       }
     });
   }

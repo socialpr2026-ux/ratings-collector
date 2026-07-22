@@ -206,6 +206,23 @@ function slugMatches(pathSlug: string, slugs: readonly string[]): boolean {
   return slugs.some((slug) => pathSlug === slug || new RegExp(`^${slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[-_]`).test(pathSlug));
 }
 
+function asnaSitemapUrls(slugs: readonly string[]): string[] {
+  const uniqueSlugs = [...new Set(slugs)];
+  const names = ["sitemap_cards.xml", "sitemap_cards1.xml"] as const;
+  const requests: string[] = [];
+  for (let offset = 0; offset < uniqueSlugs.length; offset += 12) {
+    const candidates = uniqueSlugs.slice(offset, offset + 12);
+    for (const name of names) {
+      const url = new URL(`/sitemap/${name}`, "https://www.asna.ru");
+      // The Agent routes only this exact, bounded request through the fixed
+      // gateway. The Function filters the large public map before returning it.
+      url.searchParams.set("slugs", candidates.join(","));
+      requests.push(url.toString());
+    }
+  }
+  return requests;
+}
+
 function previousRefs(
   domain: PharmacyDomain,
   brand: string,
@@ -619,10 +636,7 @@ export class AsnaAdapter implements SiteAdapter {
       return [...refs.values()].sort((left, right) => left.listingId.localeCompare(right.listingId));
     }
     const slugs = brandSlugs(brand);
-    const maps = await Promise.allSettled([
-      sitemap("https://www.asna.ru/sitemap/sitemap_cards.xml", context, this.fetchImpl),
-      sitemap("https://www.asna.ru/sitemap/sitemap_cards1.xml", context, this.fetchImpl)
-    ]);
+    const maps = await Promise.allSettled(asnaSitemapUrls(slugs).map((url) => sitemap(url, context, this.fetchImpl)));
     const candidates = new Map<string, { listingId: string; canonicalUrl: string; discovery: string }>();
     for (const map of maps) {
       if (map.status !== "fulfilled") continue;
