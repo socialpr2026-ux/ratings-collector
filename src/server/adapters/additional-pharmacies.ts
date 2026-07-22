@@ -699,6 +699,39 @@ function budRef(value: string, expectedId?: string): { id: string; url: string }
   return { id, url: `https://www.${BUD_DOMAIN}${url.pathname}` };
 }
 
+function budMissingFormPage(error: unknown): boolean {
+  return error instanceof AdapterBlockedError && /\(HTTP 404\)$/.test(error.message);
+}
+
+function addBudDiscoveryRefs(
+  page: HtmlPage,
+  selector: string,
+  brand: string,
+  discovery: "translated-first-party-form-page" | "translated-first-party-letter-index",
+  refs: Map<string, ProductRef>
+): void {
+  page.$(selector).each((_index, node) => {
+    const link = page.$(node);
+    const parsed = budRef(link.attr("href") ?? "");
+    const title = compactText(link.attr("title") || link.text());
+    if (!parsed || !matchesBrand(title, brand)) return;
+    const previous = refs.get(parsed.id);
+    refs.set(parsed.id, {
+      domain: BUD_DOMAIN,
+      platform: BUD_DOMAIN,
+      listingId: parsed.id,
+      brand,
+      url: parsed.url,
+      title,
+      metadata: {
+        discovery: previous && previous.metadata.discovery !== discovery
+          ? "translated-first-party-form+letter-union"
+          : discovery
+      }
+    });
+  });
+}
+
 type BudReview = { id?: unknown; ratings?: Array<{ attribute_code?: unknown; value?: unknown }> };
 
 export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
@@ -729,52 +762,39 @@ export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
     const slugs = budFormSlugs(brand);
     let explicitNoResults = 0;
     let successfulPages = 0;
-    let lastError: unknown;
+    let formError: unknown;
     for (const slug of slugs) {
       try {
         const source = new URL(`https://www.${BUD_DOMAIN}/forms/${slug}`);
         const page = await requestPage(source, context, this.fetchImpl, BUD_TRANSLATE_HOST);
         successfulPages += 1;
-        page.$("a[href*='/product/']").each((_index, node) => {
-          const parsed = budRef(page.$(node).attr("href") ?? "");
-          const title = compactText(page.$(node).attr("title") || page.$(node).text());
-          if (!parsed || !matchesBrand(title, brand)) return;
-          liveRefs.set(parsed.id, {
-            domain: BUD_DOMAIN, platform: BUD_DOMAIN, listingId: parsed.id, brand,
-            url: parsed.url, title, metadata: { discovery: "translated-first-party-form-page" }
-          });
-        });
-        if (liveRefs.size) break;
+        addBudDiscoveryRefs(page, "a[href*='/product/']", brand, "translated-first-party-form-page", liveRefs);
         const text = compactText(page.$("main, body").text());
         if (/ничего не найдено|товары не найдены|нет препаратов/i.test(text)) explicitNoResults += 1;
       } catch (error) {
-        lastError = error;
+        if (!budMissingFormPage(error)) formError ??= error;
       }
     }
-    if (!liveRefs.size && successfulPages === 0) {
-      const initial = brand.normalize("NFKC").trim().charAt(0).toLocaleUpperCase("ru-RU");
-      if (initial) {
-        try {
-          const source = new URL(`https://www.${BUD_DOMAIN}/letter/${encodeURIComponent(initial)}`);
-          const page = await requestPage(source, context, this.fetchImpl, BUD_TRANSLATE_HOST);
-          page.$(".alphabet-forms a[href*='/product/'], a.alphabet-forms__item-link[href*='/product/']").each((_index, node) => {
-            const parsed = budRef(page.$(node).attr("href") ?? "");
-            const title = compactText(page.$(node).attr("title") || page.$(node).text());
-            if (!parsed || !matchesBrand(title, brand)) return;
-            liveRefs.set(parsed.id, {
-              domain: BUD_DOMAIN, platform: BUD_DOMAIN, listingId: parsed.id, brand,
-              url: parsed.url, title, metadata: { discovery: "translated-first-party-letter-index" }
-            });
-          });
-        } catch (error) {
-          lastError = error;
-        }
-      }
+
+    const initial = brand.normalize("NFKC").trim().charAt(0).toLocaleUpperCase("ru-RU");
+    if (!initial) throw new AdapterBlockedError(`${BUD_DOMAIN}: brand has no alphabet initial`);
+    const letterSource = new URL(`https://www.${BUD_DOMAIN}/letter/${encodeURIComponent(initial)}`);
+    const letterPage = await requestPage(letterSource, context, this.fetchImpl, BUD_TRANSLATE_HOST);
+    if (!letterPage.$(".alphabet-forms").length) {
+      throw new ParserChangedError(`${BUD_DOMAIN}: letter index structure is missing`);
     }
+    addBudDiscoveryRefs(
+      letterPage,
+      ".alphabet-forms a[href*='/product/'], a.alphabet-forms__item-link[href*='/product/']",
+      brand,
+      "translated-first-party-letter-index",
+      liveRefs
+    );
+    if (formError) throw formError;
+
     if (!liveRefs.size && !refs.size) {
       if (successfulPages === slugs.length && explicitNoResults === slugs.length) return [];
-      if (successfulPages === 0 && lastError instanceof Error) throw lastError;
-      throw new AdapterBlockedError(`${BUD_DOMAIN}: form pages proved neither exact products nor no results`);
+      throw new AdapterBlockedError(`${BUD_DOMAIN}: form and letter pages proved neither exact products nor no results`);
     }
     if (liveRefs.size) {
       const snapshot = [...liveRefs.values()].map((ref) => ({ ...ref, metadata: { ...ref.metadata } }));

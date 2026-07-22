@@ -297,9 +297,11 @@ describe("additional pharmacy adapters", () => {
 
   it("uses complete Bud Zdorov reviews and their scores instead of a partial visible list", async () => {
     const formSource = "https://www.budzdorov.ru/forms/ocillokokcinum";
+    const letterSource = "https://www.budzdorov.ru/letter/%D0%9E";
     const productPath = "/product/otsillokoktsinum-granuly-6doz-2511";
     const productSource = `https://www.budzdorov.ru${productPath}`;
     const form = translated(formSource, `<main><a href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en" title="Оциллококцинум гранулы 6 доз">Оциллококцинум гранулы 6 доз</a></main>`);
+    const letter = translated(letterSource, `<main class="alphabet-forms"><a class="alphabet-forms__item-link" href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">Оциллококцинум гранулы 6 доз</a></main>`);
     const reviews = [
       { id: 1, ratings: [{ attribute_code: "Оценка", value: 5 }] },
       { id: 2, ratings: [{ attribute_code: "Оценка", value: 4 }] },
@@ -308,7 +310,8 @@ describe("additional pharmacy adapters", () => {
     const product = translated(productSource, `<h1>Оциллококцинум гранулы 6 доз</h1><div allreviewsqty="3"></div><script>window.__INITIAL_STATE__=${JSON.stringify({ productView: { reviews } })};document.currentScript.remove()</script>`);
     const fetchSpy = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
-      return new Response(url.pathname.startsWith("/forms/") ? form : product, { status: 200, headers: { "content-type": "text/html" } });
+      const body = url.pathname.startsWith("/forms/") ? form : url.pathname.startsWith("/letter/") ? letter : product;
+      return new Response(body, { status: 200, headers: { "content-type": "text/html" } });
     });
     const fetchMock = fetchSpy as unknown as typeof fetch;
     const adapter = new BudZdorovAdapter(new MemoryEvidenceStore(), fetchMock);
@@ -318,7 +321,8 @@ describe("additional pharmacy adapters", () => {
     expect(refs[0]).toMatchObject({ listingId: "2511", url: productSource });
     expect(new URL(String(fetchSpy.mock.calls[0][0])).pathname).toBe("/forms/ocillokokcinum");
     await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({ reviews: 3, rating: 4.7, status: "ok" });
-    expect(new URL(String(fetchSpy.mock.calls[1][0])).pathname).toBe(productPath);
+    expect(new URL(String(fetchSpy.mock.calls[1][0])).pathname).toBe("/letter/%D0%9E");
+    expect(new URL(String(fetchSpy.mock.calls[2][0])).pathname).toBe(productPath);
   });
 
   it("collects an exact Apteka.ru variant when SSR omits the transient selected attribute", async () => {
@@ -429,6 +433,79 @@ describe("additional pharmacy adapters", () => {
     expect(new URL(String(fetchSpy.mock.calls[0][0])).pathname).toBe(new URL(formSource).pathname);
   });
 
+  it("unions form and alphabet discovery for all four eye-care brands and excludes Taurin/Taufon analogs", async () => {
+    const product = (path: string, title: string, className = "product-info__title") =>
+      `<a class="${className}" href="https://www-budzdorov-ru.translate.goog${path}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">${title}</a>`;
+    const pages = new Map<string, { status?: number; body: string }>([
+      ["/forms/biviart", { status: 404, body: "missing" }],
+      ["/letter/%D0%91", { body: `<main class="alphabet-forms">
+        ${product("/product/biviart-komfort-123189", "Бивиарт Комфорт 0,18% 10 мл", "alphabet-forms__item-link")}
+        ${product("/product/biviart-soft-123188", "Бивиарт Софт 0,1% 10 мл", "alphabet-forms__item-link")}
+        ${product("/product/biviart-ultra-123187", "Бивиарт Ультра 0,3% 10 мл", "alphabet-forms__item-link")}
+      </main>` }],
+      ["/forms/okusalin", { body: `<main>${product("/product/okusalin-3-2ml-4990339", "Окусалин 3% 2 мл №10")}</main>` }],
+      ["/forms/oftarint", { body: `<main>${product("/product/oftarint-01-10ml-111503", "Офтаринт 0,1% 10 мл")}</main>` }],
+      ["/letter/%D0%9E", { body: `<main class="alphabet-forms">
+        ${product("/product/okusalin-3-2ml-4990339", "Окусалин 3% 2 мл №10", "alphabet-forms__item-link")}
+        ${product("/product/okusalin-1ml-106305", "Окусалин 1 мл №10", "alphabet-forms__item-link")}
+        ${product("/product/oftarint-01-10ml-111503", "Офтаринт 0,1% 10 мл", "alphabet-forms__item-link")}
+      </main>` }],
+      ["/forms/taustin", { body: `<main>
+        ${product("/product/taustin-4-10ml-4990756", "Таустин капли глазные 4% 10 мл")}
+        ${product("/product/taurin-4-10ml-43973", "Таурин капли глазные 4% 10 мл")}
+      </main>` }],
+      ["/letter/%D0%A2", { body: `<main class="alphabet-forms">
+        ${product("/product/taustin-04ml-4990371", "Таустин капли глазные 4% 0,4 мл №20", "alphabet-forms__item-link")}
+        ${product("/product/taustin-1ml-4990372", "Таустин капли глазные 4% 1 мл №20", "alphabet-forms__item-link")}
+        ${product("/product/taustin-4-10ml-4990756", "Таустин капли глазные 4% 10 мл", "alphabet-forms__item-link")}
+        ${product("/product/taurin-4-10ml-43973", "Таурин капли глазные 4% 10 мл", "alphabet-forms__item-link")}
+        ${product("/product/taufon-4-10ml-116393", "Тауфон капли глазные 4% 10 мл", "alphabet-forms__item-link")}
+      </main>` }]
+    ]);
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      const fixture = pages.get(url.pathname);
+      if (!fixture) throw new Error(`unexpected Bud Zdorov route: ${url.pathname}`);
+      const source = `https://www.budzdorov.ru${url.pathname}`;
+      return new Response(fixture.status === 404 ? fixture.body : translated(source, fixture.body), {
+        status: fixture.status ?? 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const adapter = new BudZdorovAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    const found = new Map<string, string[]>();
+    for (const brand of ["Бивиарт", "Окусалин", "Офтаринт", "Таустин"]) {
+      found.set(brand, (await adapter.discover(brand, { ...context, runId: `bud-${brand}` }))
+        .map((ref) => ref.listingId).sort());
+    }
+
+    expect(Object.fromEntries(found)).toEqual({
+      "Бивиарт": ["123187", "123188", "123189"],
+      "Окусалин": ["106305", "4990339"],
+      "Офтаринт": ["111503"],
+      "Таустин": ["4990371", "4990372", "4990756"]
+    });
+    expect([...found.values()].flat()).not.toContain("43973");
+    expect([...found.values()].flat()).not.toContain("116393");
+  });
+
+  it("fails closed instead of returning a partial Bud Zdorov form result when the alphabet index is blocked", async () => {
+    const formSource = "https://www.budzdorov.ru/forms/taustin";
+    const productPath = "/product/taustin-kapli-gl-4-10ml-no1-4990756";
+    const form = translated(formSource,
+      `<main><a href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">Таустин капли глазные 4% 10мл</a></main>`);
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      return url.pathname.startsWith("/letter/")
+        ? new Response("blocked", { status: 403 })
+        : new Response(form, { status: 200 });
+    });
+
+    await expect(new BudZdorovAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch)
+      .discover("Таустин", context)).rejects.toBeInstanceOf(AdapterBlockedError);
+  });
+
   it("checks the requested Bud Zdorov brand and reuses its successful discovery in the same run", async () => {
     const brand = "\u041a\u0430\u0433\u043e\u0446\u0435\u043b";
     const formSource = "https://www.budzdorov.ru/forms/kagocel";
@@ -437,17 +514,24 @@ describe("additional pharmacy adapters", () => {
       `<main><a href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en" ` +
       `title="${brand} \u0442\u0430\u0431\u043b\u0435\u0442\u043a\u0438 12\u043c\u0433 \u211620">${brand}</a></main>`);
     const fetchSpy = vi.fn(async (input: string | URL | Request) => {
-      expect(new URL(String(input)).pathname).toBe("/forms/kagocel");
-      return new Response(form, { status: 200, headers: { "content-type": "text/html" } });
+      const url = new URL(String(input));
+      if (url.pathname === "/forms/kagocel") {
+        return new Response(form, { status: 200, headers: { "content-type": "text/html" } });
+      }
+      if (url.pathname === "/forms/kagotsel") return new Response("missing", { status: 404 });
+      expect(url.pathname).toBe("/letter/%D0%9A");
+      return new Response(translated("https://www.budzdorov.ru/letter/%D0%9A",
+        `<main class="alphabet-forms"><a class="alphabet-forms__item-link" href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">${brand} таблетки 12мг №20</a></main>`), { status: 200 });
     });
     const adapter = new BudZdorovAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
     const runContext = { ...context, runId: "bud-kagocel-run", brands: [brand] };
 
-    await expect(adapter.healthCheck(runContext)).resolves.toMatchObject({ ok: true });
+    const health = await adapter.healthCheck(runContext);
+    expect(health, health.message).toMatchObject({ ok: true });
     await expect(adapter.discover(brand, runContext)).resolves.toMatchObject([
       { listingId: "106662", url: `https://www.budzdorov.ru${productPath}` }
     ]);
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
   });
 
   it("tries the ts spelling used by the Cereton form without treating an empty alias as no results", async () => {
@@ -458,10 +542,15 @@ describe("additional pharmacy adapters", () => {
       if (url.pathname === "/forms/cereton") {
         return new Response(translated(source, "<main>Каталог лекарств</main>"), { status: 200 });
       }
-      expect(url.pathname).toBe("/forms/tsereton");
+      if (url.pathname === "/forms/tsereton") {
+        return new Response(translated(source,
+          `<main><a href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en" ` +
+          `title="Церетон капсулы 400 мг №28">Церетон</a></main>`
+        ), { status: 200 });
+      }
+      expect(url.pathname).toBe("/letter/%D0%A6");
       return new Response(translated(source,
-        `<main><a href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en" ` +
-        `title="Церетон капсулы 400 мг №28">Церетон</a></main>`
+        `<main class="alphabet-forms"><a class="alphabet-forms__item-link" href="https://www-budzdorov-ru.translate.goog${productPath}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">Церетон капсулы 400 мг №28</a></main>`
       ), { status: 200 });
     });
     const adapter = new BudZdorovAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
@@ -469,7 +558,7 @@ describe("additional pharmacy adapters", () => {
     await expect(adapter.discover("Церетон", context)).resolves.toMatchObject([
       { listingId: "330028", url: `https://www.budzdorov.ru${productPath}` }
     ]);
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
   });
 
   it("collects eTabl product state and drops its default rating when there are no reviews", async () => {
