@@ -27,6 +27,7 @@ import {
 } from "../../src/server/sheets/publication-state.js";
 import { productKey } from "../../src/server/repository.js";
 import { readAgentJson } from "../../src/server/utils/agent-request.js";
+import { collectorPublicEndpoint } from "../../src/server/utils/collector-public-endpoint.js";
 import { safeErrorMessage } from "../../src/server/utils/error-message.js";
 import { loadPlaywright } from "../../src/server/utils/playwright-runtime.js";
 import { playwrightCdpBaseUrl } from "../../src/server/utils/sandbox-cdp.js";
@@ -217,7 +218,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     }
     operation = body.operation ?? "publish";
     if (!/^[0-9a-f-]{36}$/i.test(runId)) throw new Error("Некорректный runId");
-    const endpoint = new URL("/api/internal/repository", context.request.url).toString();
+    const endpoint = collectorPublicEndpoint("/api/internal/repository");
     repository = new RemoteRepository(endpoint, context.env.INTERNAL_AGENT_TOKEN ?? "");
     const initial = await repository.getRun(runId);
     if (!initial) throw new Error("Запуск не найден");
