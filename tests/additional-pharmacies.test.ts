@@ -21,6 +21,12 @@ function aptekaSelectedVariant(url: string, title: string, count: number, rating
     `<span class="caption3">(<span>${count}</span> reviews)</span></div></div></div>`;
 }
 
+function aptekaExpandedVariant(url: string, title: string, count: number, rating: number) {
+  return `<div class="variantButtonExp"><a class="variantButtonExp__link" href="${url}" aria-label="${title}"></a>` +
+    `<div class="variantButtonExp__rating"><div class="ItemRating"><span class="ItemRating__label">${rating}</span>` +
+    `<span class="caption3">(<span>${count}</span> reviews)</span></div></div></div>`;
+}
+
 function nfReviewList(title: string, ratings: number[]) {
   return `<div id="review">${ratings.map((rating) =>
     `<div class="testimonial" itemscope itemtype="https://schema.org/Review"><meta itemprop="itemReviewed" content="${title}">` +
@@ -252,6 +258,24 @@ describe("additional pharmacy adapters", () => {
       "@context": "https://schema.org", "@type": "Product", sku: id, name: title,
       aggregateRating: { "@type": "AggregateRating", reviewCount: 44, ratingValue: 4.9 }
     })}</script></head><body>${aptekaSelectedVariant(productUrl, title, 44, 4.9, false)}</body></html>`;
+    const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(product, {
+      status: 200, headers: { "content-type": "text/html" }
+    })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "apteka.ru", platform: "apteka.ru", listingId: id, brand: "Оциллококцинум",
+      url: productUrl, title, metadata: {}
+    }, context)).resolves.toMatchObject({ reviews: 44, rating: 4.9, status: "ok" });
+  });
+
+  it("collects an exact Apteka.ru expanded SSR variant with source-bound feedback", async () => {
+    const id = "5e3268eaca7bdc000192d316";
+    const productUrl = `https://apteka.ru/product/oczillokokczinum-30-sht-granuly-${id}/`;
+    const title = "Оциллококцинум 30 шт. гранулы";
+    const product = `<!doctype html><html><head><base href="${productUrl}"><script type="application/ld+json">${JSON.stringify({
+      "@context": "https://schema.org", "@type": "Product", sku: id, name: title,
+      aggregateRating: { "@type": "AggregateRating", reviewCount: 44, ratingValue: 4.9 }
+    })}</script></head><body>${aptekaExpandedVariant(productUrl, title, 44, 4.9)}</body></html>`;
     const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(product, {
       status: 200, headers: { "content-type": "text/html" }
     })) as unknown as typeof fetch);

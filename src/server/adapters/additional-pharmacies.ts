@@ -264,21 +264,25 @@ function aptekaVisibleFeedback(
   // Apteka.ru intermittently omits `aria-selected` from its SSR variants.
   // The exact product link and title still bind the visible rating to one
   // concrete variant, so recover only that unique, source-bound card.
-  const candidates = $(".variantButton").filter((_index, element) => {
-    const link = $(element).find("a.variantButton__link[href][aria-label]").first();
+  const candidates = $(".variantButton, .variantButtonExp").filter((_index, element) => {
+    const link = $(element).find(
+      "a.variantButton__link[href][aria-label], a.variantButtonExp__link[href][aria-label]"
+    ).first();
     const source = sourceHref(link.attr("href"), APTEKA_DOMAIN);
     const title = compactText(link.attr("aria-label") ?? "");
     return source?.pathname === expectedPath && normalizeText(title) === normalizeText(expectedTitle);
   });
   if (candidates.length !== 1) return undefined;
   const selected = candidates.first();
-  const link = selected.find("a.variantButton__link[href][aria-label]").first();
+  const link = selected.find(
+    "a.variantButton__link[href][aria-label], a.variantButtonExp__link[href][aria-label]"
+  ).first();
   const source = sourceHref(link.attr("href"), APTEKA_DOMAIN);
   const title = compactText(link.attr("aria-label") ?? "");
   if (!source || source.pathname !== expectedPath || normalizeText(title) !== normalizeText(expectedTitle)) {
     return undefined;
   }
-  const metric = selected.find(".variantButton__rating .ItemRating");
+  const metric = selected.find(".variantButton__rating .ItemRating, .variantButtonExp__rating .ItemRating");
   if (metric.length !== 1) return undefined;
   const count = exactInteger(metric.find(".caption3 span").first().text());
   const rating = exactRating(metric.find(".ItemRating__label").first().text());
