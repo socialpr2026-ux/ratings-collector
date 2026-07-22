@@ -443,6 +443,39 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("retries only the exact Yandex pair after one transient compact-proof failure", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const forwarded = JSON.parse(String(init?.body)) as { yandexBatch: { sitemaps: string[] } };
+      return directFetch.mock.calls.length === 1
+        ? new Response(JSON.stringify({ error: "one shard remained unproven" }), { status: 502 })
+        : new Response(JSON.stringify({
+          processed: 2,
+          firstSitemap: forwarded.yandexBatch.sitemaps[0],
+          lastSitemap: forwarded.yandexBatch.sitemaps[1],
+          matches: []
+        }), { headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    }) as typeof fetch & { yandexBatchEndpoint?: string };
+
+    const response = await routedFetch(routedFetch.yandexBatchEndpoint!, {
+      method: "POST",
+      body: JSON.stringify({
+        sitemaps: ["first", "second"],
+        brands: [{ brand: "Церетон", tokens: ["cereton"] }]
+      })
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ processed: 2, firstSitemap: "first", lastSitemap: "second" });
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("uses fixed function egress before a hanging direct Yandex request", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

@@ -1880,12 +1880,13 @@ function yandexProductMatchesTokens(input: string, tokens: string[]): boolean {
 
 class NonRetryableYandexBatchShardError extends Error {}
 
-const YANDEX_BATCH_SHARD_ATTEMPT_MS = 35_000;
+const YANDEX_BATCH_SHARD_ATTEMPT_MS = 30_000;
+const YANDEX_BATCH_SHARD_ATTEMPTS = 2;
 
 async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string> {
   const target = new URL(sitemap);
   let lastError: unknown;
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  for (let attempt = 1; attempt <= YANDEX_BATCH_SHARD_ATTEMPTS; attempt += 1) {
     const startedAt = Date.now();
     const attemptAbort = new AbortController();
     const attemptTimer = setTimeout(() => {
@@ -1916,7 +1917,7 @@ async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string> {
       return compact;
     } catch (error) {
       lastError = error;
-      if (error instanceof NonRetryableYandexBatchShardError || attempt === 3) break;
+      if (error instanceof NonRetryableYandexBatchShardError || attempt === YANDEX_BATCH_SHARD_ATTEMPTS) break;
       await new Promise((resolve) => setTimeout(resolve, attempt * 100));
     } finally {
       clearTimeout(attemptTimer);
