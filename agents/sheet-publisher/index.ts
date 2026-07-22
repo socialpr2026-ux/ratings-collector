@@ -31,7 +31,6 @@ import { safeErrorMessage } from "../../src/server/utils/error-message.js";
 import { loadPlaywright } from "../../src/server/utils/playwright-runtime.js";
 import { playwrightCdpBaseUrl } from "../../src/server/utils/sandbox-cdp.js";
 import { extractSpreadsheetId } from "../../src/server/utils/urls.js";
-import { agentInternalEndpoint } from "../../src/server/utils/agent-internal-endpoint.js";
 
 type BrowserApi = { cdpUrl: string };
 type SandboxCommands = { run(command: string): Promise<unknown> };
@@ -218,7 +217,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     }
     operation = body.operation ?? "publish";
     if (!/^[0-9a-f-]{36}$/i.test(runId)) throw new Error("Некорректный runId");
-    const endpoint = agentInternalEndpoint(context.request, "/api/internal/repository");
+    const endpoint = new URL("/api/internal/repository", context.request.url).toString();
     repository = new RemoteRepository(endpoint, context.env.INTERNAL_AGENT_TOKEN ?? "");
     const initial = await repository.getRun(runId);
     if (!initial) throw new Error("Запуск не найден");
