@@ -138,6 +138,33 @@ export function browserFetch(
       signal
     });
   };
+  const fetchVaptekeViaStaticProxy = async (request: Request) => {
+    const url = new URL(request.url);
+    if (request.method !== "POST" || url.pathname !== "/ajax/autocomplete") {
+      return fetchViaStaticProxy(url, request.signal);
+    }
+    const contentType = request.headers.get("content-type") ?? "";
+    if (!/^application\/x-www-form-urlencoded(?:\s*;|$)/i.test(contentType)) {
+      throw new AdapterBlockedError("vapteke.ru autocomplete request has an unexpected content type");
+    }
+    const text = await request.text();
+    if (text.length > 1_000) throw new AdapterBlockedError("vapteke.ru autocomplete request is too large");
+    const form = new URLSearchParams(text);
+    const query = form.get("query")?.normalize("NFKC").trim() ?? "";
+    if ([...form.keys()].some((key) => key !== "query") || form.getAll("query").length !== 1 ||
+      query.length < 2 || query.length > 160) {
+      throw new AdapterBlockedError("vapteke.ru autocomplete request is not an exact bounded brand query");
+    }
+    return fetch(staticProxy!.endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${staticProxy!.token}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ url: url.toString(), vaptekeAutocomplete: { query } }),
+      signal: request.signal
+    });
+  };
   const fetchYandexBatchViaStaticProxy = async (request: Request) => {
     if (!staticProxy) throw new Error("Static proxy is not configured");
     const text = await request.text();
@@ -433,6 +460,7 @@ export function browserFetch(
       }
     }
     if (staticProxy && (
+      host === "vapteke.ru" ||
       host === "uteka.ru" ||
       host === "megapteka.ru" ||
       host === "irecommend.ru" ||
@@ -441,7 +469,9 @@ export function browserFetch(
       host === "ru.otzyv.com" ||
       host === "med-otzyv.ru"
     )) {
-      return fetchViaStaticProxy(url, request.signal);
+      return host === "vapteke.ru"
+        ? fetchVaptekeViaStaticProxy(request)
+        : fetchViaStaticProxy(url, request.signal);
     }
     if (!shouldUseHardenedBrowser(request)) {
       return fetch(request);

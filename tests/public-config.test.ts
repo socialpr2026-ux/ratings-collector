@@ -32,6 +32,41 @@ describe("new static collector gateways", () => {
     { INTERNAL_AGENT_TOKEN: token }
   );
 
+  it("proxies only bounded exact Vapteke autocomplete and product routes", async () => {
+    const upstream = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      expect(url.hostname).toBe("vapteke.ru");
+      if (url.pathname === "/ajax/autocomplete") {
+        expect(init?.method).toBe("POST");
+        expect(String(init?.body)).toBe(`query=${encodeURIComponent("Бивиарт")}`);
+        return new Response('{"success":true,"data":{"total":{"value":0,"relation":"eq"},"hits":[]},"error":"200"}', {
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return new Response("<html>product</html>", { headers: { "content-type": "text/html" } });
+    });
+    vi.stubGlobal("fetch", upstream);
+    const autocomplete = await staticReviewFetch(new Request(
+      "https://ratings.example/api/internal/static-review-fetch",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          url: "https://vapteke.ru/ajax/autocomplete",
+          vaptekeAutocomplete: { query: "Бивиарт" }
+        })
+      }
+    ), { INTERNAL_AGENT_TOKEN: token });
+    expect(autocomplete.status).toBe(200);
+    expect(autocomplete.headers.get("x-ratings-source")).toBe("vapteke-exact-autocomplete");
+
+    await expect(callGateway("https://vapteke.ru/product/biviart-komfort-018-10-ml-682542"))
+      .resolves.toMatchObject({ status: 200 });
+    await expect(callGateway("https://vapteke.ru/search?q=Бивиарт"))
+      .resolves.toMatchObject({ status: 400 });
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
   it("proxies only exact Ozon composer search or product paths", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));

@@ -217,6 +217,38 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("routes exact Vapteke autocomplete and product requests through fixed function egress", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response('{"success":true}', { headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    await routedFetch("https://vapteke.ru/ajax/autocomplete", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded; charset=UTF-8" },
+      body: new URLSearchParams({ query: "Бивиарт" })
+    });
+    await routedFetch("https://vapteke.ru/product/biviart-komfort-018-10-ml-682542");
+
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(directFetch.mock.calls.map(([input]) => input)).toEqual([
+      "https://ratings.example/api/internal/static-review-fetch",
+      "https://ratings.example/api/internal/static-review-fetch"
+    ]);
+    expect(JSON.parse(String((directFetch.mock.calls[0]?.[1] as RequestInit).body))).toEqual({
+      url: "https://vapteke.ru/ajax/autocomplete",
+      vaptekeAutocomplete: { query: "Бивиарт" }
+    });
+    expect(JSON.parse(String((directFetch.mock.calls[1]?.[1] as RequestInit).body))).toEqual({
+      url: "https://vapteke.ru/product/biviart-komfort-018-10-ml-682542"
+    });
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("recovers a Megamarket product after two transient translated-route failures", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => directFetch.mock.calls.length <= 2

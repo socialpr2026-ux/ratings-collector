@@ -2038,7 +2038,11 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
   const configured = env.INTERNAL_AGENT_TOKEN?.trim() ?? "";
   const supplied = (request.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
   if (configured.length < 32 || !secureEqual(configured, supplied)) return json({ error: "Internal authorization failed" }, 401);
-  const body = await request.json() as { url?: string; yandexBatch?: unknown };
+  const body = await request.json() as {
+    url?: string;
+    yandexBatch?: unknown;
+    vaptekeAutocomplete?: { query?: unknown };
+  };
   const target = new URL(String(body.url ?? ""));
   const yandexBatchTarget = target.toString() === YANDEX_BATCH_ENDPOINT;
   const yandexBatch = yandexBatchTarget ? parseYandexBatchRequest(body.yandexBatch) : undefined;
@@ -2050,6 +2054,15 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
   const utekaSitemapTarget = target.protocol === "https:" && target.hostname === "uteka.ru" &&
     !target.port && !target.username && !target.password && !target.search && !target.hash &&
     target.pathname === "/sitemaps/sitemap-reviews.xml";
+  const vaptekeQuery = typeof body.vaptekeAutocomplete?.query === "string"
+    ? body.vaptekeAutocomplete.query.normalize("NFKC").trim()
+    : "";
+  const vaptekeAutocompleteTarget = target.protocol === "https:" && host === "vapteke.ru" &&
+    !target.port && !target.username && !target.password && !target.search && !target.hash &&
+    target.pathname === "/ajax/autocomplete" && vaptekeQuery.length >= 2 && vaptekeQuery.length <= 160;
+  const vaptekeProductTarget = target.protocol === "https:" && host === "vapteke.ru" &&
+    !target.port && !target.username && !target.password && !target.search && !target.hash &&
+    /^\/product\/[a-z0-9-]+-\d+\/?$/i.test(target.pathname) && body.vaptekeAutocomplete === undefined;
   const reviewTarget = new Set([
     "megapteka.ru",
     "otzovik.com",
@@ -2118,8 +2131,30 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         [...target.searchParams.keys()].every((key) => key === "url") && (safeSearch || safeProduct);
     } catch { /* invalid nested Ozon search URL */ }
   }
-  if (target.protocol !== "https:" || !(yandexBatch || reviewTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget || asnaSitemapTarget)) {
+  if (target.protocol !== "https:" || !(yandexBatch || reviewTarget || vaptekeAutocompleteTarget || vaptekeProductTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget || asnaSitemapTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
+  }
+  if (vaptekeAutocompleteTarget) {
+    await assertSafePublicDestination(target.toString());
+    const upstream = await safeFetch(target.toString(), {
+      method: "POST",
+      redirect: "follow",
+      headers: {
+        accept: "application/json",
+        "accept-language": "ru-RU,ru;q=0.9",
+        "content-type": "application/x-www-form-urlencoded; charset=UTF-8"
+      },
+      body: new URLSearchParams({ query: vaptekeQuery }).toString()
+    }, fetch, 0, 60_000);
+    const text = await readTextBounded(upstream, 2_000_000, 60_000);
+    return new Response(text, {
+      status: upstream.status,
+      headers: {
+        "content-type": upstream.headers.get("content-type") ?? "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "vapteke-exact-autocomplete"
+      }
+    });
   }
   if (yandexBatch) {
     try {
