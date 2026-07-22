@@ -362,7 +362,11 @@ export class VaptekeAdapter implements SiteAdapter {
     try {
       response = await safeFetch(url, {
         ...init,
-        headers: { accept, ...init.headers },
+        headers: {
+          accept,
+          ...(/text\/html|application\/xhtml\+xml/iu.test(accept) ? { "x-ratings-browser": "1" } : {}),
+          ...init.headers
+        },
         signal: context.signal
       }, context.fetch ?? this.fetchImpl);
     } catch (error) {

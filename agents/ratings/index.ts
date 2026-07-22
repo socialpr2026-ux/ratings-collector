@@ -459,8 +459,10 @@ export function browserFetch(
         return fetchViaStaticProxy(url, request.signal);
       }
     }
+    if (staticProxy && host === "vapteke.ru" && !shouldUseHardenedBrowser(request)) {
+      return fetchVaptekeViaStaticProxy(request);
+    }
     if (staticProxy && (
-      host === "vapteke.ru" ||
       host === "uteka.ru" ||
       host === "megapteka.ru" ||
       host === "irecommend.ru" ||
@@ -469,9 +471,7 @@ export function browserFetch(
       host === "ru.otzyv.com" ||
       host === "med-otzyv.ru"
     )) {
-      return host === "vapteke.ru"
-        ? fetchVaptekeViaStaticProxy(request)
-        : fetchViaStaticProxy(url, request.signal);
+      return fetchViaStaticProxy(url, request.signal);
     }
     if (!shouldUseHardenedBrowser(request)) {
       return fetch(request);

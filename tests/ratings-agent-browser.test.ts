@@ -249,6 +249,23 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("uses the hardened browser for a marked Vapteke product instead of the blocked fixed egress", async () => {
+    const run = vi.fn(async () => { throw new Error("Sandbox quota exceeded"); });
+    const directFetch = vi.fn(async () => new Response("unexpected"));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    await expect(routedFetch(
+      "https://vapteke.ru/product/biviart-komfort-018-10-ml-682542",
+      { headers: { "x-ratings-browser": "1" } }
+    )).rejects.toBeInstanceOf(AdapterBlockedError);
+    expect(run).toHaveBeenCalledOnce();
+    expect(directFetch).not.toHaveBeenCalled();
+  });
+
   it("recovers a Megamarket product after two transient translated-route failures", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => directFetch.mock.calls.length <= 2

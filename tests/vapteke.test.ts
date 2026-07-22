@@ -98,9 +98,12 @@ describe("VaptekeAdapter", () => {
 
   it("collects a source-bound 3.6/5 vote aggregate without claiming written reviews", async () => {
     const evidence = new MemoryEvidenceStore();
-    const adapter = new VaptekeAdapter(evidence, vi.fn(async () => new Response(productHtml(intense), {
-      status: 200, headers: { "content-type": "text/html; charset=UTF-8" }
-    })) as unknown as typeof fetch);
+    const adapter = new VaptekeAdapter(evidence, vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("x-ratings-browser")).toBe("1");
+      return new Response(productHtml(intense), {
+        status: 200, headers: { "content-type": "text/html; charset=UTF-8" }
+      });
+    }) as unknown as typeof fetch);
 
     const observation = await adapter.collect({
       domain: "vapteke.ru",
@@ -179,8 +182,9 @@ describe("VaptekeAdapter", () => {
       rating: 5,
       votes: 1
     };
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(requestedUrl(input).toString()).toBe(`https://vapteke.ru/product/${canary.slug}`);
+      expect(new Headers(init?.headers).get("x-ratings-browser")).toBe("1");
       return new Response(productHtml(canary), { status: 200, headers: { "content-type": "text/html" } });
     }) as unknown as typeof fetch;
 
