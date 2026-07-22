@@ -13,6 +13,7 @@ import { EaptekaAdapter } from "./adapters/eapteka.js";
 import { VaptekeAdapter } from "./adapters/vapteke.js";
 import { MagnitPharmacyAdapter } from "./adapters/magnit-pharmacy.js";
 import { MaksavitAdapter } from "./adapters/maksavit.js";
+import { VitaExpressAdapter } from "./adapters/vitaexpress.js";
 import { AsnaAdapter } from "./adapters/pharmacy-recovery.js";
 import { createPharmacyAdapters } from "./adapters/pharmacies.js";
 import { createAdditionalPharmacyAdapters } from "./adapters/additional-pharmacies.js";
@@ -178,6 +179,7 @@ export async function createCollectorRuntime(options: {
     new VaptekeAdapter(evidence, options.fetch),
     new MagnitPharmacyAdapter(evidence, options.fetch),
     new MaksavitAdapter(evidence, options.fetch),
+    new VitaExpressAdapter(evidence, options.fetch),
     new AsnaAdapter(evidence, options.fetch),
     ...createPharmacyAdapters(evidence, options.fetch),
     ...createAdditionalPharmacyAdapters(evidence, options.fetch),
