@@ -28,6 +28,10 @@ const MAX_TRANSLATE_REDIRECTS = 2;
 const TRANSLATED_COMPOSER_RETRY_DELAY_MS = 8_000;
 const EXACT_TRANSLATE_PROOF = "ozon:product-json-ld:google-translate";
 const EXACT_COMPOSER_PROOF = "ozon:product-composer-json";
+const DISCOVERY_QUERY_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  "\u0431\u0438\u0432\u0438\u0430\u0440\u0442": ["Biviart"],
+  "\u043a\u0430\u0433\u043e\u0446\u0435\u043b": ["Kagocel", "Kagotsel"]
+};
 
 type JsonObject = Record<string, unknown>;
 
@@ -74,6 +78,33 @@ type SearchPage = {
   rawItemCount: number;
   totalPages: number | undefined;
 };
+
+function discoveryQueries(brand: string): string[] {
+  const key = brand.normalize("NFKC").toLocaleLowerCase("ru-RU");
+  return [...new Set([brand, ...(DISCOVERY_QUERY_ALIASES[key] ?? [])])];
+}
+
+function mergeSearchTiles(first: SearchTile | undefined, next: SearchTile): SearchTile {
+  if (!first) return next;
+  const conflictingReviews = first.reviews !== null && next.reviews !== null && first.reviews !== next.reviews;
+  const conflictingRating = first.rating !== null && next.rating !== null && first.rating !== next.rating;
+  if (conflictingReviews || conflictingRating) {
+    return {
+      ...first,
+      reviews: null,
+      rating: null,
+      rawReviewCount: [first.rawReviewCount, next.rawReviewCount],
+      rawRating: [first.rawRating, next.rawRating]
+    };
+  }
+  return {
+    ...first,
+    reviews: first.reviews ?? next.reviews,
+    rating: first.rating ?? next.rating,
+    rawReviewCount: first.reviews === null ? next.rawReviewCount : first.rawReviewCount,
+    rawRating: first.rating === null ? next.rawRating : first.rawRating
+  };
+}
 
 export type OzonBrowserAdapterOptions = {
   fetch?: typeof globalThis.fetch;
@@ -815,50 +846,55 @@ export class OzonBrowserAdapter implements SiteAdapter {
     let matchedProducts = this.discoveryTileCache.get(runScope);
     if (!matchedProducts) {
       const products = new Map<string, SearchTile>();
-      let previousPageIds: string | undefined;
-      let declaredTotalPages: number | undefined;
-      let exhausted = false;
+      for (const query of discoveryQueries(requestedBrand)) {
+        let previousPageIds: string | undefined;
+        let declaredTotalPages: number | undefined;
+        let exhausted = false;
 
-      for (let pageNumber = 1; pageNumber <= this.maxPages; pageNumber += 1) {
-        const page = await this.fetchSearchPage(requestedBrand, pageNumber, context);
-        if (page.totalPages !== undefined && page.totalPages > this.maxPages) {
-          throw new AdapterBlockedError(
-            `Ozon search for ${requestedBrand} has ${page.totalPages} pages, above the safe limit ${this.maxPages}`
-          );
-        }
-        if (page.totalPages !== undefined) {
-          if (page.rawItemCount > 0 && page.totalPages === 0) {
-            throw new ParserChangedError(`Ozon search for ${requestedBrand} returned items with totalPages=0`);
-          }
-          declaredTotalPages = Math.max(declaredTotalPages ?? 0, page.totalPages);
-        }
-        if (page.rawItemCount === 0) {
-          if (declaredTotalPages !== undefined && declaredTotalPages >= pageNumber) {
+        for (let pageNumber = 1; pageNumber <= this.maxPages; pageNumber += 1) {
+          const page = await this.fetchSearchPage(query, pageNumber, context);
+          if (page.totalPages !== undefined && page.totalPages > this.maxPages) {
             throw new AdapterBlockedError(
-              `Ozon search for ${requestedBrand} returned an empty page ${pageNumber} before declared page ${declaredTotalPages}`
+              `Ozon search query ${query} for ${requestedBrand} has ${page.totalPages} pages, above the safe limit ${this.maxPages}`
             );
           }
-          exhausted = true;
-          break;
+          if (page.totalPages !== undefined) {
+            if (page.rawItemCount > 0 && page.totalPages === 0) {
+              throw new ParserChangedError(`Ozon search query ${query} for ${requestedBrand} returned items with totalPages=0`);
+            }
+            declaredTotalPages = Math.max(declaredTotalPages ?? 0, page.totalPages);
+          }
+          if (page.rawItemCount === 0) {
+            if (declaredTotalPages !== undefined && declaredTotalPages >= pageNumber) {
+              throw new AdapterBlockedError(
+                `Ozon search query ${query} for ${requestedBrand} returned an empty page ${pageNumber} before declared page ${declaredTotalPages}`
+              );
+            }
+            exhausted = true;
+            break;
+          }
+          const pageIds = page.items.map((item) => item.listingId).join(",");
+          if (previousPageIds !== undefined && pageIds === previousPageIds) {
+            throw new AdapterBlockedError(
+              `Ozon repeated search query ${query} for ${requestedBrand}; discovery was stopped fail-closed`
+            );
+          }
+          previousPageIds = pageIds;
+          for (const item of page.items) {
+            if (!matchesBrand(item.title, requestedBrand)) continue;
+            products.set(item.listingId, mergeSearchTiles(products.get(item.listingId), item));
+          }
+          if (declaredTotalPages !== undefined && pageNumber >= declaredTotalPages) {
+            exhausted = true;
+            break;
+          }
         }
-        const pageIds = page.items.map((item) => item.listingId).join(",");
-        if (previousPageIds !== undefined && pageIds === previousPageIds) {
-          throw new AdapterBlockedError(`Ozon repeated a search page for ${requestedBrand}; discovery was stopped fail-closed`);
-        }
-        previousPageIds = pageIds;
-        for (const item of page.items) {
-          if (matchesBrand(item.title, requestedBrand)) products.set(item.listingId, item);
-        }
-        if (declaredTotalPages !== undefined && pageNumber >= declaredTotalPages) {
-          exhausted = true;
-          break;
-        }
-      }
 
-      if (!exhausted) {
-        throw new AdapterBlockedError(
-          `Ozon search for ${requestedBrand} reached the ${this.maxPages}-page safety limit without proving exhaustion`
-        );
+        if (!exhausted) {
+          throw new AdapterBlockedError(
+            `Ozon search query ${query} for ${requestedBrand} reached the ${this.maxPages}-page safety limit without proving exhaustion`
+          );
+        }
       }
       matchedProducts = [...products.values()];
       setBounded(this.discoveryTileCache, runScope, matchedProducts, 250);

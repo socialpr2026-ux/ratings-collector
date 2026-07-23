@@ -231,6 +231,15 @@ describe("collector runtime fallback integration", () => {
           }]
         } : { total: 0, products: [] });
       }
+      if (url.hostname === "card.wb.ru") {
+        expect(url.searchParams.get("nm")).toBe("822686443");
+        return json({ products: [{
+          id: 822686443,
+          name: `${request.brands[0]} tablets 12 mg`,
+          nmReviewRating: 4.9,
+          nmFeedbacks: 106
+        }] });
+      }
       throw new Error(`Unexpected test request: ${url}`);
     }) as unknown as typeof fetch;
     const runtime = await createCollectorRuntime({
