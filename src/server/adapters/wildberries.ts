@@ -17,6 +17,7 @@ const SEARCH_ENDPOINTS = [
   "https://search.wb.ru/exactmatch/ru/common/v18/search"
 ] as const;
 const CARD_ENDPOINT = "https://card.wb.ru/cards/v4/detail";
+const FEEDBACK_ENDPOINT = "https://feedbacks1.wb.ru/feedbacks/v2";
 const MOSCOW_DESTINATION = "-1257786";
 const PLATFORM_ID = "wildberries";
 const PLATFORM_DOMAIN = "wildberries.ru";
@@ -29,6 +30,7 @@ const DEFAULT_BLOCKED_COOLDOWN_MS = 30_000;
 const MAX_BLOCKED_RETRY_DELAY_MS = 150;
 const MAX_BLOCKED_RETRY_TOTAL_MS = 1_200;
 const MAX_CARD_INFO_BYTES = 256_000;
+const MAX_CARD_BATCH_SIZE = 100;
 const TRANSIENT_BLOCK_STATUSES = new Set([403, 407, 423, 429, 498, 502, 503, 504]);
 
 // Wildberries stores the nm-specific product description on its public basket
@@ -50,6 +52,16 @@ type JsonObject = Record<string, unknown>;
 type ProductPage = {
   products: JsonObject[];
   total?: number;
+};
+
+type DiscoveryBatchPlan = {
+  refs: ProductRef[];
+  promise?: Promise<void>;
+};
+
+type DistributionMetrics = {
+  ratingCount: number;
+  rating: number;
 };
 
 export type WildberriesAdapterOptions = {
@@ -125,6 +137,34 @@ function firstDefinedId(record: JsonObject, keys: readonly string[]): string | u
     if (value !== undefined) return value;
   }
   return undefined;
+}
+
+function exactFirstPartyIdentity(product: JsonObject, title: string, brand: string): {
+  matches: boolean;
+  sourceBrand?: string;
+} {
+  const sourceBrand = asNonemptyString(product.brand);
+  return {
+    matches: matchesBrand(title, brand) || Boolean(sourceBrand && matchesBrand(sourceBrand, brand)),
+    ...(sourceBrand ? { sourceBrand } : {})
+  };
+}
+
+function distributionMetrics(value: unknown): DistributionMetrics | undefined {
+  if (!isObject(value)) return undefined;
+  let ratingCount = 0;
+  let weightedTotal = 0;
+  for (let score = 1; score <= 5; score += 1) {
+    const count = asNonnegativeInteger(value[String(score)]);
+    if (count === undefined) return undefined;
+    ratingCount += count;
+    weightedTotal += count * score;
+  }
+  if (ratingCount === 0) return undefined;
+  return {
+    ratingCount,
+    rating: Math.round((weightedTotal / ratingCount) * 10) / 10
+  };
 }
 
 function parseProductPage(payload: unknown): ProductPage {
@@ -248,22 +288,33 @@ function metadataId(metadata: ProductRef["metadata"], key: string): string | und
   return asId(metadata[key]);
 }
 
+function metadataString(metadata: ProductRef["metadata"], key: string): string | undefined {
+  return asNonemptyString(metadata[key]);
+}
+
 function observationFromSearchMetadata(
   ref: ProductRef,
   listingId: string,
   capturedAt: string
 ): Observation | undefined {
-  if (ref.metadata.source !== "wildberries-search-v18") return undefined;
+  const source = metadataString(ref.metadata, "source");
+  if (!source?.startsWith("wildberries-")) return undefined;
 
   const title = asNonemptyString(ref.title);
-  const reviews = metadataInteger(ref.metadata, "nmFeedbacks");
-  const rawRating = metadataNumber(ref.metadata, "nmReviewRating");
+  const reviews = metadataInteger(ref.metadata, "resolvedFeedbackCount") ??
+    metadataInteger(ref.metadata, "nmFeedbacks");
+  const rawRating = metadataNumber(ref.metadata, "resolvedRating") ??
+    metadataNumber(ref.metadata, "nmReviewRating");
+  const ratingCount = metadataInteger(ref.metadata, "ratingCount");
+  const writtenReviewCount = metadataInteger(ref.metadata, "writtenReviewCount");
+  const aggregateGroupId = metadataString(ref.metadata, "aggregateGroupId");
   const ratingIsValid = rawRating !== undefined && rawRating >= 0 && rawRating <= 5;
   if (!title || reviews === undefined || !ratingIsValid || (reviews > 0 && rawRating === 0)) {
     return undefined;
   }
 
-  const brandMatches = matchesBrand(title, ref.brand);
+  const sourceBrand = metadataString(ref.metadata, "sourceBrand");
+  const brandMatches = matchesBrand(title, ref.brand) || Boolean(sourceBrand && matchesBrand(sourceBrand, ref.brand));
   const rating = reviews === 0 ? null : rawRating;
   return {
     domain: PLATFORM_DOMAIN,
@@ -273,12 +324,16 @@ function observationFromSearchMetadata(
     canonicalUrl: canonicalProductUrl(listingId),
     product: title,
     reviews,
+    ...(writtenReviewCount !== undefined ? { writtenReviewCount } : {}),
     rating,
+    ...(ratingCount !== undefined ? { ratingCount } : {}),
     ...(rating !== null ? { rawRating: rating, rawRatingScale: 5 } : {}),
     status: brandMatches ? (reviews === 0 ? "no_reviews" : "ok") : "needs_review",
     capturedAt,
     ...(metadataId(ref.metadata, "rootId") ? { groupId: metadataId(ref.metadata, "rootId") } : {}),
-    source: "wildberries-search-v18"
+    ...(aggregateGroupId ? { aggregateGroupId } : {}),
+    ...(metadataString(ref.metadata, "evidenceRef") ? { evidenceRef: metadataString(ref.metadata, "evidenceRef") } : {}),
+    source
   };
 }
 
@@ -309,6 +364,8 @@ export class WildberriesAdapter implements SiteAdapter {
   private requestTail: Promise<void> = Promise.resolve();
   private hasMadeRequest = false;
   private readonly discoveryCache = new Map<string, Promise<ProductRef[]>>();
+  private readonly discoveryBatchPlans = new Map<string, DiscoveryBatchPlan>();
+  private nextDiscoveryBatchId = 0;
 
   constructor(options: WildberriesAdapterOptions = {}) {
     const maxPages = options.maxPages ?? DEFAULT_MAX_PAGES;
@@ -443,7 +500,9 @@ export class WildberriesAdapter implements SiteAdapter {
       for (const product of result.products) {
         const listingId = firstDefinedId(product, ["id", "nmId", "nmID"]);
         const title = asNonemptyString(product.name) ?? asNonemptyString(product.title);
-        if (!listingId || !title || !matchesBrand(title, brand)) continue;
+        if (!listingId || !title) continue;
+        const identity = exactFirstPartyIdentity(product, title, brand);
+        if (!identity.matches) continue;
         if (byListingId.has(listingId)) continue;
 
         const groupId = firstDefinedId(product, ["root", "rootId", "imtId", "imtID"]);
@@ -461,6 +520,7 @@ export class WildberriesAdapter implements SiteAdapter {
           title,
           metadata: {
             source: "wildberries-search-v18",
+            ...(identity.sourceBrand ? { sourceBrand: identity.sourceBrand } : {}),
             ...(groupId ? { rootId: groupId } : {}),
             ...(nmReviewRating !== undefined ? { nmReviewRating } : {}),
             ...(nmFeedbacks !== undefined ? { nmFeedbacks } : {}),
@@ -482,6 +542,8 @@ export class WildberriesAdapter implements SiteAdapter {
       );
     }
 
+    this.registerDiscoveryBatch([...byListingId.values()], brand, context);
+
     for (const previousId of context.previousIds ?? []) {
       const listingId = previousListingId(previousId);
       if (!listingId || byListingId.has(listingId)) continue;
@@ -498,6 +560,183 @@ export class WildberriesAdapter implements SiteAdapter {
     return [...byListingId.values()];
   }
 
+  private registerDiscoveryBatch(refs: ProductRef[], brand: string, context: AdapterContext): void {
+    if (refs.length === 0) return;
+    if (this.discoveryBatchPlans.size >= 64) {
+      throw new AdapterBlockedError("Wildberries has too many pending card-verification batches");
+    }
+    const runScope = context.runId?.trim() || "adhoc";
+    const normalizedBrand = brand.normalize("NFKC").trim().toLocaleLowerCase("ru-RU");
+    const batchKey = `${runScope}\u001e${normalizedBrand}\u001e${++this.nextDiscoveryBatchId}`;
+    for (const ref of refs) ref.metadata.discoveryBatchKey = batchKey;
+    this.discoveryBatchPlans.set(batchKey, { refs });
+  }
+
+  private async ensureDiscoveryBatch(ref: ProductRef, context: AdapterContext): Promise<void> {
+    const batchKey = metadataString(ref.metadata, "discoveryBatchKey");
+    if (!batchKey || ref.metadata.cardBatchVerified === true) return;
+    const plan = this.discoveryBatchPlans.get(batchKey);
+    if (!plan) {
+      throw new ParserChangedError(`Wildberries card-verification batch ${batchKey} is unavailable`);
+    }
+    const verification = plan.promise ?? this.verifyDiscoveredCards(plan.refs, context);
+    plan.promise = verification;
+    try {
+      await verification;
+      this.discoveryBatchPlans.delete(batchKey);
+    } catch (error) {
+      if (plan.promise === verification) plan.promise = undefined;
+      throw error;
+    }
+  }
+
+  private async verifyDiscoveredCards(refs: ProductRef[], context: AdapterContext): Promise<void> {
+    const cards = new Map<string, { product: JsonObject; evidenceRef: string }>();
+    for (let offset = 0; offset < refs.length; offset += MAX_CARD_BATCH_SIZE) {
+      const chunk = refs.slice(offset, offset + MAX_CARD_BATCH_SIZE);
+      const expected = new Set(chunk.map((ref) => ref.listingId));
+      const { page, evidenceUrl } = await this.fetchCardBatch([...expected], context);
+      for (const product of page.products) {
+        const listingId = firstDefinedId(product, ["id", "nmId", "nmID"]);
+        if (!listingId || !expected.has(listingId)) {
+          throw new ParserChangedError("Wildberries card batch returned an unexpected nmId");
+        }
+        if (cards.has(listingId)) {
+          throw new ParserChangedError(`Wildberries card batch returned duplicate nmId ${listingId}`);
+        }
+        cards.set(listingId, { product, evidenceRef: evidenceUrl });
+      }
+      const missing = [...expected].filter((listingId) => !cards.has(listingId));
+      if (missing.length > 0) {
+        throw new AdapterBlockedError(
+          `Wildberries card batch omitted ${missing.length} requested nmIds: ${missing.join(",")}`
+        );
+      }
+    }
+
+    const refsByRoot = new Map<string, ProductRef[]>();
+    for (const ref of refs) {
+      const card = cards.get(ref.listingId);
+      if (!card) throw new AdapterBlockedError(`Wildberries card batch omitted requested nmId ${ref.listingId}`);
+      const title = asNonemptyString(card.product.name) ?? asNonemptyString(card.product.title);
+      if (!title) throw new ParserChangedError(`Wildberries card ${ref.listingId} has no first-party title`);
+      const identity = exactFirstPartyIdentity(card.product, title, ref.brand);
+      if (!identity.matches) {
+        throw new ParserChangedError(`Wildberries card ${ref.listingId} no longer proves brand ${ref.brand}`);
+      }
+      const rootId = firstDefinedId(card.product, ["root", "rootId", "imtId", "imtID"]);
+      const feedbackCount = firstDefinedInteger(card.product, ["nmFeedbacks"]);
+      const rating = firstDefinedNumber(card.product, ["nmReviewRating"]);
+      if (feedbackCount === undefined || rating === undefined || rating < 0 || rating > 5 ||
+        (feedbackCount > 0 && rating === 0)) {
+        throw new ParserChangedError(`Wildberries card ${ref.listingId} has invalid nm-specific metrics`);
+      }
+
+      ref.title = title;
+      ref.metadata = {
+        ...ref.metadata,
+        source: "wildberries-card-v4-batch",
+        ...(identity.sourceBrand ? { sourceBrand: identity.sourceBrand } : {}),
+        ...(rootId ? { rootId } : {}),
+        nmFeedbacks: feedbackCount,
+        nmReviewRating: rating,
+        cardNmFeedbacks: feedbackCount,
+        cardNmReviewRating: rating,
+        evidenceRef: card.evidenceRef
+      };
+      delete ref.metadata.resolvedFeedbackCount;
+      delete ref.metadata.resolvedRating;
+      delete ref.metadata.ratingCount;
+      delete ref.metadata.writtenReviewCount;
+      delete ref.metadata.aggregateGroupId;
+
+      if (rootId) {
+        const members = refsByRoot.get(rootId) ?? [];
+        members.push(ref);
+        refsByRoot.set(rootId, members);
+      }
+    }
+
+    for (const [rootId, members] of refsByRoot) {
+      const byFingerprint = new Map<string, ProductRef[]>();
+      for (const member of members) {
+        const feedbackCount = metadataInteger(member.metadata, "nmFeedbacks");
+        const rating = metadataNumber(member.metadata, "nmReviewRating");
+        if (feedbackCount === undefined || feedbackCount === 0 || rating === undefined) continue;
+        const fingerprint = `${feedbackCount}:${rating}`;
+        const duplicates = byFingerprint.get(fingerprint) ?? [];
+        duplicates.push(member);
+        byFingerprint.set(fingerprint, duplicates);
+      }
+      const duplicatedMembers = [...new Set(
+        [...byFingerprint.values()].filter((items) => items.length > 1).flat()
+      )];
+      if (duplicatedMembers.length > 1) {
+        await this.resolveRootMetrics(rootId, members, duplicatedMembers, context);
+      }
+    }
+
+    for (const ref of refs) ref.metadata.cardBatchVerified = true;
+  }
+
+  private async resolveRootMetrics(
+    rootId: string,
+    members: ProductRef[],
+    duplicatedMembers: ProductRef[],
+    context: AdapterContext
+  ): Promise<void> {
+    const { payload, evidenceUrl } = await this.fetchRootFeedback(rootId, context);
+    if (!isObject(payload)) throw new ParserChangedError(`Wildberries root ${rootId} returned a non-object payload`);
+
+    const distributions = payload.nmValuationDistribution;
+    if (Array.isArray(distributions) && distributions.length > 0) {
+      const byListingId = new Map<string, DistributionMetrics>();
+      for (const item of distributions) {
+        if (!isObject(item)) throw new ParserChangedError(`Wildberries root ${rootId} has malformed nm distribution`);
+        const listingId = firstDefinedId(item, ["nm", "nmId", "nmID"]);
+        const metrics = distributionMetrics(item.valuationDistribution);
+        if (!listingId || !metrics || byListingId.has(listingId)) {
+          throw new ParserChangedError(`Wildberries root ${rootId} has invalid nm distribution`);
+        }
+        byListingId.set(listingId, metrics);
+      }
+      const missing = duplicatedMembers.filter((member) => !byListingId.has(member.listingId));
+      if (missing.length > 0) {
+        throw new ParserChangedError(
+          `Wildberries root ${rootId} omitted nm distributions for ${missing.map((item) => item.listingId).join(",")}`
+        );
+      }
+      for (const member of members) {
+        const metrics = byListingId.get(member.listingId);
+        if (!metrics) continue;
+        member.metadata.resolvedFeedbackCount = metrics.ratingCount;
+        member.metadata.ratingCount = metrics.ratingCount;
+        member.metadata.resolvedRating = metrics.rating;
+        member.metadata.source = "wildberries-root-nm-distribution";
+        member.metadata.evidenceRef = evidenceUrl;
+        delete member.metadata.aggregateGroupId;
+      }
+      return;
+    }
+
+    const feedbackCount = asNonnegativeInteger(payload.feedbackCount);
+    const rating = asFiniteNumber(payload.valuation);
+    if (feedbackCount === undefined || rating === undefined || rating < 0 || rating > 5 ||
+      (feedbackCount > 0 && rating === 0)) {
+      throw new ParserChangedError(`Wildberries root ${rootId} has no valid shared aggregate`);
+    }
+    const rootDistribution = distributionMetrics(payload.valuationDistribution);
+    for (const member of members) {
+      member.metadata.resolvedFeedbackCount = feedbackCount;
+      member.metadata.writtenReviewCount = feedbackCount;
+      if (rootDistribution) member.metadata.ratingCount = rootDistribution.ratingCount;
+      member.metadata.resolvedRating = feedbackCount === 0 ? 0 : rating;
+      member.metadata.aggregateGroupId = `wildberries:root:${rootId}`;
+      member.metadata.source = "wildberries-root-family-aggregate";
+      member.metadata.evidenceRef = evidenceUrl;
+    }
+  }
+
   private discoveryCacheKey(brand: string, context: AdapterContext): string | undefined {
     const runId = context.runId?.trim();
     if (!runId) return undefined;
@@ -509,6 +748,7 @@ export class WildberriesAdapter implements SiteAdapter {
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
     const listingId = asId(ref.listingId);
     if (!listingId) throw new ParserChangedError("Wildberries listingId must be a positive numeric nmId");
+    await this.ensureDiscoveryBatch(ref, context);
 
     const currentSearchTitle = asNonemptyString(ref.title);
     const enrichedSearchTitle = currentSearchTitle
@@ -548,6 +788,7 @@ export class WildberriesAdapter implements SiteAdapter {
 
     const apiTitle = asNonemptyString(product.name) ?? asNonemptyString(product.title) ?? ref.title;
     if (!apiTitle) throw new ParserChangedError(`Wildberries card ${listingId} has no product title`);
+    const sourceBrand = asNonemptyString(product.brand) ?? metadataString(ref.metadata, "sourceBrand");
     const bestKnownTitle = preferProductTitle(apiTitle, asNonemptyString(ref.title));
     const title = await this.enrichProductTitle(listingId, ref.brand, bestKnownTitle, context);
 
@@ -570,7 +811,8 @@ export class WildberriesAdapter implements SiteAdapter {
     }
 
     const ratingIsValid = rawRating !== undefined && rawRating >= 0 && rawRating <= 5;
-    const hasStrictBrandMatch = matchesBrand(title, ref.brand);
+    const hasStrictBrandMatch = matchesBrand(title, ref.brand) ||
+      Boolean(sourceBrand && matchesBrand(sourceBrand, ref.brand));
     let status: Observation["status"];
     let rating: number | null;
 
@@ -681,6 +923,37 @@ export class WildberriesAdapter implements SiteAdapter {
     url.searchParams.set("nm", listingId);
     return {
       page: parseProductPage(await this.requestJson(url, context)),
+      evidenceUrl: url.toString()
+    };
+  }
+
+  private async fetchCardBatch(
+    listingIds: string[],
+    context: AdapterContext
+  ): Promise<{ page: ProductPage; evidenceUrl: string }> {
+    if (listingIds.length < 1 || listingIds.length > MAX_CARD_BATCH_SIZE) {
+      throw new Error(`Wildberries card batch size must be between 1 and ${MAX_CARD_BATCH_SIZE}`);
+    }
+    const url = new URL(this.cardEndpoint);
+    url.searchParams.set("appType", "1");
+    url.searchParams.set("curr", "rub");
+    url.searchParams.set("dest", this.destination);
+    url.searchParams.set("lang", "ru");
+    url.searchParams.set("locale", "ru");
+    url.searchParams.set("nm", listingIds.join(";"));
+    return {
+      page: parseProductPage(await this.requestJson(url, context)),
+      evidenceUrl: url.toString()
+    };
+  }
+
+  private async fetchRootFeedback(
+    rootId: string,
+    context: AdapterContext
+  ): Promise<{ payload: unknown; evidenceUrl: string }> {
+    const url = new URL(`${FEEDBACK_ENDPOINT}/${rootId}`);
+    return {
+      payload: await this.requestJson(url, context),
       evidenceUrl: url.toString()
     };
   }
