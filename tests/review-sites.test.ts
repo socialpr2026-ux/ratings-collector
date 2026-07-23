@@ -1107,7 +1107,8 @@ describe("blocked free-mode review sites", () => {
       "pravogolosa.net",
       "ru.otzyv.com",
       "medum.ru",
-      "polza.ru"
+      "polza.ru",
+      "apteka.magnit.ru"
     ]);
   });
 });

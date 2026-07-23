@@ -18,7 +18,6 @@ export const INITIAL_DOMAINS = [
   "ozerki.ru",
   "farmlend.ru",
   "budzdorov.ru",
-  "apteka.magnit.ru",
   "vitaexpress.ru",
   "uteka.ru",
   "eapteka.ru",

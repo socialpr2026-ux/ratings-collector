@@ -490,11 +490,12 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
   }
 ];
 
-// These sites cannot currently provide a product-bound review aggregate:
-// Medum blocks the free paths, while Polza removed product reviews.
+// These sites cannot currently provide a product-bound public review aggregate:
+// Medum blocks the free paths, Polza removed product reviews, and Magnit exposes
+// numbers only through a hidden API that has no customer-visible rating block.
 // Keep every path explicit and fail closed instead of publishing zeroes.
 export const BLOCKED_FREE_MODE_DOMAINS = ["medum.ru", "polza.ru"] as const;
-export const UNPROVEN_AGGREGATE_DOMAINS = [] as const;
+export const UNPROVEN_AGGREGATE_DOMAINS = ["apteka.magnit.ru"] as const;
 const PRAVOGOLOSA_HEALTH_CANARY = "ratingscollector-healthcheck-7f4c2a";
 
 function paginationCandidates($: CheerioAPI, pageUrl: string, definition: ReviewSiteDefinition): string[] {
@@ -1313,7 +1314,7 @@ export class UnprovenAggregateAdapter implements SiteAdapter {
   }
 
   private message(): string {
-    return `unsupported_aggregate: ${this.domain} показывает отдельные тексты отзывов, но не доказан полный reviewCount и рейтинг; no_results не выводится`;
+    return `blocked: unsupported_aggregate: ${this.domain} не показывает рейтинг и отзывы на карточке товара; скрытые API-агрегаты не публикуются; no_results не выводится`;
   }
 
   async healthCheck(_context: AdapterContext): Promise<AdapterHealth> {

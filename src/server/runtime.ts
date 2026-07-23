@@ -11,7 +11,6 @@ import { ResilientAdapter } from "./adapters/resilient.js";
 import { createReviewSiteAdapters } from "./adapters/review-sites.js";
 import { EaptekaAdapter } from "./adapters/eapteka.js";
 import { VaptekeAdapter } from "./adapters/vapteke.js";
-import { MagnitPharmacyAdapter } from "./adapters/magnit-pharmacy.js";
 import { MaksavitAdapter } from "./adapters/maksavit.js";
 import { VitaExpressAdapter } from "./adapters/vitaexpress.js";
 import { AsnaAdapter } from "./adapters/pharmacy-recovery.js";
@@ -177,7 +176,6 @@ export async function createCollectorRuntime(options: {
     new MedOtzyvAdapter(evidence, options.fetch),
     new EaptekaAdapter(evidence, options.fetch),
     new VaptekeAdapter(evidence, options.fetch),
-    new MagnitPharmacyAdapter(evidence, options.fetch),
     new MaksavitAdapter(evidence, options.fetch),
     new VitaExpressAdapter(evidence, options.fetch),
     new AsnaAdapter(evidence, options.fetch),

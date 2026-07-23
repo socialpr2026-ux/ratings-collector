@@ -573,4 +573,28 @@ describe("collector runtime fallback integration", () => {
     expect(run.observations).toEqual([]);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("keeps Magnit Pharmacy blocked when ratings exist only in a hidden API", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error("disabled pharmacies must not be requested");
+    }) as unknown as typeof fetch;
+    const runtime = await createCollectorRuntime({
+      repository: new MemoryRepository(),
+      evidence: new MemoryEvidenceStore(),
+      fetch: fetchMock
+    });
+
+    const run = await runtime.service.executeRun((await runtime.service.createRun({
+      ...request,
+      domains: ["apteka.magnit.ru"],
+      brands: ["Кагоцел"]
+    })).id);
+
+    expect(run.partitions).toMatchObject([
+      { domain: "apteka.magnit.ru", status: "blocked", discovered: 0, collected: 0 }
+    ]);
+    expect(run.partitions[0]?.message).toContain("unsupported_aggregate");
+    expect(run.observations).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

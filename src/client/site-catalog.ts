@@ -73,7 +73,12 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
       { domain: "budzdorov.ru", label: "Будь Здоров" },
       { domain: "samson-pharma.ru", label: "Самсон-Фарма", availability: "temporarily_blocked", note: "Сборщик ещё не подключён" },
       { domain: "zdesapteka.ru", label: "Здесь Аптека", availability: "temporarily_blocked", note: "Сайт сейчас блокирует автоматический доступ" },
-      { domain: "apteka.magnit.ru", label: "Магнит Аптека" },
+      {
+        domain: "apteka.magnit.ru",
+        label: "Магнит Аптека",
+        availability: "temporarily_blocked",
+        note: "Рейтинг не отображается на карточке товара; скрытые API-агрегаты исключены"
+      },
       { domain: "superapteka.ru", label: "СуперАптека", availability: "temporarily_blocked", note: "Сборщик ещё не подключён" },
       { domain: "vitaexpress.ru", label: "Аптека Вита" },
       { domain: "zhivika.ru", label: "Живика", availability: "temporarily_blocked", note: "Сборщик ещё не подключён" },
