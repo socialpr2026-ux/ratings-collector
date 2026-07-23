@@ -185,6 +185,21 @@ describe("canonical product descriptors", () => {
     )).toBe("Плюс без сахара таблетки для рассасывания 950 мг №30");
   });
 
+  it("normalizes compact Baktoblis marketplace and pharmacy pack notation", () => {
+    expect(analyzeProductIdentity({
+      brand: "Бактоблис",
+      product: "Бактоблис+30таб таблетки для рассасывания"
+    })).toMatchObject({ granularity: "variant", confidence: "exact", label: "Плюс таблетки для рассасывания №30" });
+    expect(analyzeProductIdentity({
+      brand: "Бактоблис",
+      product: "Бактоблис Плюс табл. д/рассас. 950 мг х90"
+    })).toMatchObject({ granularity: "variant", confidence: "exact", label: "Плюс таблетки для рассасывания 950 мг №90" });
+    expect(analyzeProductIdentity({
+      brand: "Бактоблис",
+      product: "БактоБЛИС пор саше-пак 1500 мг х15"
+    })).toMatchObject({ granularity: "variant", confidence: "exact", label: "порошок в саше 1500 мг №15" });
+  });
+
   it("uses a clear brand-level label when a review page has no product variant", () => {
     expect(canonicalProductDescriptor("Анвифен", "Анвифен — отзывы, инструкция, цена и аналоги"))
       .toBe("Общая карточка бренда");

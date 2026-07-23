@@ -229,6 +229,7 @@ input::placeholder, textarea::placeholder { color: #9aa09d; }
 .profile-meaning select { min-height: 38px; border-color: #d8c49a; background: #fff; }
 .profile-gate-action { display: flex; align-items: center; justify-content: flex-end; gap: 14px; }
 .profile-gate-action > span { color: #776a4c; font-size: 10px; }
+.review-footer-action { display: flex; justify-content: flex-end; margin-top: 12px; }
 .table-wrap { overflow: auto; border: 1px solid #e0e5e2; border-radius: 13px; }
 .table-wrap:focus-visible { outline: 3px solid rgba(37, 113, 80, .18); outline-offset: 2px; }
 table { width: 100%; min-width: 850px; border-collapse: collapse; }

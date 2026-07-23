@@ -180,6 +180,8 @@ function formatMass(mg: number): string {
 function countFromText(value: string): number | undefined {
   const explicit = value.match(new RegExp(`(?:№|#|\\bN(?:o)?\\.?)(?:\\s*)${NUMBER}\\b`, "iu"));
   if (explicit) return Number(explicit[1]);
+  const multiplied = value.match(/(?<![\p{L}\p{N}])(?:x|х|×)\s*(\d{1,4})(?!\d)(?!\s*(?:уп(?:аковк)?\.?|упаков(?:ки|ок|ка)))/iu);
+  if (multiplied) return Number(multiplied[1]);
   const labelled = value.match(/(?:кол(?:ичество|-?во)(?:\s+в\s+упаковке)?|фасовка|комплектация)\s*[:—-]?\s*(\d{1,4})(?!\d)/iu);
   if (labelled) return Number(labelled[1]);
   const afterPattern = new RegExp(`(?<!\\d)${NUMBER}\\s*${COUNT_UNIT}(?![\\p{L}\\p{N}])`, "giu");
@@ -204,7 +206,8 @@ function countFromText(value: string): number | undefined {
 }
 
 function formFromText(value: string): string | undefined {
-  const found = FORM_RULES.filter((rule) => rule.pattern.test(value)).map((rule) => rule.value);
+  const separated = value.replace(/(?<=\d)(?=(?:табл?\.?|таблет|капс|саше|пакет|пастил|ампул|фл\.?|флакон|свеч|суппозитор))/giu, " ");
+  const found = FORM_RULES.filter((rule) => rule.pattern.test(separated)).map((rule) => rule.value);
   if (found.includes("порошок") && found.includes("саше")) return "порошок в саше";
   if (found.includes("гранулы") && found.includes("саше")) return "гранулы в саше";
   return found[0];
@@ -414,8 +417,11 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
   const doses = equivalence.doses;
   const multipackMatch = withoutBrand.match(/(?:[xх×]\s*|(?<![\p{L}\p{N}]))(\d+)\s*(?:уп(?:аковк)?\.?|упаков(?:ки|ок|ка))(?![\p{L}\p{N}])/iu);
   const multipack = multipackMatch ? Number(multipackMatch[1]) : undefined;
-  const modifiers = MODIFIERS.filter((item) => item.pattern.test(withoutBrand))
+  const sourceHasBaktoblisPlus = normalizeText(brand) === "бактоблис"
+    && /(?:бактоблис|бакто\s*блис|bactoblis)\s*\+/iu.test(sourceWithoutVendor);
+  const modifiers = [...(sourceHasBaktoblisPlus ? ["Плюс"] : []), ...MODIFIERS.filter((item) => item.pattern.test(withoutBrand))
     .map((item) => item.value)
+  ]
     // "Плюс" can qualify a concrete dosage form, but by itself it does
     // not prove a product or a separate line.
     .filter((value) => value !== "Плюс" || Boolean(form || doses.length));

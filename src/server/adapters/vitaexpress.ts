@@ -22,7 +22,7 @@ const EMPTY_REVIEW_TEXT = "\u0432\u0430\u0448 \u043e\u0442\u0437\u044b\u0432 \u0
 
 type ExactProduct = {
   id: string;
-  brand: "\u0411\u0438\u0432\u0438\u0430\u0440\u0442" | "\u041e\u043a\u0443\u0441\u0430\u043b\u0438\u043d" | "\u041e\u0444\u0442\u0430\u0440\u0438\u043d\u0442" | "\u0422\u0430\u0443\u0441\u0442\u0438\u043d";
+  brand: "\u0411\u0438\u0432\u0438\u0430\u0440\u0442" | "\u041e\u043a\u0443\u0441\u0430\u043b\u0438\u043d" | "\u041e\u0444\u0442\u0430\u0440\u0438\u043d\u0442" | "\u0422\u0430\u0443\u0441\u0442\u0438\u043d" | "Бактоблис";
   url: string;
   requiredPhrases: readonly string[];
 };
@@ -31,6 +31,10 @@ type ParsedPage = {
   canonicalUrl: string;
   title: string;
   productEvidence: ProductEvidence;
+  reviews: number;
+  writtenReviewCount: number;
+  rating: number | null;
+  ratingCount: number;
 };
 
 type FetchedPage = ParsedPage & {
@@ -74,6 +78,36 @@ const EXACT_PRODUCTS: readonly ExactProduct[] = [
     brand: "\u0422\u0430\u0443\u0441\u0442\u0438\u043d",
     url: `${ORIGIN}/product/taurin__taustin__kapli_glaznye_4_10ml_solofarm/`,
     requiredPhrases: ["\u0442\u0430\u0443\u0441\u0442\u0438\u043d", "\u0441\u043e\u043b\u043e\u0444\u0430\u0440\u043c", "\u043a\u0430\u043f\u043b\u0438 \u0433\u043b\u0430\u0437\u043d\u044b\u0435", "4", "10\u043c\u043b"]
+  },
+  {
+    id: "203657",
+    brand: "Бактоблис",
+    url: `${ORIGIN}/product/baktoblis_plyus_tab__drassas___30_bsakhara_bad/`,
+    requiredPhrases: ["бактоблис", "таблетки для рассасывания", "no30", "без сахара"]
+  },
+  {
+    id: "197583",
+    brand: "Бактоблис",
+    url: `${ORIGIN}/product/baktoblis_plyus_tab__drassas__950mg__90_bad/`,
+    requiredPhrases: ["бактоблис плюс", "таблетки для рассасывания", "no90"]
+  },
+  {
+    id: "190233",
+    brand: "Бактоблис",
+    url: `${ORIGIN}/product/baktoblis_por__dpr__vnutr_1500mg__15_sashe_pak__bad/`,
+    requiredPhrases: ["бактоблис", "порошок в саше пакетах", "no15"]
+  },
+  {
+    id: "193661",
+    brand: "Бактоблис",
+    url: `${ORIGIN}/product/baktoblis_por__dpr__vnutr_1500mg__30_sashe_pak__bad/`,
+    requiredPhrases: ["бактоблис", "порошок в саше пакетах", "no30"]
+  },
+  {
+    id: "175303",
+    brand: "Бактоблис",
+    url: `${ORIGIN}/product/baktoblis_tabletki_bad_30/`,
+    requiredPhrases: ["бактоблис плюс", "таблетки для рассасывания", "no30"]
   }
 ] as const;
 
@@ -133,7 +167,7 @@ function productEvidence(product: ExactProduct, title: string): ProductEvidence 
   };
 }
 
-function parseExactEmptyPage(body: string, product: ExactProduct): ParsedPage {
+function parseExactPage(body: string, product: ExactProduct): ParsedPage {
   const $ = load(body);
   const titleNodes = $("h1");
   const title = compactText(titleNodes.first().text());
@@ -159,7 +193,7 @@ function parseExactEmptyPage(body: string, product: ExactProduct): ParsedPage {
   if (pageRoots.length !== 1 || pageRoot.attr("data-id") !== product.id ||
       pageRoot.attr("data-xml") !== product.id || pageRoot.attr("data-xml_id") !== product.id ||
       pageRoot.attr("data-url") !== expectedUrl.pathname ||
-      normalizeText(pageRoot.attr("data-name") ?? "") !== normalizeText(title)) {
+      !matchesExactTitle(pageRoot.attr("data-name") ?? "", product)) {
     throw new ParserChangedError(`${DOMAIN}:${product.id}: first-party product identity changed`);
   }
 
@@ -167,13 +201,14 @@ function parseExactEmptyPage(body: string, product: ExactProduct): ParsedPage {
   const reviews = reviewComponents.first();
   if (reviewComponents.length !== 1 || reviews.attr(":id") !== product.id ||
       reviews.attr(":product-id") !== product.id ||
-      normalizeText(reviews.attr("name") ?? "") !== normalizeText(title)) {
+      !matchesExactTitle(reviews.attr("name") ?? "", product)) {
     throw new ParserChangedError(`${DOMAIN}:${product.id}: product-bound review component changed`);
   }
 
   const reviewPayload = parseJsonAttribute(reviews.attr(":reviews"), "reviews", product.id);
-  if (!isRecord(reviewPayload) || String(reviewPayload.productId) !== product.id || reviewPayload.reviewList !== null) {
-    throw new ParserChangedError(`${DOMAIN}:${product.id}: empty written-review list is not proven`);
+  if (!isRecord(reviewPayload) || String(reviewPayload.productId) !== product.id ||
+      reviewPayload.reviewList !== null && !Array.isArray(reviewPayload.reviewList)) {
+    throw new ParserChangedError(`${DOMAIN}:${product.id}: written-review list is not source-bound`);
   }
 
   const ratingPayload = parseJsonAttribute(reviews.attr(":rating"), "rating", product.id);
@@ -181,19 +216,39 @@ function parseExactEmptyPage(body: string, product: ExactProduct): ParsedPage {
     throw new ParserChangedError(`${DOMAIN}:${product.id}: rating-count payload changed`);
   }
   const aggregate = ratingPayload[0];
+  const reviewsCount = Number(aggregate.reviewsCount);
+  const rawRating = Number(aggregate.rating);
   if (String(aggregate.productId) !== product.id || aggregate.status !== true ||
-      aggregate.reviewsCount !== 0 || aggregate.rating !== 0) {
-    throw new ParserChangedError(`${DOMAIN}:${product.id}: source-bound empty aggregate is not proven`);
+      !Number.isInteger(reviewsCount) || reviewsCount < 0 ||
+      !Number.isFinite(rawRating) || rawRating < 0 || rawRating > 5 ||
+      (reviewsCount === 0) !== (rawRating === 0)) {
+    throw new ParserChangedError(`${DOMAIN}:${product.id}: source-bound review aggregate is invalid`);
   }
 
   const reviewText = normalizeText(reviews.text());
   const headings = reviews.find("h2");
-  if (headings.length !== 1 || !normalizeText(headings.first().text()).includes(`\u043e\u0442\u0437\u044b\u0432\u044b \u043e \u0442\u043e\u0432\u0430\u0440\u0435 ${normalizeText(title)}`) ||
-      !reviewText.includes(EMPTY_REVIEW_TEXT)) {
+  const headingText = compactText(headings.first().text());
+  if (headings.length !== 1 || !normalizeText(headingText).startsWith("отзывы о товаре ") ||
+      !matchesExactTitle(headingText, product)) {
+    throw new ParserChangedError(`${DOMAIN}:${product.id}: visible review heading is missing`);
+  }
+  const reviewList = reviewPayload.reviewList;
+  if (reviewsCount === 0 && (reviewList !== null || !reviewText.includes(EMPTY_REVIEW_TEXT))) {
     throw new ParserChangedError(`${DOMAIN}:${product.id}: visible first-review empty state is missing`);
   }
+  if (reviewsCount > 0 && (!Array.isArray(reviewList) || reviewList.length === 0 || reviewText.includes(EMPTY_REVIEW_TEXT))) {
+    throw new ParserChangedError(`${DOMAIN}:${product.id}: positive written-review state is not proven`);
+  }
 
-  return { canonicalUrl: product.url, title, productEvidence: productEvidence(product, title) };
+  return {
+    canonicalUrl: product.url,
+    title,
+    productEvidence: productEvidence(product, title),
+    reviews: reviewsCount,
+    writtenReviewCount: Array.isArray(reviewList) ? reviewList.length : 0,
+    rating: reviewsCount === 0 ? null : rawRating,
+    ratingCount: reviewsCount
+  };
 }
 
 export class VitaExpressAdapter implements SiteAdapter {
@@ -250,7 +305,9 @@ export class VitaExpressAdapter implements SiteAdapter {
 
     const capturedAt = new Date().toISOString();
     const page = await this.fetchExact(product, context);
-    const source = "vitaexpress-visible-first-review-empty-state";
+    const source = page.reviews === 0
+      ? "vitaexpress-visible-first-review-empty-state"
+      : "vitaexpress-source-bound-review-aggregate";
     const evidenceRef = await this.evidence.put({
       capturedAt,
       url: product.url,
@@ -260,11 +317,11 @@ export class VitaExpressAdapter implements SiteAdapter {
         listingId: product.id,
         title: page.title,
         canonicalUrl: page.canonicalUrl,
-        reviews: 0,
-        writtenReviewCount: 0,
-        rating: null,
-        ratingCount: 0,
-        countMeaning: "visible empty written-review state plus source-bound reviewsCount"
+        reviews: page.reviews,
+        writtenReviewCount: page.writtenReviewCount,
+        rating: page.rating,
+        ratingCount: page.ratingCount,
+        countMeaning: "source-bound reviewsCount plus product-bound written-review component"
       },
       productEvidence: page.productEvidence,
       source
@@ -277,11 +334,11 @@ export class VitaExpressAdapter implements SiteAdapter {
       brand: ref.brand,
       canonicalUrl: page.canonicalUrl,
       product: page.title,
-      reviews: 0,
-      writtenReviewCount: 0,
-      rating: null,
-      ratingCount: 0,
-      status: "no_reviews",
+      reviews: page.reviews,
+      writtenReviewCount: page.writtenReviewCount,
+      rating: page.rating,
+      ratingCount: page.ratingCount,
+      status: page.reviews === 0 ? "no_reviews" : "ok",
       capturedAt,
       evidenceRef,
       productEvidence: page.productEvidence,
@@ -337,7 +394,6 @@ export class VitaExpressAdapter implements SiteAdapter {
       throw new ParserChangedError(`${DOMAIN}:${product.id}: product page returned non-HTML content`);
     }
 
-    return { ...parseExactEmptyPage(body, product), body, status: response.status };
+    return { ...parseExactPage(body, product), body, status: response.status };
   }
 }
-

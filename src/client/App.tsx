@@ -1177,8 +1177,8 @@ export function App() {
           <div className="selection-bar-top">
             <label><input type="checkbox" checked={allReviewSelected} onChange={toggleAllReview} disabled={visibleConfirmableReviewItems.length === 0} /> <span>Выбрать все показанные</span></label>
             <div className="selection-actions">
-              <span aria-live="polite">Выбрано: {selectedCount}</span>
-              {selectedUnapprovedProfileDomains.length === 0 && <button className="button button-secondary button-compact" type="button" onClick={acceptSelected} disabled={selectedCount === 0 || busy}>{busyAction === "review" ? "Сохраняем…" : `Подтвердить выбранные · ${selectedCount}`}</button>}
+              <span aria-live="polite">Выбрано: {selectedCount}. Нажмите кнопку, чтобы сохранить подтверждение.</span>
+              {selectedUnapprovedProfileDomains.length === 0 && <button className="button button-primary button-compact" type="button" onClick={acceptSelected} disabled={selectedCount === 0 || busy}>{busyAction === "review" ? "Сохраняем…" : `Подтвердить и сохранить · ${selectedCount}`}</button>}
             </div>
           </div>
 
@@ -1229,7 +1229,7 @@ export function App() {
                 const proofLines = productProofLines({ productIdentity: identity });
                 return <tr key={key} className={item.status === "needs_review" ? "row-review" : ""}>
                   <td className={`check-column ${item.status !== "needs_review" ? "check-empty" : ""}`} data-label="Выбрать">{item.status === "needs_review" && (confirmable
-                    ? <input aria-label={`Подтвердить карточку ${item.product}`} type="checkbox" checked={selected.has(key)} onChange={(event) => setSelected((current) => { const next = new Set(current); event.target.checked ? next.add(key) : next.delete(key); return next; })} />
+                    ? <input aria-label={`Выбрать карточку ${item.product}`} type="checkbox" checked={selected.has(key)} onChange={(event) => setSelected((current) => { const next = new Set(current); event.target.checked ? next.add(key) : next.delete(key); return next; })} />
                     : <span className="check-unavailable" aria-label={observationIssueText(item)}>—</span>)}</td>
                   <td data-label="Площадка"><span className="domain-name">{item.domain}</span></td>
                   <td className="brand-cell" data-label="Бренд"><strong>{item.brand}</strong></td>
@@ -1243,6 +1243,12 @@ export function App() {
             </tbody>
           </table>
         </div>
+
+        {selectedCount > 0 && selectedUnapprovedProfileDomains.length === 0 && <div className="review-footer-action">
+          <button className="button button-primary" type="button" onClick={acceptSelected} disabled={busy}>
+            {busyAction === "review" ? "Сохраняем подтверждение…" : `Подтвердить и сохранить выбранные · ${selectedCount}`}
+          </button>
+        </div>}
 
       </section>}
 

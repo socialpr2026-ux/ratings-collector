@@ -358,15 +358,35 @@ export class VaptekeAdapter implements SiteAdapter {
     init: RequestInit = {},
     maxBytes = MAX_DOCUMENT_BYTES
   ): Promise<{ response: Response; body: string }> {
+    const wantsHtml = /text\/html|application\/xhtml\+xml/iu.test(accept);
+    const browserHeaders = new Headers(init.headers);
+    browserHeaders.set("x-ratings-browser", "1");
+    const browserInit = { ...init, headers: browserHeaders };
+    let direct: { response: Response; body: string };
+    try {
+      direct = await this.requestOnce(url, context, accept, init, maxBytes);
+    } catch (error) {
+      if (!wantsHtml) throw error;
+      return this.requestOnce(url, context, accept, browserInit, maxBytes);
+    }
+    if (!wantsHtml || !blockedStatus(direct.response.status) && !isBlockedBody(direct.body)) return direct;
+    return this.requestOnce(url, context, accept, browserInit, maxBytes);
+  }
+
+  private async requestOnce(
+    url: string,
+    context: AdapterContext,
+    accept: string,
+    init: RequestInit,
+    maxBytes: number
+  ): Promise<{ response: Response; body: string }> {
     let response: Response;
+    const requestHeaders = new Headers(init.headers);
+    requestHeaders.set("accept", accept);
     try {
       response = await safeFetch(url, {
         ...init,
-        headers: {
-          accept,
-          ...(/text\/html|application\/xhtml\+xml/iu.test(accept) ? { "x-ratings-browser": "1" } : {}),
-          ...init.headers
-        },
+        headers: Object.fromEntries(requestHeaders.entries()),
         signal: context.signal
       }, context.fetch ?? this.fetchImpl);
     } catch (error) {

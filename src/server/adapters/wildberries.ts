@@ -688,6 +688,25 @@ export class WildberriesAdapter implements SiteAdapter {
     const { payload, evidenceUrl } = await this.fetchRootFeedback(rootId, context);
     if (!isObject(payload)) throw new ParserChangedError(`Wildberries root ${rootId} returned a non-object payload`);
 
+    const applySharedAggregate = () => {
+      const feedbackCount = asNonnegativeInteger(payload.feedbackCount);
+      const rating = asFiniteNumber(payload.valuation);
+      if (feedbackCount === undefined || rating === undefined || rating < 0 || rating > 5 ||
+        (feedbackCount > 0 && rating === 0)) {
+        throw new ParserChangedError(`Wildberries root ${rootId} has no valid shared aggregate`);
+      }
+      const rootDistribution = distributionMetrics(payload.valuationDistribution);
+      for (const member of members) {
+        member.metadata.resolvedFeedbackCount = feedbackCount;
+        member.metadata.writtenReviewCount = feedbackCount;
+        if (rootDistribution) member.metadata.ratingCount = rootDistribution.ratingCount;
+        member.metadata.resolvedRating = feedbackCount === 0 ? 0 : rating;
+        member.metadata.aggregateGroupId = `wildberries:root:${rootId}`;
+        member.metadata.source = "wildberries-root-family-aggregate";
+        member.metadata.evidenceRef = evidenceUrl;
+      }
+    };
+
     const distributions = payload.nmValuationDistribution;
     if (Array.isArray(distributions) && distributions.length > 0) {
       const byListingId = new Map<string, DistributionMetrics>();
@@ -702,9 +721,11 @@ export class WildberriesAdapter implements SiteAdapter {
       }
       const missing = duplicatedMembers.filter((member) => !byListingId.has(member.listingId));
       if (missing.length > 0) {
-        throw new ParserChangedError(
-          `Wildberries root ${rootId} omitted nm distributions for ${missing.map((item) => item.listingId).join(",")}`
-        );
+        // A root can expose a valid family aggregate while omitting the
+        // per-nm distribution for one of its variants. Publish that source-
+        // bound aggregate once instead of duplicating or inventing SKU data.
+        applySharedAggregate();
+        return;
       }
       for (const member of members) {
         const metrics = byListingId.get(member.listingId);
@@ -719,22 +740,7 @@ export class WildberriesAdapter implements SiteAdapter {
       return;
     }
 
-    const feedbackCount = asNonnegativeInteger(payload.feedbackCount);
-    const rating = asFiniteNumber(payload.valuation);
-    if (feedbackCount === undefined || rating === undefined || rating < 0 || rating > 5 ||
-      (feedbackCount > 0 && rating === 0)) {
-      throw new ParserChangedError(`Wildberries root ${rootId} has no valid shared aggregate`);
-    }
-    const rootDistribution = distributionMetrics(payload.valuationDistribution);
-    for (const member of members) {
-      member.metadata.resolvedFeedbackCount = feedbackCount;
-      member.metadata.writtenReviewCount = feedbackCount;
-      if (rootDistribution) member.metadata.ratingCount = rootDistribution.ratingCount;
-      member.metadata.resolvedRating = feedbackCount === 0 ? 0 : rating;
-      member.metadata.aggregateGroupId = `wildberries:root:${rootId}`;
-      member.metadata.source = "wildberries-root-family-aggregate";
-      member.metadata.evidenceRef = evidenceUrl;
-    }
+    applySharedAggregate();
   }
 
   private discoveryCacheKey(brand: string, context: AdapterContext): string | undefined {

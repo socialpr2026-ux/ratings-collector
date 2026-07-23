@@ -496,6 +496,38 @@ describe("WildberriesAdapter.discover", () => {
     expect(observations.every((item) => item.source === "wildberries-root-family-aggregate")).toBe(true);
   });
 
+  it("collapses a valid root aggregate when Wildberries omits one duplicated nm distribution", async () => {
+    const products = [
+      { id: 493939488, root: 501370411, brand: "Бактоблис", name: "Бактоблис Плюс 90 таблеток", nmReviewRating: 5, nmFeedbacks: 2 },
+      { id: 493941788, root: 501370411, brand: "Бактоблис", name: "Бактоблис Плюс 90 таблеток 2 упаковки", nmReviewRating: 5, nmFeedbacks: 2 }
+    ];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 2, products });
+      if (url.hostname === "card.wb.ru") return jsonResponse({ products });
+      if (url.hostname === "feedbacks1.wb.ru") {
+        return jsonResponse({
+          feedbackCount: 3,
+          valuation: 5,
+          valuationDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 2 },
+          nmValuationDistribution: [
+            { nm: 493939488, valuationDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 2 } }
+          ]
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("Бактоблис", context({ runId: "partial-root-distribution" }));
+
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context())));
+    expect(observations).toMatchObject([
+      { reviews: 3, ratingCount: 2, rating: 5, aggregateGroupId: "wildberries:root:501370411" },
+      { reviews: 3, ratingCount: 2, rating: 5, aggregateGroupId: "wildberries:root:501370411" }
+    ]);
+    expect(observations.every((item) => item.source === "wildberries-root-family-aggregate")).toBe(true);
+  });
+
   it("fails closed at the configured maximum when every page remains non-empty", async () => {
     const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
       const page = Number(new URL(String(input)).searchParams.get("page"));

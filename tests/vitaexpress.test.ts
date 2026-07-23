@@ -30,6 +30,26 @@ const PRODUCTS = [
   {
     id: "203245", brand: "\u0422\u0430\u0443\u0441\u0442\u0438\u043d", title: "\u0422\u0430\u0443\u0441\u0442\u0438\u043d \u0421\u043e\u043b\u043e\u0444\u0430\u0440\u043c \u041a\u0430\u043f\u043b\u0438 \u0433\u043b\u0430\u0437\u043d\u044b\u0435 4%, 10\u043c\u043b",
     path: "/product/taurin__taustin__kapli_glaznye_4_10ml_solofarm/"
+  },
+  {
+    id: "203657", brand: "Бактоблис", title: "Бактоблис таблетки для рассасывания, №30 без сахара",
+    path: "/product/baktoblis_plyus_tab__drassas___30_bsakhara_bad/"
+  },
+  {
+    id: "197583", brand: "Бактоблис", title: "Бактоблис плюс таблетки для рассасывания, №90",
+    path: "/product/baktoblis_plyus_tab__drassas__950mg__90_bad/"
+  },
+  {
+    id: "190233", brand: "Бактоблис", title: "Бактоблис порошок в саше-пакетах, №15",
+    path: "/product/baktoblis_por__dpr__vnutr_1500mg__15_sashe_pak__bad/"
+  },
+  {
+    id: "193661", brand: "Бактоблис", title: "Бактоблис порошок в саше-пакетах, №30",
+    path: "/product/baktoblis_por__dpr__vnutr_1500mg__30_sashe_pak__bad/"
+  },
+  {
+    id: "175303", brand: "Бактоблис", title: "Бактоблис плюс таблетки для рассасывания, №30",
+    path: "/product/baktoblis_tabletki_bad_30/"
   }
 ] as const;
 
@@ -41,6 +61,7 @@ function escapeAttribute(value: unknown): string {
 
 function page(product: TestProduct, options: {
   title?: string;
+  boundName?: string;
   canonicalPath?: string;
   pageId?: string;
   reviews?: unknown;
@@ -48,6 +69,7 @@ function page(product: TestProduct, options: {
   emptyText?: string;
 } = {}): string {
   const title = options.title ?? product.title;
+  const boundName = options.boundName ?? title;
   const pageId = options.pageId ?? product.id;
   const canonicalPath = options.canonicalPath ?? product.path;
   const reviews = options.reviews ?? { productId: Number(product.id), reviewList: null };
@@ -56,10 +78,10 @@ function page(product: TestProduct, options: {
   return `<!doctype html><html><head><link rel="canonical" href="${ORIGIN}${canonicalPath}"></head><body>
     <h1>${title}</h1>
     <div id="page-content" data-id="${pageId}" data-xml="${pageId}" data-xml_id="${pageId}"
-      data-url="${canonicalPath}" data-name="${title}">
-      <product-reviews :id="${pageId}" :product-id="${pageId}" name="${title}"
+      data-url="${canonicalPath}" data-name="${boundName}">
+      <product-reviews :id="${pageId}" :product-id="${pageId}" name="${boundName}"
         :reviews="${escapeAttribute(reviews)}" :rating="${escapeAttribute(rating)}">
-        <h2>\u041e\u0442\u0437\u044b\u0432\u044b \u043e \u0442\u043e\u0432\u0430\u0440\u0435 ${title}</h2>
+        <h2>\u041e\u0442\u0437\u044b\u0432\u044b \u043e \u0442\u043e\u0432\u0430\u0440\u0435 ${boundName}</h2>
         <div>${emptyText}</div>
       </product-reviews>
     </div>
@@ -117,6 +139,26 @@ describe("VitaExpressAdapter", () => {
     ]);
   });
 
+  it("discovers all five proven Baktoblis cards from the bounded registry", async () => {
+    const adapter = new VitaExpressAdapter(new MemoryEvidenceStore(), fetchProducts());
+    const refs = await adapter.discover("Бактоблис", { ...CONTEXT, runId: "discover-baktoblis" });
+
+    expect(refs.map((item) => item.listingId)).toEqual(["203657", "197583", "190233", "193661", "175303"]);
+  });
+
+  it("accepts Vita's longer source-bound component name for the same exact Baktoblis card", async () => {
+    const product = productById("203657");
+    const boundName = "Бактоблис таблетки для рассасывания без сахара, №30 без сахара";
+    const adapter = new VitaExpressAdapter(new MemoryEvidenceStore(), fetchProducts({
+      [product.id]: new Response(page(product, { boundName }), {
+        status: 200, headers: { "content-type": "text/html; charset=utf-8" }
+      })
+    }));
+
+    await expect(adapter.discover("Бактоблис", { ...CONTEXT, runId: "bound-name-baktoblis" }))
+      .resolves.toHaveLength(5);
+  });
+
   it("publishes only the proven empty-review contract and preserves absent rating as null", async () => {
     const evidence = new MemoryEvidenceStore();
     const product = productById("178185");
@@ -139,6 +181,31 @@ describe("VitaExpressAdapter", () => {
       identifiers: [{ type: "product_id", value: "178185" }]
     });
     expect(evidence.items.size).toBe(1);
+  });
+
+  it("publishes a positive product-bound Baktoblis aggregate", async () => {
+    const product = productById("175303");
+    const reviews = Array.from({ length: 6 }, (_, index) => ({ name: `Покупатель ${index + 1}`, body: "Отзыв" }));
+    const fetchMock = fetchProducts({
+      [product.id]: new Response(page(product, {
+        reviews: { productId: Number(product.id), reviewList: reviews },
+        rating: [{ productId: product.id, status: true, rating: 4.9, reviewsCount: 6 }],
+        emptyText: "Проверенные отзывы покупателей"
+      }), { status: 200, headers: { "content-type": "text/html; charset=utf-8" } })
+    });
+    const adapter = new VitaExpressAdapter(new MemoryEvidenceStore(), fetchMock);
+    const refs = await adapter.discover("Бактоблис", { ...CONTEXT, runId: "positive-baktoblis" });
+    const positiveRef = refs.find((item) => item.listingId === product.id)!;
+
+    await expect(adapter.collect(positiveRef, { ...CONTEXT, runId: "positive-baktoblis" })).resolves.toMatchObject({
+      listingId: "175303",
+      reviews: 6,
+      writtenReviewCount: 6,
+      ratingCount: 6,
+      rating: 4.9,
+      status: "ok",
+      source: "vitaexpress-source-bound-review-aggregate"
+    });
   });
 
   it("reuses a proven exact page within one run without weakening identity checks", async () => {
@@ -251,4 +318,3 @@ describe("VitaExpressAdapter", () => {
     });
   });
 });
-
