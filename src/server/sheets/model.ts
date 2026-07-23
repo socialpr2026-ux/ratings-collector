@@ -80,9 +80,13 @@ const MARKETPLACE_DOMAINS = new Set([
 ]);
 
 const PHARMACY_DOMAINS = new Set([
-  "uteka.ru", "megapteka.ru", "medum.ru", "eapteka.ru", "polza.ru", "asna.ru",
-  "farmlend.ru", "okapteka.ru", "rigla.ru", "ozerki.ru", "zdravcity.ru", "apteka.ru", "nfapteka.ru",
-  "budzdorov.ru", "etabl.ru", "apteka-april.ru"
+  "aptekaplus.ru", "megapteka.ru", "redapteka.ru", "maksavit.ru", "vapteke.ru", "polza.ru",
+  "expero.ru", "rigla.ru", "gorzdrav.org", "366.ru", "stolichki.ru", "neopharm.ru", "ozerki.ru",
+  "stoletov.ru", "apteka-april.ru", "farmlend.ru", "planetazdorovo.ru", "budzdorov.ru",
+  "samson-pharma.ru", "zdesapteka.ru", "apteka.magnit.ru", "superapteka.ru", "vitaexpress.ru",
+  "zhivika.ru", "aptekasalve.ru", "zdorov.ru", "tabletka.ru", "pharmeconom.ru", "aptstore.ru",
+  "newapteka.ru", "ovita.ru", "uteka.ru", "eapteka.ru", "medum.ru", "asna.ru", "okapteka.ru",
+  "zdravcity.ru", "apteka.ru", "nfapteka.ru", "etabl.ru"
 ]);
 
 const PLATFORM_LABELS: Readonly<Record<string, string>> = {
@@ -98,6 +102,30 @@ const PLATFORM_LABELS: Readonly<Record<string, string>> = {
   "otzyvru.com": "ОтзывРу",
   "pravogolosa.net": "Право голоса",
   "ru.otzyv.com": "Otzyv.com",
+  "aptekaplus.ru": "Аптека Плюс",
+  "redapteka.ru": "REDapteka",
+  "maksavit.ru": "Максавит",
+  "vapteke.ru": "ВАптеке",
+  "expero.ru": "Expero",
+  "gorzdrav.org": "Горздрав",
+  "366.ru": "36,6",
+  "stolichki.ru": "Столички",
+  "neopharm.ru": "Неофарм",
+  "stoletov.ru": "Доктор Столетов",
+  "planetazdorovo.ru": "Планета Здоровья",
+  "samson-pharma.ru": "Самсон-Фарма",
+  "zdesapteka.ru": "Здесь Аптека",
+  "apteka.magnit.ru": "Магнит Аптека",
+  "superapteka.ru": "СуперАптека",
+  "vitaexpress.ru": "Аптека Вита",
+  "zhivika.ru": "Живика",
+  "aptekasalve.ru": "Salve",
+  "zdorov.ru": "Здоров.ру",
+  "tabletka.ru": "tabletka.ru",
+  "pharmeconom.ru": "ФАРМЭКОНОМ",
+  "aptstore.ru": "aptstore.ru",
+  "newapteka.ru": "Новая аптека",
+  "ovita.ru": "Овита.ру",
   "uteka.ru": "Ютека",
   "megapteka.ru": "Мегаптека",
   "medum.ru": "Medum",

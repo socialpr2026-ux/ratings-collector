@@ -9,6 +9,7 @@ import {
   parseTemporarilyBlockedDomainList,
   updateDomainSelection
 } from "../src/client/site-catalog.js";
+import { INITIAL_DOMAINS } from "../src/shared/constants.js";
 
 describe("site picker catalog", () => {
   it("exposes every confirmed production site in clear groups", () => {
@@ -59,6 +60,25 @@ describe("site picker catalog", () => {
     )).toEqual(expect.arrayContaining([
       expect.objectContaining({ domain: "polza.ru", availability: "temporarily_blocked" })
     ]));
+  });
+
+  it("selects every runnable catalog site in a new collection by default", () => {
+    expect(INITIAL_DOMAINS).toEqual(SELECTABLE_CATALOG_DOMAINS);
+    expect(INITIAL_DOMAINS).toHaveLength(29);
+  });
+
+  it("shows the complete requested pharmacy list alongside additional connected pharmacies", () => {
+    const pharmacyDomains = SITE_CATALOG.find((group) => group.id === "pharmacies")!.sites.map((site) => site.domain);
+    expect(pharmacyDomains).toEqual(expect.arrayContaining([
+      "aptekaplus.ru", "megapteka.ru", "redapteka.ru", "maksavit.ru", "vapteke.ru", "polza.ru",
+      "expero.ru", "rigla.ru", "gorzdrav.org", "366.ru", "stolichki.ru", "neopharm.ru", "ozerki.ru",
+      "stoletov.ru", "apteka-april.ru", "farmlend.ru", "planetazdorovo.ru", "budzdorov.ru",
+      "samson-pharma.ru", "zdesapteka.ru", "apteka.magnit.ru", "superapteka.ru", "vitaexpress.ru",
+      "zhivika.ru", "aptekasalve.ru", "zdorov.ru", "tabletka.ru", "pharmeconom.ru", "aptstore.ru",
+      "newapteka.ru", "ovita.ru"
+    ]));
+    expect(pharmacyDomains).toHaveLength(40);
+    expect(CATALOG_DOMAINS).toHaveLength(53);
   });
 
   it("normalizes pasted URLs for the run without duplicating a site", () => {

@@ -21,6 +21,7 @@ import {
   summarizeIssues
 } from "./review-copy.js";
 import {
+  CATALOG_DOMAINS,
   SELECTABLE_CATALOG_DOMAINS,
   SITE_CATALOG,
   countCustomDomains,
@@ -950,7 +951,7 @@ export function App() {
         <div className="setup-lists">
           <section className="site-picker" aria-labelledby="sites-title">
             <div className="picker-heading">
-              <div><span className="label-row"><span id="sites-title">Площадки</span><small>{normalizedDomains.length}</small></span><p>Выберите готовые варианты или добавьте свои.</p></div>
+              <div><span className="label-row"><span id="sites-title">Площадки</span><small>{normalizedDomains.length} выбрано · {CATALOG_DOMAINS.length} всего</small></span><p>Выберите готовые варианты или добавьте свои.</p></div>
               <div className="picker-actions">
                 <button type="button" onClick={() => setPresetSites(SELECTABLE_CATALOG_DOMAINS, true)} disabled={SELECTABLE_CATALOG_DOMAINS.every((domain) => selectedDomainSet.has(domain))}>Выбрать все доступные</button>
                 <button type="button" onClick={() => setDomains("")} disabled={normalizedDomains.length === 0}>Очистить</button>

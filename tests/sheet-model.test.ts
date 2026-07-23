@@ -410,6 +410,25 @@ describe("Google Sheets model", () => {
     expect(reviewRows.map((row) => row[2])).toEqual(["таблетки №10", "таблетки №10"]);
   });
 
+  it("keeps every connected or requested pharmacy out of the review-sites section", () => {
+    const domains = ["vapteke.ru", "maksavit.ru", "vitaexpress.ru", "apteka.magnit.ru", "superapteka.ru"];
+    const records: ProductRecord[] = domains.map((domain) => ({
+      key: `${domain}:card`, domain, listingId: "card", brand: "Кагоцел", platform: domain,
+      canonicalUrl: `https://${domain}/product/card`, product: "Кагоцел таблетки №10",
+      firstSeenMonth: "2026-07", lastSeenMonth: "2026-07"
+    }));
+    const document = buildSheetDocument({ values: [] }, { ...request, domains }, records, {});
+    const sections = document.values
+      .filter((_row, index) => document.rowKinds[index] === "section")
+      .map((row) => row[0]);
+    const labels = document.values
+      .filter((_row, index) => document.rowKinds[index] === "product")
+      .map((row) => row[0]);
+
+    expect(sections).toEqual(["Аптеки"]);
+    expect(labels).toEqual(["ВАптеке", "Максавит", "Аптека Вита", "Магнит Аптека", "СуперАптека"]);
+  });
+
   it("classifies 4.9, 4.5, 4.4, rating zero, no reviews and blank errors without overlap", () => {
     const metric = (listingId: string, reviews: number, rating: number | null, status: "ok" | "no_reviews"): Observation => ({
       ...observation(listingId, reviews), rating, status
