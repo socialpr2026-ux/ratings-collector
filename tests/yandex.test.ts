@@ -216,6 +216,49 @@ describe("YandexAdapter discovery", () => {
       .toEqual([fetchMock.mock.calls[1]![1]?.body, fetchMock.mock.calls[1]![1]?.body]);
   });
 
+  it("retries only the transient HTTP 502 batch without restarting proven sitemap chunks", async () => {
+    const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const maps = [MAP_A, MAP_B];
+    let batchAttempts = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      const request = JSON.parse(String(init?.body)) as { sitemaps: string[]; brands: Array<{ brand: string }> };
+      batchAttempts += 1;
+      if (batchAttempts === 1) {
+        return new Response(JSON.stringify({ error: "transient exact shard timeout" }), {
+          status: 502,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return new Response(JSON.stringify({
+        processed: request.sitemaps.length,
+        firstSitemap: request.sitemaps[0],
+        lastSitemap: request.sitemaps.at(-1),
+        matches: [{
+          brand: request.brands[0]!.brand,
+          url: "https://reviews.yandex.ru/product/baktoblis--170000001",
+          sitemap: request.sitemaps[0]
+        }]
+      }), { headers: { "content-type": "application/json" } });
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
+    fetch.yandexBatchEndpoint = batchEndpoint;
+    const adapter = new YandexAdapter({
+      fetch,
+      maxSitemaps: maps.length,
+      sitemapRetryAttempts: 2,
+      sitemapRetryBaseMs: 0
+    });
+
+    await expect(adapter.discover("baktoblis", context())).resolves.toMatchObject([
+      { listingId: "170000001", brand: "baktoblis" }
+    ]);
+    expect(batchAttempts).toBe(2);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST").map(([, init]) => init?.body))
+      .toEqual([fetchMock.mock.calls[1]![1]?.body, fetchMock.mock.calls[1]![1]?.body]);
+  });
+
   it("rejects a partial batch aggregate even when an earlier chunk contained a match", async () => {
     const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
     const maps = Array.from({ length: 9 }, (_value, index) =>
@@ -238,7 +281,7 @@ describe("YandexAdapter discovery", () => {
       }), { headers: { "content-type": "application/json" } });
     }) as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
     fetch.yandexBatchEndpoint = batchEndpoint;
-    const adapter = new YandexAdapter({ fetch, maxSitemaps: 9 });
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 9, sitemapRetryBaseMs: 0 });
 
     await expect(adapter.discover("oscillococcinum", context())).rejects.toBeInstanceOf(AdapterBlockedError);
   });
@@ -269,13 +312,13 @@ describe("YandexAdapter discovery", () => {
     });
     const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
     fetch.yandexBatchEndpoint = batchEndpoint;
-    const adapter = new YandexAdapter({ fetch, maxSitemaps: maps.length });
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: maps.length, sitemapRetryBaseMs: 0 });
 
     await expect(adapter.discover("Церетон", context())).rejects.toMatchObject({
       message: `Yandex batch proof failed with HTTP 502: Yandex batch shard remained unproven: ${maps[0]}`
     });
     expect(siblingAborted).toBe(true);
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(2);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(4);
   });
 
   it("propagates the caller deadline instead of returning partial sitemap matches", async () => {

@@ -341,6 +341,14 @@ export class YandexAdapter implements SiteAdapter {
               brands: brands.map((brand) => ({ brand, tokens: yandexBrandTokens(brand) }))
             })
           });
+          if (!response.ok && [502, 504].includes(response.status) && attempt < this.sitemapRetryAttempts) {
+            const status = response.status;
+            await response.body?.cancel().catch(() => undefined);
+            response = undefined;
+            lastRequestError = new Error(`Yandex batch proof returned transient HTTP ${status}`);
+            await this.waitBeforeSitemapRetry(attempt, context);
+            continue;
+          }
           break;
         } catch (error) {
           if (callerAborted || batchAbort.signal.aborted) throw error;
