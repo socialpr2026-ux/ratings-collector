@@ -134,6 +134,45 @@ describe("YandexAdapter discovery", () => {
     expect(fetch).toHaveBeenCalledTimes(1 + Math.ceil(maps.length / 4));
   });
 
+  it("retries the same exact batch after a transient gateway network failure", async () => {
+    const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const maps = [MAP_A, MAP_B];
+    let batchAttempts = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      if (url !== batchEndpoint) throw new Error(`Unexpected request: ${url}`);
+      batchAttempts += 1;
+      if (batchAttempts === 1) throw new TypeError("fetch failed");
+      const request = JSON.parse(String(init?.body)) as { sitemaps: string[]; brands: Array<{ brand: string }> };
+      return new Response(JSON.stringify({
+        processed: request.sitemaps.length,
+        firstSitemap: request.sitemaps[0],
+        lastSitemap: request.sitemaps.at(-1),
+        matches: [{
+          brand: request.brands[0]!.brand,
+          url: "https://reviews.yandex.ru/product/baktoblis--170000001",
+          sitemap: request.sitemaps[0]
+        }]
+      }), { headers: { "content-type": "application/json" } });
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
+    fetch.yandexBatchEndpoint = batchEndpoint;
+    const adapter = new YandexAdapter({
+      fetch,
+      maxSitemaps: maps.length,
+      sitemapRetryAttempts: 3,
+      sitemapRetryBaseMs: 0
+    });
+
+    await expect(adapter.discover("baktoblis", context())).resolves.toMatchObject([
+      { listingId: "170000001", brand: "baktoblis" }
+    ]);
+    expect(batchAttempts).toBe(2);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST").map(([, init]) => init?.body))
+      .toEqual([fetchMock.mock.calls[1]![1]?.body, fetchMock.mock.calls[1]![1]?.body]);
+  });
+
   it("rejects a partial batch aggregate even when an earlier chunk contained a match", async () => {
     const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
     const maps = Array.from({ length: 9 }, (_value, index) =>

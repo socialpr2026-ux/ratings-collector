@@ -317,21 +317,31 @@ export class YandexAdapter implements SiteAdapter {
     let failure: unknown;
 
     const processChunk = async (sitemaps: string[]): Promise<void> => {
-      let response: Response;
-      try {
-        response = await fetcher(endpoint, {
-          method: "POST",
-          redirect: "error",
-          signal: batchAbort.signal,
-          headers: { "content-type": "application/json", accept: "application/json" },
-          body: JSON.stringify({
-            sitemaps,
-            brands: brands.map((brand) => ({ brand, tokens: yandexBrandTokens(brand) }))
-          })
-        });
-      } catch (error) {
-        if (callerAborted) throw error;
-        throw new AdapterBlockedError(`Yandex batch proof request failed: ${errorMessage(error)}`);
+      let response: Response | undefined;
+      let lastRequestError: unknown;
+      for (let attempt = 1; attempt <= this.sitemapRetryAttempts; attempt += 1) {
+        try {
+          response = await fetcher(endpoint, {
+            method: "POST",
+            redirect: "error",
+            signal: batchAbort.signal,
+            headers: { "content-type": "application/json", accept: "application/json" },
+            body: JSON.stringify({
+              sitemaps,
+              brands: brands.map((brand) => ({ brand, tokens: yandexBrandTokens(brand) }))
+            })
+          });
+          break;
+        } catch (error) {
+          if (callerAborted || batchAbort.signal.aborted) throw error;
+          lastRequestError = error;
+          if (attempt < this.sitemapRetryAttempts) {
+            await this.waitBeforeSitemapRetry(attempt, context);
+          }
+        }
+      }
+      if (!response) {
+        throw new AdapterBlockedError(`Yandex batch proof request failed: ${errorMessage(lastRequestError)}`);
       }
       if (!response.ok) {
         let detail = "";
