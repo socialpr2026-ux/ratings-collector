@@ -115,6 +115,22 @@ describe("recovered first-party pharmacy adapters", () => {
     }, { region: "Москва" })).rejects.toThrow(/product aggregate is incomplete/);
   });
 
+  it("collects an exact Polza card with the public no-reviews state and no AggregateRating", async () => {
+    const card = "https://polza.ru/catalog/akvaoptik-rastvor-dlya-obrabotki-i-khraneniya-linz-120-ml_30712/";
+    const adapter = new PolzaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(translated(card, `
+      <main itemscope itemtype="https://schema.org/Product"><meta itemprop="sku" content="30712">
+        <link itemprop="url" href="${card}"></main>
+      <div id="review_block"><input class="js-product_id" name="product_id" value="30712">
+        <div class="reviews__empty" data-empty-reviews>Отзывов пока нет</div>
+      </div>`), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "polza.ru", platform: "polza.ru", listingId: "30712", brand: "АкваОптик", url: card, metadata: {}
+    }, { region: "Москва" })).resolves.toMatchObject({
+      listingId: "30712", reviews: 0, rating: null, status: "no_reviews"
+    });
+  });
+
   it("discovers only exact Polza family cards and collects the product aggregate", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));

@@ -1027,6 +1027,45 @@ describe("static pharmacy Translate gateway", () => {
     expect(upstream).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps exact Polza family cards without AggregateRating and compacts their public empty-review state", async () => {
+    const familySource = "https://polza.ru/product/akvaoptik/";
+    const productSource = "https://polza.ru/catalog/akvaoptik-rastvor-dlya-obrabotki-i-khraneniya-linz-120-ml_30712/";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      const source = url.pathname.startsWith("/product/") ? familySource : productSource;
+      const body = url.pathname.startsWith("/product/")
+        ? `<div class="catalog__block--cards"><div class="catalog-block__items"><div class="catalog-card" itemscope>
+            <link itemprop="url" href="/catalog/akvaoptik-rastvor-dlya-obrabotki-i-khraneniya-linz-120-ml_30712/">
+            <meta itemprop="sku" content="30712"><meta itemprop="name" content="АкваОптик, раствор для обработки и хранения линз, 120 мл">
+          </div></div></div>`
+        : `<section class="product-detail__block" itemscope itemtype="https://schema.org/Product">
+            <link itemprop="url" href="/catalog/akvaoptik-rastvor-dlya-obrabotki-i-khraneniya-linz-120-ml_30712/">
+            <meta itemprop="sku" content="30712"></section>
+          <div id="review_block"><input class="js-product_id" name="product_id" value="30712">
+            <p>Отзывов пока нет</p>
+          </div>`;
+      return new Response(`<html><head><base href="${source}"></head><body>${body}</body></html>`, {
+        headers: { "content-type": "text/html" }
+      });
+    }));
+
+    const family = await callGateway(translated("polza-ru.translate.goog", "/product/akvaoptik/").toString());
+    expect(family.status).toBe(200);
+    const familyProof = await family.text();
+    expect(familyProof).toContain('itemprop="sku" content="30712"');
+    expect(familyProof).not.toContain('itemprop="aggregateRating"');
+
+    const product = await callGateway(translated(
+      "polza-ru.translate.goog",
+      "/catalog/akvaoptik-rastvor-dlya-obrabotki-i-khraneniya-linz-120-ml_30712/"
+    ).toString());
+    expect(product.status).toBe(200);
+    const productProof = await product.text();
+    expect(productProof).toContain('class="reviews__empty" data-empty-reviews');
+    expect(productProof).toContain('name="product_id" value="30712"');
+    expect(productProof).not.toContain('itemprop="aggregateRating"');
+  });
+
   it("compacts exact NFapteka search and product microdata", async () => {
     const searchTarget = translated("nfapteka-ru.translate.goog", "/catalog/", { q: "Оциллококцинум" });
     const searchSource = new URL("https://nfapteka.ru/catalog/");

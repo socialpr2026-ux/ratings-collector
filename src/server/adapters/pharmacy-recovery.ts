@@ -377,12 +377,6 @@ function polzaProductMetrics(
   const aggregate = root.find("[itemprop='aggregateRating']").first();
   const reviews = exactInteger(aggregate.find("meta[itemprop='reviewCount']").first().attr("content"));
   const rating = exactRating(aggregate.find("meta[itemprop='ratingValue']").first().attr("content"));
-  if (reviews === undefined || reviews > 0 && rating === undefined) return undefined;
-  if (reviews === 0) return { reviews: 0, rating: null };
-
-  // Polza can leave a stale AggregateRating on a product that has no review
-  // section at all. Accept a positive total only when the same product root
-  // exposes the visible review block, its total and at least one review item.
   const reviewBlocks = $("#review_block");
   const reviewBlock = reviewBlocks.first();
   const reviewItems = reviewBlock.find(".reviews__item.review-item");
@@ -399,6 +393,12 @@ function polzaProductMetrics(
   const explicitStaleZero = reviewBlocks.length === 0 && reviewItems.length === 0 &&
     $(".review-add-modal, .js-notify-add-modal").length > 0;
   if (explicitStaleZero) return { reviews: 0, rating: null };
+  if (reviews === undefined || reviews > 0 && rating === undefined) return undefined;
+  if (reviews === 0) return { reviews: 0, rating: null };
+
+  // Polza can leave a stale AggregateRating on a product that has no review
+  // section at all. Accept a positive total only when the exact public review
+  // block exposes its total and at least one review item.
   if (!reviewBlocks.length && !reviewItems.length) return undefined;
   if (reviewBlocks.length !== 1) return undefined;
   const visibleTotal = exactInteger(reviewBlock.find(".reviews__amount").first().text());
@@ -500,13 +500,20 @@ export class PolzaAdapter implements SiteAdapter {
       .filter((node, index, nodes) => nodes.indexOf(node) === index)
       .filter((node) => {
         const candidate = $(node);
-        if (candidate.find("[itemprop='aggregateRating']").length !== 1) return false;
         const path = candidate.find("link[itemprop='url']").first().attr("href");
         if (!path) return true;
         const bound = polzaRef(new URL(path, parsedRef.canonicalUrl));
         return bound?.listingId === parsedRef.listingId && bound.canonicalUrl === parsedRef.canonicalUrl;
       });
-    const root = productRoots.length === 1 ? $(productRoots[0]) : undefined;
+    const aggregateRoots = productRoots.filter((node) => $(node).find("[itemprop='aggregateRating']").length === 1);
+    const exactMainRoots = productRoots.filter((node) => {
+      const candidate = $(node);
+      return candidate.is("main") || candidate.is("section.product-detail__block");
+    });
+    const selectedRoot = aggregateRoots.length === 1
+      ? aggregateRoots[0]
+      : aggregateRoots.length === 0 && exactMainRoots.length === 1 ? exactMainRoots[0] : undefined;
+    const root = selectedRoot ? $(selectedRoot) : undefined;
     const metrics = root ? polzaProductMetrics(root, $, parsedRef.listingId) : undefined;
     if (!metrics) {
       throw new ParserChangedError(`polza.ru:${ref.listingId}: product aggregate is incomplete`);

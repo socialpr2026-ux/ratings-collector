@@ -815,6 +815,7 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
 
   if (requested.kind === "polza-family") {
     const cards: string[] = [];
+    let invalidCard = false;
     $(".catalog__block--cards .catalog-block__items > .catalog-card[itemscope]").each((_index, node) => {
       const root = $(node);
       const sku = root.find("meta[itemprop='sku']").first().attr("content")?.trim();
@@ -823,23 +824,32 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
       const aggregate = root.find("[itemprop='aggregateRating']").first();
       const reviews = aggregate.find("meta[itemprop='reviewCount']").first().attr("content")?.trim();
       const rating = aggregate.find("meta[itemprop='ratingValue']").first().attr("content")?.trim();
-      if (!sku || !/^\d+$/.test(sku) || !href || !name || !reviews || !/^\d+$/.test(reviews)) return;
+      if (!sku || !/^\d+$/.test(sku) || !href || !name) {
+        invalidCard = true;
+        return;
+      }
       let product: URL;
       try { product = new URL(href, requested.source); }
-      catch { return; }
+      catch {
+        invalidCard = true;
+        return;
+      }
       const productId = product.pathname.match(/^\/catalog\/[a-z0-9][a-z0-9-]*_(\d+)\/$/i)?.[1];
-      const reviewCount = Number(reviews);
+      const reviewCount = reviews && /^\d+$/.test(reviews) ? Number(reviews) : Number.NaN;
       const ratingValue = rating && /^\d(?:[.,]\d+)?$/.test(rating) ? Number(rating.replace(",", ".")) : Number.NaN;
       if (product.protocol !== "https:" || product.hostname !== "polza.ru" || productId !== sku ||
-        !Number.isSafeInteger(reviewCount) || reviewCount < 0 ||
-        reviewCount > 0 && (!Number.isFinite(ratingValue) || ratingValue <= 0 || ratingValue > 5)) return;
+        aggregate.length > 0 && (!Number.isSafeInteger(reviewCount) || reviewCount < 0 ||
+          reviewCount > 0 && (!Number.isFinite(ratingValue) || ratingValue <= 0 || ratingValue > 5))) {
+        invalidCard = true;
+        return;
+      }
       cards.push(`<div class="catalog-card" itemscope itemtype="https://schema.org/Product">` +
         `<link itemprop="url" href="${escapeHtml(product.pathname)}"><meta itemprop="sku" content="${escapeHtml(sku)}">` +
-        `<meta itemprop="name" content="${escapeHtml(name)}"><span itemprop="aggregateRating">` +
-        `<meta itemprop="reviewCount" content="${escapeHtml(reviews)}">` +
-        `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</span></div>`);
+        `<meta itemprop="name" content="${escapeHtml(name)}">${aggregate.length > 0 ? `<span itemprop="aggregateRating">` +
+          `<meta itemprop="reviewCount" content="${escapeHtml(reviews!)}">` +
+          `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</span>` : ""}</div>`);
     });
-    if (!cards.length) return undefined;
+    if (invalidCard || !cards.length) return undefined;
     return `<html><head>${base}</head><body><script data-source-url="${escapeHtml(requested.source.toString())}"></script>` +
       `<div class="catalog__block--cards"><div class="catalog-block__items">${cards.join("")}</div></div></body></html>`;
   }
@@ -865,20 +875,31 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
         reviewCount > 0 && (!Number.isFinite(ratingValue) || ratingValue <= 0 || ratingValue > 5)) return undefined;
       candidates.push({ reviews: reviews!, ...(rating ? { rating } : {}), reviewCount, ratingValue });
     }
-    if (candidates.length === 0 || new Set(candidates.map((item) => `${item.reviewCount}:${item.ratingValue}`)).size !== 1) {
-      return undefined;
-    }
-    const [{ reviews, rating, reviewCount }] = candidates;
+    const candidateKeys = new Set(candidates.map((item) => `${item.reviewCount}:${item.ratingValue}`));
+    if (candidateKeys.size > 1) return undefined;
+    const selected = candidates[0];
     let compactReviewProof = "";
-    if (reviewCount > 0) {
-      const reviewBlocks = $("#review_block");
-      const reviewBlock = reviewBlocks.first();
-      const reviewProductId = reviewBlock.find("input.js-product_id[name='product_id']").first().attr("value")?.trim();
+    const reviewBlocks = $("#review_block");
+    const reviewBlock = reviewBlocks.first();
+    const reviewProductId = reviewBlock.find("input.js-product_id[name='product_id']").first().attr("value")?.trim();
+    if (!selected) {
+      const exactMainRoots = roots.toArray().filter((node) => {
+        const root = $(node);
+        if (!(root.is("main") || root.is("section.product-detail__block"))) return false;
+        const href = root.find("link[itemprop='url']").first().attr("href");
+        return Boolean(href && translatedSourceMatches(new URL(href, requested.source).toString(), requested.source));
+      });
+      const emptyText = reviewBlock.text().normalize("NFKC").replace(/\s+/g, " ").trim();
+      if (exactMainRoots.length !== 1 || reviewBlocks.length !== 1 || reviewProductId !== requested.productId ||
+        reviewBlock.find(".reviews__item.review-item").length > 0 || !/отзывов пока нет/iu.test(emptyText)) return undefined;
+      compactReviewProof = `<div id="review_block"><input class="js-product_id" name="product_id" value="${escapeHtml(requested.productId!)}">` +
+        `<div class="reviews__empty" data-empty-reviews>Отзывов пока нет</div></div>`;
+    } else if (selected.reviewCount > 0) {
       const visibleTotal = reviewBlock.find(".reviews__amount").first().text().replace(/[\s\u00a0]/g, "");
       const reviewItems = reviewBlock.find(".reviews__item.review-item");
-      if (reviewBlocks.length === 1 && reviewProductId === requested.productId && visibleTotal === reviews && reviewItems.length > 0) {
+      if (reviewBlocks.length === 1 && reviewProductId === requested.productId && visibleTotal === selected.reviews && reviewItems.length > 0) {
         compactReviewProof = `<div id="review_block"><input class="js-product_id" name="product_id" value="${escapeHtml(requested.productId!)}">` +
-          `<div class="reviews__amount">${escapeHtml(reviews)}</div><div class="reviews__list">${reviewItems.toArray().map(() =>
+          `<div class="reviews__amount">${escapeHtml(selected.reviews)}</div><div class="reviews__list">${reviewItems.toArray().map(() =>
             `<article class="reviews__item review-item"></article>`
           ).join("")}</div></div>`;
       } else if (reviewBlocks.length === 0 && $(".review-add-modal, .js-notify-add-modal").length > 0) {
@@ -891,11 +912,13 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
         return undefined;
       }
     }
+    const reviews = selected?.reviews;
+    const rating = selected?.rating;
     return `<html><head>${base}</head><body><script data-source-url="${escapeHtml(requested.source.toString())}"></script>` +
       `<main itemscope itemtype="https://schema.org/Product"><meta itemprop="sku" content="${escapeHtml(requested.productId!)}">` +
       `<link itemprop="url" href="${escapeHtml(requested.source.pathname)}">` +
-      `<div itemprop="aggregateRating" itemscope><meta itemprop="reviewCount" content="${escapeHtml(reviews)}">` +
-      `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</div></main>${compactReviewProof}</body></html>`;
+      `${reviews === undefined ? "" : `<div itemprop="aggregateRating" itemscope><meta itemprop="reviewCount" content="${escapeHtml(reviews)}">` +
+        `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</div>`}</main>${compactReviewProof}</body></html>`;
   }
 
   if (requested.kind === "asna-product") {
