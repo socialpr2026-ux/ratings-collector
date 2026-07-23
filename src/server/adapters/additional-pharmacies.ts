@@ -1098,7 +1098,6 @@ export function createAdditionalPharmacyAdapters(evidence: EvidenceStore, fetchI
     new AptekaRuAdapter(evidence, fetchImpl),
     new NfAptekaAdapter(evidence, fetchImpl),
     new BudZdorovAdapter(evidence, fetchImpl),
-    new EtablAdapter(evidence, fetchImpl),
     new OzerkiAdapter(evidence, fetchImpl),
     new AptekaAprilAdapter(evidence, fetchImpl)
   ];

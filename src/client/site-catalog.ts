@@ -97,7 +97,12 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
       { domain: "zdravcity.ru", label: "Здравсити" },
       { domain: "apteka.ru", label: "Apteka.ru" },
       { domain: "nfapteka.ru", label: "Надежда-Фарм" },
-      { domain: "etabl.ru", label: "eTabl.ru" }
+      {
+        domain: "etabl.ru",
+        label: "eTabl.ru",
+        availability: "temporarily_blocked",
+        note: "Публичный рейтинг не подтверждён; скрытые reviewsStats исключены"
+      }
     ]
   }
 ] as const;

@@ -1108,7 +1108,8 @@ describe("blocked free-mode review sites", () => {
       "ru.otzyv.com",
       "medum.ru",
       "polza.ru",
-      "apteka.magnit.ru"
+      "apteka.magnit.ru",
+      "etabl.ru"
     ]);
   });
 });

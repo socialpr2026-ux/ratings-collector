@@ -32,6 +32,7 @@ const fixtures = {
   </body></html>`,
   riglaProduct: `<!doctype html><html><head><link rel="canonical" href="https://www.rigla.ru/product/kagotsel-tab-12mg-no10-15027"></head><body>
     <h1>Кагоцел таблетки 0,012г №10</h1>
+    <div class="reviews-list__reviews-count"><div>Отзывы 3</div></div>
     <script>window.__INITIAL_STATE__={"productView":{"reviews":[{"id":11,"ratings":[{"attribute_code":"Оценка","value":5}]},{"id":12,"ratings":[{"attribute_code":"Оценка","value":4}]},{"id":13,"ratings":[{"attribute_code":"Оценка","value":4}]}]}};(function(){})()</script>
   </body></html>`,
   zdravGroup: `<!doctype html><html><body><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
@@ -156,6 +157,27 @@ describe("RiglaAdapter", () => {
     expect(refs.map((item) => item.listingId)).toEqual(["15027", "106662"]);
     const observation = await adapter.collect(refs[0], context);
     expect(observation).toMatchObject({ reviews: 3, rating: 4.33, ratingCount: 3, status: "ok" });
+  });
+
+  it("prefers the visible no-reviews state over stale hidden Rigla reviews", async () => {
+    const hiddenStale = fixtures.riglaProduct.replace(
+      '<div class="reviews-list__reviews-count"><div>Отзывы 3</div></div>',
+      '<div class="reviews-list__empty-text">Отзывов пока нет</div>'
+    );
+    const adapter = new RiglaAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(hiddenStale, { status: 200 })
+    ) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "rigla.ru", platform: "rigla.ru", listingId: "15027", brand: "Кагоцел",
+      url: "https://www.rigla.ru/product/kagotsel-tab-12mg-no10-15027", metadata: {}
+    }, context)).resolves.toMatchObject({
+      reviews: 0,
+      rating: null,
+      ratingCount: 0,
+      status: "no_reviews",
+      source: "rigla-visible-no-reviews"
+    });
   });
 
   it("checks the requested Rigla brand instead of an unrelated fixed canary", async () => {

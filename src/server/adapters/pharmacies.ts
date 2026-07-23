@@ -489,9 +489,36 @@ export class RiglaAdapter extends PharmacyAdapter {
     if (!canonical || canonical.id !== ref.listingId) throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: canonical ведёт на другую карточку`);
     const title = compactText($("h1").first().text());
     if (!title) throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: название не найдено`);
+    const emptyReviews = compactText($(".reviews-list__empty-text").first().text());
+    if (/^(?:Отзывов пока нет|No reviews yet)$/iu.test(emptyReviews)) {
+      return evidenceObservation(this.evidence, {
+        domain: RIGLA_DOMAIN,
+        listingId: ref.listingId,
+        brand: ref.brand,
+        canonicalUrl: canonical.url,
+        title,
+        reviews: 0,
+        rating: null,
+        ratingCount: 0,
+        capturedAt: new Date().toISOString(),
+        html: result.html,
+        status: result.status,
+        requestedUrl: result.requestedUrl,
+        source: "rigla-visible-no-reviews"
+      });
+    }
+    const visibleReviewCount = integer(
+      compactText($(".reviews-list__reviews-count").first().text()).match(/(?:Отзывы|Reviews)\s+(\d+)/iu)?.[1]
+    );
+    if (visibleReviewCount === undefined || visibleReviewCount <= 0) {
+      throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: публичный блок отзывов не доказан`);
+    }
     const state = riglaState(result.html) as { productView?: { reviews?: unknown[] } };
     const reviewItems = state.productView?.reviews;
     if (!Array.isArray(reviewItems)) throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: список отзывов не найден`);
+    if (reviewItems.length !== visibleReviewCount) {
+      throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: скрытые отзывы не совпадают с публичным счетчиком`);
+    }
     const reviewIds = new Set<string>();
     const ratings: number[] = [];
     for (const item of reviewItems) {

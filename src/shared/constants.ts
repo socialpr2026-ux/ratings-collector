@@ -25,8 +25,7 @@ export const INITIAL_DOMAINS = [
   "okapteka.ru",
   "zdravcity.ru",
   "apteka.ru",
-  "nfapteka.ru",
-  "etabl.ru"
+  "nfapteka.ru"
 ] as const;
 
 export const INITIAL_BRANDS = [

@@ -50,15 +50,20 @@ describe("site picker catalog", () => {
       availability: "temporarily_blocked"
     });
     expect(SELECTABLE_CATALOG_DOMAINS).toEqual(expect.arrayContaining([
-      "apteka.ru", "nfapteka.ru", "budzdorov.ru", "etabl.ru", "eapteka.ru", "vapteke.ru",
+      "apteka.ru", "nfapteka.ru", "budzdorov.ru", "eapteka.ru", "vapteke.ru",
       "maksavit.ru", "vitaexpress.ru"
     ]));
     expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("apteka-april.ru");
     expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("polza.ru");
     expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("apteka.magnit.ru");
+    expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("etabl.ru");
     expect(SITE_CATALOG.flatMap((group) => group.sites).find((site) => site.domain === "apteka.magnit.ru")).toMatchObject({
       availability: "temporarily_blocked",
       note: "Рейтинг не отображается на карточке товара; скрытые API-агрегаты исключены"
+    });
+    expect(SITE_CATALOG.flatMap((group) => group.sites).find((site) => site.domain === "etabl.ru")).toMatchObject({
+      availability: "temporarily_blocked",
+      note: "Публичный рейтинг не подтверждён; скрытые reviewsStats исключены"
     });
     expect(SITE_CATALOG.flatMap((group) => group.sites).filter((site) =>
       ["polza.ru"].includes(site.domain)
@@ -69,7 +74,7 @@ describe("site picker catalog", () => {
 
   it("selects every runnable catalog site in a new collection by default", () => {
     expect(INITIAL_DOMAINS).toEqual(SELECTABLE_CATALOG_DOMAINS);
-    expect(INITIAL_DOMAINS).toHaveLength(28);
+    expect(INITIAL_DOMAINS).toHaveLength(27);
   });
 
   it("shows the complete requested pharmacy list alongside additional connected pharmacies", () => {
