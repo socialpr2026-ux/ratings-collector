@@ -101,7 +101,7 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
         domain: "etabl.ru",
         label: "eTabl.ru",
         availability: "temporarily_blocked",
-        note: "Публичный рейтинг не подтверждён; скрытые reviewsStats исключены"
+        note: "Публичные рейтинги подтверждены; автоматический маршрут сейчас недоступен"
       }
     ]
   }

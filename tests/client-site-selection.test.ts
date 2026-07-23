@@ -62,7 +62,7 @@ describe("site picker catalog", () => {
     });
     expect(SITE_CATALOG.flatMap((group) => group.sites).find((site) => site.domain === "etabl.ru")).toMatchObject({
       availability: "temporarily_blocked",
-      note: "Публичный рейтинг не подтверждён; скрытые reviewsStats исключены"
+      note: "Публичные рейтинги подтверждены; автоматический маршрут сейчас недоступен"
     });
     expect(SITE_CATALOG.flatMap((group) => group.sites).find((site) => site.domain === "polza.ru"))
       .toEqual({ domain: "polza.ru", label: "POLZAru" });
