@@ -264,7 +264,7 @@ describe("collector runtime fallback integration", () => {
       listingId: "822686443",
       reviews: 106,
       rating: 4.9,
-      source: "wildberries-search-v18"
+      source: "wildberries-card-v4-batch"
     }]);
     expect(requestedUrls.filter((url) => url.hostname === "search.wb.ru").map((url) =>
       url.searchParams.get("appType")

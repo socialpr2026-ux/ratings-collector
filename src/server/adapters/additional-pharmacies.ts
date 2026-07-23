@@ -684,6 +684,30 @@ const BUD_PRODUCT = /^\/product\/(?:[a-z0-9-]+-)?(\d+)\/?$/i;
 const BUD_FORM_SLUG_ALIASES: Record<string, string> = {
   "оциллококцинум": "ocillokokcinum"
 };
+const BUD_BOUNDED_EXACT_PRODUCTS: Record<string, Array<{ id: string; url: string; title: string }>> = {
+  "бактоблис": [
+    {
+      id: "5005555",
+      url: `https://www.${BUD_DOMAIN}/product/baktoblis-plyus-tabdlya-rassas-950mg-no30-ddet-starshe-3-kh-let-i-vzr-bad-5005555`,
+      title: "Бактоблис плюс таблетки для рассасывания 950 мг №30"
+    },
+    {
+      id: "109834",
+      url: `https://www.${BUD_DOMAIN}/product/baktoblis-tab-dlya-rassasyv-30g-no30-109834`,
+      title: "Бактоблис таблетки для рассасывания 30 г №30"
+    },
+    {
+      id: "5005556",
+      url: `https://www.${BUD_DOMAIN}/product/baktoblis-poroshok-dlya-vzr-i-det-ot-15let-sashe-paket-1500mg-no15-bad-5005556`,
+      title: "Бактоблис порошок в саше-пакетах 1500 мг №15"
+    },
+    {
+      id: "6000866",
+      url: `https://www.${BUD_DOMAIN}/product/baktoblis-poroshok-v-sashe-paketakh-1500mg-no30-6000866`,
+      title: "Бактоблис порошок в саше-пакетах 1500 мг №30"
+    }
+  ]
+};
 
 function budFormSlugs(brand: string): string[] {
   const normalized = brand.normalize("NFKC").toLocaleLowerCase("ru-RU").replace(/ё/g, "е").trim();
@@ -734,6 +758,63 @@ function addBudDiscoveryRefs(
 
 type BudReview = { id?: unknown; ratings?: Array<{ attribute_code?: unknown; value?: unknown }> };
 
+function boundedBudRefs(brand: string): ProductRef[] {
+  return (BUD_BOUNDED_EXACT_PRODUCTS[normalizeText(brand)] ?? []).map((product) => ({
+    domain: BUD_DOMAIN,
+    platform: BUD_DOMAIN,
+    listingId: product.id,
+    brand,
+    url: product.url,
+    title: product.title,
+    metadata: { discovery: "bounded-exact-product-registry" }
+  }));
+}
+
+function parseBudReviewPage(page: HtmlPage, ref: ProductRef): {
+  title: string;
+  reviews: BudReview[];
+  rating: number | null;
+  ratingUnavailable: boolean;
+} {
+  const title = compactText(page.$("h1").first().text());
+  if (!matchesBrand(title, ref.brand)) throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: product brand changed`);
+  const state = initialState(page.$, BUD_DOMAIN);
+  const productView = state.productView as { reviews?: unknown } | undefined;
+  const reviews = Array.isArray(productView?.reviews) ? productView.reviews as BudReview[] : undefined;
+  const visibleCount = exactInteger(page.$("[allreviewsqty]").first().attr("allreviewsqty"));
+  if (!reviews || visibleCount === undefined || visibleCount !== reviews.length) {
+    throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: full review list is missing or incomplete`);
+  }
+  const ids = new Set<string>();
+  let sum = 0;
+  let ratedReviews = 0;
+  for (const review of reviews) {
+    const id = String(review.id ?? "");
+    if (!id || ids.has(id) || !Array.isArray(review.ratings)) {
+      throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: review identities or scores are incomplete`);
+    }
+    ids.add(id);
+    const scores = review.ratings.filter((item) =>
+      String(item.attribute_code ?? "").toLocaleLowerCase("ru-RU") === "оценка"
+    );
+    if (scores.length === 0) continue;
+    const score = scores.length === 1 ? exactRating(scores[0].value) : undefined;
+    if (score === undefined) {
+      throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: review identities or scores are incomplete`);
+    }
+    sum += score;
+    ratedReviews += 1;
+  }
+  return {
+    title,
+    reviews,
+    rating: reviews.length && ratedReviews === reviews.length
+      ? Math.round(sum / reviews.length * 10) / 10
+      : null,
+    ratingUnavailable: reviews.length > 0 && ratedReviews < reviews.length
+  };
+}
+
 export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
   readonly id = "budzdorov.ru:translated-review-state-v1";
   readonly supportedDomains = [BUD_DOMAIN, `www.${BUD_DOMAIN}`] as const;
@@ -779,18 +860,37 @@ export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
     const initial = brand.normalize("NFKC").trim().charAt(0).toLocaleUpperCase("ru-RU");
     if (!initial) throw new AdapterBlockedError(`${BUD_DOMAIN}: brand has no alphabet initial`);
     const letterSource = new URL(`https://www.${BUD_DOMAIN}/letter/${encodeURIComponent(initial)}`);
-    const letterPage = await requestPage(letterSource, context, this.fetchImpl, BUD_TRANSLATE_HOST);
-    if (!letterPage.$(".alphabet-forms").length) {
-      throw new ParserChangedError(`${BUD_DOMAIN}: letter index structure is missing`);
+    let letterError: unknown;
+    try {
+      const letterPage = await requestPage(letterSource, context, this.fetchImpl, BUD_TRANSLATE_HOST);
+      if (!letterPage.$(".alphabet-forms").length) {
+        throw new ParserChangedError(`${BUD_DOMAIN}: letter index structure is missing`);
+      }
+      addBudDiscoveryRefs(
+        letterPage,
+        ".alphabet-forms a[href*='/product/'], a.alphabet-forms__item-link[href*='/product/']",
+        brand,
+        "translated-first-party-letter-index",
+        liveRefs
+      );
+    } catch (error) {
+      letterError = error;
     }
-    addBudDiscoveryRefs(
-      letterPage,
-      ".alphabet-forms a[href*='/product/'], a.alphabet-forms__item-link[href*='/product/']",
-      brand,
-      "translated-first-party-letter-index",
-      liveRefs
-    );
-    if (formError) throw formError;
+
+    const discoveryError = formError ?? letterError;
+    if (discoveryError) {
+      const bounded = boundedBudRefs(brand);
+      if (!bounded.length) throw discoveryError;
+      const verified = await Promise.all(bounded.map(async (ref) => {
+        const parsedRef = budRef(ref.url, ref.listingId);
+        if (!parsedRef) throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: invalid bounded product URL`);
+        const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl, BUD_TRANSLATE_HOST);
+        const parsed = parseBudReviewPage(page, ref);
+        return { ...ref, title: parsed.title, metadata: { ...ref.metadata } };
+      }));
+      liveRefs.clear();
+      for (const ref of verified) liveRefs.set(ref.listingId, ref);
+    }
 
     if (!liveRefs.size && !refs.size) {
       if (successfulPages === slugs.length && explicitNoResults === slugs.length) return [];
@@ -808,50 +908,16 @@ export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
     const parsedRef = budRef(ref.url, ref.listingId);
     if (!parsedRef) throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: invalid product URL or ID`);
     const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl, BUD_TRANSLATE_HOST);
-    const title = compactText(page.$("h1").first().text());
-    if (!matchesBrand(title, ref.brand)) throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: product brand changed`);
-    const state = initialState(page.$, BUD_DOMAIN);
-    const productView = state.productView as { reviews?: unknown } | undefined;
-    const reviews = Array.isArray(productView?.reviews) ? productView.reviews as BudReview[] : undefined;
-    const visibleCount = exactInteger(page.$("[allreviewsqty]").first().attr("allreviewsqty"));
-    if (!reviews || visibleCount === undefined || visibleCount !== reviews.length) {
-      throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: full review list is missing or incomplete`);
-    }
-    const ids = new Set<string>();
-    let sum = 0;
-    let ratedReviews = 0;
-    for (const review of reviews) {
-      const id = String(review.id ?? "");
-      if (!id || ids.has(id) || !Array.isArray(review.ratings)) {
-        throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: review identities or scores are incomplete`);
-      }
-      ids.add(id);
-      const scores = review.ratings.filter((item) =>
-        String(item.attribute_code ?? "").toLocaleLowerCase("ru-RU") === "оценка"
-      );
-      if (scores.length === 0) continue;
-      const score = scores.length === 1 ? exactRating(scores[0].value) : undefined;
-      if (score === undefined) {
-        throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: review identities or scores are incomplete`);
-      }
-      sum += score;
-      ratedReviews += 1;
-    }
-    // Bud Zdorov allows a written product review without a star rating. The
-    // complete, unique review list still proves feedback count, but a partial
-    // set of scores does not prove the product's aggregate rating.
-    const value = reviews.length && ratedReviews === reviews.length
-      ? Math.round(sum / reviews.length * 10) / 10
-      : null;
+    const parsed = parseBudReviewPage(page, ref);
     const result = await observation(this.evidence, ref, page, {
       domain: BUD_DOMAIN,
-      title,
+      title: parsed.title,
       canonicalUrl: parsedRef.url,
-      reviews: reviews.length,
-      rating: value,
+      reviews: parsed.reviews.length,
+      rating: parsed.rating,
       source: "budzdorov-complete-review-state:google-translate"
     });
-    if (reviews.length > 0 && ratedReviews < reviews.length) result.ratingUnavailable = true;
+    if (parsed.ratingUnavailable) result.ratingUnavailable = true;
     return result;
   }
 }

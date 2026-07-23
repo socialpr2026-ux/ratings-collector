@@ -614,6 +614,10 @@ export class YandexAdapter implements SiteAdapter {
     endpoint.searchParams.set("_x_tr_tl", "en");
     endpoint.searchParams.set("_x_tr_hl", "en");
     const response = await this.request(endpoint.toString(), context, "text/html,application/xhtml+xml");
+    if (response.status === 404 || response.status === 410) {
+      void response.body?.cancel().catch(() => undefined);
+      return { kind: "missing", requestUrl: sourceUrl };
+    }
     assertUsableResponse(response, endpoint.toString());
     const actualUrl = new URL(response.url || endpoint.toString());
     if (actualUrl.protocol !== "https:" || actualUrl.hostname !== "reviews-yandex-ru.translate.goog" ||

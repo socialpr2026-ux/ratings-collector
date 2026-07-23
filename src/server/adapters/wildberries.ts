@@ -583,7 +583,16 @@ export class WildberriesAdapter implements SiteAdapter {
     plan.promise = verification;
     try {
       await verification;
-      this.discoveryBatchPlans.delete(batchKey);
+      // Product refs can cross a repository/checkpoint boundary between
+      // discovery and collection. Rehydrate the verified source-bound fields
+      // from the retained batch instead of assuming object identity.
+      const verified = plan.refs.find((item) => item.listingId === ref.listingId);
+      if (!verified || verified.metadata.cardBatchVerified !== true) {
+        throw new ParserChangedError(`Wildberries card-verification batch ${batchKey} did not verify ${ref.listingId}`);
+      }
+      ref.title = verified.title;
+      ref.url = verified.url;
+      ref.metadata = { ...ref.metadata, ...verified.metadata };
     } catch (error) {
       if (plan.promise === verification) plan.promise = undefined;
       throw error;

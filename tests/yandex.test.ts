@@ -867,6 +867,26 @@ describe("YandexAdapter collection", () => {
       .rejects.toThrow(/incomplete HTML/);
   });
 
+  it("drops a translated 404 candidate without blocking other current Yandex cards", async () => {
+    const modelId = "5881130484";
+    const directUrl = `https://reviews.yandex.ru/product/baktoblis--${modelId}`;
+    const translatedUrl = `https://reviews-yandex-ru.translate.goog/product/${modelId}?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en`;
+    const fetch = routeFetch({
+      [directUrl]: new Response("blocked", { status: 403 }),
+      [translatedUrl]: new Response("missing", { status: 404 })
+    });
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.collect(ref({ listingId: modelId, brand: "\u0411\u0430\u043a\u0442\u043e\u0431\u043b\u0438\u0441", url: directUrl }), context()))
+      .resolves.toMatchObject({
+        listingId: modelId,
+        reviews: null,
+        rating: null,
+        status: "not_found",
+        source: "yandex_reviews_missing_candidate"
+      });
+  });
+
   it("requires explicit zero-review proof on a complete translated Product without AggregateRating", async () => {
     const modelId = "695943742";
     const directUrl = `https://reviews.yandex.ru/product/kagotsel--${modelId}`;

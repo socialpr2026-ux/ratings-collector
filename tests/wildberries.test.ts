@@ -520,7 +520,11 @@ describe("WildberriesAdapter.discover", () => {
     const adapter = createAdapter(fetchMock);
     const refs = await adapter.discover("Бактоблис", context({ runId: "partial-root-distribution" }));
 
-    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context())));
+    const persistedSecondRef = { ...refs[1]!, metadata: { ...refs[1]!.metadata } };
+    const observations = [
+      await adapter.collect(refs[0]!, context()),
+      await adapter.collect(persistedSecondRef, context())
+    ];
     expect(observations).toMatchObject([
       { reviews: 3, ratingCount: 2, rating: 5, aggregateGroupId: "wildberries:root:501370411" },
       { reviews: 3, ratingCount: 2, rating: 5, aggregateGroupId: "wildberries:root:501370411" }

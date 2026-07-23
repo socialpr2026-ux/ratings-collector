@@ -532,6 +532,52 @@ describe("additional pharmacy adapters", () => {
     expect(new URL(String(fetchSpy.mock.calls[0][0])).pathname).toBe(new URL(formSource).pathname);
   });
 
+  it("verifies every bounded exact Baktoblis card when Bud Zdorov indexes are unavailable", async () => {
+    const brand = "\u0411\u0430\u043a\u0442\u043e\u0431\u043b\u0438\u0441";
+    const products = new Map<string, { id: string; title: string; reviews: Array<{ id: number; ratings: never[] }> }>([
+      ["/product/baktoblis-plyus-tabdlya-rassas-950mg-no30-ddet-starshe-3-kh-let-i-vzr-bad-5005555", {
+        id: "5005555", title: `${brand} \u043f\u043b\u044e\u0441 \u0442\u0430\u0431\u043b\u0435\u0442\u043a\u0438 \u0434\u043b\u044f \u0440\u0430\u0441\u0441\u0430\u0441\u044b\u0432\u0430\u043d\u0438\u044f 950 \u043c\u0433 \u211630`, reviews: []
+      }],
+      ["/product/baktoblis-tab-dlya-rassasyv-30g-no30-109834", {
+        id: "109834", title: `${brand} \u0442\u0430\u0431\u043b\u0435\u0442\u043a\u0438 \u0434\u043b\u044f \u0440\u0430\u0441\u0441\u0430\u0441\u044b\u0432\u0430\u043d\u0438\u044f 30 \u0433 \u211630`,
+        reviews: [1, 2, 3, 4, 5].map((id) => ({ id, ratings: [] }))
+      }],
+      ["/product/baktoblis-poroshok-dlya-vzr-i-det-ot-15let-sashe-paket-1500mg-no15-bad-5005556", {
+        id: "5005556", title: `${brand} \u043f\u043e\u0440\u043e\u0448\u043e\u043a \u0432 \u0441\u0430\u0448\u0435-\u043f\u0430\u043a\u0435\u0442\u0430\u0445 1500 \u043c\u0433 \u211615`, reviews: []
+      }],
+      ["/product/baktoblis-poroshok-v-sashe-paketakh-1500mg-no30-6000866", {
+        id: "6000866", title: `${brand} \u043f\u043e\u0440\u043e\u0448\u043e\u043a \u0432 \u0441\u0430\u0448\u0435-\u043f\u0430\u043a\u0435\u0442\u0430\u0445 1500 \u043c\u0433 \u211630`, reviews: []
+      }]
+    ]);
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/forms/baktoblis") return new Response("missing", { status: 404 });
+      if (url.pathname === "/letter/%D0%91") return new Response("gateway", { status: 502 });
+      const product = products.get(url.pathname);
+      if (!product) throw new Error(`unexpected Bud Zdorov route: ${url.pathname}`);
+      const source = `https://www.budzdorov.ru${url.pathname}`;
+      return new Response(translated(source,
+        `<h1>${product.title}</h1><div allreviewsqty="${product.reviews.length}"></div>` +
+        `<script>window.__INITIAL_STATE__=${JSON.stringify({ productView: { reviews: product.reviews } })};document.currentScript.remove()</script>`), {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const adapter = new BudZdorovAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    const refs = await adapter.discover(brand, context);
+    expect(refs.map((ref) => ref.listingId).sort()).toEqual(["109834", "5005555", "5005556", "6000866"]);
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context)));
+    expect(observations.find((item) => item.listingId === "5005555"))
+      .toMatchObject({ reviews: 0, rating: null, status: "no_reviews" });
+    expect(observations.find((item) => item.listingId === "109834"))
+      .toMatchObject({ reviews: 5, rating: null, ratingUnavailable: true, status: "ok" });
+    expect(observations.find((item) => item.listingId === "5005556"))
+      .toMatchObject({ reviews: 0, rating: null, status: "no_reviews" });
+    expect(observations.find((item) => item.listingId === "6000866"))
+      .toMatchObject({ reviews: 0, rating: null, status: "no_reviews" });
+  });
+
   it("unions form and alphabet discovery for all four eye-care brands and excludes Taurin/Taufon analogs", async () => {
     const product = (path: string, title: string, className = "product-info__title") =>
       `<a class="${className}" href="https://www-budzdorov-ru.translate.goog${path}?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">${title}</a>`;
