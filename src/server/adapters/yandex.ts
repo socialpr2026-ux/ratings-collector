@@ -1,4 +1,5 @@
 import type {
+  AdapterActivityEvent,
   AdapterContext,
   AdapterHealth,
   Observation,
@@ -20,10 +21,12 @@ const MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_\d+-\d+-\d+\.xml$/i;
 const MODEL_ID_AT_END = /--(\d+)(?:[/?#]|$)/;
 // The gateway has two shard workers and a 120-second platform ceiling. Four
 // shards make two waves; with the bounded 2 x 25-second shard attempts below,
-// even the worst complete call stays under 100 seconds while halving the
-// per-request overhead versus two-shard batches.
+// even the worst complete call stays under 100 seconds. Two gateway requests
+// keep at most four first-party shards in flight, avoiding the throttling seen
+// at higher concurrency while exact retries and timeout splitting stay bounded.
 const YANDEX_BATCH_CHUNK_SIZE = 4;
 const YANDEX_BATCH_CONCURRENCY = 2;
+const YANDEX_PROGRESS_SITEMAP_INTERVAL = 32;
 
 type YandexBatchCapableFetch = typeof globalThis.fetch & { yandexBatchEndpoint?: string };
 
@@ -57,6 +60,11 @@ type ProductPage =
       responseUrl: string;
       translated: boolean;
     };
+
+async function reportActivity(context: AdapterContext, event: AdapterActivityEvent): Promise<void> {
+  try { await context.activity?.(event); }
+  catch { /* progress telemetry must never change collector semantics */ }
+}
 
 export type YandexAdapterOptions = {
   fetch?: typeof globalThis.fetch;
@@ -314,6 +322,8 @@ export class YandexAdapter implements SiteAdapter {
     if (context.signal?.aborted) relayAbort();
     else context.signal?.addEventListener("abort", relayAbort, { once: true });
     let cursor = 0;
+    let completedSitemaps = 0;
+    let reportedSitemaps = 0;
     let failure: unknown;
 
     const processChunk = async (sitemaps: string[]): Promise<void> => {
@@ -378,9 +388,33 @@ export class YandexAdapter implements SiteAdapter {
         const index = cursor;
         cursor += 1;
         if (index >= chunks.length) return;
+        const sitemaps = chunks[index]!;
         try {
-          await processChunk(chunks[index]!);
+          await processChunk(sitemaps);
+          completedSitemaps += sitemaps.length;
+          if (
+            completedSitemaps === sitemapUrls.length ||
+            completedSitemaps - reportedSitemaps >= YANDEX_PROGRESS_SITEMAP_INTERVAL
+          ) {
+            reportedSitemaps = completedSitemaps;
+            await reportActivity(context, {
+              operationId: `yandex:gateway-progress:${completedSitemaps}`,
+              stage: "discovery",
+              status: "complete",
+              label: "Полный поиск карточек Yandex",
+              channels: ["gateway"],
+              detail: `Проверено карт индекса: ${completedSitemaps} из ${sitemapUrls.length}`
+            });
+          }
         } catch (error) {
+          await reportActivity(context, {
+            operationId: `yandex:gateway-failure:${index}`,
+            stage: "discovery",
+            status: "warning",
+            label: "Полный поиск карточек Yandex",
+            channels: ["gateway"],
+            detail: `Пакет ${index + 1} не подтверждён: ${errorMessage(error)}`
+          });
           failure ??= error;
           if (!batchAbort.signal.aborted) batchAbort.abort(error);
           return;

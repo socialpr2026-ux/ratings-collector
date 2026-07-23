@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { AdapterContext, ProductRef } from "../src/shared/types.js";
+import type { AdapterActivityEvent, AdapterContext, ProductRef } from "../src/shared/types.js";
 import { AdapterBlockedError, ParserChangedError } from "../src/server/adapters/errors.js";
 import { YandexAdapter } from "../src/server/adapters/yandex.js";
 import { analyzeProductIdentity } from "../src/server/utils/product-name.js";
@@ -132,6 +132,49 @@ describe("YandexAdapter discovery", () => {
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(Math.ceil(maps.length / 4));
     expect(fetchMock.mock.calls.filter(([input]) => maps.includes(String(input)))).toHaveLength(0);
     expect(fetch).toHaveBeenCalledTimes(1 + Math.ceil(maps.length / 4));
+  });
+
+  it("keeps two bounded gateway workers and checkpoints verified full-scan milestones", async () => {
+    const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const maps = Array.from({ length: 36 }, (_value, index) =>
+      `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
+    );
+    const processed: string[] = [];
+    const activity: AdapterActivityEvent[] = [];
+    let inFlight = 0;
+    let peak = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      if (url !== batchEndpoint) throw new Error(`Unexpected request: ${url}`);
+      const request = JSON.parse(String(init?.body)) as { sitemaps: string[] };
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inFlight -= 1;
+      processed.push(...request.sitemaps);
+      return new Response(JSON.stringify({
+        processed: request.sitemaps.length,
+        firstSitemap: request.sitemaps[0],
+        lastSitemap: request.sitemaps.at(-1),
+        matches: []
+      }), { headers: { "content-type": "application/json" } });
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
+    fetch.yandexBatchEndpoint = batchEndpoint;
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: maps.length });
+
+    await expect(adapter.discover("baktoblis", context({
+      activity: async (event) => { activity.push(event); }
+    }))).resolves.toEqual([]);
+
+    expect(processed.sort()).toEqual([...maps].sort());
+    expect(peak).toBe(2);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(9);
+    expect(activity.filter((event) => event.status === "complete").map((event) => event.detail)).toEqual([
+      "Проверено карт индекса: 32 из 36",
+      "Проверено карт индекса: 36 из 36"
+    ]);
   });
 
   it("retries the same exact batch after a transient gateway network failure", async () => {

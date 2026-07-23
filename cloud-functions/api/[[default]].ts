@@ -1836,7 +1836,7 @@ function compactUtekaReviewsHtml(html: string, requested: UtekaReviewsTarget): s
  * fields that the adapter never reads. The complete upstream document and
  * exact shard range are verified before any compact proof is returned.
  */
-function compactYandexModelSitemap(xml: string, requested: URL): string | undefined {
+function extractCompleteYandexModelLocations(xml: string, requested: URL): string[] | undefined {
   const range = requested.pathname.match(YANDEX_MODEL_SITEMAP_PATH);
   if (!range || !/<urlset\b/i.test(xml) || !/<\/urlset\s*>\s*$/i.test(xml)) return undefined;
   const minimumId = BigInt(range[1]);
@@ -1866,6 +1866,12 @@ function compactYandexModelSitemap(xml: string, requested: URL): string | undefi
     locations.push(product.toString());
   }
   if (locations.length !== $("url").length) return undefined;
+  return locations;
+}
+
+function compactYandexModelSitemap(xml: string, requested: URL): string | undefined {
+  const locations = extractCompleteYandexModelLocations(xml, requested);
+  if (!locations) return undefined;
   return `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` +
     locations.map((location) => `<url><loc>${escapeHtml(location)}</loc></url>`).join("") +
     `</urlset>`;
@@ -1928,7 +1934,7 @@ class NonRetryableYandexBatchShardError extends Error {}
 const YANDEX_BATCH_SHARD_ATTEMPT_MS = 25_000;
 const YANDEX_BATCH_SHARD_ATTEMPTS = 2;
 
-async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string> {
+async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string[]> {
   const target = new URL(sitemap);
   let lastError: unknown;
   for (let attempt = 1; attempt <= YANDEX_BATCH_SHARD_ATTEMPTS; attempt += 1) {
@@ -1947,7 +1953,7 @@ async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string> {
       if (!upstream.ok) {
         await upstream.body?.cancel().catch(() => undefined);
         if (upstream.status === 404) {
-          return `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>`;
+          return [];
         }
         const message = `Yandex batch shard returned HTTP ${upstream.status}`;
         if (![408, 425, 429].includes(upstream.status) && upstream.status < 500) {
@@ -1957,9 +1963,9 @@ async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string> {
       }
       const remainingMs = Math.max(1, YANDEX_BATCH_SHARD_ATTEMPT_MS - (Date.now() - startedAt));
       const xml = await readTextBounded(upstream, 12_000_000, remainingMs);
-      const compact = compactYandexModelSitemap(xml, target);
-      if (!compact) throw new Error("Yandex batch shard did not prove complete exact XML");
-      return compact;
+      const locations = extractCompleteYandexModelLocations(xml, target);
+      if (!locations) throw new Error("Yandex batch shard did not prove complete exact XML");
+      return locations;
     } catch (error) {
       lastError = error;
       if (error instanceof NonRetryableYandexBatchShardError || attempt === YANDEX_BATCH_SHARD_ATTEMPTS) break;
@@ -1984,10 +1990,8 @@ async function collectYandexBatch(batch: YandexBatchRequest): Promise<{
       const index = cursor++;
       if (index >= batch.sitemaps.length) return;
       const sitemap = batch.sitemaps[index]!;
-      const compact = await fetchCompleteYandexBatchShard(sitemap);
-      const $ = load(compact, { xmlMode: true });
-      for (const node of $("urlset").children("url").toArray()) {
-        const productUrl = $(node).children("loc").first().text().trim();
+      const productUrls = await fetchCompleteYandexBatchShard(sitemap);
+      for (const productUrl of productUrls) {
         for (const brand of batch.brands) {
           if (yandexProductMatchesTokens(productUrl, brand.tokens)) {
             matches.push({ brand: brand.brand, url: productUrl, sitemap });
