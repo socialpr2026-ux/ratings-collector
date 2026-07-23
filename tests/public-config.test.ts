@@ -1005,7 +1005,9 @@ describe("static pharmacy Translate gateway", () => {
           : `<main itemscope>${card}</main><aside><div itemscope itemtype="https://schema.org/Product">
               <link itemprop="url" href="/catalog/otsillokoktsinum-granuly-1-g-6-doz_20630/">
               <meta itemprop="sku" content="20630"><meta itemprop="name" content="duplicate recommendation without metrics">
-            </div></aside>`) + `</body></html>`, { headers: { "content-type": "text/html" } });
+            </div></aside><div id="review_block"><input class="js-product_id" name="product_id" value="20630">
+              <div class="reviews__amount">1</div><div class="reviews__item review-item">Проверенный отзыв</div>
+            </div>`) + `</body></html>`, { headers: { "content-type": "text/html" } });
     });
     vi.stubGlobal("fetch", upstream);
 
@@ -1017,7 +1019,11 @@ describe("static pharmacy Translate gateway", () => {
 
     const product = await callGateway(translated("polza-ru.translate.goog", "/catalog/otsillokoktsinum-granuly-1-g-6-doz_20630/").toString());
     expect(product.status).toBe(200);
-    expect(await product.text()).toContain('itemprop="reviewCount" content="1"');
+    const productProof = await product.text();
+    expect(productProof).toContain('itemprop="reviewCount" content="1"');
+    expect(productProof).toContain('class="js-product_id" name="product_id" value="20630"');
+    expect(productProof).toContain('class="reviews__amount">1</div>');
+    expect(productProof).toContain('class="reviews__item review-item"');
     expect(upstream).toHaveBeenCalledTimes(2);
   });
 

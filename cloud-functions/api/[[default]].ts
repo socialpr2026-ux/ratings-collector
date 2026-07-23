@@ -868,12 +868,34 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
     if (candidates.length === 0 || new Set(candidates.map((item) => `${item.reviewCount}:${item.ratingValue}`)).size !== 1) {
       return undefined;
     }
-    const [{ reviews, rating }] = candidates;
+    const [{ reviews, rating, reviewCount }] = candidates;
+    let compactReviewProof = "";
+    if (reviewCount > 0) {
+      const reviewBlocks = $("#review_block");
+      const reviewBlock = reviewBlocks.first();
+      const reviewProductId = reviewBlock.find("input.js-product_id[name='product_id']").first().attr("value")?.trim();
+      const visibleTotal = reviewBlock.find(".reviews__amount").first().text().replace(/[\s\u00a0]/g, "");
+      const reviewItems = reviewBlock.find(".reviews__item.review-item");
+      if (reviewBlocks.length === 1 && reviewProductId === requested.productId && visibleTotal === reviews && reviewItems.length > 0) {
+        compactReviewProof = `<div id="review_block"><input class="js-product_id" name="product_id" value="${escapeHtml(requested.productId!)}">` +
+          `<div class="reviews__amount">${escapeHtml(reviews)}</div><div class="reviews__list">${reviewItems.toArray().map(() =>
+            `<article class="reviews__item review-item"></article>`
+          ).join("")}</div></div>`;
+      } else if (reviewBlocks.length === 0 && $(".review-add-modal, .js-notify-add-modal").length > 0) {
+        // Some exact Polza pages retain stale positive AggregateRating
+        // microdata after their public review block has been removed. Preserve
+        // only the page's explicit add-review UI so the adapter can map this
+        // source-bound current state to no_reviews instead of a false positive.
+        compactReviewProof = `<div class="review-add-modal js-notify-add-modal"></div>`;
+      } else {
+        return undefined;
+      }
+    }
     return `<html><head>${base}</head><body><script data-source-url="${escapeHtml(requested.source.toString())}"></script>` +
       `<main itemscope itemtype="https://schema.org/Product"><meta itemprop="sku" content="${escapeHtml(requested.productId!)}">` +
       `<link itemprop="url" href="${escapeHtml(requested.source.pathname)}">` +
       `<div itemprop="aggregateRating" itemscope><meta itemprop="reviewCount" content="${escapeHtml(reviews)}">` +
-      `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</div></main></body></html>`;
+      `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</div></main>${compactReviewProof}</body></html>`;
   }
 
   if (requested.kind === "asna-product") {
