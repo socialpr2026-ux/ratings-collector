@@ -175,26 +175,19 @@ export function browserFetch(
     const input = batch && typeof batch === "object" && !Array.isArray(batch)
       ? batch as { sitemaps?: unknown; brands?: unknown }
       : undefined;
-    const requestProof = async (payload: unknown) => {
-      for (let attempt = 1; ; attempt += 1) {
-        const response = await fetch(staticProxy.endpoint, {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${staticProxy.token}`,
-            "content-type": "application/json"
-          },
-          body: JSON.stringify({ url: request.url, yandexBatch: payload }),
-          signal: request.signal
-        });
-        if (response.status !== 502 || attempt >= 3) return response;
-        await response.body?.cancel().catch(() => undefined);
-        request.signal.throwIfAborted();
-        // Retry only the exact failed pair. This avoids restarting the complete
-        // 324-shard scan after one transient compact-proof failure.
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        request.signal.throwIfAborted();
-      }
-    };
+    // The fixed Function already retries the exact upstream shard. Return its
+    // authoritative batch response unchanged: YandexAdapter owns the bounded
+    // batch-level retry, so stacking another loop here would multiply a slow
+    // shard into as many as nine expensive attempts.
+    const requestProof = (payload: unknown) => fetch(staticProxy.endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${staticProxy.token}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ url: request.url, yandexBatch: payload }),
+      signal: request.signal
+    });
     const splitTimedOutProof = async (payload: { sitemaps: string[]; brands?: unknown }): Promise<Response> => {
       const response = await requestProof(payload);
       if (response.status !== 504 || payload.sitemaps.length <= 1) return response;
