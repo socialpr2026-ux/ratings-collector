@@ -478,9 +478,11 @@ export class PolzaAdapter implements SiteAdapter {
         if (!parsed) return;
         const productSlug = new URL(parsed.canonicalUrl).pathname.split("/").filter(Boolean)[1]?.replace(/_\d+$/, "") ?? "";
         if (!slugMatches(productSlug, slugs)) return;
+        const sourceTitle = root.find("meta[itemprop='name']").first().attr("content")
+          ?.normalize("NFKC").replace(/\s+/g, " ").trim();
         refs.set(parsed.listingId, {
           domain: "polza.ru", platform: "polza.ru", listingId: parsed.listingId, brand,
-          url: parsed.canonicalUrl, title: polzaProductTitle(parsed.canonicalUrl, brand),
+          url: parsed.canonicalUrl, title: sourceTitle || polzaProductTitle(parsed.canonicalUrl, brand),
           metadata: { discovery: "polza-current-sitemap-family", familyUrl: familyUrl.toString() }
         });
       });

@@ -13,6 +13,7 @@ function polzaFamily(source: string): string {
       <div class="catalog-card" itemscope itemtype="https://schema.org/Product">
         <link itemprop="url" href="/catalog/kagotsel-tabletki-12-mg-10-sht_6853/">
         <meta itemprop="sku" content="6853">
+        <meta itemprop="name" content="Кагоцел, таблетки 12 мг, 10 шт.">
         <span itemprop="aggregateRating"><meta itemprop="reviewCount" content="5"><meta itemprop="ratingValue" content="5"></span>
       </div>
       <div class="catalog-card" itemscope itemtype="https://schema.org/Product">
@@ -150,7 +151,10 @@ describe("recovered first-party pharmacy adapters", () => {
 
     const refs = await adapter.discover("Кагоцел", { region: "Москва" });
     expect(refs).toHaveLength(1);
-    expect(refs[0]).toMatchObject({ listingId: "6853", url: "https://polza.ru/catalog/kagotsel-tabletki-12-mg-10-sht_6853/" });
+    expect(refs[0]).toMatchObject({
+      listingId: "6853", url: "https://polza.ru/catalog/kagotsel-tabletki-12-mg-10-sht_6853/",
+      title: "Кагоцел, таблетки 12 мг, 10 шт."
+    });
 
     const result = await adapter.collect(refs[0], { region: "Москва" });
     expect(result).toMatchObject({ listingId: "6853", reviews: 5, rating: 5, status: "ok", source: "polza-product-microdata:google-translate" });
