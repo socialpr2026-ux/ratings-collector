@@ -51,10 +51,9 @@ describe("site picker catalog", () => {
     });
     expect(SELECTABLE_CATALOG_DOMAINS).toEqual(expect.arrayContaining([
       "apteka.ru", "nfapteka.ru", "budzdorov.ru", "eapteka.ru", "vapteke.ru",
-      "maksavit.ru", "vitaexpress.ru"
+      "maksavit.ru", "vitaexpress.ru", "polza.ru"
     ]));
     expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("apteka-april.ru");
-    expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("polza.ru");
     expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("apteka.magnit.ru");
     expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("etabl.ru");
     expect(SITE_CATALOG.flatMap((group) => group.sites).find((site) => site.domain === "apteka.magnit.ru")).toMatchObject({
@@ -65,16 +64,13 @@ describe("site picker catalog", () => {
       availability: "temporarily_blocked",
       note: "Публичный рейтинг не подтверждён; скрытые reviewsStats исключены"
     });
-    expect(SITE_CATALOG.flatMap((group) => group.sites).filter((site) =>
-      ["polza.ru"].includes(site.domain)
-    )).toEqual(expect.arrayContaining([
-      expect.objectContaining({ domain: "polza.ru", availability: "temporarily_blocked" })
-    ]));
+    expect(SITE_CATALOG.flatMap((group) => group.sites).find((site) => site.domain === "polza.ru"))
+      .toEqual({ domain: "polza.ru", label: "POLZAru" });
   });
 
   it("selects every runnable catalog site in a new collection by default", () => {
     expect(INITIAL_DOMAINS).toEqual(SELECTABLE_CATALOG_DOMAINS);
-    expect(INITIAL_DOMAINS).toHaveLength(27);
+    expect(INITIAL_DOMAINS).toHaveLength(28);
   });
 
   it("shows the complete requested pharmacy list alongside additional connected pharmacies", () => {
@@ -104,8 +100,8 @@ describe("site picker catalog", () => {
     const value = "https://medum.ru/\nmed-otzyv.ru\npolza.ru\neapteka.ru\ncustom.example";
 
     expect(parseDomainList(value)).toEqual(["medum.ru", "med-otzyv.ru", "polza.ru", "eapteka.ru", "custom.example"]);
-    expect(parseRunnableDomainList(value)).toEqual(["eapteka.ru", "custom.example"]);
-    expect(parseTemporarilyBlockedDomainList(value)).toEqual(["medum.ru", "med-otzyv.ru", "polza.ru"]);
+    expect(parseRunnableDomainList(value)).toEqual(["polza.ru", "eapteka.ru", "custom.example"]);
+    expect(parseTemporarilyBlockedDomainList(value)).toEqual(["medum.ru", "med-otzyv.ru"]);
   });
 
   it("keeps unrelated manual entries unchanged when a preset is toggled", () => {

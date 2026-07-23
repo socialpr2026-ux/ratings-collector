@@ -31,13 +31,13 @@ function polzaCard(source: string): string {
       <div itemprop="aggregateRating" itemscope>
         <meta itemprop="reviewCount" content="5"><meta itemprop="ratingValue" content="5">
       </div>
-      ${polzaReviewProof(5)}
+      ${polzaReviewProof(5, "6853")}
     </main>
   `);
 }
 
-function polzaReviewProof(reviews: number): string {
-  return `<div id="review_block"><div class="reviews__amount">${reviews}</div>
+function polzaReviewProof(reviews: number, productId: string): string {
+  return `<div id="review_block"><input class="js-product_id" name="product_id" value="${productId}"><div class="reviews__amount">${reviews}</div>
     <div class="reviews__list"><div class="reviews__item review-item">Проверенный отзыв</div></div></div>`;
 }
 
@@ -74,6 +74,47 @@ function translatedFinal(source: URL): string {
 }
 
 describe("recovered first-party pharmacy adapters", () => {
+  it("collects the public AquaOptic 250 ml Polza card with five visible reviews", async () => {
+    const card = "https://polza.ru/catalog/akvaoptik-rastvor-dlya-linz-250-ml_27787/";
+    const adapter = new PolzaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(translated(card, `
+      <div class="catalog-card" itemscope itemtype="https://schema.org/Product"><meta itemprop="sku" content="27787">
+        <link itemprop="url" href="${card}">
+      </div>
+      <main itemscope itemtype="https://schema.org/Product"><meta itemprop="sku" content="27787">
+        <link itemprop="url" href="${card}">
+        <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="5"><meta itemprop="ratingValue" content="5"></div>
+        <div id="review_block"><input class="js-product_id" name="product_id" value="27787"><div class="reviews__amount">5</div>
+          <div class="reviews__item review-item">Отзыв 1</div>
+          <div class="reviews__item review-item">Отзыв 2</div>
+          <div class="reviews__item review-item">Отзыв 3</div>
+          <div class="reviews__item review-item">Отзыв 4</div>
+          <div class="reviews__item review-item">Отзыв 5</div>
+        </div>
+      </main>`), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "polza.ru", platform: "polza.ru", listingId: "27787", brand: "АкваОптик", url: card, metadata: {}
+    }, { region: "Москва" })).resolves.toMatchObject({
+      listingId: "27787", reviews: 5, rating: 5, status: "ok", source: "polza-product-microdata:google-translate"
+    });
+  });
+
+  it("fails closed when the visible Polza review block belongs to another product", async () => {
+    const card = "https://polza.ru/catalog/akvaoptik-rastvor-dlya-linz-250-ml_27787/";
+    const adapter = new PolzaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(translated(card, `
+      <main itemscope itemtype="https://schema.org/Product"><meta itemprop="sku" content="27787">
+        <link itemprop="url" href="${card}">
+        <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="5"><meta itemprop="ratingValue" content="5"></div>
+      </main>
+      <div id="review_block"><input class="js-product_id" name="product_id" value="30714">
+        <div class="reviews__amount">5</div><div class="reviews__item review-item">Другой вариант</div>
+      </div>`), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "polza.ru", platform: "polza.ru", listingId: "27787", brand: "АкваОптик", url: card, metadata: {}
+    }, { region: "Москва" })).rejects.toThrow(/product aggregate is incomplete/);
+  });
+
   it("discovers only exact Polza family cards and collects the product aggregate", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
@@ -106,7 +147,7 @@ describe("recovered first-party pharmacy adapters", () => {
       <main itemscope itemtype="https://schema.org/Product">
         <meta itemprop="sku" content="56071">
         <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5"></div>
-        <div id="review_block"><div class="reviews__empty">Отзывов пока нет</div></div>
+        <div id="review_block"><input class="js-product_id" name="product_id" value="56071"><div class="reviews__empty">Отзывов пока нет</div></div>
       </main>`), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
     const adapter = new PolzaAdapter(new MemoryEvidenceStore(), fetchMock);
 
@@ -155,7 +196,7 @@ describe("recovered first-party pharmacy adapters", () => {
       if (url.pathname.includes("_20630")) return new Response(translated(card, `
         <main itemscope><meta itemprop="sku" content="20630"><div itemprop="aggregateRating">
           <meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5">
-        </div>${polzaReviewProof(1)}</main>`), { headers: { "content-type": "text/html" } });
+        </div>${polzaReviewProof(1, "20630")}</main>`), { headers: { "content-type": "text/html" } });
       throw new Error(`unexpected ${url}`);
     }) as unknown as typeof fetch;
     const adapter = new PolzaAdapter(new MemoryEvidenceStore(), fetchMock);
@@ -196,7 +237,7 @@ describe("recovered first-party pharmacy adapters", () => {
         return new Response(translated(card, `
           <main itemscope><meta itemprop="sku" content="20630"><div itemprop="aggregateRating">
             <meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5">
-          </div>${polzaReviewProof(1)}</main>`), { headers: { "content-type": "text/html" } });
+          </div>${polzaReviewProof(1, "20630")}</main>`), { headers: { "content-type": "text/html" } });
       }
       throw new Error(`unexpected ${url}`);
     }) as unknown as typeof fetch;
@@ -497,7 +538,7 @@ describe("recovered first-party pharmacy adapters", () => {
       if (url.hostname === "polza-ru.translate.goog" && url.pathname.includes("_53076")) {
         return new Response(translated(polzaProductUrl, `<main itemscope><meta itemprop="sku" content="53076">
           <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="3"><meta itemprop="ratingValue" content="5"></div>
-          ${polzaReviewProof(3)}
+          ${polzaReviewProof(3, "53076")}
         </main>`), { headers: { "content-type": "text/html" } });
       }
       if (url.hostname === "www.asna.ru" && url.pathname.endsWith("sitemap_cards.xml")) {

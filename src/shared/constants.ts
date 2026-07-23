@@ -14,6 +14,7 @@ export const INITIAL_DOMAINS = [
   "megapteka.ru",
   "maksavit.ru",
   "vapteke.ru",
+  "polza.ru",
   "rigla.ru",
   "ozerki.ru",
   "farmlend.ru",

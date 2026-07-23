@@ -371,7 +371,8 @@ function polzaProduct($: CheerioAPI, expectedId?: string): ParsedProduct | undef
 
 function polzaProductMetrics(
   root: ReturnType<CheerioAPI>,
-  $: CheerioAPI
+  $: CheerioAPI,
+  expectedId: string
 ): Pick<ParsedProduct, "reviews" | "rating"> | undefined {
   const aggregate = root.find("[itemprop='aggregateRating']").first();
   const reviews = exactInteger(aggregate.find("meta[itemprop='reviewCount']").first().attr("content"));
@@ -385,6 +386,8 @@ function polzaProductMetrics(
   const reviewBlocks = $("#review_block");
   const reviewBlock = reviewBlocks.first();
   const reviewItems = reviewBlock.find(".reviews__item.review-item");
+  const reviewProductId = reviewBlock.find("input.js-product_id[name='product_id']").first().attr("value");
+  if (reviewBlocks.length === 1 && reviewProductId !== expectedId) return undefined;
   const explicitEmpty = reviewBlocks.length === 1 && reviewBlock.find(
     ".reviews__empty, .reviews-empty, [data-empty-reviews]"
   ).length === 1 && /(?:отзывов\s+(?:пока\s+)?нет|нет\s+отзывов)/iu.test(reviewBlock.text());
@@ -491,8 +494,20 @@ export class PolzaAdapter implements SiteAdapter {
     if (!parsedRef || parsedRef.listingId !== ref.listingId) throw new ParserChangedError(`polza.ru: invalid product ref ${ref.listingId}`);
     const capturedAt = new Date().toISOString();
     const { html, $ } = await translatedPage(new URL(parsedRef.canonicalUrl), "polza-ru.translate.goog", context, this.fetchImpl);
-    const root = $(`meta[itemprop='sku'][content='${parsedRef.listingId}']`).closest("[itemscope]").first();
-    const metrics = root.length === 1 ? polzaProductMetrics(root, $) : undefined;
+    const productRoots = $(`meta[itemprop='sku'][content='${parsedRef.listingId}']`).toArray()
+      .map((node) => $(node).closest("[itemscope]").get(0))
+      .filter((node): node is NonNullable<typeof node> => Boolean(node))
+      .filter((node, index, nodes) => nodes.indexOf(node) === index)
+      .filter((node) => {
+        const candidate = $(node);
+        if (candidate.find("[itemprop='aggregateRating']").length !== 1) return false;
+        const path = candidate.find("link[itemprop='url']").first().attr("href");
+        if (!path) return true;
+        const bound = polzaRef(new URL(path, parsedRef.canonicalUrl));
+        return bound?.listingId === parsedRef.listingId && bound.canonicalUrl === parsedRef.canonicalUrl;
+      });
+    const root = productRoots.length === 1 ? $(productRoots[0]) : undefined;
+    const metrics = root ? polzaProductMetrics(root, $, parsedRef.listingId) : undefined;
     if (!metrics) {
       throw new ParserChangedError(`polza.ru:${ref.listingId}: product aggregate is incomplete`);
     }

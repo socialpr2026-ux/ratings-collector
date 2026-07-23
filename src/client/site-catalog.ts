@@ -53,7 +53,7 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
       { domain: "redapteka.ru", label: "REDapteka", availability: "temporarily_blocked", note: "Сборщик ещё не подключён" },
       { domain: "maksavit.ru", label: "Максавит" },
       { domain: "vapteke.ru", label: "ВАптеке" },
-      { domain: "polza.ru", label: "POLZAru", availability: "temporarily_blocked", note: "Отзывы на сайте отключены" },
+      { domain: "polza.ru", label: "POLZAru" },
       { domain: "expero.ru", label: "Expero", availability: "temporarily_blocked", note: "Сборщик ещё не подключён" },
       { domain: "rigla.ru", label: "Ригла" },
       { domain: "gorzdrav.org", label: "Горздрав", availability: "temporarily_blocked", note: "Сборщик ещё не подключён" },

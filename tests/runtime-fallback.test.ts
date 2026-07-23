@@ -550,9 +550,37 @@ describe("collector runtime fallback integration", () => {
     expect(requestedUrls.every((url) => url.hostname === "example.com")).toBe(true);
   });
 
-  it("keeps Polza blocked without making a request or publishing zeroes", async () => {
-    const fetchMock = vi.fn(async () => {
-      throw new Error("blocked domains must not be requested");
+  it("routes Polza through its exact public product-review adapter", async () => {
+    const family = "https://polza.ru/product/akvaoptik/";
+    const card = "https://polza.ru/catalog/akvaoptik-rastvor-dlya-linz-250-ml_27787/";
+    const translated = (source: string, body: string) =>
+      `<html><head><base href="${source}"></head><body><script data-source-url="${source}"></script>${body}</body></html>`;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.hostname === "polza.ru" && url.pathname === "/sitemap-iblock-33.xml") {
+        return new Response(`<urlset><url><loc>https://polza.ru/product/kagocel/</loc></url><url><loc>${family}</loc></url></urlset>`);
+      }
+      if (url.hostname === "polza-ru.translate.goog" && url.pathname === "/product/kagocel/") {
+        return new Response(translated("https://polza.ru/product/kagocel/", `
+          <div class="catalog__block--cards"><div class="catalog-block__items"><div class="catalog-card" itemscope>
+            <link itemprop="url" href="/catalog/kagotsel-tabletki-12-mg-10-sht_6853/"><meta itemprop="sku" content="6853">
+            <span itemprop="aggregateRating"><meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5"></span>
+          </div></div></div>`), { headers: { "content-type": "text/html" } });
+      }
+      if (url.hostname === "polza-ru.translate.goog" && url.pathname === "/product/akvaoptik/") {
+        return new Response(translated(family, `
+          <div class="catalog__block--cards"><div class="catalog-block__items"><div class="catalog-card" itemscope>
+            <link itemprop="url" href="${card}"><meta itemprop="sku" content="27787">
+            <span itemprop="aggregateRating"><meta itemprop="reviewCount" content="5"><meta itemprop="ratingValue" content="5"></span>
+          </div></div></div>`), { headers: { "content-type": "text/html" } });
+      }
+      if (url.hostname === "polza-ru.translate.goog" && url.pathname.includes("_27787")) {
+        return new Response(translated(card, `<main itemscope><meta itemprop="sku" content="27787">
+          <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="5"><meta itemprop="ratingValue" content="5"></div>
+          <div id="review_block"><input class="js-product_id" name="product_id" value="27787"><div class="reviews__amount">5</div><div class="reviews__item review-item">Отзыв</div></div>
+        </main>`), { headers: { "content-type": "text/html" } });
+      }
+      throw new Error(`unexpected Polza request ${url}`);
     }) as unknown as typeof fetch;
     const runtime = await createCollectorRuntime({
       repository: new MemoryRepository(),
@@ -563,15 +591,15 @@ describe("collector runtime fallback integration", () => {
     const run = await runtime.service.executeRun((await runtime.service.createRun({
       ...request,
       domains: ["polza.ru"],
-      brands: ["Бактоблис"]
+      brands: ["АкваОптик"]
     })).id);
 
     expect(run.partitions).toMatchObject([
-      { domain: "polza.ru", status: "blocked", discovered: 0, collected: 0 }
+      { domain: "polza.ru", status: "complete", discovered: 1, collected: 1 }
     ]);
-    expect(run.partitions.every((partition) => partition.message?.includes("blocked_free_mode"))).toBe(true);
-    expect(run.observations).toEqual([]);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(run.observations).toMatchObject([
+      { domain: "polza.ru", listingId: "27787", brand: "АкваОптик", reviews: 5, rating: 5, status: "ok" }
+    ]);
   });
 
   it.each([

@@ -1107,7 +1107,6 @@ describe("blocked free-mode review sites", () => {
       "pravogolosa.net",
       "ru.otzyv.com",
       "medum.ru",
-      "polza.ru",
       "apteka.magnit.ru",
       "etabl.ru"
     ]);
