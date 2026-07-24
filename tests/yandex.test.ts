@@ -259,6 +259,34 @@ describe("YandexAdapter discovery", () => {
       .toEqual([fetchMock.mock.calls[1]![1]?.body, fetchMock.mock.calls[1]![1]?.body]);
   });
 
+  it("bounds a gateway request that never returns and fails closed", async () => {
+    const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A]));
+      return await new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) throw new Error("missing gateway deadline signal");
+        const onAbort = () => reject(signal.reason ?? new DOMException("aborted", "AbortError"));
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      });
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
+    fetch.yandexBatchEndpoint = batchEndpoint;
+    const adapter = new YandexAdapter({
+      fetch,
+      maxSitemaps: 1,
+      sitemapRetryAttempts: 1,
+      batchRequestTimeoutMs: 10
+    });
+
+    await expect(adapter.discover("Бактоблис", context())).rejects.toMatchObject({
+      message: expect.stringContaining("Yandex batch proof request failed")
+    });
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+
   it("rejects a partial batch aggregate even when an earlier chunk contained a match", async () => {
     const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
     const maps = Array.from({ length: 9 }, (_value, index) =>

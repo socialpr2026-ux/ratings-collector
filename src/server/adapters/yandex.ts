@@ -80,6 +80,7 @@ export type YandexAdapterOptions = {
   sitemapRetryAttempts?: number;
   sitemapRetryBaseMs?: number;
   sitemapReadTimeoutMs?: number;
+  batchRequestTimeoutMs?: number;
   now?: () => Date;
   sleep?: (milliseconds: number) => Promise<void>;
 };
@@ -138,6 +139,7 @@ export class YandexAdapter implements SiteAdapter {
   private readonly sitemapRetryAttempts: number;
   private readonly sitemapRetryBaseMs: number;
   private readonly sitemapReadTimeoutMs: number;
+  private readonly batchRequestTimeoutMs: number;
   private readonly now: () => Date;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private indexCache?: Cached<string[]>;
@@ -168,6 +170,11 @@ export class YandexAdapter implements SiteAdapter {
     // verified transfer can legitimately take more than 20 seconds; keep the
     // safety deadline, but do not misclassify a healthy shard as blocked.
     this.sitemapReadTimeoutMs = boundedInteger(options.sitemapReadTimeoutMs, 60_000, 1, 120_000);
+    // A gateway invocation is bounded by the hosting platform itself. Keep a
+    // slightly larger client deadline so a lost transport response cannot
+    // leave the whole exhaustive scan running forever after the function has
+    // already stopped.
+    this.batchRequestTimeoutMs = boundedInteger(options.batchRequestTimeoutMs, 130_000, 1, 180_000);
     this.now = options.now ?? (() => new Date());
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
@@ -334,7 +341,10 @@ export class YandexAdapter implements SiteAdapter {
           response = await fetcher(endpoint, {
             method: "POST",
             redirect: "error",
-            signal: batchAbort.signal,
+            signal: AbortSignal.any([
+              batchAbort.signal,
+              AbortSignal.timeout(this.batchRequestTimeoutMs)
+            ]),
             headers: { "content-type": "application/json", accept: "application/json" },
             body: JSON.stringify({
               sitemaps,
