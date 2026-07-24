@@ -516,6 +516,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
       processed: 2,
       firstSitemap: "a",
       lastSitemap: "b",
+      verifiedSitemaps: ["a", "b"],
       matches: []
     }), { headers: { "content-type": "application/json" } }));
     vi.stubGlobal("fetch", directFetch);
@@ -559,6 +560,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
         processed: sitemaps.length,
         firstSitemap: sitemaps[0],
         lastSitemap: sitemaps.at(-1),
+        verifiedSitemaps: sitemaps,
         matches: sitemaps[0] === "a" ? [{
           brand: forwarded.yandexBatch.brands[0]!.brand,
           url: "https://reviews.yandex.ru/product/cereton--123",
@@ -585,6 +587,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
       processed: number;
       firstSitemap: string;
       lastSitemap: string;
+      verifiedSitemaps: string[];
       matches: Array<{ brand: string; url: string; sitemap: string }>;
     };
 
@@ -593,6 +596,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
       processed: 4,
       firstSitemap: "a",
       lastSitemap: "d",
+      verifiedSitemaps: ["a", "b", "c", "d"],
       matches: [{ brand: "Церетон", url: "https://reviews.yandex.ru/product/cereton--123", sitemap: "a" }]
     });
     expect(directFetch).toHaveBeenCalledTimes(3);
@@ -628,7 +632,13 @@ describe("ratings Agent lazy Sandbox routing", () => {
     vi.useFakeTimers();
     try {
       const run = vi.fn(async () => undefined);
-      const directFetch = vi.fn(() => new Promise<Response>(() => undefined));
+      let transportAborted = false;
+      const directFetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          transportAborted = true;
+          reject(init.signal?.reason);
+        }, { once: true });
+      }));
       vi.stubGlobal("fetch", directFetch);
       const routedFetch = browserFetch(sandbox(run), {
         endpoint: "https://ratings.example/api/internal/static-review-fetch",
@@ -648,6 +658,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
       expect(response.status).toBe(504);
       expect(await response.json()).toEqual({ error: "Yandex batch gateway transport timed out" });
       expect(directFetch).toHaveBeenCalledOnce();
+      expect(transportAborted).toBe(true);
       expect(run).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();

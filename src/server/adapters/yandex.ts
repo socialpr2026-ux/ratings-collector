@@ -19,12 +19,11 @@ const DIRECT_SOURCE = "yandex_reviews_json_ld";
 const TRANSLATE_SOURCE = "yandex_reviews_json_ld_google_translate";
 const MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_\d+-\d+-\d+\.xml$/i;
 const MODEL_ID_AT_END = /--(\d+)(?:[/?#]|$)/;
-// The gateway has two shard workers and a 120-second platform ceiling. Four
-// shards make two waves; with the bounded 2 x 25-second shard attempts below,
-// even the worst complete call stays under 100 seconds. Two gateway requests
-// keep at most four first-party shards in flight, avoiding the throttling seen
-// at higher concurrency while exact retries and timeout splitting stay bounded.
-const YANDEX_BATCH_CHUNK_SIZE = 4;
+// The gateway has two shard workers and a 120-second platform ceiling. A
+// two-shard package is one wave and stays below the Agent's transport deadline
+// even when both exact 25-second shard attempts are needed. Two gateway calls
+// still keep the proven production peak at four upstream shards.
+const YANDEX_BATCH_CHUNK_SIZE = 2;
 const YANDEX_BATCH_CONCURRENCY = 2;
 const YANDEX_PROGRESS_SITEMAP_INTERVAL = 32;
 
@@ -49,6 +48,7 @@ type YandexBatchProof = {
   processed: number;
   firstSitemap: string;
   lastSitemap: string;
+  verifiedSitemaps: string[];
   matches: Array<{ brand: string; url: string; sitemap: string }>;
 };
 
@@ -188,8 +188,8 @@ export class YandexAdapter implements SiteAdapter {
   constructor(options: YandexAdapterOptions = {}) {
     this.fallbackFetch = options.fetch ?? globalThis.fetch;
     this.sitemapIndexUrl = options.sitemapIndexUrl ?? DEFAULT_SITEMAP_INDEX;
-    // The live index currently contains 319 model maps. The hard ceiling keeps
-    // drift bounded while the default still scans the complete current index.
+    // The live index grows over time. The hard ceiling catches a structural
+    // jump while the default still scans every currently declared model map.
     this.maxSitemaps = boundedInteger(options.maxSitemaps, 400, 1, 400);
     this.maxCandidates = boundedInteger(options.maxCandidates, 300, 1, 2_000);
     this.maxDocumentBytes = boundedInteger(options.maxDocumentBytes, 12_000_000, 10_000, 25_000_000);
@@ -792,9 +792,13 @@ export class YandexAdapter implements SiteAdapter {
     if (looksBlocked(xml)) throw new AdapterBlockedError("Yandex blocked sitemap index access");
     if (!/<sitemapindex\b/i.test(xml)) throw new ParserChangedError("Yandex sitemap index XML shape changed");
 
-    const modelMaps = parseXmlLocs(xml).filter(isAllowedModelSitemap);
-    if (modelMaps.length === 0) throw new ParserChangedError("Yandex sitemap index contains no valid model maps");
-    return [...new Set(modelMaps)];
+    const locations = parseXmlLocs(xml);
+    const declared = xml.match(/<sitemap\b/gi)?.length ?? 0;
+    if (declared === 0 || locations.length !== declared || locations.some((location) => !isAllowedModelSitemap(location)) ||
+      new Set(locations).size !== locations.length) {
+      throw new ParserChangedError("Yandex sitemap index is incomplete or contains an unknown map shape");
+    }
+    return locations;
   }
 
   private async fetchModelSitemap(url: string, context: AdapterContext): Promise<string> {
@@ -802,6 +806,7 @@ export class YandexAdapter implements SiteAdapter {
     const xml = await this.fetchSitemapDocument(url, context, "model");
     if (looksBlocked(xml)) throw new AdapterBlockedError(`Yandex blocked model sitemap ${url}`);
     if (!/<urlset\b/i.test(xml)) throw new ParserChangedError(`Yandex model sitemap XML shape changed: ${url}`);
+    assertCompleteModelSitemap(xml, url);
     return xml;
   }
 
@@ -827,7 +832,7 @@ export class YandexAdapter implements SiteAdapter {
 
       if (kind === "model" && response.status === 404) {
         void response.body?.cancel().catch(() => undefined);
-        return "<?xml version=\"1.0\"?><urlset></urlset>";
+        throw new AdapterBlockedError(`Yandex indexed model sitemap disappeared: ${url}`);
       }
       if ([408, 425, 429].includes(response.status) || response.status >= 500 && response.status <= 599) {
         lastTransient = new AdapterBlockedError(`Yandex is unavailable for ${url}: HTTP ${response.status}`);
@@ -984,6 +989,32 @@ function isAllowedModelSitemap(input: string): boolean {
   }
 }
 
+function assertCompleteModelSitemap(xml: string, sitemap: string): void {
+  const requested = new URL(sitemap);
+  const range = requested.pathname.match(/sitemap_model_(\d+)-(\d+)-\d+\.xml/i);
+  const locations = parseXmlLocs(xml);
+  const declared = xml.match(/<url\b/gi)?.length ?? 0;
+  if (!range || locations.length !== declared) {
+    throw new ParserChangedError(`Yandex model sitemap is incomplete: ${sitemap}`);
+  }
+  const minimumId = BigInt(range[1]!);
+  const maximumId = BigInt(range[2]!);
+  for (const location of locations) {
+    let product: URL;
+    try { product = new URL(location); }
+    catch { throw new ParserChangedError(`Yandex model sitemap contains an invalid URL: ${sitemap}`); }
+    const modelId = product.pathname.match(/^\/product\/(?:[a-z0-9][a-z0-9_-]*)?--(\d+)$/i)?.[1];
+    if (product.protocol !== "https:" || product.hostname !== "reviews.yandex.ru" || product.port ||
+      product.username || product.password || product.search || product.hash || !modelId) {
+      throw new ParserChangedError(`Yandex model sitemap contains an unknown product route: ${sitemap}`);
+    }
+    const numericId = BigInt(modelId);
+    if (numericId < minimumId || numericId > maximumId) {
+      throw new ParserChangedError(`Yandex model sitemap contains a cross-range product: ${sitemap}`);
+    }
+  }
+}
+
 function isAllowedProductUrl(input: string): boolean {
   try {
     const url = new URL(input);
@@ -1114,7 +1145,10 @@ function validYandexBatchProof(proof: unknown, sitemaps: string[], brands: strin
   if (!proof || typeof proof !== "object" || Array.isArray(proof)) return false;
   const value = proof as Partial<YandexBatchProof>;
   if (value.processed !== sitemaps.length || value.firstSitemap !== sitemaps[0] ||
-    value.lastSitemap !== sitemaps.at(-1) || !Array.isArray(value.matches)) return false;
+    value.lastSitemap !== sitemaps.at(-1) || !Array.isArray(value.verifiedSitemaps) ||
+    value.verifiedSitemaps.length !== sitemaps.length ||
+    value.verifiedSitemaps.some((sitemap, index) => sitemap !== sitemaps[index]) ||
+    !Array.isArray(value.matches)) return false;
   const brandKeys = new Set(brands.map(brandKey));
   const sitemapSet = new Set(sitemaps);
   return value.matches.every((match) => Boolean(match) && typeof match === "object" &&

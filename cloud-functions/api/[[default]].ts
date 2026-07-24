@@ -1952,9 +1952,6 @@ async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string[]>
       }, fetch, 4, YANDEX_BATCH_SHARD_ATTEMPT_MS);
       if (!upstream.ok) {
         await upstream.body?.cancel().catch(() => undefined);
-        if (upstream.status === 404) {
-          return [];
-        }
         const message = `Yandex batch shard returned HTTP ${upstream.status}`;
         if (![408, 425, 429].includes(upstream.status) && upstream.status < 500) {
           throw new NonRetryableYandexBatchShardError(message);
@@ -1981,6 +1978,7 @@ async function collectYandexBatch(batch: YandexBatchRequest): Promise<{
   processed: number;
   firstSitemap: string;
   lastSitemap: string;
+  verifiedSitemaps: string[];
   matches: Array<{ brand: string; url: string; sitemap: string }>;
 }> {
   const matches: Array<{ brand: string; url: string; sitemap: string }> = [];
@@ -2020,6 +2018,7 @@ async function collectYandexBatch(batch: YandexBatchRequest): Promise<{
     processed: batch.sitemaps.length,
     firstSitemap: batch.sitemaps[0]!,
     lastSitemap: batch.sitemaps.at(-1)!,
+    verifiedSitemaps: [...batch.sitemaps],
     matches
   };
 }

@@ -15,7 +15,7 @@ const MAP_695 = "https://reviews.yandex.ru/ugcpub/sitemap_model_690000000-699999
 describe("YandexAdapter discovery", () => {
   it("discovers model cards by Cyrillic brand transliteration and deduplicates modelId", async () => {
     const fetch = routeFetch({
-      [INDEX]: xmlResponse(sitemapIndex([MAP_A, MAP_B, "https://evil.example/sitemap_model_1-2-0.xml"])),
+      [INDEX]: xmlResponse(sitemapIndex([MAP_A, MAP_B])),
       [MAP_A]: xmlResponse(modelSitemap([
         "https://reviews.yandex.ru/product/chasy-kagotsel--111",
         "https://reviews.yandex.ru/product/--3252533"
@@ -24,8 +24,7 @@ describe("YandexAdapter discovery", () => {
         modelSitemap([
           "https://reviews.yandex.ru/product/kagotsel-tabletki-12-mg-20-sht--265149860",
           "https://reviews.yandex.ru/product/kagotsel--265149860",
-          "https://reviews.yandex.ru/product/ingavirin--265149861",
-          "https://evil.example/product/kagotsel--999"
+          "https://reviews.yandex.ru/product/ingavirin--265149861"
         ])
       )
     });
@@ -113,6 +112,7 @@ describe("YandexAdapter discovery", () => {
         processed: request.sitemaps.length,
         firstSitemap: request.sitemaps[0],
         lastSitemap: request.sitemaps.at(-1),
+        verifiedSitemaps: request.sitemaps,
         matches: match ? [{
           brand: request.brands[0]!.brand,
           url: "https://reviews.yandex.ru/product/oscillococcinum--170000001",
@@ -128,10 +128,10 @@ describe("YandexAdapter discovery", () => {
       { listingId: "170000001", brand: "oscillococcinum" }
     ]);
     expect(batches.flat()).toEqual(maps);
-    expect(batches.every((batch) => batch.length >= 1 && batch.length <= 4)).toBe(true);
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(Math.ceil(maps.length / 4));
+    expect(batches.every((batch) => batch.length >= 1 && batch.length <= 2)).toBe(true);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(Math.ceil(maps.length / 2));
     expect(fetchMock.mock.calls.filter(([input]) => maps.includes(String(input)))).toHaveLength(0);
-    expect(fetch).toHaveBeenCalledTimes(1 + Math.ceil(maps.length / 4));
+    expect(fetch).toHaveBeenCalledTimes(1 + Math.ceil(maps.length / 2));
   });
 
   it("keeps two bounded gateway workers and checkpoints verified full-scan milestones", async () => {
@@ -157,6 +157,7 @@ describe("YandexAdapter discovery", () => {
         processed: request.sitemaps.length,
         firstSitemap: request.sitemaps[0],
         lastSitemap: request.sitemaps.at(-1),
+        verifiedSitemaps: request.sitemaps,
         matches: []
       }), { headers: { "content-type": "application/json" } });
     });
@@ -170,11 +171,33 @@ describe("YandexAdapter discovery", () => {
 
     expect(processed.sort()).toEqual([...maps].sort());
     expect(peak).toBe(2);
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(9);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(18);
     expect(activity.filter((event) => event.status === "complete").map((event) => event.detail)).toEqual([
       "Проверено карт индекса: 32 из 36",
       "Проверено карт индекса: 36 из 36"
     ]);
+  });
+
+  it("rejects a batch proof that omits a requested middle shard", async () => {
+    const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const maps = [MAP_A, MAP_B];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      const request = JSON.parse(String(init?.body)) as { sitemaps: string[] };
+      return new Response(JSON.stringify({
+        processed: request.sitemaps.length,
+        firstSitemap: request.sitemaps[0],
+        lastSitemap: request.sitemaps.at(-1),
+        verifiedSitemaps: [request.sitemaps[0]],
+        matches: []
+      }), { headers: { "content-type": "application/json" } });
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
+    fetch.yandexBatchEndpoint = batchEndpoint;
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: maps.length, sitemapRetryAttempts: 1 });
+
+    await expect(adapter.discover("baktoblis", context())).rejects.toBeInstanceOf(AdapterBlockedError);
   });
 
   it("retries the same exact batch after a transient gateway network failure", async () => {
@@ -192,6 +215,7 @@ describe("YandexAdapter discovery", () => {
         processed: request.sitemaps.length,
         firstSitemap: request.sitemaps[0],
         lastSitemap: request.sitemaps.at(-1),
+        verifiedSitemaps: request.sitemaps,
         matches: [{
           brand: request.brands[0]!.brand,
           url: "https://reviews.yandex.ru/product/baktoblis--170000001",
@@ -235,6 +259,7 @@ describe("YandexAdapter discovery", () => {
         processed: request.sitemaps.length,
         firstSitemap: request.sitemaps[0],
         lastSitemap: request.sitemaps.at(-1),
+        verifiedSitemaps: request.sitemaps,
         matches: [{
           brand: request.brands[0]!.brand,
           url: "https://reviews.yandex.ru/product/baktoblis--170000001",
@@ -295,6 +320,7 @@ describe("YandexAdapter discovery", () => {
         processed: request.sitemaps.length,
         firstSitemap: request.sitemaps[0],
         lastSitemap: request.sitemaps.at(-1),
+        verifiedSitemaps: request.sitemaps,
         matches: [{
           brand: request.brands[0]!.brand,
           url: "https://reviews.yandex.ru/product/oscillococcinum--170000001",
@@ -335,6 +361,7 @@ describe("YandexAdapter discovery", () => {
           processed: request.sitemaps.length,
           firstSitemap: request.sitemaps[0],
           lastSitemap: request.sitemaps.at(-1),
+          verifiedSitemaps: request.sitemaps,
           matches: []
         }), { headers: { "content-type": "application/json" } }));
       });
@@ -483,7 +510,7 @@ describe("YandexAdapter discovery", () => {
         mapBRequests += 1;
         return mapBRequests === 1
           ? xmlResponse("<html>changed</html>")
-          : xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/ingavirin--112"]));
+          : xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/ingavirin--265000112"]));
       }
       throw new Error(`Unexpected URL: ${url}`);
     }) as unknown as typeof globalThis.fetch;
@@ -495,7 +522,7 @@ describe("YandexAdapter discovery", () => {
       adapter.discover("ingavirin", context(shared))
     ])).rejects.toBeInstanceOf(ParserChangedError);
     await expect(adapter.discover("ingavirin", context(shared))).resolves.toMatchObject([
-      { listingId: "112", brand: "ingavirin" }
+      { listingId: "265000112", brand: "ingavirin" }
     ]);
 
     expect(mapARequests).toBe(2);
@@ -583,9 +610,9 @@ describe("YandexAdapter discovery", () => {
         indexRequests += 1;
         return indexRequests === 1
           ? new Response("temporary", { status: 503 })
-          : xmlResponse(sitemapIndex([MAP_A]));
+          : xmlResponse(sitemapIndex([MAP_B]));
       }
-      if (url === MAP_A) {
+      if (url === MAP_B) {
         return xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/kagotsel--265149860"]));
       }
       throw new Error(`Unexpected URL: ${url}`);
@@ -606,8 +633,8 @@ describe("YandexAdapter discovery", () => {
     let modelCalls = 0;
     const fetch = vi.fn(async (input: string | URL | Request) => {
       const url = input instanceof Request ? input.url : input.toString();
-      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A]));
-      if (url === MAP_A) {
+      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_B]));
+      if (url === MAP_B) {
         modelCalls += 1;
         return modelCalls === 1
           ? new Response("rate limited", { status: 429 })
@@ -627,8 +654,8 @@ describe("YandexAdapter discovery", () => {
     let modelRequests = 0;
     const fetch = vi.fn(async (input: string | URL | Request) => {
       const url = input instanceof Request ? input.url : input.toString();
-      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A]));
-      if (url === MAP_A) {
+      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_B]));
+      if (url === MAP_B) {
         modelRequests += 1;
         return modelRequests === 1
           ? hangingXmlResponse()
@@ -647,15 +674,25 @@ describe("YandexAdapter discovery", () => {
     expect(modelRequests).toBe(2);
   });
 
-  it("treats a missing model sitemap shard as an empty urlset", async () => {
+  it("fails closed when a model sitemap declared by the current index disappears", async () => {
     const fetch = routeFetch({
       [INDEX]: xmlResponse(sitemapIndex([MAP_A])),
       [MAP_A]: new Response("missing", { status: 404 })
     });
     const adapter = new YandexAdapter({ fetch, sitemapRetryBaseMs: 0 });
 
-    await expect(adapter.discover("kagotsel", context())).resolves.toEqual([]);
+    await expect(adapter.discover("kagotsel", context())).rejects.toBeInstanceOf(AdapterBlockedError);
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails closed when the root index contains an unknown sitemap shape", async () => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([MAP_A, "https://evil.example/sitemap_model_1-2-0.xml"]))
+    });
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.discover("kagotsel", context())).rejects.toBeInstanceOf(ParserChangedError);
+    expect(fetch).toHaveBeenCalledOnce();
   });
 
   it("keeps an invalid successful model sitemap as parser_changed without retrying it", async () => {

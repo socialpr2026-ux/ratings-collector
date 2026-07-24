@@ -57,7 +57,10 @@ export function transientRecoveryDelayMs(
 
 const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);
 const YANDEX_BATCH_ENDPOINT = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
-export const YANDEX_BATCH_GATEWAY_TIMEOUT_MS = 95_000;
+// EdgeOne terminates a Cloud Function at 120 seconds. Waiting beyond that
+// horizon prevents a synthetic timeout from starting a recursive split while
+// the original invocation can still be consuming the same Yandex shards.
+export const YANDEX_BATCH_GATEWAY_TIMEOUT_MS = 125_000;
 type YandexBatchCapableFetch = typeof fetch & { yandexBatchEndpoint?: string };
 
 function json(value: unknown, status = 200) {
@@ -181,6 +184,8 @@ export function browserFetch(
     // batch-level retry, so stacking another loop here would multiply a slow
     // shard into as many as nine expensive attempts.
     const requestProof = async (payload: unknown): Promise<Response> => {
+      const attemptAbort = new AbortController();
+      const signal = AbortSignal.any([request.signal, attemptAbort.signal]);
       try {
         return await withDeadline(fetch(staticProxy.endpoint, {
           method: "POST",
@@ -189,13 +194,13 @@ export function browserFetch(
             "content-type": "application/json"
           },
           body: JSON.stringify({ url: request.url, yandexBatch: payload }),
-          signal: request.signal
+          signal
         }), YANDEX_BATCH_GATEWAY_TIMEOUT_MS, "Yandex batch gateway transport timed out");
       } catch (error) {
+        attemptAbort.abort(error);
         request.signal.throwIfAborted();
-        // Some edge fetch implementations ignore an aborted signal. Convert
-        // the independently bounded transport timeout into the same explicit
-        // response as the Function deadline so the exact payload is split.
+        // The deadline is beyond the Function's platform ceiling, so this
+        // synthetic response cannot overlap a still-valid fixed invocation.
         return json({ error: safeErrorMessage(error) }, 504);
       }
     };
@@ -212,17 +217,25 @@ export function browserFetch(
       const middle = Math.ceil(payload.sitemaps.length / 2);
       const left = await splitTimedOutProof({ ...payload, sitemaps: payload.sitemaps.slice(0, middle) });
       if (!left.ok) return left;
-      const leftProof = await left.json() as { processed?: unknown; firstSitemap?: unknown; lastSitemap?: unknown; matches?: unknown };
+      const leftProof = await left.json() as {
+        processed?: unknown; firstSitemap?: unknown; lastSitemap?: unknown;
+        verifiedSitemaps?: unknown; matches?: unknown;
+      };
       const right = await splitTimedOutProof({ ...payload, sitemaps: payload.sitemaps.slice(middle) });
       if (!right.ok) return right;
-      const rightProof = await right.json() as { processed?: unknown; firstSitemap?: unknown; lastSitemap?: unknown; matches?: unknown };
-      if (!Array.isArray(leftProof.matches) || !Array.isArray(rightProof.matches)) {
+      const rightProof = await right.json() as {
+        processed?: unknown; firstSitemap?: unknown; lastSitemap?: unknown;
+        verifiedSitemaps?: unknown; matches?: unknown;
+      };
+      if (!Array.isArray(leftProof.matches) || !Array.isArray(rightProof.matches) ||
+        !Array.isArray(leftProof.verifiedSitemaps) || !Array.isArray(rightProof.verifiedSitemaps)) {
         return json({ error: "Split Yandex batch proof is unreadable" }, 502);
       }
       return json({
         processed: Number(leftProof.processed) + Number(rightProof.processed),
         firstSitemap: leftProof.firstSitemap,
         lastSitemap: rightProof.lastSitemap,
+        verifiedSitemaps: [...leftProof.verifiedSitemaps, ...rightProof.verifiedSitemaps],
         matches: [...leftProof.matches, ...rightProof.matches]
       });
     };

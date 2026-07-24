@@ -1524,7 +1524,7 @@ describe("fixed first-party collection egress", () => {
     }]);
   });
 
-  it("treats an exact indexed Yandex batch shard HTTP 404 as a complete empty proof only", async () => {
+  it("keeps an indexed Yandex batch shard HTTP 404 fail-closed", async () => {
     const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_5880000000-5889999999-0.xml";
     const callBatch = () => staticReviewFetch(new Request(
       "https://ratings.example/api/internal/static-review-fetch",
@@ -1544,8 +1544,8 @@ describe("fixed first-party collection egress", () => {
     vi.stubGlobal("fetch", missingFetch);
 
     const missing = await callBatch();
-    expect(missing.status).toBe(200);
-    expect(await missing.json()).toMatchObject({ processed: 1, matches: [] });
+    expect(missing.status).toBe(502);
+    expect(await missing.text()).not.toContain('"processed":1');
     expect(missingFetch).toHaveBeenCalledOnce();
 
     const blockedFetch = vi.fn(async () => new Response("blocked", { status: 403 }));
