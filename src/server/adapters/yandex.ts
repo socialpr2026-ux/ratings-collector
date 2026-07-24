@@ -81,6 +81,7 @@ export type YandexAdapterOptions = {
   sitemapRetryBaseMs?: number;
   sitemapReadTimeoutMs?: number;
   batchRequestTimeoutMs?: number;
+  productRequestTimeoutMs?: number;
   now?: () => Date;
   sleep?: (milliseconds: number) => Promise<void>;
 };
@@ -140,6 +141,7 @@ export class YandexAdapter implements SiteAdapter {
   private readonly sitemapRetryBaseMs: number;
   private readonly sitemapReadTimeoutMs: number;
   private readonly batchRequestTimeoutMs: number;
+  private readonly productRequestTimeoutMs: number;
   private readonly now: () => Date;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private indexCache?: Cached<string[]>;
@@ -175,6 +177,10 @@ export class YandexAdapter implements SiteAdapter {
     // leave the whole exhaustive scan running forever after the function has
     // already stopped.
     this.batchRequestTimeoutMs = boundedInteger(options.batchRequestTimeoutMs, 130_000, 1, 180_000);
+    // Product-page traffic can pass through the same fixed gateway as sitemap
+    // traffic. Bound every direct/translated page request independently so a
+    // lost upstream response cannot pin the collection stage forever.
+    this.productRequestTimeoutMs = boundedInteger(options.productRequestTimeoutMs, 45_000, 1, 120_000);
     this.now = options.now ?? (() => new Date());
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
@@ -643,6 +649,7 @@ export class YandexAdapter implements SiteAdapter {
       response = await this.request(requestUrl, context, "text/html,application/xhtml+xml");
     } catch (error) {
       if (!(error instanceof AdapterBlockedError)) throw error;
+      if (triedNumericRoute) throw error;
       // Some model--ID routes reset connections for removed products. The
       // same-origin numeric route either redirects to the canonical product
       // or renders Yandex's explicit missing-page screen.
@@ -832,10 +839,13 @@ export class YandexAdapter implements SiteAdapter {
     const fetcher = context.fetch ?? this.fallbackFetch;
     if (typeof fetcher !== "function") throw new AdapterBlockedError("No fetch implementation is available");
     try {
+      const requestSignal = context.signal
+        ? AbortSignal.any([context.signal, AbortSignal.timeout(this.productRequestTimeoutMs)])
+        : AbortSignal.timeout(this.productRequestTimeoutMs);
       return await fetcher(url, {
         method: "GET",
         redirect: "follow",
-        signal: context.signal,
+        signal: requestSignal,
         headers: {
           accept,
           "accept-language": "ru-RU,ru;q=0.9",

@@ -666,6 +666,20 @@ describe("YandexAdapter discovery", () => {
 });
 
 describe("YandexAdapter collection", () => {
+  it("bounds a product request that never returns and fails closed", async () => {
+    const fetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+    }));
+    const adapter = new YandexAdapter({ fetch: fetch as typeof globalThis.fetch, productRequestTimeoutMs: 10 });
+
+    await expect(adapter.collect(ref({
+      listingId: "126122882",
+      brand: "Бактоблис",
+      url: "https://reviews.yandex.ru/product/126122882"
+    }), context())).rejects.toBeInstanceOf(AdapterBlockedError);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
   it("does not attach a reviewed tablet variant to the source-bound Baktoblis sachet model", async () => {
     const listingId = "5705860403";
     const url = `https://reviews.yandex.ru/product/baktoblis-sashe--${listingId}`;
