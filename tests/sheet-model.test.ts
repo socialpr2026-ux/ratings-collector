@@ -241,7 +241,7 @@ describe("Google Sheets model", () => {
       "Ozon", "https://www.ozon.ru/product/otsillokoktsinum-148170210/",
       "гранулы 1 г №12 и №30", null, 2454, 4.9
     ]);
-    expect(summary[0][4]).toBe("=SUM(E5)");
+    expect(summary[0][4]).toBe("=SUM(E5:E5)");
     expect(summary[1][4]).toBe('=COUNTIFS({F5};">="&9/2;{E5};">0")');
   });
 
@@ -294,7 +294,7 @@ describe("Google Sheets model", () => {
     });
     const summary = document.formulas.filter((_row, index) => document.rowKinds[index] === "summary");
 
-    expect(summary[0][4]).toBe("=SUM(E5;E6)");
+    expect(summary[0][4]).toBe("=SUM(E5:E6)");
   });
 
   it("clears the current pair when a SKU disappears on a same-month rerun", () => {

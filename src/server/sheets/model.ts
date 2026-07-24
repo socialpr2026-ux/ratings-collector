@@ -460,7 +460,7 @@ export function buildSheetDocument(
       const reviewArray = `{${reviewCells.join(";")}}`;
       const ratingArray = `{${ratingCells.join(";")}}`;
       const formulasForMetric = [
-        reviewCells.length ? `=SUM(${reviewCells.join(";")})` : "=0",
+        reviewCells.length ? `=SUM(${reviewsColumn}${productStartRow}:${reviewsColumn}${productEndRow})` : "=0",
         ratingCells.length ? `=COUNTIFS(${ratingArray};">="&9/2;${reviewArray};">0")` : "=0",
         ratingCells.length ? `=COUNTIFS(${ratingArray};"<"&9/2;${ratingArray};"<>";${reviewArray};">0")` : "=0",
         ratingCells.length ? `=COUNTIFS(${ratingArray};"";${reviewArray};"<>")` : "=0"
