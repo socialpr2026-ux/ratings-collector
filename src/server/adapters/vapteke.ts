@@ -16,6 +16,7 @@ const HEALTH_BRAND = "АкваОптик";
 const HEALTH_URL = `${ORIGIN}/product/rastvor-dlya-uhoda-za-kontaktnymi-linzami-akvaoptik-mnogofunktsionalnyy-60-ml-${HEALTH_LISTING_ID}`;
 const MAX_API_BYTES = 2_000_000;
 const MAX_DOCUMENT_BYTES = 8_000_000;
+const STATIC_RETRY_DELAY_MS = 250;
 const PRODUCT_PATH = /^\/product\/([a-z0-9-]+)-(\d+)\/?$/i;
 const BLOCK_MARKERS = /captcha|access denied|forbidden|too many requests|cloudflare|qrator|доступ (?:ограничен|запрещ[её]н)|слишком много запросов|провер(?:ка|ьте),? что вы не робот|подтвердите,? что вы человек/i;
 
@@ -362,14 +363,24 @@ export class VaptekeAdapter implements SiteAdapter {
     const browserHeaders = new Headers(init.headers);
     browserHeaders.set("x-ratings-browser", "1");
     const browserInit = { ...init, headers: browserHeaders };
-    let direct: { response: Response; body: string };
-    try {
-      direct = await this.requestOnce(url, context, accept, init, maxBytes);
-    } catch (error) {
-      if (!wantsHtml) throw error;
-      return this.requestOnce(url, context, accept, browserInit, maxBytes);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let direct: { response: Response; body: string };
+      try {
+        direct = await this.requestOnce(url, context, accept, init, maxBytes);
+      } catch (error) {
+        if (!wantsHtml) throw error;
+        if (attempt === 1) return this.requestOnce(url, context, accept, browserInit, maxBytes);
+        context.signal?.throwIfAborted();
+        await new Promise((resolve) => setTimeout(resolve, STATIC_RETRY_DELAY_MS));
+        context.signal?.throwIfAborted();
+        continue;
+      }
+      if (!wantsHtml || !blockedStatus(direct.response.status) && !isBlockedBody(direct.body)) return direct;
+      if (attempt === 1) return this.requestOnce(url, context, accept, browserInit, maxBytes);
+      context.signal?.throwIfAborted();
+      await new Promise((resolve) => setTimeout(resolve, STATIC_RETRY_DELAY_MS));
+      context.signal?.throwIfAborted();
     }
-    if (!wantsHtml || !blockedStatus(direct.response.status) && !isBlockedBody(direct.body)) return direct;
     return this.requestOnce(url, context, accept, browserInit, maxBytes);
   }
 

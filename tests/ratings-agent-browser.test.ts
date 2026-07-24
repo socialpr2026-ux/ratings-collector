@@ -7,6 +7,8 @@ import {
   transientRecoveryDelayMs
 } from "../agents/ratings/index.js";
 import { AdapterBlockedError } from "../src/server/adapters/errors.js";
+import { VaptekeAdapter } from "../src/server/adapters/vapteke.js";
+import { MemoryEvidenceStore } from "../src/server/evidence.js";
 
 vi.mock("../src/server/utils/safe-fetch.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/server/utils/safe-fetch.js")>();
@@ -246,6 +248,110 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(JSON.parse(String((directFetch.mock.calls[1]?.[1] as RequestInit).body))).toEqual({
       url: "https://vapteke.ru/product/biviart-komfort-018-10-ml-682542"
     });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("keeps the complete Vapteke adapter path off Sandbox when fixed egress succeeds", async () => {
+    const run = vi.fn(async () => {
+      throw new Error("Sandbox quota exceeded");
+    });
+    const brand = "\u0411\u0430\u043a\u0442\u043e\u0431\u043b\u0438\u0441";
+    const productId = "659414";
+    const productSlug = `baktoblis-poroshok-1500-mg-15-sht-${productId}`;
+    const productTitle = `${brand} \u043f\u043e\u0440\u043e\u0448\u043e\u043a 1500 \u043c\u0433 \u211615`;
+    let productAttempts = 0;
+    const productPage = (input: {
+      id: string;
+      brand: string;
+      title: string;
+      slug: string;
+      rating: number;
+      votes: number;
+    }) => `<!doctype html><html><head>
+      <link rel="canonical" href="https://vapteke.ru/product/${input.slug}">
+      <script type="application/ld+json">{
+        "@context":"https://schema.org","@type":"Product","name":"${input.brand}",
+        "description":"${input.title}","aggregateRating":{
+          "@type":"AggregateRating","bestRating":"5.0","worstRating":"1.0",
+          "ratingValue":"${input.rating}","reviewCount":"${input.votes}"
+        }
+      }</script>
+    </head><body>
+      <h1 class="q-product__header-title">${input.title}</h1>
+      <div><span>${input.brand}</span><div id="active_rating" class="item-rating">
+        <div class="item-rating-stars" data-id="${input.id}"></div>
+        <span class="rating-value">${input.rating}</span>
+        <span class="rating-count">(<span>${input.votes}</span> \u0433\u043e\u043b\u043e\u0441\u043e\u0432)</span>
+      </div></div>
+    </body></html>`;
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const payload = JSON.parse(String(init?.body)) as {
+        url: string;
+        vaptekeAutocomplete?: { query: string };
+      };
+      if (payload.vaptekeAutocomplete) {
+        expect(payload.vaptekeAutocomplete.query).toBe(brand);
+        return Response.json({
+          success: true,
+          data: {
+            total: { value: 1, relation: "eq" },
+            hits: [{
+              product_id: Number(productId),
+              name: productTitle,
+              slug: productSlug,
+              is_active: true
+            }]
+          },
+          error: "200"
+        });
+      }
+      if (payload.url.includes("-365917")) {
+        return new Response(productPage({
+          id: "365917",
+          brand: "\u0410\u043a\u0432\u0430\u041e\u043f\u0442\u0438\u043a",
+          title: "\u0410\u043a\u0432\u0430\u041e\u043f\u0442\u0438\u043a \u0440\u0430\u0441\u0442\u0432\u043e\u0440 60 \u043c\u043b",
+          slug: "rastvor-dlya-uhoda-za-kontaktnymi-linzami-akvaoptik-mnogofunktsionalnyy-60-ml-365917",
+          rating: 5,
+          votes: 1
+        }), { headers: { "content-type": "text/html; charset=utf-8" } });
+      }
+      expect(payload.url).toBe(`https://vapteke.ru/product/${productSlug}`);
+      productAttempts += 1;
+      if (productAttempts === 1) {
+        return new Response("transient upstream failure", { status: 502 });
+      }
+      return new Response(productPage({
+        id: productId,
+        brand,
+        title: productTitle,
+        slug: productSlug,
+        rating: 5,
+        votes: 15
+      }), { headers: { "content-type": "text/html; charset=utf-8" } });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const adapter = new VaptekeAdapter(new MemoryEvidenceStore(), routedFetch);
+    const context = { region: "\u041c\u043e\u0441\u043a\u0432\u0430" };
+
+    await expect(adapter.healthCheck(context)).resolves.toMatchObject({ ok: true });
+    const refs = await adapter.discover(brand, context);
+    expect(refs).toHaveLength(1);
+    await expect(adapter.collect(refs[0]!, context)).resolves.toMatchObject({
+      listingId: productId,
+      brand,
+      reviews: 15,
+      rating: 5,
+      ratingCount: 15,
+      status: "ok"
+    });
+    expect(directFetch).toHaveBeenCalledTimes(4);
+    expect(directFetch.mock.calls.every(([input]) =>
+      input === "https://ratings.example/api/internal/static-review-fetch"
+    )).toBe(true);
     expect(run).not.toHaveBeenCalled();
   });
 

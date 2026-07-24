@@ -194,7 +194,25 @@ describe("VaptekeAdapter", () => {
     });
   });
 
-  it("uses the quota-bearing browser only after the static exact product route is blocked", async () => {
+  it("recovers a transient exact product response before using the quota-bearing browser", async () => {
+    const headers: Array<string | null> = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const browser = new Headers(init?.headers).get("x-ratings-browser");
+      headers.push(browser);
+      return headers.length === 1
+        ? new Response("transient upstream failure", { status: 502 })
+        : new Response(productHtml(intense), { status: 200, headers: { "content-type": "text/html" } });
+    }) as unknown as typeof fetch;
+    const adapter = new VaptekeAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    await expect(adapter.collect({
+      domain: "vapteke.ru", platform: "vapteke.ru", listingId: intense.id, brand: intense.brand,
+      url: `https://vapteke.ru/product/${intense.slug}`, metadata: {}
+    }, context)).resolves.toMatchObject({ listingId: intense.id, rating: 3.6 });
+    expect(headers).toEqual([null, null]);
+  });
+
+  it("uses the quota-bearing browser only after two static exact product attempts are blocked", async () => {
     const headers: Array<string | null> = [];
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       const browser = new Headers(init?.headers).get("x-ratings-browser");
@@ -209,6 +227,6 @@ describe("VaptekeAdapter", () => {
       domain: "vapteke.ru", platform: "vapteke.ru", listingId: intense.id, brand: intense.brand,
       url: `https://vapteke.ru/product/${intense.slug}`, metadata: {}
     }, context)).resolves.toMatchObject({ listingId: intense.id, rating: 3.6 });
-    expect(headers).toEqual([null, "1"]);
+    expect(headers).toEqual([null, null, "1"]);
   });
 });
