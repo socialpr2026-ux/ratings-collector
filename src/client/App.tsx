@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { MAX_RUN_PARTITIONS, type Observation, type RunActivityStage, type RunState, type SiteProfile } from "../shared/types.js";
+import { MAX_RUN_PARTITIONS, type Observation, type RunActivityStage, type RunHistoryItem, type RunState, type SiteProfile } from "../shared/types.js";
 import type { OzonCompanionResult, OzonCompanionSession } from "../shared/companion.js";
 import { formatRatingValue } from "../shared/rating.js";
 import { analyzeProductIdentity, canonicalProductVariants } from "../server/utils/product-name.js";
@@ -34,6 +34,7 @@ import {
   pollSavedCollectionAttempt,
   type AutomaticContinuationNotice
 } from "./checkpoint-resume.js";
+import { completedCollectionHistory, formatCollectionDuration, historyBrandLabel } from "./run-history.js";
 
 type Config = {
   domains: readonly string[];
@@ -60,7 +61,7 @@ const FORM_STORAGE_KEY = "ratings-last-configuration";
 const CONVERSATION_STORAGE_KEY = "ratings-conversation-id";
 const LAST_RUN_STORAGE_KEY = "ratings-last-run-id";
 const pendingStatuses = new Set<RunState["status"]>(["queued", "running", "publishing"]);
-type BusyAction = "resume" | "start" | "retry" | "continue" | "review" | "profile" | "publish" | "companion";
+type BusyAction = "resume" | "start" | "refresh" | "retry" | "continue" | "review" | "profile" | "publish" | "companion";
 
 export async function completeRunPage(
   first: RunPage,
@@ -242,6 +243,12 @@ function formatMonth(value: string) {
     .format(new Date(Date.UTC(year, month - 1, 1)));
 }
 
+function formatCollectionTime(value: string) {
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit"
+  }).format(new Date(value));
+}
+
 function formatReviews(value: number | null) {
   return value === null ? "—" : value.toLocaleString("ru-RU");
 }
@@ -274,6 +281,7 @@ export function App() {
   const [automaticContinuation, setAutomaticContinuation] = useState<AutomaticContinuationNotice>();
   const [error, setError] = useState("");
   const [companionState, setCompanionState] = useState<CompanionState>({ status: "idle" });
+  const [runHistory, setRunHistory] = useState<RunHistoryItem[]>([]);
   const formRef = useRef<HTMLFormElement>(null);
 
   useEffect(() => {
@@ -293,6 +301,11 @@ export function App() {
       });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (!config || config.authRequired) return;
+    void refreshRunHistory();
+  }, [config?.authRequired]);
 
   useEffect(() => {
     const queryRunId = new URLSearchParams(window.location.search).get("runId")?.trim();
@@ -338,6 +351,11 @@ export function App() {
     if (run.status === "published") localStorage.removeItem(LAST_RUN_STORAGE_KEY);
     else localStorage.setItem(LAST_RUN_STORAGE_KEY, run.id);
   }, [run?.id, run?.status]);
+
+  useEffect(() => {
+    if (!run || pendingStatuses.has(run.status)) return;
+    void refreshRunHistory();
+  }, [run?.id, run?.status, run?.collectionFinishedAt]);
 
   const normalizedDomains = useMemo(() => parseRunnableDomainList(domains), [domains]);
   const temporarilyBlockedDomains = useMemo(() => parseTemporarilyBlockedDomainList(domains), [domains]);
@@ -396,6 +414,15 @@ export function App() {
     return completeRunPage(first, (offset, limit) =>
       api(`/api/runs/${encodeURIComponent(id)}?offset=${offset}&limit=${limit}`) as Promise<RunPage>
     );
+  }
+
+  async function refreshRunHistory() {
+    try {
+      const items = await api("/api/runs?limit=8") as RunHistoryItem[];
+      setRunHistory(completedCollectionHistory(items));
+    } catch {
+      // History is secondary and must never interrupt collection or publication.
+    }
   }
 
   async function poll(id: string, triggerError?: () => Error | undefined) {
@@ -521,6 +548,36 @@ export function App() {
         // EdgeOne creates a queued run and needs the separate Agent request.
         await collectRun(created, !config?.agentMode);
       }
+    } catch (caught) {
+      setError(friendlyErrorMessage(caught, "start"));
+    } finally {
+      setBusyAction(undefined);
+    }
+  }
+
+  async function searchNewYandexCards() {
+    if (!run || !run.request.domains.includes("market.yandex.ru")) return;
+    setBusyAction("refresh");
+    setError("");
+    setSelected(new Set());
+    setAutomaticContinuation(undefined);
+    try {
+      const created = await api("/api/runs", {
+        method: "POST",
+        body: JSON.stringify({
+          ...run.request,
+          domains: ["market.yandex.ru"],
+          discoveryMode: "refresh"
+        })
+      }) as RunState;
+      setRun(created);
+      if (config?.agentMode) {
+        await api("/sheet-publisher", {
+          method: "POST",
+          body: JSON.stringify({ runId: created.id, operation: "preflight" })
+        });
+      }
+      await collectRun(created, !config?.agentMode);
     } catch (caught) {
       setError(friendlyErrorMessage(caught, "start"));
     } finally {
@@ -1084,14 +1141,26 @@ export function App() {
             <span id="setup-status">{setupStatus}</span>
           </div>
           <button className="button button-primary button-large" type="submit" disabled={!formIsReady || busy || config?.authRequired} aria-describedby="setup-status">
-            <span>{busyAction === "resume" ? "Восстанавливаем…" : busyAction === "continue" ? "Продолжаем сбор…" : busyAction === "start" ? "Собираем данные…" : "Начать сбор"}</span><span aria-hidden="true">→</span>
+            <span>{busyAction === "resume" ? "Восстанавливаем…" : busyAction === "continue" ? "Продолжаем сбор…" : busyAction === "refresh" ? "Ищем новые карточки…" : busyAction === "start" ? "Собираем данные…" : "Начать сбор"}</span><span aria-hidden="true">→</span>
           </button>
         </div>
+        {runHistory.length > 0 && <details className="collection-history">
+          <summary>Недавние сборы <span>{runHistory.length}</span></summary>
+          <ol>
+            {runHistory.map((item) => <li key={item.id}>
+              <a href={`?runId=${encodeURIComponent(item.id)}`}>
+                <strong>{historyBrandLabel(item.brands)}</strong>
+                <span>{formatCollectionTime(item.collectionStartedAt)}</span>
+                <small>{formatCollectionDuration(item.durationMs)}</small>
+              </a>
+            </li>)}
+          </ol>
+        </details>}
       </form>
 
       {(busy || run) && <section className={`card progress-card ${run && (pendingStatuses.has(run.status) || collectionIsContinuing) ? "progress-active" : ""}`} aria-labelledby="progress-title" aria-busy={Boolean(run && (pendingStatuses.has(run.status) || collectionIsContinuing))}>
         <div className="card-heading compact">
-          <div><p className="section-number">Шаг 2</p><h2 id="progress-title">{busyAction === "resume" ? "Восстанавливаем последний запуск" : busyAction === "continue" ? `Автоматически продолжаем сбор · ${automaticContinuation?.attempt ?? 1}/${automaticContinuation?.maxAttempts ?? 3}` : busyAction === "retry" ? "Повторяем неуспешные площадки" : cleanReviewReady ? "Сбор готов" : run ? runStatusLabels[run.status] : "Создаём запуск"}</h2><p>{busyAction === "resume" ? "Загружаем сохранённый результат и актуальный статус площадок." : busyAction === "continue" ? `Сохранено ${automaticContinuation?.completedPartitions ?? run?.progress.completedPartitions ?? 0} из ${automaticContinuation?.totalPartitions ?? run?.progress.totalPartitions ?? 0} проверок. Готовые площадки остаются на месте; продолжаются только незавершённые.` : busyAction === "retry" ? "Уже собранные данные сохранены. Обновляем только площадки с ошибками." : cleanReviewReady ? "Данные собраны и проверены. Можно записывать их в таблицу." : run?.progress.current ? "Получаем страницы, извлекаем рейтинг и сверяем продукт." : pendingStatuses.has(run?.status ?? "queued") ? "Можно перейти в другую вкладку — этот экран обновится автоматически." : "Сбор завершён. Ниже можно проверить результат."}</p></div>
+          <div><p className="section-number">Шаг 2</p><h2 id="progress-title">{busyAction === "resume" ? "Восстанавливаем последний запуск" : busyAction === "continue" ? `Автоматически продолжаем сбор · ${automaticContinuation?.attempt ?? 1}/${automaticContinuation?.maxAttempts ?? 3}` : busyAction === "refresh" ? "Ищем новые карточки Яндекса" : busyAction === "retry" ? "Повторяем неуспешные площадки" : cleanReviewReady ? "Сбор готов" : run ? runStatusLabels[run.status] : "Создаём запуск"}</h2><p>{busyAction === "resume" ? "Загружаем сохранённый результат и актуальный статус площадок." : busyAction === "continue" ? `Сохранено ${automaticContinuation?.completedPartitions ?? run?.progress.completedPartitions ?? 0} из ${automaticContinuation?.totalPartitions ?? run?.progress.totalPartitions ?? 0} проверок. Готовые площадки остаются на месте; продолжаются только незавершённые.` : busyAction === "refresh" ? "Это отдельная проверка полного индекса; уже записанные данные остаются на месте." : busyAction === "retry" ? "Уже собранные данные сохранены. Обновляем только площадки с ошибками." : cleanReviewReady ? "Данные собраны и проверены. Можно записывать их в таблицу." : run?.progress.current ? "Получаем страницы, извлекаем рейтинг и сверяем продукт." : pendingStatuses.has(run?.status ?? "queued") ? "Можно перейти в другую вкладку — этот экран обновится автоматически." : "Сбор завершён. Ниже можно проверить результат."}</p></div>
           <div className="progress-value"><strong>{run ? `${progress}%` : "…"}</strong><small>{run ? `${run.progress.completedPartitions} из ${run.progress.totalPartitions}` : "подготовка"}</small></div>
         </div>
         <div className="progress-track" role="progressbar" aria-label="Ход сбора" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
@@ -1266,6 +1335,11 @@ export function App() {
           <span className="publish-icon" aria-hidden="true">{run.qa.ok ? "✓" : "!"}</span>
           <div><p className="section-number">Шаг 4</p><h2 id="publish-title">{run.status === "published" ? "Готово — таблица обновлена" : run.qa.ok ? "Всё готово к записи" : canPublishCompletedOnly ? "Готовые результаты можно записать" : "Сначала устраните замечания"}</h2><p>{run.status === "published" ? `Данные за ${formatMonth(run.request.month)} сохранены в ${brandSheetDestinationText(publicationSummary.brands)}: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")}.` : run.qa.ok ? `Будет записано: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")} за ${formatMonth(run.request.month)} ${BRAND_SHEET_COLUMNS_TEXT}` : canPublishCompletedOnly ? `Будут записаны ${publicationSummary.cards} ${plural(publicationSummary.cards, "готовая карточка", "готовые карточки", "готовых карточек")} из ${successfulPartitionCount} ${plural(successfulPartitionCount, "успешно завершённой проверки", "успешно завершённых проверок", "успешно завершённых проверок")}. Неуспешные сочетания площадок и брендов останутся пустыми за текущий месяц; их ошибки не станут нулями.` : "Разберите отмеченные карточки или повторите проблемные площадки."}</p></div>
         </div>
+
+        {run.status === "published" && run.request.domains.includes("market.yandex.ru") && run.request.discoveryMode !== "refresh" && <div className="discovery-followup">
+          <div><strong>Проверить новые карточки Яндекса</strong><p>Текущие данные уже записаны. Полный поиск можно запустить отдельно.</p></div>
+          <button className="text-button" type="button" disabled={busy} onClick={searchNewYandexCards}>Найти новые</button>
+        </div>}
 
         {visibleBlockers.length > 0 && <div className="issue-list"><strong>Что нужно исправить</strong><ul>{visibleBlockers.map((item) => <li key={item}>{item}</li>)}</ul></div>}
         {visibleWarnings.length > 0 && <details className="warning-details"><summary>Есть замечания ({visibleWarnings.length})</summary><ul>{visibleWarnings.map((item) => <li key={item}>{item}</li>)}</ul></details>}

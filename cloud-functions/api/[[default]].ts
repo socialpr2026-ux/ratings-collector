@@ -2067,6 +2067,7 @@ async function repositoryRpc(request: Request, env: Record<string, string | unde
   let result: unknown;
   switch (body.action) {
     case "findRuns": result = await repository.findRecentRunsByBrand(body.brand, body.limit); break;
+    case "listRuns": result = await repository.listRecentRuns(body.ownerEmail, body.limit); break;
     case "getRun": result = await repository.getRun(body.id); break;
     case "saveRun": {
       const previous = await repository.getRun(body.run.id);
@@ -2078,6 +2079,8 @@ async function repositoryRpc(request: Request, env: Record<string, string | unde
     case "listProducts": result = await repository.listProducts(body.spreadsheetId); break;
     case "saveProducts": await repository.saveProducts(body.spreadsheetId, body.records); result = null; break;
     case "replaceProducts": await repository.replaceProducts(body.spreadsheetId, body.records); result = null; break;
+    case "listSourceCards": result = await repository.listSourceCards(body.spreadsheetId); break;
+    case "saveSourceCards": await repository.saveSourceCards(body.spreadsheetId, body.records); result = null; break;
     case "getSnapshots": result = await repository.getSnapshots(body.spreadsheetId); break;
     case "saveSnapshot": await repository.saveSnapshot(body.spreadsheetId, body.month, body.observations); result = null; break;
     case "replaceSnapshots": await repository.replaceSnapshots(body.spreadsheetId, body.snapshots); result = null; break;
@@ -3044,6 +3047,10 @@ export default async function onRequest(context: Context): Promise<Response> {
       // never depends on Apify availability or credit.
       const run = await service.createRun(input, user.email);
       return json(pagedRun(run, url), 202);
+    }
+    if (context.request.method === "GET" && url.pathname === "/api/runs") {
+      const limit = Math.max(1, Math.min(20, Math.trunc(Number(url.searchParams.get("limit") ?? 8)) || 8));
+      return json(await service.listRecentRuns(user.email, limit));
     }
     const runMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
     const publishMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/publish$/);

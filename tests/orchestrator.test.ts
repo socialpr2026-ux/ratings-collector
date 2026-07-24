@@ -1161,4 +1161,56 @@ describe("run orchestration and fail-closed QA", () => {
 
     expect(maximumActive).toBe(1);
   });
+
+  it("retains collected Yandex model IDs before publication and reuses them on the next brand run", async () => {
+    const repository = new MemoryRepository();
+    const discoveryContexts: AdapterContext[] = [];
+    const healthContexts: AdapterContext[] = [];
+    const adapter: SiteAdapter = {
+      id: "market.yandex.ru:saved-models",
+      supportedDomains: ["market.yandex.ru"],
+      async healthCheck(context) {
+        healthContexts.push(context);
+        return { ok: true, checkedAt: new Date().toISOString() };
+      },
+      async discover(brand, context) {
+        discoveryContexts.push(context);
+        return [{
+          domain: "market.yandex.ru", platform: "yandex", listingId: "1746647533", brand,
+          url: "https://reviews.yandex.ru/product/baktoblis--1746647533", metadata: {}
+        }];
+      },
+      async collect(ref) {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: `${ref.brand} таблетки 100 мг №10`, reviews: 12, rating: 4.8,
+          status: "ok", capturedAt: new Date().toISOString(), source: "yandex_reviews_direct"
+        };
+      }
+    };
+    const service = new RatingsService(repository, async () => adapter);
+    const yandexRequest = { ...request, domains: ["market.yandex.ru"], brands: ["Бактоблис"] };
+
+    const first = await service.executeRun((await service.createRun(yandexRequest)).id);
+    expect(first.collectionStartedAt).toBeTruthy();
+    expect(first.collectionFinishedAt).toBeTruthy();
+    expect(await repository.listSourceCards("test_sheet")).toMatchObject([{
+      listingId: "1746647533",
+      brand: "Бактоблис",
+      canonicalUrl: "https://reviews.yandex.ru/product/baktoblis--1746647533"
+    }]);
+
+    await service.executeRun((await service.createRun(yandexRequest)).id);
+    expect(healthContexts[1]?.previousIds).toEqual(["1746647533"]);
+    expect(discoveryContexts[1]?.previousIds).toEqual(["1746647533"]);
+    expect(discoveryContexts[1]?.refreshDiscovery).toBe(false);
+
+    await service.executeRun((await service.createRun({ ...yandexRequest, discoveryMode: "refresh" })).id);
+    expect(discoveryContexts[2]?.previousIds).toEqual(["1746647533"]);
+    expect(discoveryContexts[2]?.refreshDiscovery).toBe(true);
+    expect((await service.listRecentRuns())[0]).toMatchObject({
+      brands: ["Бактоблис"],
+      durationMs: expect.any(Number)
+    });
+  });
 });

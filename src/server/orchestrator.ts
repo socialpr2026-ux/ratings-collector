@@ -4,8 +4,10 @@ import type {
   Observation,
   ProductRecord,
   ProductRef,
+  RunHistoryItem,
   RunRequest,
   RunState,
+  SourceCardRecord,
   SiteAdapter,
   SiteProfile
 } from "../shared/types.js";
@@ -214,6 +216,10 @@ export class RatingsService {
 
   async getRun(id: string): Promise<RunState | undefined> { return this.repository.getRun(id); }
 
+  async listRecentRuns(ownerEmail?: string, limit = 8): Promise<RunHistoryItem[]> {
+    return this.repository.listRecentRuns(ownerEmail, limit);
+  }
+
   async executeRun(id: string): Promise<RunState> {
     if (this.active.has(id)) throw new Error("Запуск уже выполняется");
     this.active.add(id);
@@ -263,6 +269,7 @@ export class RatingsService {
       await this.refreshDraftProfileExamples(run);
       run.payloadHash = stableHash({ request: run.request, observations: run.observations });
       run.status = "review";
+      run.collectionFinishedAt ??= new Date().toISOString();
       run.qa = validateRun(run);
       await this.touch(run);
       return run;
@@ -292,6 +299,8 @@ export class RatingsService {
     run.progress.totalPartitions = expectedPartitions.length;
     run.progress.completedPartitions = preservedPartitions.length;
     delete run.progress.current;
+    run.collectionStartedAt ??= new Date().toISOString();
+    run.collectionFinishedAt = undefined;
     const activity = new RunActivityTracker(run);
     activity.instant({
       stage: "prepare",
@@ -306,7 +315,11 @@ export class RatingsService {
     );
     deadlineTimer.unref?.();
     try {
-      const products = await this.repository.listProducts(extractSpreadsheetId(run.request.sheetUrl));
+      const spreadsheetId = extractSpreadsheetId(run.request.sheetUrl);
+      const [products, sourceCards] = await Promise.all([
+        this.repository.listProducts(spreadsheetId),
+        this.repository.listSourceCards(spreadsheetId)
+      ]);
       const seen = new Map(run.observations.map((observation) => [
         productKey(observation.domain, observation.listingId),
         observation
@@ -380,6 +393,14 @@ export class RatingsService {
       }
       await Promise.all(run.request.domains.filter((domain) => retryBrandsByDomain.has(domain)).map(async (domain) => {
         const retryBrands = retryBrandsByDomain.get(domain)!;
+        const retryBrandKeys = new Set(retryBrands.map(normalizeText));
+        const previousDomainRecords = [
+          ...products.filter((item) => item.domain === domain && retryBrandKeys.has(normalizeText(item.brand)))
+            .map((item) => ({ listingId: item.listingId, url: item.canonicalUrl })),
+          ...sourceCards.filter((item) => item.domain === domain && retryBrandKeys.has(normalizeText(item.brand)))
+            .map((item) => ({ listingId: item.listingId, url: item.canonicalUrl }))
+        ];
+        const previousDomainRefs = [...new Map(previousDomainRecords.map((item) => [item.listingId, item])).values()];
         let adapter: SiteAdapter;
         const healthReporter = createAdapterActivityReporter({ domain });
         const healthActivity = activity.start({
@@ -396,6 +417,9 @@ export class RatingsService {
             brands: retryBrands,
             region: run.request.region,
             month: run.request.month,
+            previousIds: previousDomainRefs.map((item) => item.listingId),
+            previousRefs: previousDomainRefs,
+            refreshDiscovery: run.request.discoveryMode === "refresh",
             signal: deadline.signal,
             activity: healthReporter.report
           });
@@ -444,9 +468,17 @@ export class RatingsService {
         }
         await forEachWithConcurrency(retryBrands, brandConcurrency(domain), async (brand) => {
           run.progress.current = `${domain} / ${brand}`;
-          const previousRecords = products.filter((item) => item.domain === domain && item.brand === brand);
-          const previousIds = previousRecords.map((item) => item.listingId);
-          const previousRefs = previousRecords.map((item) => ({ listingId: item.listingId, url: item.canonicalUrl }));
+          const previousRecords = products.filter((item) =>
+            item.domain === domain && normalizeText(item.brand) === normalizeText(brand)
+          );
+          const previousSourceCards = sourceCards.filter((item) =>
+            item.domain === domain && normalizeText(item.brand) === normalizeText(brand)
+          );
+          const previousRefs = [...new Map([
+            ...previousRecords.map((item) => ({ listingId: item.listingId, url: item.canonicalUrl })),
+            ...previousSourceCards.map((item) => ({ listingId: item.listingId, url: item.canonicalUrl }))
+          ].map((item) => [item.listingId, item])).values()];
+          const previousIds = previousRefs.map((item) => item.listingId);
           const discoveryActivity = activity.start({
             stage: "discovery",
             label: "Поиск карточек",
@@ -455,6 +487,7 @@ export class RatingsService {
           });
           let activeCollection: string | undefined;
           let activeNormalization: string | undefined;
+          const retainedSourceCards: SourceCardRecord[] = [];
           const adapterReporter = createAdapterActivityReporter({ domain, brand });
           // Discovery is frequently the longest operation (sitemaps, search
           // pagination and exact product proof), so always expose its start to
@@ -469,6 +502,7 @@ export class RatingsService {
               month: run.request.month,
               previousIds,
               previousRefs,
+              refreshDiscovery: run.request.discoveryMode === "refresh",
               signal: deadline.signal,
               activity: adapterReporter.report
             }), domain, brand);
@@ -502,6 +536,7 @@ export class RatingsService {
                 month: run.request.month,
                 previousIds,
                 previousRefs,
+                refreshDiscovery: run.request.discoveryMode === "refresh",
                 signal: deadline.signal,
                 activity: adapterReporter.report
               }), ref, domain, brand);
@@ -589,6 +624,21 @@ export class RatingsService {
                 seen.set(key, observation);
                 collected += 1;
               }
+              if (
+                domain === "market.yandex.ru" &&
+                ["ok", "no_reviews"].includes(observation.status) &&
+                matchesBrand(observation.product, brand)
+              ) {
+                retainedSourceCards.push({
+                  key,
+                  domain: observation.domain,
+                  listingId: observation.listingId,
+                  brand,
+                  canonicalUrl: observation.canonicalUrl,
+                  firstSeenAt: observation.capturedAt,
+                  lastSeenAt: observation.capturedAt
+                });
+              }
               activity.complete(activeNormalization, {
                 detail: observation.productIdentity?.label ?? observation.product
               });
@@ -603,6 +653,9 @@ export class RatingsService {
               collected,
               viableDiscovered === 0 ? "Поиск исчерпан, живых карточек нет" : undefined
             );
+            if (retainedSourceCards.length > 0) {
+              await this.repository.saveSourceCards(spreadsheetId, retainedSourceCards);
+            }
           } catch (error) {
             const kind = errorStatus(error);
             const message = safeErrorMessage(error);
@@ -630,6 +683,7 @@ export class RatingsService {
       await this.refreshDraftProfileExamples(run);
       run.payloadHash = stableHash({ request: run.request, observations: run.observations });
       run.status = "review";
+      run.collectionFinishedAt = new Date().toISOString();
       const qaActivity = activity.start({
         stage: "qa",
         label: "Проверка целостности"

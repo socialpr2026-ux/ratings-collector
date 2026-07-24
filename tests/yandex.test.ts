@@ -382,7 +382,7 @@ describe("YandexAdapter discovery", () => {
     const adapter = new YandexAdapter({ fetch, maxSitemaps: 1 });
 
     await expect(
-      adapter.discover("Кагоцел", context({ previousIds: ["yandex:265149860"] }))
+      adapter.discover("Кагоцел", context({ previousIds: ["yandex:265149860"], refreshDiscovery: true }))
     ).rejects.toBeInstanceOf(AdapterBlockedError);
 
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -539,6 +539,31 @@ describe("YandexAdapter discovery", () => {
         metadata: { discovery: "previous_registry" }
       }
     ]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("checks saved models without the index and scans for new cards only on explicit refresh", async () => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([MAP_A])),
+      [MAP_A]: xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/kagotsel-new--777"
+      ]))
+    });
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 1 });
+
+    await expect(adapter.healthCheck(context({ previousIds: ["265149860"] }))).resolves.toMatchObject({ ok: true });
+    await expect(adapter.discover("Кагоцел", context({ previousIds: ["265149860"] }))).resolves.toMatchObject([
+      { listingId: "265149860", metadata: { discovery: "previous_registry" } }
+    ]);
+    expect(fetch).not.toHaveBeenCalled();
+
+    const refreshed = await adapter.discover("Кагоцел", context({
+      previousIds: ["265149860"],
+      refreshDiscovery: true
+    }));
+
+    expect(refreshed.map((item) => item.listingId)).toEqual(["265149860", "777"]);
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it("reports sitemap parser drift through healthCheck", async () => {

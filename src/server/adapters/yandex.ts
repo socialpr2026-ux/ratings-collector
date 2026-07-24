@@ -220,6 +220,14 @@ export class YandexAdapter implements SiteAdapter {
 
   async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
     const checkedAt = this.now().toISOString();
+    const knownModelIds = previousModelIds(context.previousIds ?? []);
+    if (knownModelIds.length > 0 && !context.refreshDiscovery) {
+      return {
+        ok: true,
+        checkedAt,
+        message: `Saved Yandex model registry is available (${knownModelIds.length} models)`
+      };
+    }
     try {
       const sitemaps = await this.loadSitemapIndex(context);
       if (sitemaps.length === 0) {
@@ -241,9 +249,18 @@ export class YandexAdapter implements SiteAdapter {
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = new Map<string, ProductRef>();
+    const knownIds = previousModelIds(context.previousIds ?? []);
+    const knownSet = new Set(knownIds);
 
-    for (const listingId of previousModelIds(context.previousIds ?? [])) {
+    for (const listingId of knownIds) {
       refs.set(listingId, productRefFromPreviousId(listingId, brand));
+    }
+
+    // Repeat collections validate the exact models retained after the previous
+    // successful collection. The exhaustive sitemap scan is an explicit,
+    // separate refresh so it never delays publication of known cards.
+    if (refs.size > 0 && !context.refreshDiscovery) {
+      return [...refs.values()].sort((a, b) => compareIds(a.listingId, b.listingId));
     }
 
     const brands = uniqueDiscoveryBrands(brand, context.brands ?? []);
@@ -264,7 +281,8 @@ export class YandexAdapter implements SiteAdapter {
     }
 
     return [...refs.values()]
-      .sort((a, b) => (a.title ?? "").localeCompare(b.title ?? "", "ru") || compareIds(a.listingId, b.listingId));
+      .sort((a, b) => Number(knownSet.has(b.listingId)) - Number(knownSet.has(a.listingId)) ||
+        (a.title ?? "").localeCompare(b.title ?? "", "ru") || compareIds(a.listingId, b.listingId));
   }
 
   private async loadDiscoveryBatch(

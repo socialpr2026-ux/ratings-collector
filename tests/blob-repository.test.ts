@@ -48,4 +48,36 @@ describe("BlobRepository run lookup", () => {
       totalPartitions: 2
     }]);
   });
+
+  it("reads compact completed-run history without loading full run payloads", async () => {
+    const values = new Map([
+      ["run-history/mine.json", {
+        id: "mine", ownerEmail: "operator@example.com", brands: ["Бактоблис"],
+        createdAt: "2026-07-24T09:00:00.000Z", collectionStartedAt: "2026-07-24T09:00:00.000Z",
+        collectionFinishedAt: "2026-07-24T09:08:00.000Z", durationMs: 480_000
+      }],
+      ["run-history/other.json", {
+        id: "other", ownerEmail: "other@example.com", brands: ["Кагоцел"],
+        createdAt: "2026-07-24T10:00:00.000Z", collectionStartedAt: "2026-07-24T10:00:00.000Z",
+        collectionFinishedAt: "2026-07-24T10:03:00.000Z", durationMs: 180_000
+      }]
+    ]);
+    const store = {
+      list: vi.fn(async ({ prefix }: { prefix: string }) => ({
+        blobs: [...values.keys()].filter((key) => key.startsWith(prefix)).map((key) => ({ key, etag: key })),
+        directories: []
+      })),
+      get: vi.fn(async (key: string) => values.get(key) ?? null)
+    } as unknown as Store;
+
+    const history = await new BlobRepository(store).listRecentRuns("operator@example.com", 8);
+
+    expect(history).toEqual([{
+      id: "mine", brands: ["Бактоблис"], createdAt: "2026-07-24T09:00:00.000Z",
+      collectionStartedAt: "2026-07-24T09:00:00.000Z",
+      collectionFinishedAt: "2026-07-24T09:08:00.000Z", durationMs: 480_000
+    }]);
+    expect(store.list).toHaveBeenCalledWith({ prefix: "run-history/", consistency: "strong" });
+    expect(store.get).not.toHaveBeenCalledWith(expect.stringMatching(/^runs\//), expect.anything());
+  });
 });
