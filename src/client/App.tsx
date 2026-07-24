@@ -62,6 +62,18 @@ const LAST_RUN_STORAGE_KEY = "ratings-last-run-id";
 const pendingStatuses = new Set<RunState["status"]>(["queued", "running", "publishing"]);
 type BusyAction = "resume" | "start" | "retry" | "continue" | "review" | "profile" | "publish" | "companion";
 
+export async function completeRunPage(
+  first: RunPage,
+  readPage: (offset: number, limit: number) => Promise<RunPage>
+): Promise<RunState> {
+  const page = first.observationPage;
+  if (!page || page.total <= first.observations.length || pendingStatuses.has(first.status)) return first;
+  const pageCount = Math.ceil(page.total / page.limit);
+  const offsets = Array.from({ length: pageCount - 1 }, (_, index) => (index + 1) * page.limit);
+  const rest = await Promise.all(offsets.map((offset) => readPage(offset, page.limit)));
+  return { ...first, observations: [first.observations, ...rest.map((item) => item.observations)].flat() };
+}
+
 type CompanionState = {
   status: "idle" | "checking" | "collecting" | "importing" | "unavailable" | "captcha" | "error";
   message?: string;
@@ -381,14 +393,9 @@ export function App() {
 
   async function fetchRun(id: string): Promise<RunState> {
     const first = await api(`/api/runs/${encodeURIComponent(id)}?offset=0&limit=250`) as RunPage;
-    const page = first.observationPage;
-    if (!page || page.total <= first.observations.length || pendingStatuses.has(first.status)) return first;
-    const pageCount = Math.ceil(page.total / page.limit);
-    const offsets = Array.from({ length: pageCount - 1 }, (_, index) => (index + 1) * page.limit);
-    const rest = await Promise.all(offsets.map((offset) =>
-      api(`/api/runs/${encodeURIComponent(id)}?offset=${offset}&limit=${page.limit}`) as Promise<RunPage>
-    ));
-    return { ...first, observations: [first.observations, ...rest.map((item) => item.observations)].flat() };
+    return completeRunPage(first, (offset, limit) =>
+      api(`/api/runs/${encodeURIComponent(id)}?offset=${offset}&limit=${limit}`) as Promise<RunPage>
+    );
   }
 
   async function poll(id: string, triggerError?: () => Error | undefined) {
@@ -526,7 +533,7 @@ export function App() {
     setBusyAction("review");
     setError("");
     try {
-      await api(`/api/runs/${run.id}/review`, {
+      const reviewed = await api(`/api/runs/${run.id}/review`, {
         method: "POST",
         body: JSON.stringify({
           acceptedKeys: validSelectedKeys,
@@ -534,8 +541,10 @@ export function App() {
             .map((key) => [key, normalizeProductOverride(productEdits[key] ?? "")] as const)
             .filter(([, value]) => Boolean(value)))
         })
-      });
-      setRun(await fetchRun(run.id));
+      }) as RunPage;
+      setRun(await completeRunPage(reviewed, (offset, limit) =>
+        api(`/api/runs/${encodeURIComponent(run.id)}?offset=${offset}&limit=${limit}`) as Promise<RunPage>
+      ));
       setSelected(new Set());
       setProductEdits({});
     } catch (caught) {
