@@ -211,7 +211,7 @@ describe("Google Sheets model", () => {
     const row = document.values.find((_, index) => document.rowKinds[index] === "product")!;
     expect(row.slice(4, 8)).toEqual([10, 3.9, null, null]);
     const formulas = document.formulas.flat().filter(Boolean).join("\n");
-    expect(formulas).toContain('"\u003e=4,5"'.replace("\\u003e", ">"));
+    expect(formulas).toContain('"\u003e="&9/2'.replace("\\u003e", ">"));
     expect(formulas).not.toContain("34");
   });
 
@@ -242,7 +242,7 @@ describe("Google Sheets model", () => {
       "гранулы 1 г №12 и №30", null, 2454, 4.9
     ]);
     expect(summary[0][4]).toBe("=SUM(E5)");
-    expect(summary[1][4]).toBe('=COUNTIFS({F5};">=4,5";{E5};">0")');
+    expect(summary[1][4]).toBe('=COUNTIFS({F5};">="&9/2;{E5};">0")');
   });
 
   it("never merges distinct listings merely because rating and review count match", () => {
@@ -436,7 +436,7 @@ describe("Google Sheets model", () => {
     const observations = [
       metric("49", 10, 4.9, "ok"), metric("45", 10, 4.5, "ok"),
       metric("44", 10, 4.4, "ok"), metric("00", 10, 0, "ok"),
-      metric("none", 0, null, "no_reviews")
+      metric("none", 0, null, "no_reviews"), metric("norating", 10, null, "ok")
     ];
     const blank: ProductRecord = {
       key: "ozon.ru:blank", domain: "ozon.ru", listingId: "blank", brand: "Кагоцел", platform: "ozon",
@@ -453,15 +453,14 @@ describe("Google Sheets model", () => {
     expect(rows.filter((row) => row[4] === null && row[5] === null)).toHaveLength(1);
 
     const summary = document.formulas.filter((_, index) => document.rowKinds[index] === "summary");
-    expect(summary[1][4]).toContain('">=4,5"');
+    expect(summary[1][4]).toContain('">="&9/2');
     expect(summary[1][4]).toContain('{E');
     expect(summary[1][4]).toContain('">0"');
     expect(summary[1][4]).not.toContain('$B$3:$B');
-    expect(summary[2][4]).toContain('"<4,5"');
+    expect(summary[2][4]).toContain('"<"&9/2');
     expect(summary[2][4]).toContain('"<>"');
-    expect(summary[3][4]).toContain(';0;');
-    expect(summary[3][4]).toContain(';"<>";');
-    expect(summary[3][4]).toContain(';"")');
+    expect(summary[3][4]).toContain(';"";');
+    expect(summary[3][4]).toContain(';"<>")');
   });
 
   it("re-reads the new brand/link/product layout without losing history", () => {

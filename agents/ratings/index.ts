@@ -190,7 +190,11 @@ export function browserFetch(
     });
     const splitTimedOutProof = async (payload: { sitemaps: string[]; brands?: unknown }): Promise<Response> => {
       const response = await requestProof(payload);
-      if (response.status !== 504 || payload.sitemaps.length <= 1) return response;
+      // A transport/runtime 502 has the same practical meaning here as the
+      // explicit 504 deadline: the fixed function could not prove this whole
+      // bounded group. Reduce the payload recursively instead of repeating the
+      // same expensive four-shard request.
+      if (![502, 504].includes(response.status) || payload.sitemaps.length <= 1) return response;
       await response.body?.cancel().catch(() => undefined);
       request.signal.throwIfAborted();
 

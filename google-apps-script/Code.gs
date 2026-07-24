@@ -625,6 +625,7 @@ function applyFormatting_(sheet, rowKinds, rows, columns) {
   // sections. Format those blocks in batches so a long monthly history does
   // not turn into thousands of remote Apps Script calls.
   var productBlockStart = -1;
+  var ratingRanges = [];
   for (var productCursor = 0; productCursor <= rows; productCursor += 1) {
     if (productCursor < rows && rowKinds[productCursor] === "product") {
       if (productBlockStart < 0) productBlockStart = productCursor;
@@ -640,6 +641,9 @@ function applyFormatting_(sheet, rowKinds, rows, columns) {
       if (columns > 4) {
         sheet.getRange(productBlockStart + 1, 5, productCount, columns - 4)
           .setBackground("#fbfaff").setHorizontalAlignment("center");
+        for (var ratingColumn = 6; ratingColumn <= columns; ratingColumn += 2) {
+          ratingRanges.push(sheet.getRange(productBlockStart + 1, ratingColumn, productCount, 1));
+        }
       }
       productBlockStart = -1;
     }
@@ -702,6 +706,19 @@ function applyFormatting_(sheet, rowKinds, rows, columns) {
       null, true, null, true, true, null, "#e3e0f1", SpreadsheetApp.BorderStyle.SOLID
     );
   }
+
+  // Ratings use one client-facing scale: values below 4 remain red, then the
+  // colour moves continuously through yellow at 4.5 to green at 5.
+  var conditionalRules = [];
+  if (ratingRanges.length) {
+    conditionalRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .setGradientMinpointWithValue("#ea4335", SpreadsheetApp.InterpolationType.NUMBER, "4")
+      .setGradientMidpointWithValue("#fbbc04", SpreadsheetApp.InterpolationType.NUMBER, "4.5")
+      .setGradientMaxpointWithValue("#34a853", SpreadsheetApp.InterpolationType.NUMBER, "5")
+      .setRanges(ratingRanges)
+      .build());
+  }
+  sheet.setConditionalFormatRules(conditionalRules);
 
 }
 

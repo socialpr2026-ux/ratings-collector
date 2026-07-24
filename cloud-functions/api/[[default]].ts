@@ -1985,22 +1985,32 @@ async function collectYandexBatch(batch: YandexBatchRequest): Promise<{
 }> {
   const matches: Array<{ brand: string; url: string; sitemap: string }> = [];
   let cursor = 0;
+  let failure: unknown;
   const workers = Array.from({ length: Math.min(2, batch.sitemaps.length) }, async () => {
-    for (;;) {
+    while (failure === undefined) {
       const index = cursor++;
       if (index >= batch.sitemaps.length) return;
       const sitemap = batch.sitemaps[index]!;
-      const productUrls = await fetchCompleteYandexBatchShard(sitemap);
-      for (const productUrl of productUrls) {
-        for (const brand of batch.brands) {
-          if (yandexProductMatchesTokens(productUrl, brand.tokens)) {
-            matches.push({ brand: brand.brand, url: productUrl, sitemap });
+      try {
+        const productUrls = await fetchCompleteYandexBatchShard(sitemap);
+        for (const productUrl of productUrls) {
+          for (const brand of batch.brands) {
+            if (yandexProductMatchesTokens(productUrl, brand.tokens)) {
+              matches.push({ brand: brand.brand, url: productUrl, sitemap });
+            }
           }
         }
+      } catch (error) {
+        failure ??= error;
+        return;
       }
     }
   });
+  // Settle the already-started sibling before returning the first failure.
+  // Otherwise a recursive retry can overlap the orphaned shard and reproduce
+  // the same function/egress overload as the original request.
   await Promise.all(workers);
+  if (failure !== undefined) throw failure;
   const sitemapOrder = new Map(batch.sitemaps.map((sitemap, index) => [sitemap, index]));
   matches.sort((left, right) =>
     (sitemapOrder.get(left.sitemap)! - sitemapOrder.get(right.sitemap)!) ||

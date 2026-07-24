@@ -546,14 +546,14 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("splits only a timed-out Yandex batch and recombines complete proofs", async () => {
+  it.each([502, 504])("splits a Yandex batch after HTTP %i and recombines complete proofs", async (failureStatus) => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       const forwarded = JSON.parse(String(init?.body)) as {
         yandexBatch: { sitemaps: string[]; brands: Array<{ brand: string }> };
       };
       const sitemaps = forwarded.yandexBatch.sitemaps;
-      if (sitemaps.length === 4) return new Response("function timeout", { status: 504 });
+      if (sitemaps.length === 4) return new Response("function could not prove the full group", { status: failureStatus });
       return new Response(JSON.stringify({
         processed: sitemaps.length,
         firstSitemap: sitemaps[0],
@@ -598,7 +598,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("returns a transient Yandex batch failure to the adapter without stacking proxy retries", async () => {
+  it("returns a persistent singleton Yandex failure without retrying the same payload", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async () =>
       new Response(JSON.stringify({ error: "one shard remained unproven" }), { status: 502 })
@@ -612,7 +612,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
     const response = await routedFetch(routedFetch.yandexBatchEndpoint!, {
       method: "POST",
       body: JSON.stringify({
-        sitemaps: ["first", "second"],
+        sitemaps: ["first"],
         brands: [{ brand: "Церетон", tokens: ["cereton"] }]
       })
     });

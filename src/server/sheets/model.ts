@@ -461,9 +461,9 @@ export function buildSheetDocument(
       const ratingArray = `{${ratingCells.join(";")}}`;
       const formulasForMetric = [
         reviewCells.length ? `=SUM(${reviewCells.join(";")})` : "=0",
-        ratingCells.length ? `=COUNTIFS(${ratingArray};">=4,5";${reviewArray};">0")` : "=0",
-        ratingCells.length ? `=COUNTIFS(${ratingArray};"<4,5";${ratingArray};"<>";${reviewArray};">0")` : "=0",
-        ratingCells.length ? `=COUNTIFS(${reviewArray};0;${reviewArray};"<>";${ratingArray};"")` : "=0"
+        ratingCells.length ? `=COUNTIFS(${ratingArray};">="&9/2;${reviewArray};">0")` : "=0",
+        ratingCells.length ? `=COUNTIFS(${ratingArray};"<"&9/2;${ratingArray};"<>";${reviewArray};">0")` : "=0",
+        ratingCells.length ? `=COUNTIFS(${ratingArray};"";${reviewArray};"<>")` : "=0"
       ];
       formula[4 + index * 2] = formulasForMetric[metricIndex];
       if (metricIndex > 0) formula[5 + index * 2] = `=IFERROR(${reviewsColumn}${countRow}/SUM(${reviewsColumn}${summaryStartRow + 2}:${reviewsColumn}${summaryStartRow + 4});0)`;

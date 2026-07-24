@@ -309,10 +309,10 @@ export class YandexAdapter implements SiteAdapter {
       brandKey(brand),
       { brand, refs: new Map() }
     ]));
-    // A failed chunk must cancel and settle its in-flight siblings before the
-    // caller can retry. Otherwise a retry starts while the previous gateway
-    // requests are still consuming the same egress/function budget, producing
-    // repeated 502s without weakening the complete-proof requirement.
+    // A failed chunk stops workers from taking new chunks, but an already
+    // running sibling must settle normally before the failure is returned.
+    // Aborting that sibling makes the same error appear against two packages
+    // and can leave fixed-function egress overlapping the next retry.
     const batchAbort = new AbortController();
     let callerAborted = false;
     const relayAbort = () => {
@@ -424,7 +424,6 @@ export class YandexAdapter implements SiteAdapter {
             detail: `Пакет ${index + 1} не подтверждён: ${errorMessage(error)}`
           });
           failure ??= error;
-          if (!batchAbort.signal.aborted) batchAbort.abort(error);
           return;
         }
       }

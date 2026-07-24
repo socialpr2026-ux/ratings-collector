@@ -1449,6 +1449,46 @@ describe("fixed first-party collection egress", () => {
     expect(await incomplete.text()).not.toContain('"processed":2');
   });
 
+  it("settles an in-flight Yandex shard before returning the first batch failure", async () => {
+    const endpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const sitemaps = [
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_690000000-699999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_700000000-709999999-0.xml"
+    ];
+    let releaseSibling: (() => void) | undefined;
+    let siblingSettled = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === sitemaps[0]) throw new Error("first shard failed");
+      await new Promise<void>((resolve) => { releaseSibling = resolve; });
+      siblingSettled = true;
+      return new Response("<urlset></urlset>", { headers: { "content-type": "application/xml" } });
+    }));
+
+    const responsePromise = staticReviewFetch(new Request(
+      "https://ratings.example/api/internal/static-review-fetch",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          url: endpoint,
+          yandexBatch: {
+            sitemaps,
+            brands: [{ brand: "Бактоблис", tokens: ["baktoblis"] }]
+          }
+        })
+      }
+    ), { INTERNAL_AGENT_TOKEN: token });
+
+    await vi.waitFor(() => expect(releaseSibling).toBeTypeOf("function"));
+    expect(siblingSettled).toBe(false);
+    releaseSibling!();
+    const response = await responsePromise;
+
+    expect(siblingSettled).toBe(true);
+    expect(response.status).toBe(502);
+    expect(await response.text()).toContain("first shard failed");
+  });
+
   it("retries only a transiently truncated Yandex batch shard and accepts its complete second proof", async () => {
     const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_1220000000-1229999999-0.xml";
     const upstream = vi.fn(async () => upstream.mock.calls.length === 1
