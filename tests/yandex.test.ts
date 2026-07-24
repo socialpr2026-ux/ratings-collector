@@ -264,13 +264,7 @@ describe("YandexAdapter discovery", () => {
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : input.toString();
       if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A]));
-      return await new Promise<Response>((_resolve, reject) => {
-        const signal = init?.signal;
-        if (!signal) throw new Error("missing gateway deadline signal");
-        const onAbort = () => reject(signal.reason ?? new DOMException("aborted", "AbortError"));
-        if (signal.aborted) onAbort();
-        else signal.addEventListener("abort", onAbort, { once: true });
-      });
+      return await new Promise<Response>(() => undefined);
     });
     const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
     fetch.yandexBatchEndpoint = batchEndpoint;
@@ -667,9 +661,7 @@ describe("YandexAdapter discovery", () => {
 
 describe("YandexAdapter collection", () => {
   it("bounds a product request that never returns and fails closed", async () => {
-    const fetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
-      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
-    }));
+    const fetch = vi.fn(() => new Promise<Response>(() => undefined));
     const adapter = new YandexAdapter({ fetch: fetch as typeof globalThis.fetch, productRequestTimeoutMs: 10 });
 
     await expect(adapter.collect(ref({

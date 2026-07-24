@@ -4,7 +4,8 @@ import {
   createLazySandboxAcquire,
   hasExplicitWildberriesNoResults,
   shouldAutoRetryInitialCollection,
-  transientRecoveryDelayMs
+  transientRecoveryDelayMs,
+  YANDEX_BATCH_GATEWAY_TIMEOUT_MS
 } from "../agents/ratings/index.js";
 import { AdapterBlockedError } from "../src/server/adapters/errors.js";
 import { VaptekeAdapter } from "../src/server/adapters/vapteke.js";
@@ -621,6 +622,36 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(await response.json()).toEqual({ error: "one shard remained unproven" });
     expect(directFetch).toHaveBeenCalledOnce();
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("turns a hanging Yandex gateway transport into a splittable 504", async () => {
+    vi.useFakeTimers();
+    try {
+      const run = vi.fn(async () => undefined);
+      const directFetch = vi.fn(() => new Promise<Response>(() => undefined));
+      vi.stubGlobal("fetch", directFetch);
+      const routedFetch = browserFetch(sandbox(run), {
+        endpoint: "https://ratings.example/api/internal/static-review-fetch",
+        token: "internal-token"
+      }) as typeof fetch & { yandexBatchEndpoint?: string };
+
+      const pending = routedFetch(routedFetch.yandexBatchEndpoint!, {
+        method: "POST",
+        body: JSON.stringify({
+          sitemaps: ["first"],
+          brands: [{ brand: "Бактоблис", tokens: ["baktoblis"] }]
+        })
+      });
+      await vi.advanceTimersByTimeAsync(YANDEX_BATCH_GATEWAY_TIMEOUT_MS);
+      const response = await pending;
+
+      expect(response.status).toBe(504);
+      expect(await response.json()).toEqual({ error: "Yandex batch gateway transport timed out" });
+      expect(directFetch).toHaveBeenCalledOnce();
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("uses fixed function egress before a hanging direct Yandex request", async () => {

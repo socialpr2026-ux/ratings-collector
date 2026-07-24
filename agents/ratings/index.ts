@@ -57,6 +57,7 @@ export function transientRecoveryDelayMs(
 
 const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);
 const YANDEX_BATCH_ENDPOINT = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+export const YANDEX_BATCH_GATEWAY_TIMEOUT_MS = 95_000;
 type YandexBatchCapableFetch = typeof fetch & { yandexBatchEndpoint?: string };
 
 function json(value: unknown, status = 200) {
@@ -179,15 +180,25 @@ export function browserFetch(
     // authoritative batch response unchanged: YandexAdapter owns the bounded
     // batch-level retry, so stacking another loop here would multiply a slow
     // shard into as many as nine expensive attempts.
-    const requestProof = (payload: unknown) => fetch(staticProxy.endpoint, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${staticProxy.token}`,
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({ url: request.url, yandexBatch: payload }),
-      signal: request.signal
-    });
+    const requestProof = async (payload: unknown): Promise<Response> => {
+      try {
+        return await withDeadline(fetch(staticProxy.endpoint, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${staticProxy.token}`,
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({ url: request.url, yandexBatch: payload }),
+          signal: request.signal
+        }), YANDEX_BATCH_GATEWAY_TIMEOUT_MS, "Yandex batch gateway transport timed out");
+      } catch (error) {
+        request.signal.throwIfAborted();
+        // Some edge fetch implementations ignore an aborted signal. Convert
+        // the independently bounded transport timeout into the same explicit
+        // response as the Function deadline so the exact payload is split.
+        return json({ error: safeErrorMessage(error) }, 504);
+      }
+    };
     const splitTimedOutProof = async (payload: { sitemaps: string[]; brands?: unknown }): Promise<Response> => {
       const response = await requestProof(payload);
       // A transport/runtime 502 has the same practical meaning here as the

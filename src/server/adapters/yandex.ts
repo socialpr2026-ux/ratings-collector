@@ -66,6 +66,39 @@ async function reportActivity(context: AdapterContext, event: AdapterActivityEve
   catch { /* progress telemetry must never change collector semantics */ }
 }
 
+async function fetchWithDeadline(
+  fetcher: typeof globalThis.fetch,
+  input: string,
+  init: RequestInit,
+  timeoutMs: number,
+  label: string
+): Promise<Response> {
+  const deadline = new AbortController();
+  const signal = init.signal
+    ? AbortSignal.any([init.signal, deadline.signal])
+    : deadline.signal;
+  let abortListener: (() => void) | undefined;
+  const interrupted = new Promise<never>((_resolve, reject) => {
+    abortListener = () => reject(signal.reason ?? new DOMException("aborted", "AbortError"));
+    if (signal.aborted) abortListener();
+    else signal.addEventListener("abort", abortListener, { once: true });
+  });
+  const timer = setTimeout(
+    () => deadline.abort(new AdapterBlockedError(`${label} exceeded ${timeoutMs}ms`)),
+    timeoutMs
+  );
+  timer.unref?.();
+  try {
+    // Edge runtimes do not all settle fetch() when its signal is aborted. The
+    // explicit race guarantees that the adapter still returns control while
+    // the same signal asks compliant transports to release their resources.
+    return await Promise.race([fetcher(input, { ...init, signal }), interrupted]);
+  } finally {
+    clearTimeout(timer);
+    if (abortListener) signal.removeEventListener("abort", abortListener);
+  }
+}
+
 export type YandexAdapterOptions = {
   fetch?: typeof globalThis.fetch;
   sitemapIndexUrl?: string;
@@ -172,11 +205,11 @@ export class YandexAdapter implements SiteAdapter {
     // verified transfer can legitimately take more than 20 seconds; keep the
     // safety deadline, but do not misclassify a healthy shard as blocked.
     this.sitemapReadTimeoutMs = boundedInteger(options.sitemapReadTimeoutMs, 60_000, 1, 120_000);
-    // A gateway invocation is bounded by the hosting platform itself. Keep a
-    // slightly larger client deadline so a lost transport response cannot
-    // leave the whole exhaustive scan running forever after the function has
-    // already stopped.
-    this.batchRequestTimeoutMs = boundedInteger(options.batchRequestTimeoutMs, 130_000, 1, 180_000);
+    // The Agent bounds one gateway transport at 95 seconds and may then split
+    // one four-shard package recursively (4→2→1). Keep enough time for that
+    // exact recovery chain while the explicit race still guarantees a finite
+    // outcome even when the edge fetch implementation ignores AbortSignal.
+    this.batchRequestTimeoutMs = boundedInteger(options.batchRequestTimeoutMs, 330_000, 1, 360_000);
     // Product-page traffic can pass through the same fixed gateway as sitemap
     // traffic. Bound every direct/translated page request independently so a
     // lost upstream response cannot pin the collection stage forever.
@@ -344,19 +377,16 @@ export class YandexAdapter implements SiteAdapter {
       let lastRequestError: unknown;
       for (let attempt = 1; attempt <= this.sitemapRetryAttempts; attempt += 1) {
         try {
-          response = await fetcher(endpoint, {
+          response = await fetchWithDeadline(fetcher, endpoint, {
             method: "POST",
             redirect: "error",
-            signal: AbortSignal.any([
-              batchAbort.signal,
-              AbortSignal.timeout(this.batchRequestTimeoutMs)
-            ]),
+            signal: batchAbort.signal,
             headers: { "content-type": "application/json", accept: "application/json" },
             body: JSON.stringify({
               sitemaps,
               brands: brands.map((brand) => ({ brand, tokens: yandexBrandTokens(brand) }))
             })
-          });
+          }, this.batchRequestTimeoutMs, "Yandex batch proof request");
           if (!response.ok && [502, 504].includes(response.status) && attempt < this.sitemapRetryAttempts) {
             const status = response.status;
             await response.body?.cancel().catch(() => undefined);
@@ -839,19 +869,16 @@ export class YandexAdapter implements SiteAdapter {
     const fetcher = context.fetch ?? this.fallbackFetch;
     if (typeof fetcher !== "function") throw new AdapterBlockedError("No fetch implementation is available");
     try {
-      const requestSignal = context.signal
-        ? AbortSignal.any([context.signal, AbortSignal.timeout(this.productRequestTimeoutMs)])
-        : AbortSignal.timeout(this.productRequestTimeoutMs);
-      return await fetcher(url, {
+      return await fetchWithDeadline(fetcher, url, {
         method: "GET",
         redirect: "follow",
-        signal: requestSignal,
+        signal: context.signal,
         headers: {
           accept,
           "accept-language": "ru-RU,ru;q=0.9",
           "user-agent": "RatingsCollector/1.0 (+https://reviews.yandex.ru/robots.txt)"
         }
-      });
+      }, this.productRequestTimeoutMs, `Yandex product request for ${url}`);
     } catch (error) {
       if (error instanceof AdapterBlockedError || error instanceof ParserChangedError) throw error;
       if (context.signal?.aborted) throw error;
