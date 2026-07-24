@@ -18,6 +18,16 @@ const TRANSLATE_ORIGIN = "https://reviews-yandex-ru.translate.goog";
 const DIRECT_SOURCE = "yandex_reviews_json_ld";
 const TRANSLATE_SOURCE = "yandex_reviews_json_ld_google_translate";
 const MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_\d+-\d+-\d+\.xml$/i;
+const SHOP_SITEMAP_PATH = /^\/ugcpub\/sitemap_shop_((?:[0-9a-z]|%[0-9a-f]{2})-(?:[0-9a-z]|%[0-9a-f]{2}))-\d+\.xml$/i;
+const SHOP_SITEMAP_RANGES = new Set([
+  "%25-%26",
+  ...Array.from({ length: 10 }, (_value, index) => `${index}-${index === 9 ? "%3a" : index + 1}`),
+  ...Array.from({ length: 26 }, (_value, index) => {
+    const start = String.fromCharCode("a".charCodeAt(0) + index);
+    const end = index === 25 ? "%7b" : String.fromCharCode("a".charCodeAt(0) + index + 1);
+    return `${start}-${end}`;
+  })
+]);
 const MODEL_ID_AT_END = /--(\d+)(?:[/?#]|$)/;
 // The gateway has two shard workers and a 120-second platform ceiling. A
 // two-shard package is one wave and stays below the Agent's transport deadline
@@ -794,11 +804,16 @@ export class YandexAdapter implements SiteAdapter {
 
     const locations = parseXmlLocs(xml);
     const declared = xml.match(/<sitemap\b/gi)?.length ?? 0;
-    if (declared === 0 || locations.length !== declared || locations.some((location) => !isAllowedModelSitemap(location)) ||
+    const modelLocations = locations.filter(isAllowedModelSitemap);
+    if (declared === 0 || locations.length !== declared || modelLocations.length === 0 ||
+      locations.some((location) => !isAllowedModelSitemap(location) && !isAllowedShopSitemap(location)) ||
       new Set(locations).size !== locations.length) {
       throw new ParserChangedError("Yandex sitemap index is incomplete or contains an unknown map shape");
     }
-    return locations;
+    // The root index also advertises shop-review maps. They are part of the
+    // index completeness proof, but cannot contain exact Market product model
+    // cards and must not consume the product discovery scan budget.
+    return modelLocations;
   }
 
   private async fetchModelSitemap(url: string, context: AdapterContext): Promise<string> {
@@ -983,10 +998,25 @@ function decodeXmlEntities(value: string): string {
 function isAllowedModelSitemap(input: string): boolean {
   try {
     const url = new URL(input);
-    return url.protocol === "https:" && url.hostname === "reviews.yandex.ru" && MODEL_SITEMAP_PATH.test(url.pathname);
+    return isAllowedYandexSitemapUrl(url) && MODEL_SITEMAP_PATH.test(url.pathname);
   } catch {
     return false;
   }
+}
+
+function isAllowedShopSitemap(input: string): boolean {
+  try {
+    const url = new URL(input);
+    const range = url.pathname.match(SHOP_SITEMAP_PATH)?.[1]?.toLowerCase();
+    return isAllowedYandexSitemapUrl(url) && Boolean(range && SHOP_SITEMAP_RANGES.has(range));
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedYandexSitemapUrl(url: URL): boolean {
+  return url.protocol === "https:" && url.hostname === "reviews.yandex.ru" && !url.port &&
+    !url.username && !url.password && !url.search && !url.hash;
 }
 
 function assertCompleteModelSitemap(xml: string, sitemap: string): void {

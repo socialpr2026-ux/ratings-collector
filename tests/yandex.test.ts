@@ -11,6 +11,11 @@ const MAP_A = "https://reviews.yandex.ru/ugcpub/sitemap_model_0-9999999-0.xml";
 const MAP_B = "https://reviews.yandex.ru/ugcpub/sitemap_model_260000000-269999999-0.xml";
 const MAP_C = "https://reviews.yandex.ru/ugcpub/sitemap_model_500000000-509999999-0.xml";
 const MAP_695 = "https://reviews.yandex.ru/ugcpub/sitemap_model_690000000-699999999-0.xml";
+const SHOP_MAP_SYMBOLS = "https://reviews.yandex.ru/ugcpub/sitemap_shop_%25-%26-0.xml";
+const SHOP_MAP_DIGITS = "https://reviews.yandex.ru/ugcpub/sitemap_shop_0-1-0.xml";
+const SHOP_MAP_DIGITS_END = "https://reviews.yandex.ru/ugcpub/sitemap_shop_9-%3A-0.xml";
+const SHOP_MAP_LETTERS = "https://reviews.yandex.ru/ugcpub/sitemap_shop_a-b-0.xml";
+const SHOP_MAP_LETTERS_END = "https://reviews.yandex.ru/ugcpub/sitemap_shop_z-%7B-0.xml";
 
 describe("YandexAdapter discovery", () => {
   it("discovers model cards by Cyrillic brand transliteration and deduplicates modelId", async () => {
@@ -65,6 +70,29 @@ describe("YandexAdapter discovery", () => {
       "695943742"
     ]));
     expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("accepts the current mixed root index but scans only product model maps", async () => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([
+        SHOP_MAP_SYMBOLS,
+        MAP_B,
+        SHOP_MAP_DIGITS,
+        SHOP_MAP_DIGITS_END,
+        SHOP_MAP_LETTERS,
+        SHOP_MAP_LETTERS_END
+      ])),
+      [MAP_B]: xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/kagotsel--265149860"
+      ]))
+    });
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 1 });
+
+    await expect(adapter.discover("kagotsel", context())).resolves.toMatchObject([
+      { listingId: "265149860" }
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining("sitemap_shop_"), expect.anything());
   });
 
   it("scans every shard in a live-sized cold index without a synthetic whole-pass deadline", async () => {
@@ -688,6 +716,43 @@ describe("YandexAdapter discovery", () => {
   it("fails closed when the root index contains an unknown sitemap shape", async () => {
     const fetch = routeFetch({
       [INDEX]: xmlResponse(sitemapIndex([MAP_A, "https://evil.example/sitemap_model_1-2-0.xml"]))
+    });
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.discover("kagotsel", context())).rejects.toBeInstanceOf(ParserChangedError);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed when the root index adds an unknown same-origin sitemap family", async () => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([
+        MAP_A,
+        "https://reviews.yandex.ru/ugcpub/sitemap_brand_a-b-0.xml"
+      ]))
+    });
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.discover("kagotsel", context())).rejects.toBeInstanceOf(ParserChangedError);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    "https://reviews.yandex.ru/ugcpub/sitemap_shop_a-z-0.xml",
+    `${SHOP_MAP_DIGITS}?changed=1`,
+    `${SHOP_MAP_LETTERS}#changed`
+  ])("fails closed for a non-canonical shop sitemap: %s", async (unknownShopMap) => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([MAP_A, unknownShopMap]))
+    });
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.discover("kagotsel", context())).rejects.toBeInstanceOf(ParserChangedError);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed when the root index contains only shop maps", async () => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([SHOP_MAP_SYMBOLS, SHOP_MAP_DIGITS]))
     });
     const adapter = new YandexAdapter({ fetch });
 
