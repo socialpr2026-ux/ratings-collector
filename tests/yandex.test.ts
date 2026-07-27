@@ -659,6 +659,24 @@ describe("YandexAdapter discovery", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("retains an exact saved Market reviews URL for a known-first collection", async () => {
+    const fetch = vi.fn(async () => { throw new Error("discovery must not fetch"); }) as unknown as typeof globalThis.fetch;
+    const adapter = new YandexAdapter({ fetch });
+    const marketUrl = "https://market.yandex.ru/card/mikroginon-tab-po/103544271955/reviews";
+
+    const refs = await adapter.discover("Микрогинон", context({
+      previousIds: ["103544271955"],
+      previousRefs: [{ listingId: "103544271955", url: marketUrl }]
+    }));
+
+    expect(refs).toMatchObject([{
+      listingId: "103544271955",
+      url: marketUrl,
+      metadata: { discovery: "previous_registry" }
+    }]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("checks saved models without the index and scans for new cards only on explicit refresh", async () => {
     const fetch = routeFetch({
       [INDEX]: xmlResponse(sitemapIndex([MAP_A])),
@@ -1482,6 +1500,61 @@ describe("YandexAdapter collection", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("collects a saved Market card through the hardened browser with visible source-bound metrics", async () => {
+    const listingId = "103544271955";
+    const marketUrl = `https://market.yandex.ru/card/mikroginon-tab-po/${listingId}/reviews`;
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      expect(request.url).toBe(marketUrl);
+      expect(request.headers.get("x-ratings-browser")).toBe("1");
+      return new Response(marketCardHtml({
+        title: "Микрогинон таблетки п/о 150мкг+30мкг 21шт",
+        rating: "5.0",
+        ratingCount: 15,
+        reviewCount: 1
+      }), {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "x-ratings-final-url": marketUrl
+        }
+      });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.collect(ref({
+      listingId,
+      brand: "Микрогинон",
+      url: marketUrl
+    }), context({ brands: ["Микрогинон", "Видора Микро", "Видора"] }))).resolves.toMatchObject({
+      listingId,
+      canonicalUrl: marketUrl,
+      product: "Микрогинон таблетки п/о 150мкг+30мкг 21шт",
+      reviews: 15,
+      writtenReviewCount: 1,
+      ratingCount: 15,
+      rating: 5,
+      status: "ok",
+      source: "yandex_market_browser_visible_rating"
+    });
+  });
+
+  it("does not accept a saved Видора Микро Market card under the shorter Видора brand", async () => {
+    const listingId = "103544253024";
+    const marketUrl = `https://market.yandex.ru/card/vidora-mikro-244-tab-po-plen/${listingId}/reviews`;
+    const adapter = new YandexAdapter({
+      fetch: (async () => new Response(marketCardHtml({
+        title: "Видора Микро таблетки п/о плен. 3мг+0,02мг 24+4шт",
+        rating: "4.9",
+        ratingCount: 18,
+        reviewCount: 4
+      }), { headers: { "x-ratings-final-url": marketUrl } })) as typeof globalThis.fetch
+    });
+
+    await expect(adapter.collect(ref({ listingId, brand: "Видора", url: marketUrl }), context({
+      brands: ["Видора Микро", "Видора"]
+    }))).resolves.toMatchObject({ status: "needs_review", reviews: 18, rating: 4.9 });
+  });
+
   it("does not fetch an arbitrary URL supplied in a ProductRef", async () => {
     const safeUrl = "https://reviews.yandex.ru/product/model--265149860";
     const fetch = routeFetch({
@@ -1560,6 +1633,23 @@ function modelSitemap(urls: string[]): string {
 
 function productHtml({ canonical, product }: { canonical: string; product: unknown }): string {
   return `<!doctype html><html><head><link href="${canonical}" rel="canonical"><script type="application/ld+json">${JSON.stringify(product)}</script></head><body></body></html>`;
+}
+
+function marketCardHtml({
+  title,
+  rating,
+  ratingCount,
+  reviewCount
+}: {
+  title: string;
+  rating: string;
+  ratingCount: number;
+  reviewCount: number;
+}): string {
+  return `<!doctype html><html><body><h1>${title}</h1>` +
+    `<a aria-label="Рейтинг товара: ${rating} из 5"><span>${rating}</span><span>(${ratingCount})</span></a>` +
+    `<section><h2>Отзывы и оценки</h2><div>${ratingCount} оценок</div><div>${reviewCount} отзыв</div></section>` +
+    `</body></html>`;
 }
 
 function translatedProductHtml({

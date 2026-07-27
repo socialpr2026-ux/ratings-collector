@@ -18,6 +18,7 @@ const REVIEWS_ORIGIN = "https://reviews.yandex.ru";
 const TRANSLATE_ORIGIN = "https://reviews-yandex-ru.translate.goog";
 const DIRECT_SOURCE = "yandex_reviews_json_ld";
 const TRANSLATE_SOURCE = "yandex_reviews_json_ld_google_translate";
+const MARKET_BROWSER_SOURCE = "yandex_market_browser_visible_rating";
 const MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_\d+-\d+-\d+\.xml$/i;
 const SHOP_SITEMAP_PATH = /^\/ugcpub\/sitemap_shop_((?:[0-9a-z]|%[0-9a-f]{2})-(?:[0-9a-z]|%[0-9a-f]{2}))-\d+\.xml$/i;
 const SHOP_SITEMAP_RANGES = new Set([
@@ -269,9 +270,14 @@ export class YandexAdapter implements SiteAdapter {
     const refs = new Map<string, ProductRef>();
     const knownIds = previousModelIds(context.previousIds ?? []);
     const knownSet = new Set(knownIds);
+    const previousUrls = new Map((context.previousRefs ?? []).flatMap((previous) => {
+      const listingId = normalizeListingId(previous.listingId) ?? extractModelId(previous.url) ??
+        extractMarketCardId(previous.url);
+      return listingId ? [[listingId, previous.url] as const] : [];
+    }));
 
     for (const listingId of knownIds) {
-      refs.set(listingId, productRefFromPreviousId(listingId, brand));
+      refs.set(listingId, productRefFromPreviousId(listingId, brand, previousUrls.get(listingId)));
     }
 
     // Repeat collections validate the exact models retained after the previous
@@ -558,8 +564,11 @@ export class YandexAdapter implements SiteAdapter {
   }
 
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
-    const listingId = normalizeListingId(ref.listingId) ?? extractModelId(ref.url);
+    const listingId = normalizeListingId(ref.listingId) ?? extractModelId(ref.url) ?? extractMarketCardId(ref.url);
     if (!listingId) throw new ParserChangedError(`Invalid Yandex modelId: ${ref.listingId}`);
+    if (isAllowedMarketCardReviewsUrl(ref.url, listingId)) {
+      return this.collectMarketCard(ref, listingId, context);
+    }
 
     let page: ProductPage;
     try {
@@ -724,6 +733,64 @@ export class YandexAdapter implements SiteAdapter {
       evidenceRef: `${canonicalUrl}#json-ld`,
       productEvidence,
       source: page.translated ? TRANSLATE_SOURCE : DIRECT_SOURCE
+    };
+  }
+
+  private async collectMarketCard(
+    ref: ProductRef,
+    listingId: string,
+    context: AdapterContext
+  ): Promise<Observation> {
+    let response: Response;
+    try {
+      response = await this.requestMarketCard(ref.url, context);
+    } catch (error) {
+      if (error instanceof AdapterBlockedError || error instanceof ParserChangedError) throw error;
+      if (context.signal?.aborted) throw error;
+      throw new AdapterBlockedError(`Yandex Market card ${listingId} is unavailable: ${errorMessage(error)}`);
+    }
+    if (response.status === 404 || response.status === 410) {
+      return this.emptyObservation(ref, listingId, ref.url, "not_found", "yandex_market_missing_candidate");
+    }
+    assertUsableResponse(response, ref.url);
+    const finalUrl = response.headers.get("x-ratings-final-url") || response.url || ref.url;
+    if (!isAllowedMarketCardReviewsUrl(finalUrl, listingId)) {
+      throw new ParserChangedError(`Yandex Market card ${listingId} escaped its exact reviews route`);
+    }
+    const html = await readBoundedBody(response, this.maxDocumentBytes, finalUrl);
+    if (looksBlocked(html)) throw new AdapterBlockedError(`Yandex blocked Market card ${listingId}`);
+    const metrics = extractMarketCardMetrics(html, listingId);
+    const brands = context.brands?.length ? context.brands : [ref.brand];
+    const brandMatches = bestMatchingTextBrandKeys(metrics.title, brands).has(brandKey(ref.brand));
+    const canonicalUrl = canonicalizeUrl(finalUrl);
+    return {
+      domain: "market.yandex.ru",
+      platform: this.id,
+      listingId,
+      brand: ref.brand,
+      canonicalUrl,
+      product: metrics.title,
+      reviews: metrics.ratingCount,
+      writtenReviewCount: metrics.reviewCount,
+      rating: metrics.ratingCount === 0 ? null : metrics.rating,
+      rawRating: metrics.ratingCount === 0 ? null : metrics.rating,
+      rawRatingScale: 5,
+      ratingCount: metrics.ratingCount,
+      status: brandMatches ? (metrics.ratingCount === 0 ? "no_reviews" : "ok") : "needs_review",
+      capturedAt: this.now().toISOString(),
+      evidenceRef: `${canonicalUrl}#visible-rating`,
+      productEvidence: {
+        scope: "listing",
+        signals: [
+          { source: "title", text: metrics.title },
+          { source: "url", text: canonicalUrl }
+        ],
+        variants: [],
+        identifiers: [{ type: "model_id", value: listingId }],
+        imageUrls: [],
+        instructionUrls: []
+      },
+      source: MARKET_BROWSER_SOURCE
     };
   }
 
@@ -965,6 +1032,28 @@ export class YandexAdapter implements SiteAdapter {
       throw new AdapterBlockedError(`Yandex request failed for ${url}: ${errorMessage(error)}`);
     }
   }
+
+  private async requestMarketCard(url: string, context: AdapterContext): Promise<Response> {
+    const fetcher = context.fetch ?? this.fallbackFetch;
+    if (typeof fetcher !== "function") throw new AdapterBlockedError("No fetch implementation is available");
+    try {
+      return await fetchWithDeadline(fetcher, url, {
+        method: "GET",
+        redirect: "follow",
+        signal: context.signal,
+        headers: {
+          accept: "text/html,application/xhtml+xml",
+          "accept-language": "ru-RU,ru;q=0.9",
+          "user-agent": "RatingsCollector/1.0 (+public aggregate metrics)",
+          "x-ratings-browser": "1"
+        }
+      }, this.productRequestTimeoutMs, `Yandex Market product request for ${url}`);
+    } catch (error) {
+      if (error instanceof AdapterBlockedError || error instanceof ParserChangedError) throw error;
+      if (context.signal?.aborted) throw error;
+      throw new AdapterBlockedError(`Yandex request failed for ${url}: ${errorMessage(error)}`);
+    }
+  }
 }
 
 export default YandexAdapter;
@@ -1105,6 +1194,25 @@ function extractModelId(input: string): string | undefined {
   return input.match(MODEL_ID_AT_END)?.[1];
 }
 
+function extractMarketCardId(input: string): string | undefined {
+  try {
+    const url = new URL(input);
+    return url.pathname.match(/^\/card\/[a-z0-9][a-z0-9-]*\/(\d+)\/reviews\/?$/i)?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
+function isAllowedMarketCardReviewsUrl(input: string, listingId: string): boolean {
+  try {
+    const url = new URL(input);
+    return url.protocol === "https:" && url.hostname === "market.yandex.ru" && !url.port &&
+      !url.username && !url.password && !url.search && !url.hash && extractMarketCardId(input) === listingId;
+  } catch {
+    return false;
+  }
+}
+
 function normalizeListingId(input: string): string | undefined {
   return input.match(/^(?:yandex:)?(\d+)$/i)?.[1];
 }
@@ -1118,13 +1226,17 @@ function previousModelIds(previousIds: string[]): string[] {
   return [...new Set(result)];
 }
 
-function productRefFromPreviousId(listingId: string, brand: string): ProductRef {
+function productRefFromPreviousId(listingId: string, brand: string, previousUrl?: string): ProductRef {
+  const retainedUrl = previousUrl && (
+    isAllowedProductUrl(previousUrl) && extractModelId(previousUrl) === listingId ||
+    isAllowedMarketCardReviewsUrl(previousUrl, listingId)
+  ) ? canonicalizeUrl(previousUrl) : undefined;
   return {
     domain: "market.yandex.ru",
     platform: "yandex",
     listingId,
     brand,
-    url: `${REVIEWS_ORIGIN}/product/model--${listingId}`,
+    url: retainedUrl ?? `${REVIEWS_ORIGIN}/product/model--${listingId}`,
     metadata: { discovery: "previous_registry" }
   };
 }
@@ -1214,6 +1326,24 @@ function yandexBrandMatchScore(input: string, brand: string): number {
 function bestMatchingBrandKeys(input: string, brands: readonly string[]): Set<string> {
   const matches = brands
     .map((brand) => ({ key: brandKey(brand), score: yandexBrandMatchScore(input, brand) }))
+    .filter(({ score }) => score >= 0);
+  const bestScore = Math.max(-1, ...matches.map(({ score }) => score));
+  return new Set(matches.filter(({ score }) => score === bestScore).map(({ key }) => key));
+}
+
+function textBrandMatchScore(input: string, brand: string): number {
+  const normalized = ` ${normalizeForSlug(input)} `;
+  const scores = aliasesForBrand(brand)
+    .map(normalizeForSlug)
+    .filter(Boolean)
+    .filter((candidate) => normalized.includes(` ${candidate} `))
+    .map((candidate) => candidate.replace(/\s+/g, "").length);
+  return scores.length > 0 ? Math.max(...scores) : -1;
+}
+
+function bestMatchingTextBrandKeys(input: string, brands: readonly string[]): Set<string> {
+  const matches = brands
+    .map((brand) => ({ key: brandKey(brand), score: textBrandMatchScore(input, brand) }))
     .filter(({ score }) => score >= 0);
   const bestScore = Math.max(-1, ...matches.map(({ score }) => score));
   return new Set(matches.filter(({ score }) => score === bestScore).map(({ key }) => key));
@@ -1410,6 +1540,63 @@ function expandYandexProductTitle(value: string): string {
     .replace(/(?<![\p{L}\p{N}])капс\.?(?![\p{L}\p{N}])/giu, "капсулы")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function visibleMarketText(value: string): string {
+  return decodeHtmlEntities(value
+    .replace(/<(?:script|style|noscript|template)\b[^>]*>[\s\S]*?<\/(?:script|style|noscript|template)\s*>/giu, " ")
+    .replace(/<[^>]+>/g, " "))
+    .normalize("NFKC")
+    .replace(/[\s\u00a0\u202f]+/g, " ")
+    .trim();
+}
+
+function extractMarketCardMetrics(html: string, listingId: string): {
+  title: string;
+  rating: number;
+  ratingCount: number;
+  reviewCount?: number;
+} {
+  const heading = /<h1\b[^>]*>([\s\S]*?)<\/h1\s*>/iu.exec(html);
+  const title = heading ? visibleMarketText(heading[1]) : "";
+  if (!title) throw new ParserChangedError(`Yandex Market card ${listingId} has no product heading`);
+  const afterHeading = html.slice((heading?.index ?? 0) + (heading?.[0].length ?? 0), (heading?.index ?? 0) + 250_000);
+  let rawRating: number | undefined;
+  let rawScale: number | undefined;
+  let ratingCount: number | undefined;
+  for (const match of afterHeading.matchAll(/<[^>]+\baria-label\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)[^>]*>/giu)) {
+    const aria = htmlAttribute(match[0], "aria-label");
+    const rating = aria?.match(/Рейтинг\s+товара\s*:\s*([\d.,]+)\s+из\s+([\d.,]+)/iu);
+    if (!rating) continue;
+    rawRating = parseFiniteNumber(rating[1]);
+    rawScale = parseFiniteNumber(rating[2]);
+    const snippet = visibleMarketText(afterHeading.slice(match.index, match.index + 4_000));
+    ratingCount = parseNonNegativeInteger(snippet.match(/\(([\d\s\u00a0\u202f]+)\)/u)?.[1]);
+    break;
+  }
+  const visible = visibleMarketText(afterHeading);
+  ratingCount ??= parseNonNegativeInteger(visible.match(
+    /(?<![\p{L}\p{N}])([\d\s\u00a0\u202f]+)\s+оцен(?:ка|ки|ок)(?![\p{L}\p{N}])/iu
+  )?.[1]);
+  const reviewCount = parseNonNegativeInteger(visible.match(
+    /(?<![\p{L}\p{N}])([\d\s\u00a0\u202f]+)\s+отзыв(?:а|ов)?(?![\p{L}\p{N}])/iu
+  )?.[1]);
+  if (ratingCount === undefined) {
+    const explicitEmpty = /(?:0\s+оцен|оценок\s+(?:пока\s+)?нет)/iu.test(visible) &&
+      /(?:0\s+отзыв|отзывов\s+(?:пока\s+)?нет)/iu.test(visible);
+    if (explicitEmpty) return { title, rating: 0, ratingCount: 0, reviewCount: 0 };
+    throw new ParserChangedError(`Yandex Market card ${listingId} has no source-bound rating count`);
+  }
+  if (ratingCount === 0) return { title, rating: 0, ratingCount, reviewCount };
+  if (rawRating === undefined || rawScale === undefined || rawScale <= 0 || rawRating < 0 || rawRating > rawScale) {
+    throw new ParserChangedError(`Yandex Market card ${listingId} has invalid visible rating metrics`);
+  }
+  return {
+    title,
+    rating: normalizeRating(rawRating, rawScale),
+    ratingCount,
+    ...(reviewCount === undefined ? {} : { reviewCount })
+  };
 }
 
 function extractReviewedProductTitles(html: string, brand: string): string[] {

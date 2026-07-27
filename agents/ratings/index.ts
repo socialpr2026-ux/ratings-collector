@@ -701,7 +701,7 @@ export function browserFetch(
     // Only reviewed first-party adapters are allowed to execute page
     // JavaScript. Newly supplied domains remain static with subresources
     // blocked until a dedicated adapter is reviewed.
-    const trustedContext = url.hostname === "reviews.yandex.ru"
+    const trustedContext = ["reviews.yandex.ru", "market.yandex.ru"].includes(url.hostname)
       ? "trusted-yandex"
       : sameDomain(url.hostname, "irecommend.ru")
         ? "trusted-irecommend"
