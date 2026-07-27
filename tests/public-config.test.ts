@@ -67,6 +67,45 @@ describe("new static collector gateways", () => {
     expect(upstream).toHaveBeenCalledTimes(2);
   });
 
+  it("compacts an exact translated Yandex Market card without Sandbox", async () => {
+    const source = "https://market.yandex.ru/card/mikroginon-tab-po/103544271955/reviews";
+    const target = new URL("https://market-yandex-ru.translate.goog/card/mikroginon-tab-po/103544271955/reviews");
+    target.searchParams.set("_x_tr_sl", "ru");
+    target.searchParams.set("_x_tr_tl", "en");
+    target.searchParams.set("_x_tr_hl", "en");
+    const noise = "x".repeat(500_000);
+    const upstream = vi.fn(async () => new Response(`<html><head><base href="${source}"><style>${noise}</style></head><body>` +
+      `<script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "Product",
+        name: "?????????? ???????? ?/? 150???+30??? 21??",
+        url: source,
+        aggregateRating: {
+          "@type": "AggregateRating",
+          bestRating: 5,
+          ratingValue: 5,
+          ratingCount: 15,
+          reviewCount: 1
+        }
+      })}</script></body></html>`, { headers: { "content-type": "text/html; charset=utf-8" } }));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target.toString());
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-yandex-market-compact");
+    expect(response.headers.get("x-ratings-final-url")).toBe(source);
+    expect(proof).toContain('"ratingCount":15');
+    expect(proof).toContain('"reviewCount":1');
+    expect(proof).not.toContain(noise.slice(0, 100));
+    expect(Number(response.headers.get("x-ratings-proof-bytes"))).toBeLessThan(2_000);
+
+    target.searchParams.set("redirect", "https://evil.example");
+    expect((await callGateway(target.toString())).status).toBe(400);
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
   it("proxies only exact Ozon composer search or product paths", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));

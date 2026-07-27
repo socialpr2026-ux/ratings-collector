@@ -402,10 +402,10 @@ export class RatingsService {
         const retryBrands = retryBrandsByDomain.get(domain)!;
         const retryBrandKeys = new Set(retryBrands.map(normalizeText));
         const previousDomainRecords = [
-          ...products.filter((item) => item.domain === domain && retryBrandKeys.has(normalizeText(item.brand)))
-            .map((item) => ({ listingId: item.listingId, url: item.canonicalUrl })),
           ...sourceCards.filter((item) => item.domain === domain && retryBrandKeys.has(normalizeText(item.brand)))
-            .map((item) => ({ listingId: item.listingId, url: item.canonicalUrl }))
+            .map((item) => ({ listingId: item.listingId, url: item.canonicalUrl })),
+          ...products.filter((item) => item.domain === domain && retryBrandKeys.has(normalizeText(item.brand)))
+            .map((item) => ({ listingId: item.listingId, url: item.canonicalUrl, title: item.product }))
         ];
         const previousDomainRefs = [...new Map(previousDomainRecords.map((item) => [item.listingId, item])).values()];
         let adapter: SiteAdapter;
@@ -482,8 +482,8 @@ export class RatingsService {
             item.domain === domain && normalizeText(item.brand) === normalizeText(brand)
           );
           const previousRefs = [...new Map([
-            ...previousRecords.map((item) => ({ listingId: item.listingId, url: item.canonicalUrl })),
-            ...previousSourceCards.map((item) => ({ listingId: item.listingId, url: item.canonicalUrl }))
+            ...previousSourceCards.map((item) => ({ listingId: item.listingId, url: item.canonicalUrl })),
+            ...previousRecords.map((item) => ({ listingId: item.listingId, url: item.canonicalUrl, title: item.product }))
           ].map((item) => [item.listingId, item])).values()];
           const previousIds = previousRefs.map((item) => item.listingId);
           const discoveryActivity = activity.start({

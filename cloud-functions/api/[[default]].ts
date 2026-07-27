@@ -48,6 +48,7 @@ const APTEKA_TRANSLATE_HOST = "apteka-ru.translate.goog";
 const NFAPTEKA_TRANSLATE_HOST = "nfapteka-ru.translate.goog";
 const BUDZDOROV_TRANSLATE_HOST = "www-budzdorov-ru.translate.goog";
 const ETABL_TRANSLATE_HOST = "etabl-ru.translate.goog";
+const YANDEX_MARKET_TRANSLATE_HOST = "market-yandex-ru.translate.goog";
 const YANDEX_MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_(\d+)-(\d+)-\d+\.xml$/i;
 const YANDEX_BATCH_ENDPOINT = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
 
@@ -103,6 +104,22 @@ type RuOtzyvTarget = {
 type UtekaReviewsTarget = {
   source: URL;
 };
+
+type YandexMarketTranslateTarget = {
+  source: URL;
+  listingId: string;
+};
+
+function parseYandexMarketTranslateTarget(target: URL): YandexMarketTranslateTarget | undefined {
+  if (target.protocol !== "https:" || target.hostname !== YANDEX_MARKET_TRANSLATE_HOST || target.port ||
+    target.username || target.password || target.hash || !exactTranslateParameters(target) ||
+    [...target.searchParams.keys()].some((key) => !PHARMACY_TRANSLATE_PARAMETERS.has(key) || target.searchParams.getAll(key).length !== 1)) {
+    return undefined;
+  }
+  const card = target.pathname.match(/^\/card\/[a-z0-9][a-z0-9-]*\/(\d+)\/reviews\/?$/i);
+  if (!card) return undefined;
+  return { source: new URL(target.pathname, "https://market.yandex.ru"), listingId: card[1] };
+}
 
 function parseUtekaReviewsTarget(target: URL): UtekaReviewsTarget | undefined {
   if (
@@ -1296,6 +1313,82 @@ function escapeHtml(value: string): string {
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
+function compactYandexMarketTranslateHtml(
+  html: string,
+  requested: YandexMarketTranslateTarget
+): string | undefined {
+  // Google Translate appends its own navigation script after the origin's
+  // closing tag. A complete bounded read plus one closed source document is
+  // the relevant proof; requiring the closing tag to be the final byte would
+  // reject a healthy translated response.
+  if (!/<\/html>/i.test(html)) return undefined;
+  const $ = load(html);
+  const baseValue = $("base[href]").first().attr("href");
+  let base: URL;
+  try { base = new URL(baseValue ?? ""); }
+  catch { return undefined; }
+  if (base.protocol !== "https:" || base.hostname !== "market.yandex.ru" || base.port || base.username ||
+    base.password || base.search || base.hash || base.pathname.replace(/\/$/, "") !== requested.source.pathname.replace(/\/$/, "")) {
+    return undefined;
+  }
+
+  const products: Array<Record<string, unknown>> = [];
+  $("script[type='application/ld+json']").each((_index, node) => {
+    let root: unknown;
+    try { root = JSON.parse($(node).text().trim()); }
+    catch { return; }
+    const queue: unknown[] = [root];
+    for (let visited = 0; queue.length > 0 && visited < 2_000; visited += 1) {
+      const value = queue.shift();
+      if (Array.isArray(value)) queue.push(...value);
+      else if (value && typeof value === "object") {
+        const object = value as Record<string, unknown>;
+        const types = Array.isArray(object["@type"]) ? object["@type"] : [object["@type"]];
+        if (types.some((type) => typeof type === "string" && type.toLowerCase() === "product")) products.push(object);
+        queue.push(...Object.values(object));
+      }
+    }
+  });
+  const identified = products.filter((product) => {
+    if (typeof product.url !== "string") return false;
+    try {
+      const url = new URL(product.url, requested.source);
+      return url.protocol === "https:" && url.hostname === "market.yandex.ru" && !url.port && !url.username &&
+        !url.password && !url.search && !url.hash && url.pathname.replace(/\/$/, "") === requested.source.pathname.replace(/\/$/, "");
+    } catch { return false; }
+  });
+  if (identified.length !== 1) return undefined;
+  const product = identified[0];
+  const name = typeof product.name === "string" ? product.name.normalize("NFKC").replace(/\s+/g, " ").trim() : "";
+  const aggregate = product.aggregateRating && typeof product.aggregateRating === "object" && !Array.isArray(product.aggregateRating)
+    ? product.aggregateRating as Record<string, unknown>
+    : undefined;
+  const ratingCount = Number(aggregate?.ratingCount);
+  const reviewCount = aggregate?.reviewCount === undefined ? undefined : Number(aggregate.reviewCount);
+  const ratingValue = Number(aggregate?.ratingValue);
+  const bestRating = aggregate?.bestRating === undefined ? 5 : Number(aggregate.bestRating);
+  if (!name || !Number.isSafeInteger(ratingCount) || ratingCount < 0 ||
+    reviewCount !== undefined && (!Number.isSafeInteger(reviewCount) || reviewCount < 0) ||
+    ratingCount > 0 && (!Number.isFinite(ratingValue) || !Number.isFinite(bestRating) || bestRating <= 0 || ratingValue < 0 || ratingValue > bestRating)) {
+    return undefined;
+  }
+  const proof = JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name,
+    url: requested.source.toString(),
+    aggregateRating: {
+      "@type": "AggregateRating",
+      bestRating,
+      ratingValue: ratingCount > 0 ? ratingValue : 0,
+      ratingCount,
+      ...(reviewCount === undefined ? {} : { reviewCount })
+    }
+  }).replace(/<\//g, "\\u003c/");
+  return `<html><head><base href="${escapeHtml(requested.source.toString())}"></head><body>` +
+    `<script type="application/ld+json">${proof}</script></body></html>`;
+}
+
 const MED_OTZYV_PRODUCT_PATH = /^\/lekarstva\/\d+-[a-z0-9-]+\/(\d+)-[a-z0-9-]+\/?$/i;
 
 function medOtzyvProductFromSearchHref(value: string, base: URL): URL | undefined {
@@ -2191,6 +2284,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
   const pharmacyTranslatedTarget = parsePharmacyTranslateTarget(target);
   const aptekaRuTarget = parseAptekaRuTarget(target);
   const asnaSitemapTarget = parseAsnaSitemapTarget(target);
+  const yandexMarketTranslatedTarget = parseYandexMarketTranslateTarget(target);
   let ozonTarget = false;
   if (target.hostname === "www.ozon.ru" && target.pathname === "/api/composer-api.bx/page/json/v2") {
     const nested = target.searchParams.get("url") ?? "";
@@ -2210,7 +2304,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         [...target.searchParams.keys()].every((key) => key === "url") && (safeSearch || safeProduct);
     } catch { /* invalid nested Ozon search URL */ }
   }
-  if (target.protocol !== "https:" || !(yandexBatch || reviewTarget || vaptekeAutocompleteTarget || vaptekeProductTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget || asnaSitemapTarget)) {
+  if (target.protocol !== "https:" || !(yandexBatch || reviewTarget || vaptekeAutocompleteTarget || vaptekeProductTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget || asnaSitemapTarget || yandexMarketTranslatedTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
   }
   if (vaptekeAutocompleteTarget) {
@@ -2241,6 +2335,39 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     } catch (error) {
       return json({ error: safeErrorMessage(error) }, 502);
     }
+  }
+  if (yandexMarketTranslatedTarget) {
+    const upstream = await safeFetch(target.toString(), {
+      method: "GET",
+      redirect: "manual",
+      headers: {
+        accept: "text/html,application/xhtml+xml",
+        "accept-language": "ru-RU,ru;q=0.9",
+        "user-agent": "RatingsCollector/1.0 (+public aggregate metrics)"
+      }
+    }, fetch, 0, 60_000);
+    const html = await readTextBounded(upstream, 12_000_000, 60_000);
+    if (!upstream.ok) {
+      return new Response(html, {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "text/html; charset=utf-8" }
+      });
+    }
+    const compactHtml = compactYandexMarketTranslateHtml(html, yandexMarketTranslatedTarget);
+    if (!compactHtml || compactHtml.length > 100_000) {
+      return json({ error: "Translated Yandex Market page did not prove the exact product aggregate" }, 502);
+    }
+    return new Response(compactHtml, {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "google-translate-yandex-market-compact",
+        "x-ratings-final-url": yandexMarketTranslatedTarget.source.toString(),
+        "x-ratings-original-bytes": String(new TextEncoder().encode(html).byteLength),
+        "x-ratings-proof-bytes": String(new TextEncoder().encode(compactHtml).byteLength)
+      }
+    });
   }
   if (ozonTranslatedComposerTarget) {
     await assertSafePublicDestination(target.toString());

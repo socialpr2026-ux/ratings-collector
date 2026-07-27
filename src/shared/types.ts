@@ -138,7 +138,7 @@ export type AdapterContext = {
   month?: string;
   signal?: AbortSignal;
   previousIds?: string[];
-  previousRefs?: Array<{ listingId: string; url: string }>;
+  previousRefs?: Array<{ listingId: string; url: string; title?: string }>;
   /** Bypass the saved-card fast path and search the source for newly added cards. */
   refreshDiscovery?: boolean;
   fetch?: typeof globalThis.fetch;

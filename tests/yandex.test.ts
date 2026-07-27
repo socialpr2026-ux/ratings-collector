@@ -666,12 +666,17 @@ describe("YandexAdapter discovery", () => {
 
     const refs = await adapter.discover("Микрогинон", context({
       previousIds: ["103544271955"],
-      previousRefs: [{ listingId: "103544271955", url: marketUrl }]
+      previousRefs: [{
+        listingId: "103544271955",
+        url: marketUrl,
+        title: "Микрогинон таблетки п/о 150мкг+30мкг 21шт"
+      }]
     }));
 
     expect(refs).toMatchObject([{
       listingId: "103544271955",
       url: marketUrl,
+      title: "Микрогинон таблетки п/о 150мкг+30мкг 21шт",
       metadata: { discovery: "previous_registry" }
     }]);
     expect(fetch).not.toHaveBeenCalled();
@@ -1500,16 +1505,19 @@ describe("YandexAdapter collection", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
-  it("collects a saved Market card through the hardened browser with visible source-bound metrics", async () => {
+  it("collects a saved Market card through the bounded translated JSON-LD route", async () => {
     const listingId = "103544271955";
     const marketUrl = `https://market.yandex.ru/card/mikroginon-tab-po/${listingId}/reviews`;
     const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const request = input instanceof Request ? input : new Request(input, init);
-      expect(request.url).toBe(marketUrl);
-      expect(request.headers.get("x-ratings-browser")).toBe("1");
-      return new Response(marketCardHtml({
-        title: "Микрогинон таблетки п/о 150мкг+30мкг 21шт",
-        rating: "5.0",
+      expect(request.url).toBe(
+        `https://market-yandex-ru.translate.goog/card/mikroginon-tab-po/${listingId}/reviews?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en`
+      );
+      expect(request.headers.get("x-ratings-browser")).toBeNull();
+      return new Response(marketJsonLdHtml({
+        url: marketUrl,
+        title: "?????????? ???????? ?/? 150???+30??? 21??",
+        rating: 5,
         ratingCount: 15,
         reviewCount: 1
       }), {
@@ -1524,7 +1532,8 @@ describe("YandexAdapter collection", () => {
     await expect(adapter.collect(ref({
       listingId,
       brand: "Микрогинон",
-      url: marketUrl
+      url: marketUrl,
+      title: "Микрогинон таблетки п/о 150мкг+30мкг 21шт"
     }), context({ brands: ["Микрогинон", "Видора Микро", "Видора"] }))).resolves.toMatchObject({
       listingId,
       canonicalUrl: marketUrl,
@@ -1534,7 +1543,7 @@ describe("YandexAdapter collection", () => {
       ratingCount: 15,
       rating: 5,
       status: "ok",
-      source: "yandex_market_browser_visible_rating"
+      source: "yandex_market_json_ld_google_translate"
     });
   });
 
@@ -1650,6 +1659,35 @@ function marketCardHtml({
     `<a aria-label="Рейтинг товара: ${rating} из 5"><span>${rating}</span><span>(${ratingCount})</span></a>` +
     `<section><h2>Отзывы и оценки</h2><div>${ratingCount} оценок</div><div>${reviewCount} отзыв</div></section>` +
     `</body></html>`;
+}
+
+function marketJsonLdHtml({
+  url,
+  title,
+  rating,
+  ratingCount,
+  reviewCount
+}: {
+  url: string;
+  title: string;
+  rating: number;
+  ratingCount: number;
+  reviewCount: number;
+}): string {
+  return `<!doctype html><html><head><base href="${url}"></head><body>` +
+    `<script type="application/ld+json">${JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "Product",
+      name: title,
+      url,
+      aggregateRating: {
+        "@type": "AggregateRating",
+        bestRating: 5,
+        ratingValue: rating,
+        ratingCount,
+        reviewCount
+      }
+    })}</script></body></html>`;
 }
 
 function translatedProductHtml({

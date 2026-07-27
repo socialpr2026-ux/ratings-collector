@@ -395,7 +395,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("routes the exact pharmacy Translate hosts through fixed function egress without Sandbox", async () => {
+  it("routes exact pharmacy and Yandex Market Translate hosts through fixed function egress without Sandbox", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("compact pharmacy proof", {
       headers: { "content-type": "text/html; charset=utf-8" }
@@ -413,7 +413,8 @@ describe("ratings Agent lazy Sandbox routing", () => {
       "https://polza-ru.translate.goog/product/otsillokoktsinum/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
       "https://apteka-ru.translate.goog/preparation/otsillokoktsinum/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
       "https://nfapteka-ru.translate.goog/catalog/?q=Оциллококцинум&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
-      "https://www-budzdorov-ru.translate.goog/forms/ocillokokcinum?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
+      "https://www-budzdorov-ru.translate.goog/forms/ocillokokcinum?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
+      "https://market-yandex-ru.translate.goog/card/mikroginon-tab-po/103544271955/reviews?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
     ]) {
       const response = await routedFetch(target);
       expect(await response.text()).toBe("compact pharmacy proof");

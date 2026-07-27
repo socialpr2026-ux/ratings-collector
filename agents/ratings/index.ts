@@ -417,6 +417,7 @@ export function browserFetch(
       "apteka-ru.translate.goog",
       "nfapteka-ru.translate.goog",
       "www-budzdorov-ru.translate.goog",
+      "market-yandex-ru.translate.goog",
       "megamarket-ru.translate.goog"
     ].includes(url.hostname)) {
       const maxAttempts = url.hostname === "megamarket-ru.translate.goog" ? 3 : 2;
@@ -701,7 +702,7 @@ export function browserFetch(
     // Only reviewed first-party adapters are allowed to execute page
     // JavaScript. Newly supplied domains remain static with subresources
     // blocked until a dedicated adapter is reviewed.
-    const trustedContext = ["reviews.yandex.ru", "market.yandex.ru"].includes(url.hostname)
+    const trustedContext = url.hostname === "reviews.yandex.ru"
       ? "trusted-yandex"
       : sameDomain(url.hostname, "irecommend.ru")
         ? "trusted-irecommend"

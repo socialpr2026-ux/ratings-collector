@@ -16,9 +16,10 @@ import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 const DEFAULT_SITEMAP_INDEX = "https://reviews.yandex.ru/ugcpub/sitemap.xml";
 const REVIEWS_ORIGIN = "https://reviews.yandex.ru";
 const TRANSLATE_ORIGIN = "https://reviews-yandex-ru.translate.goog";
+const MARKET_TRANSLATE_ORIGIN = "https://market-yandex-ru.translate.goog";
 const DIRECT_SOURCE = "yandex_reviews_json_ld";
 const TRANSLATE_SOURCE = "yandex_reviews_json_ld_google_translate";
-const MARKET_BROWSER_SOURCE = "yandex_market_browser_visible_rating";
+const MARKET_TRANSLATE_SOURCE = "yandex_market_json_ld_google_translate";
 const MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_\d+-\d+-\d+\.xml$/i;
 const SHOP_SITEMAP_PATH = /^\/ugcpub\/sitemap_shop_((?:[0-9a-z]|%[0-9a-f]{2})-(?:[0-9a-z]|%[0-9a-f]{2}))-\d+\.xml$/i;
 const SHOP_SITEMAP_RANGES = new Set([
@@ -270,14 +271,14 @@ export class YandexAdapter implements SiteAdapter {
     const refs = new Map<string, ProductRef>();
     const knownIds = previousModelIds(context.previousIds ?? []);
     const knownSet = new Set(knownIds);
-    const previousUrls = new Map((context.previousRefs ?? []).flatMap((previous) => {
+    const previousRefs = new Map((context.previousRefs ?? []).flatMap((previous) => {
       const listingId = normalizeListingId(previous.listingId) ?? extractModelId(previous.url) ??
         extractMarketCardId(previous.url);
-      return listingId ? [[listingId, previous.url] as const] : [];
+      return listingId ? [[listingId, previous] as const] : [];
     }));
 
     for (const listingId of knownIds) {
-      refs.set(listingId, productRefFromPreviousId(listingId, brand, previousUrls.get(listingId)));
+      refs.set(listingId, productRefFromPreviousId(listingId, brand, previousRefs.get(listingId)));
     }
 
     // Repeat collections validate the exact models retained after the previous
@@ -759,7 +760,7 @@ export class YandexAdapter implements SiteAdapter {
     }
     const html = await readBoundedBody(response, this.maxDocumentBytes, finalUrl);
     if (looksBlocked(html)) throw new AdapterBlockedError(`Yandex blocked Market card ${listingId}`);
-    const metrics = extractMarketCardMetrics(html, listingId);
+    const metrics = extractMarketCardMetrics(html, listingId, ref.title, ref.brand);
     const brands = context.brands?.length ? context.brands : [ref.brand];
     const brandMatches = bestMatchingTextBrandKeys(metrics.title, brands).has(brandKey(ref.brand));
     const canonicalUrl = canonicalizeUrl(finalUrl);
@@ -778,7 +779,7 @@ export class YandexAdapter implements SiteAdapter {
       ratingCount: metrics.ratingCount,
       status: brandMatches ? (metrics.ratingCount === 0 ? "no_reviews" : "ok") : "needs_review",
       capturedAt: this.now().toISOString(),
-      evidenceRef: `${canonicalUrl}#visible-rating`,
+      evidenceRef: `${canonicalUrl}#json-ld`,
       productEvidence: {
         scope: "listing",
         signals: [
@@ -790,7 +791,7 @@ export class YandexAdapter implements SiteAdapter {
         imageUrls: [],
         instructionUrls: []
       },
-      source: MARKET_BROWSER_SOURCE
+      source: MARKET_TRANSLATE_SOURCE
     };
   }
 
@@ -1036,18 +1037,22 @@ export class YandexAdapter implements SiteAdapter {
   private async requestMarketCard(url: string, context: AdapterContext): Promise<Response> {
     const fetcher = context.fetch ?? this.fallbackFetch;
     if (typeof fetcher !== "function") throw new AdapterBlockedError("No fetch implementation is available");
+    const source = new URL(url);
+    const translated = new URL(source.pathname, MARKET_TRANSLATE_ORIGIN);
+    translated.searchParams.set("_x_tr_sl", "ru");
+    translated.searchParams.set("_x_tr_tl", "en");
+    translated.searchParams.set("_x_tr_hl", "en");
     try {
-      return await fetchWithDeadline(fetcher, url, {
+      return await fetchWithDeadline(fetcher, translated.toString(), {
         method: "GET",
         redirect: "follow",
         signal: context.signal,
         headers: {
           accept: "text/html,application/xhtml+xml",
           "accept-language": "ru-RU,ru;q=0.9",
-          "user-agent": "RatingsCollector/1.0 (+public aggregate metrics)",
-          "x-ratings-browser": "1"
+          "user-agent": "RatingsCollector/1.0 (+public aggregate metrics)"
         }
-      }, this.productRequestTimeoutMs, `Yandex Market product request for ${url}`);
+      }, this.productRequestTimeoutMs, `Yandex Market translated product request for ${url}`);
     } catch (error) {
       if (error instanceof AdapterBlockedError || error instanceof ParserChangedError) throw error;
       if (context.signal?.aborted) throw error;
@@ -1226,17 +1231,22 @@ function previousModelIds(previousIds: string[]): string[] {
   return [...new Set(result)];
 }
 
-function productRefFromPreviousId(listingId: string, brand: string, previousUrl?: string): ProductRef {
-  const retainedUrl = previousUrl && (
-    isAllowedProductUrl(previousUrl) && extractModelId(previousUrl) === listingId ||
-    isAllowedMarketCardReviewsUrl(previousUrl, listingId)
-  ) ? canonicalizeUrl(previousUrl) : undefined;
+function productRefFromPreviousId(
+  listingId: string,
+  brand: string,
+  previous?: { url: string; title?: string }
+): ProductRef {
+  const retainedUrl = previous?.url && (
+    isAllowedProductUrl(previous.url) && extractModelId(previous.url) === listingId ||
+    isAllowedMarketCardReviewsUrl(previous.url, listingId)
+  ) ? canonicalizeUrl(previous.url) : undefined;
   return {
     domain: "market.yandex.ru",
     platform: "yandex",
     listingId,
     brand,
     url: retainedUrl ?? `${REVIEWS_ORIGIN}/product/model--${listingId}`,
+    ...(previous?.title ? { title: previous.title } : {}),
     metadata: { discovery: "previous_registry" }
   };
 }
@@ -1471,6 +1481,7 @@ function productIdentifiesModel(product: JsonObject, listingId: string): boolean
   for (const value of [product.url, product["@id"]]) {
     if (typeof value !== "string") continue;
     if (extractModelId(value) === listingId) return true;
+    if (extractMarketCardId(value) === listingId) return true;
     try {
       const url = new URL(value, REVIEWS_ORIGIN);
       if (url.hostname === "reviews.yandex.ru" && url.pathname === `/product/${listingId}`) return true;
@@ -1551,12 +1562,41 @@ function visibleMarketText(value: string): string {
     .trim();
 }
 
-function extractMarketCardMetrics(html: string, listingId: string): {
+function extractMarketCardMetrics(html: string, listingId: string, retainedTitle?: string, brand?: string): {
   title: string;
   rating: number;
   ratingCount: number;
   reviewCount?: number;
 } {
+  const products = extractJsonLdProducts(html);
+  if (products.length > 0) {
+    const product = selectJsonLdProduct(products, listingId);
+    const sourceTitle = nonEmptyString(product.name);
+    const currentTitle = sourceTitle && normalizeForSlug(sourceTitle) && (!brand || matchesBrand(sourceTitle, brand))
+      ? sourceTitle
+      : undefined;
+    const title = currentTitle ?? nonEmptyString(retainedTitle);
+    if (!title) throw new ParserChangedError(`Yandex Market card ${listingId} has no usable product title`);
+    const aggregate = isObject(product.aggregateRating) ? product.aggregateRating : undefined;
+    if (!aggregate) throw new ParserChangedError(`Yandex Market card ${listingId} has no source-bound AggregateRating`);
+    const ratingCount = parseNonNegativeInteger(aggregate.ratingCount);
+    const reviewCount = parseNonNegativeInteger(aggregate.reviewCount);
+    if (ratingCount === undefined) {
+      throw new ParserChangedError(`Yandex Market card ${listingId} has no valid ratingCount`);
+    }
+    if (ratingCount === 0) return { title, rating: 0, ratingCount, reviewCount };
+    const rawRating = parseFiniteNumber(aggregate.ratingValue);
+    const rawScale = parseFiniteNumber(aggregate.bestRating) ?? 5;
+    if (rawRating === undefined || rawScale <= 0 || rawRating < 0 || rawRating > rawScale) {
+      throw new ParserChangedError(`Yandex Market card ${listingId} has invalid JSON-LD rating metrics`);
+    }
+    return {
+      title,
+      rating: normalizeRating(rawRating, rawScale),
+      ratingCount,
+      ...(reviewCount === undefined ? {} : { reviewCount })
+    };
+  }
   const heading = /<h1\b[^>]*>([\s\S]*?)<\/h1\s*>/iu.exec(html);
   const title = heading ? visibleMarketText(heading[1]) : "";
   if (!title) throw new ParserChangedError(`Yandex Market card ${listingId} has no product heading`);
