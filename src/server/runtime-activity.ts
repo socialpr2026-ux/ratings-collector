@@ -141,6 +141,19 @@ export class RunActivityTracker {
     if (trace.recent.length > RECENT_LIMIT) trace.recent.splice(0, trace.recent.length - RECENT_LIMIT);
   }
 
+  progress(id: string, patch: FinishActivity = {}): void {
+    const trace = this.run.activity!;
+    const index = trace.active.findIndex((item) => item.id === id);
+    if (index < 0) return;
+    const active = trace.active[index]!;
+    trace.active[index] = {
+      ...active,
+      ...(patch.detail === undefined ? {} : { detail: patch.detail }),
+      channels: unique([...(active.channels ?? []), ...(patch.channels ?? [])]),
+      parsers: unique([...(active.parsers ?? []), ...(patch.parsers ?? [])])
+    };
+  }
+
   complete(id: string, patch: FinishActivity = {}): void {
     this.finish(id, "complete", patch);
   }

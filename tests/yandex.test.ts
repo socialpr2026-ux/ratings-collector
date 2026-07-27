@@ -11,6 +11,16 @@ const MAP_A = "https://reviews.yandex.ru/ugcpub/sitemap_model_0-9999999-0.xml";
 const MAP_B = "https://reviews.yandex.ru/ugcpub/sitemap_model_260000000-269999999-0.xml";
 const MAP_C = "https://reviews.yandex.ru/ugcpub/sitemap_model_500000000-509999999-0.xml";
 const MAP_695 = "https://reviews.yandex.ru/ugcpub/sitemap_model_690000000-699999999-0.xml";
+const MAP_588_TOMBSTONE = "https://reviews.yandex.ru/ugcpub/sitemap_model_5880000000-5889999999-0.xml";
+const MAP_590_TOMBSTONE = "https://reviews.yandex.ru/ugcpub/sitemap_model_5900000000-5909999999-0.xml";
+const CURRENT_INDEX_TOMBSTONES = [
+  MAP_588_TOMBSTONE,
+  MAP_590_TOMBSTONE,
+  ...Array.from({ length: 7 }, (_value, index) => {
+    const start = 5_910_000_000 + index * 10_000_000;
+    return `https://reviews.yandex.ru/ugcpub/sitemap_model_${start}-${start + 9_999_999}-0.xml`;
+  })
+];
 const SHOP_MAP_SYMBOLS = "https://reviews.yandex.ru/ugcpub/sitemap_shop_%25-%26-0.xml";
 const SHOP_MAP_DIGITS = "https://reviews.yandex.ru/ugcpub/sitemap_shop_0-1-0.xml";
 const SHOP_MAP_DIGITS_END = "https://reviews.yandex.ru/ugcpub/sitemap_shop_9-%3A-0.xml";
@@ -200,9 +210,17 @@ describe("YandexAdapter discovery", () => {
     expect(processed.sort()).toEqual([...maps].sort());
     expect(peak).toBe(2);
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(18);
-    expect(activity.filter((event) => event.status === "complete").map((event) => event.detail)).toEqual([
-      "Проверено карт индекса: 32 из 36",
-      "Проверено карт индекса: 36 из 36"
+    expect(activity.map((event) => ({ operationId: event.operationId, status: event.status, detail: event.detail }))).toEqual([
+      {
+        operationId: "yandex:gateway-progress",
+        status: "active",
+        detail: "Проверено карт индекса: 32 из 36"
+      },
+      {
+        operationId: "yandex:gateway-progress",
+        status: "complete",
+        detail: "Проверено карт индекса: 36 из 36"
+      }
     ]);
   });
 
@@ -485,6 +503,27 @@ describe("YandexAdapter discovery", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it("assigns an overlapping Yandex model to the longest requested brand only", async () => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([MAP_A])),
+      [MAP_A]: xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/vidora-mikro-tabletki--301",
+        "https://reviews.yandex.ru/product/vidora-tabletki--302"
+      ]))
+    });
+    const adapter = new YandexAdapter({ fetch });
+    const shared = { runId: "run-overlapping-brands", brands: ["Видора", "Видора Микро"] } as const;
+
+    const [vidora, vidoraMicro] = await Promise.all([
+      adapter.discover("Видора", context(shared)),
+      adapter.discover("Видора Микро", context(shared))
+    ]);
+
+    expect(vidora.map(({ listingId }) => listingId)).toEqual(["302"]);
+    expect(vidoraMicro.map(({ listingId }) => listingId)).toEqual(["301"]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it("isolates one brand candidate overflow without poisoning cached results for other brands", async () => {
     const fetch = routeFetch({
       [INDEX]: xmlResponse(sitemapIndex([MAP_A])),
@@ -555,6 +594,29 @@ describe("YandexAdapter discovery", () => {
 
     expect(mapARequests).toBe(2);
     expect(mapBRequests).toBe(2);
+  });
+
+  it("shares one failed full scan across sequential brands before allowing a later retry", async () => {
+    let modelRequests = 0;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A]));
+      if (url === MAP_A) {
+        modelRequests += 1;
+        return xmlResponse("<html>changed</html>");
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new YandexAdapter({ fetch });
+    const shared = { runId: "run-sequential-failure", brands: ["kagotsel", "ingavirin", "arbidol"] } as const;
+
+    await expect(adapter.discover("kagotsel", context(shared))).rejects.toBeInstanceOf(ParserChangedError);
+    await expect(adapter.discover("ingavirin", context(shared))).rejects.toBeInstanceOf(ParserChangedError);
+    await expect(adapter.discover("arbidol", context(shared))).rejects.toBeInstanceOf(ParserChangedError);
+    expect(modelRequests).toBe(1);
+
+    await expect(adapter.discover("kagotsel", context(shared))).rejects.toBeInstanceOf(ParserChangedError);
+    expect(modelRequests).toBe(2);
   });
 
   it("fails closed only when the distinct candidate count actually exceeds its cap", async () => {
@@ -711,6 +773,20 @@ describe("YandexAdapter discovery", () => {
 
     await expect(adapter.discover("kagotsel", context())).rejects.toBeInstanceOf(AdapterBlockedError);
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("accepts only the current proven Yandex index tombstones as non-product shards", async () => {
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([...CURRENT_INDEX_TOMBSTONES, MAP_B])),
+      ...Object.fromEntries(CURRENT_INDEX_TOMBSTONES.map((sitemap) => [sitemap, new Response(null, { status: 404 })])),
+      [MAP_B]: xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/kagotsel--265149860"]))
+    });
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: CURRENT_INDEX_TOMBSTONES.length + 1 });
+
+    await expect(adapter.discover("kagotsel", context())).resolves.toMatchObject([
+      { listingId: "265149860" }
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(CURRENT_INDEX_TOMBSTONES.length + 2);
   });
 
   it("fails closed when the root index contains an unknown sitemap shape", async () => {

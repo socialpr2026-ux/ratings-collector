@@ -358,9 +358,16 @@ export class RatingsService {
             } as const;
             const existing = activeOperations.get(event.operationId);
             if (event.status === "active") {
-              if (existing) activity.warn(existing, { detail: "Операция перезапущена" });
-              const id = activity.start(input);
-              activeOperations.set(event.operationId, id);
+              if (existing) {
+                activity.progress(existing, {
+                  channels: event.channels,
+                  parsers: event.parsers,
+                  detail: event.detail
+                });
+              } else {
+                const id = activity.start(input);
+                activeOperations.set(event.operationId, id);
+              }
               // Persist the first active nested operation immediately. Parallel
               // product checks then share the same snapshot without flooding
               // the repository with one write per request.

@@ -219,23 +219,28 @@ export function browserFetch(
       if (!left.ok) return left;
       const leftProof = await left.json() as {
         processed?: unknown; firstSitemap?: unknown; lastSitemap?: unknown;
-        verifiedSitemaps?: unknown; matches?: unknown;
+        verifiedSitemaps?: unknown; tombstonedSitemaps?: unknown; matches?: unknown;
       };
       const right = await splitTimedOutProof({ ...payload, sitemaps: payload.sitemaps.slice(middle) });
       if (!right.ok) return right;
       const rightProof = await right.json() as {
         processed?: unknown; firstSitemap?: unknown; lastSitemap?: unknown;
-        verifiedSitemaps?: unknown; matches?: unknown;
+        verifiedSitemaps?: unknown; tombstonedSitemaps?: unknown; matches?: unknown;
       };
       if (!Array.isArray(leftProof.matches) || !Array.isArray(rightProof.matches) ||
         !Array.isArray(leftProof.verifiedSitemaps) || !Array.isArray(rightProof.verifiedSitemaps)) {
         return json({ error: "Split Yandex batch proof is unreadable" }, 502);
       }
+      const tombstonedSitemaps = [
+        ...(Array.isArray(leftProof.tombstonedSitemaps) ? leftProof.tombstonedSitemaps : []),
+        ...(Array.isArray(rightProof.tombstonedSitemaps) ? rightProof.tombstonedSitemaps : [])
+      ];
       return json({
         processed: Number(leftProof.processed) + Number(rightProof.processed),
         firstSitemap: leftProof.firstSitemap,
         lastSitemap: rightProof.lastSitemap,
         verifiedSitemaps: [...leftProof.verifiedSitemaps, ...rightProof.verifiedSitemaps],
+        ...(tombstonedSitemaps.length > 0 ? { tombstonedSitemaps } : {}),
         matches: [...leftProof.matches, ...rightProof.matches]
       });
     };

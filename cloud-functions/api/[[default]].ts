@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { load } from "cheerio";
 import { COMPANY_BRANDS, INITIAL_BRANDS, INITIAL_DOMAINS } from "../../src/shared/constants.js";
 import type { RunState } from "../../src/shared/types.js";
+import { isKnownYandexIndexTombstoneSitemap } from "../../src/shared/yandex-sitemaps.js";
 import { authenticate, authConfig, type AuthUser } from "../../src/server/auth.js";
 import { BlobEvidenceStore, BlobRepository } from "../../src/server/blob-repository.js";
 import { reconcileStaleCollectionCheckpoint } from "../../src/server/collection-checkpoint.js";
@@ -1914,7 +1915,7 @@ function parseYandexBatchRequest(value: unknown): YandexBatchRequest | undefined
   return { sitemaps, brands };
 }
 
-function yandexProductMatchesTokens(input: string, tokens: string[]): boolean {
+function yandexProductMatchScore(input: string, tokens: string[]): number {
   try {
     const url = new URL(input);
     const slug = decodeURIComponent(url.pathname.split("/").filter(Boolean).at(-1) ?? "")
@@ -1925,8 +1926,12 @@ function yandexProductMatchesTokens(input: string, tokens: string[]): boolean {
       .replace(/[^a-zа-я0-9]+/giu, " ")
       .replace(/\s+/g, " ")
       .trim();
-    return Boolean(slug) && tokens.some((token) => ` ${slug} `.includes(` ${token} `));
-  } catch { return false; }
+    if (!slug) return -1;
+    const matches = tokens
+      .filter((token) => ` ${slug} `.includes(` ${token} `))
+      .map((token) => token.replace(/\s+/g, "").length);
+    return matches.length > 0 ? Math.max(...matches) : -1;
+  } catch { return -1; }
 }
 
 class NonRetryableYandexBatchShardError extends Error {}
@@ -1934,7 +1939,10 @@ class NonRetryableYandexBatchShardError extends Error {}
 const YANDEX_BATCH_SHARD_ATTEMPT_MS = 25_000;
 const YANDEX_BATCH_SHARD_ATTEMPTS = 2;
 
-async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string[]> {
+async function fetchCompleteYandexBatchShard(sitemap: string): Promise<{
+  locations: string[];
+  tombstoned: boolean;
+}> {
   const target = new URL(sitemap);
   let lastError: unknown;
   for (let attempt = 1; attempt <= YANDEX_BATCH_SHARD_ATTEMPTS; attempt += 1) {
@@ -1952,6 +1960,9 @@ async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string[]>
       }, fetch, 4, YANDEX_BATCH_SHARD_ATTEMPT_MS);
       if (!upstream.ok) {
         await upstream.body?.cancel().catch(() => undefined);
+        if (upstream.status === 404 && isKnownYandexIndexTombstoneSitemap(target)) {
+          return { locations: [], tombstoned: true };
+        }
         const message = `Yandex batch shard returned HTTP ${upstream.status}`;
         if (![408, 425, 429].includes(upstream.status) && upstream.status < 500) {
           throw new NonRetryableYandexBatchShardError(message);
@@ -1962,7 +1973,7 @@ async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string[]>
       const xml = await readTextBounded(upstream, 12_000_000, remainingMs);
       const locations = extractCompleteYandexModelLocations(xml, target);
       if (!locations) throw new Error("Yandex batch shard did not prove complete exact XML");
-      return locations;
+      return { locations, tombstoned: false };
     } catch (error) {
       lastError = error;
       if (error instanceof NonRetryableYandexBatchShardError || attempt === YANDEX_BATCH_SHARD_ATTEMPTS) break;
@@ -1979,9 +1990,11 @@ async function collectYandexBatch(batch: YandexBatchRequest): Promise<{
   firstSitemap: string;
   lastSitemap: string;
   verifiedSitemaps: string[];
+  tombstonedSitemaps?: string[];
   matches: Array<{ brand: string; url: string; sitemap: string }>;
 }> {
   const matches: Array<{ brand: string; url: string; sitemap: string }> = [];
+  const tombstonedSitemaps: string[] = [];
   let cursor = 0;
   let failure: unknown;
   const workers = Array.from({ length: Math.min(2, batch.sitemaps.length) }, async () => {
@@ -1990,12 +2003,16 @@ async function collectYandexBatch(batch: YandexBatchRequest): Promise<{
       if (index >= batch.sitemaps.length) return;
       const sitemap = batch.sitemaps[index]!;
       try {
-        const productUrls = await fetchCompleteYandexBatchShard(sitemap);
+        const shard = await fetchCompleteYandexBatchShard(sitemap);
+        if (shard.tombstoned) tombstonedSitemaps.push(sitemap);
+        const productUrls = shard.locations;
         for (const productUrl of productUrls) {
-          for (const brand of batch.brands) {
-            if (yandexProductMatchesTokens(productUrl, brand.tokens)) {
-              matches.push({ brand: brand.brand, url: productUrl, sitemap });
-            }
+          const matched = batch.brands
+            .map((brand) => ({ brand, score: yandexProductMatchScore(productUrl, brand.tokens) }))
+            .filter(({ score }) => score >= 0);
+          const bestScore = Math.max(-1, ...matched.map(({ score }) => score));
+          for (const { brand, score } of matched) {
+            if (score === bestScore) matches.push({ brand: brand.brand, url: productUrl, sitemap });
           }
         }
       } catch (error) {
@@ -2019,6 +2036,7 @@ async function collectYandexBatch(batch: YandexBatchRequest): Promise<{
     firstSitemap: batch.sitemaps[0]!,
     lastSitemap: batch.sitemaps.at(-1)!,
     verifiedSitemaps: [...batch.sitemaps],
+    ...(tombstonedSitemaps.length > 0 ? { tombstonedSitemaps } : {}),
     matches
   };
 }

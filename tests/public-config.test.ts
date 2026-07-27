@@ -1449,6 +1449,43 @@ describe("fixed first-party collection egress", () => {
     expect(await incomplete.text()).not.toContain('"processed":2');
   });
 
+  it("assigns an overlapping Yandex URL to the longest requested brand token", async () => {
+    const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_0-9999999-0.xml";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "<urlset>" +
+      "<url><loc>https://reviews.yandex.ru/product/vidora-mikro-tabletki--301</loc></url>" +
+      "<url><loc>https://reviews.yandex.ru/product/vidora-tabletki--302</loc></url>" +
+      "</urlset>",
+      { headers: { "content-type": "application/xml" } }
+    )));
+
+    const response = await staticReviewFetch(new Request(
+      "https://ratings.example/api/internal/static-review-fetch",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          url: "https://reviews.yandex.ru/ugcpub/__ratings_batch__",
+          yandexBatch: {
+            sitemaps: [sitemap],
+            brands: [
+              { brand: "Видора", tokens: ["vidora"] },
+              { brand: "Видора Микро", tokens: ["vidora mikro"] }
+            ]
+          }
+        })
+      }
+    ), { INTERNAL_AGENT_TOKEN: token });
+    const proof = await response.json() as { matches: Array<{ brand: string; url: string }> };
+
+    expect(response.status).toBe(200);
+    expect(proof.matches).toHaveLength(2);
+    expect(proof.matches).toEqual(expect.arrayContaining([
+      expect.objectContaining({ brand: "Видора Микро", url: expect.stringContaining("vidora-mikro") }),
+      expect.objectContaining({ brand: "Видора", url: expect.stringContaining("vidora-tabletki") })
+    ]));
+  });
+
   it("settles an in-flight Yandex shard before returning the first batch failure", async () => {
     const endpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
     const sitemaps = [
@@ -1524,9 +1561,10 @@ describe("fixed first-party collection egress", () => {
     }]);
   });
 
-  it("keeps an indexed Yandex batch shard HTTP 404 fail-closed", async () => {
-    const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_5880000000-5889999999-0.xml";
-    const callBatch = () => staticReviewFetch(new Request(
+  it("recognizes only proven Yandex index tombstones and keeps other shard failures closed", async () => {
+    const tombstone = "https://reviews.yandex.ru/ugcpub/sitemap_model_5880000000-5889999999-0.xml";
+    const unknown = "https://reviews.yandex.ru/ugcpub/sitemap_model_5890000000-5899999999-0.xml";
+    const callBatch = (sitemap: string) => staticReviewFetch(new Request(
       "https://ratings.example/api/internal/static-review-fetch",
       {
         method: "POST",
@@ -1540,17 +1578,25 @@ describe("fixed first-party collection egress", () => {
         })
       }
     ), { INTERNAL_AGENT_TOKEN: token });
-    const missingFetch = vi.fn(async () => new Response("missing", { status: 404 }));
+    const missingFetch = vi.fn(async () => new Response(null, { status: 404 }));
     vi.stubGlobal("fetch", missingFetch);
 
-    const missing = await callBatch();
+    const known = await callBatch(tombstone);
+    const proof = await known.json() as { processed: number; tombstonedSitemaps?: string[] };
+    expect(known.status).toBe(200);
+    expect(proof).toMatchObject({ processed: 1, tombstonedSitemaps: [tombstone] });
+    expect(missingFetch).toHaveBeenCalledOnce();
+
+    const unknownFetch = vi.fn(async () => new Response(null, { status: 404 }));
+    vi.stubGlobal("fetch", unknownFetch);
+    const missing = await callBatch(unknown);
     expect(missing.status).toBe(502);
     expect(await missing.text()).not.toContain('"processed":1');
-    expect(missingFetch).toHaveBeenCalledOnce();
+    expect(unknownFetch).toHaveBeenCalledOnce();
 
     const blockedFetch = vi.fn(async () => new Response("blocked", { status: 403 }));
     vi.stubGlobal("fetch", blockedFetch);
-    const blocked = await callBatch();
+    const blocked = await callBatch(tombstone);
     expect(blocked.status).toBe(502);
     expect(await blocked.text()).not.toContain('"processed":1');
     expect(blockedFetch).toHaveBeenCalledOnce();

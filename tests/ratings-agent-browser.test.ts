@@ -561,6 +561,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
         firstSitemap: sitemaps[0],
         lastSitemap: sitemaps.at(-1),
         verifiedSitemaps: sitemaps,
+        tombstonedSitemaps: sitemaps[0] === "a" ? ["b"] : ["c"],
         matches: sitemaps[0] === "a" ? [{
           brand: forwarded.yandexBatch.brands[0]!.brand,
           url: "https://reviews.yandex.ru/product/cereton--123",
@@ -588,6 +589,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
       firstSitemap: string;
       lastSitemap: string;
       verifiedSitemaps: string[];
+      tombstonedSitemaps?: string[];
       matches: Array<{ brand: string; url: string; sitemap: string }>;
     };
 
@@ -597,6 +599,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
       firstSitemap: "a",
       lastSitemap: "d",
       verifiedSitemaps: ["a", "b", "c", "d"],
+      tombstonedSitemaps: ["b", "c"],
       matches: [{ brand: "Церетон", url: "https://reviews.yandex.ru/product/cereton--123", sitemap: "a" }]
     });
     expect(directFetch).toHaveBeenCalledTimes(3);

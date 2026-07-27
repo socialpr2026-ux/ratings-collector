@@ -6,6 +6,7 @@ import type {
   ProductRef,
   SiteAdapter
 } from "../../shared/types.js";
+import { isKnownYandexIndexTombstoneSitemap } from "../../shared/yandex-sitemaps.js";
 import { aliasesForBrand, matchesBrand, normalizeRating } from "../utils/normalize.js";
 import { readTextBounded } from "../utils/safe-fetch.js";
 import { canonicalizeUrl } from "../utils/urls.js";
@@ -54,11 +55,18 @@ type BrandDiscovery = {
 
 type DiscoveryBatch = Map<string, ProductRef[] | AdapterBlockedError>;
 
+type CachedDiscoveryBatch = {
+  brandKeys: Set<string>;
+  attemptedBrandKeys: Set<string>;
+  value: Promise<DiscoveryBatch>;
+};
+
 type YandexBatchProof = {
   processed: number;
   firstSitemap: string;
   lastSitemap: string;
   verifiedSitemaps: string[];
+  tombstonedSitemaps?: string[];
   matches: Array<{ brand: string; url: string; sitemap: string }>;
 };
 
@@ -193,7 +201,7 @@ export class YandexAdapter implements SiteAdapter {
    * one exhaustive sitemap pass and keep only the small matched-ref index.
    * Raw multi-megabyte sitemap XML is deliberately never cached here.
    */
-  private readonly discoveryBatches = new Map<string, Promise<DiscoveryBatch>>();
+  private readonly discoveryBatches = new Map<string, CachedDiscoveryBatch>();
 
   constructor(options: YandexAdapterOptions = {}) {
     this.fallbackFetch = options.fetch ?? globalThis.fetch;
@@ -276,7 +284,7 @@ export class YandexAdapter implements SiteAdapter {
     const brands = uniqueDiscoveryBrands(brand, context.brands ?? []);
     const batchKey = discoveryBatchKey(context.runId, brands);
     const discoveredByBrand = batchKey
-      ? await this.loadDiscoveryBatch(batchKey, brands, context)
+      ? await this.loadDiscoveryBatch(batchKey, brands, brand, context)
       : await this.scanDiscoveryBatch(brands, context);
     const discovered = discoveredByBrand.get(brandKey(brand));
     if (discovered instanceof AdapterBlockedError) throw discovered;
@@ -298,13 +306,19 @@ export class YandexAdapter implements SiteAdapter {
   private async loadDiscoveryBatch(
     key: string,
     brands: string[],
+    requestedBrand: string,
     context: AdapterContext
   ): Promise<DiscoveryBatch> {
-    const cached = this.discoveryBatches.get(key);
-    if (cached) return cached;
-
-    const value = this.scanDiscoveryBatch(brands, context);
-    this.discoveryBatches.set(key, value);
+    let cached = this.discoveryBatches.get(key);
+    if (!cached) {
+      cached = {
+        brandKeys: new Set(brands.map(brandKey)),
+        attemptedBrandKeys: new Set(),
+        value: this.scanDiscoveryBatch(brands, context)
+      };
+      this.discoveryBatches.set(key, cached);
+    }
+    cached.attemptedBrandKeys.add(brandKey(requestedBrand));
     // Agent isolates may occasionally be reused. A handful of tiny matched-ref
     // indexes is enough for overlapping requests; never grow an unbounded cache.
     while (this.discoveryBatches.size > 4) {
@@ -312,12 +326,18 @@ export class YandexAdapter implements SiteAdapter {
       if (!oldest || oldest === key) break;
       this.discoveryBatches.delete(oldest);
     }
-    value.catch(() => {
-      // An unreadable shard invalidates exhaustiveness. Do not make that
-      // transient failure sticky: a selective retry must perform a fresh pass.
-      if (this.discoveryBatches.get(key) === value) this.discoveryBatches.delete(key);
-    });
-    return value;
+    try {
+      return await cached.value;
+    } catch (error) {
+      // A failed exhaustive pass is shared by every brand in this run. Keep
+      // that exact outcome until each brand has observed it, so a sequential
+      // orchestrator cannot download the same 329 shards again. Once all
+      // brands have consumed the failure, a later selective retry may rescan.
+      if (cached.attemptedBrandKeys.size >= cached.brandKeys.size && this.discoveryBatches.get(key) === cached) {
+        this.discoveryBatches.delete(key);
+      }
+      throw error;
+    }
   }
 
   private async scanDiscoveryBatch(
@@ -348,9 +368,16 @@ export class YandexAdapter implements SiteAdapter {
           if (!isAllowedProductUrl(url)) continue;
           const listingId = extractModelId(url);
           if (!listingId) continue;
-          for (const discovery of discoveries.values()) {
+          const matched = [...discoveries.values()]
+            .map((discovery) => ({ discovery, score: yandexBrandMatchScore(url, discovery.brand) }))
+            .filter(({ score }) => score >= 0);
+          const bestScore = Math.max(-1, ...matched.map(({ score }) => score));
+          for (const { discovery, score } of matched) {
+            // When requested brands overlap (for example, "Видора" and
+            // "Видора Микро"), assign the model to the most specific exact
+            // brand only instead of duplicating it under the shorter prefix.
+            if (score !== bestScore) continue;
             if (discovery.error) continue;
-            if (!urlMatchesBrand(url, discovery.brand)) continue;
             discovery.refs.set(listingId, productRefFromSitemap(listingId, url, discovery.brand, sitemapUrl));
             if (discovery.refs.size > this.maxCandidates) {
               discovery.error = new AdapterBlockedError(
@@ -399,6 +426,7 @@ export class YandexAdapter implements SiteAdapter {
     let completedSitemaps = 0;
     let reportedSitemaps = 0;
     let failure: unknown;
+    const tombstonedSitemaps = new Set<string>();
 
     const processChunk = async (sitemaps: string[]): Promise<void> => {
       let response: Response | undefined;
@@ -452,6 +480,7 @@ export class YandexAdapter implements SiteAdapter {
       if (!validYandexBatchProof(proof, sitemaps, brands)) {
         throw new AdapterBlockedError("Yandex batch proof is incomplete or source-unbound");
       }
+      for (const sitemap of proof.tombstonedSitemaps ?? []) tombstonedSitemaps.add(sitemap);
       for (const match of proof.matches) {
         const discovery = discoveries.get(brandKey(match.brand))!;
         const listingId = extractModelId(match.url)!;
@@ -480,9 +509,9 @@ export class YandexAdapter implements SiteAdapter {
           ) {
             reportedSitemaps = completedSitemaps;
             await reportActivity(context, {
-              operationId: `yandex:gateway-progress:${completedSitemaps}`,
+              operationId: "yandex:gateway-progress",
               stage: "discovery",
-              status: "complete",
+              status: completedSitemaps === sitemapUrls.length ? "complete" : "active",
               label: "Полный поиск карточек Yandex",
               channels: ["gateway"],
               detail: `Проверено карт индекса: ${completedSitemaps} из ${sitemapUrls.length}`
@@ -507,6 +536,16 @@ export class YandexAdapter implements SiteAdapter {
       await Promise.all(Array.from({ length: Math.min(YANDEX_BATCH_CONCURRENCY, chunks.length) }, worker));
       if (failure !== undefined) throw failure;
       if (callerAborted) throw context.signal?.reason ?? new DOMException("aborted", "AbortError");
+      if (tombstonedSitemaps.size > 0) {
+        await reportActivity(context, {
+          operationId: "yandex:gateway-tombstones",
+          stage: "discovery",
+          status: "complete",
+          label: "Yandex: проверка карт индекса",
+          channels: ["gateway"],
+          detail: `Индекс проверен: ${tombstonedSitemaps.size} неиспользуемых пустых диапазонов`
+        });
+      }
     } finally {
       context.signal?.removeEventListener("abort", relayAbort);
     }
@@ -847,6 +886,9 @@ export class YandexAdapter implements SiteAdapter {
 
       if (kind === "model" && response.status === 404) {
         void response.body?.cancel().catch(() => undefined);
+        if (isKnownYandexIndexTombstoneSitemap(url)) {
+          return "<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"></urlset>";
+        }
         throw new AdapterBlockedError(`Yandex indexed model sitemap disappeared: ${url}`);
       }
       if ([408, 425, 429].includes(response.status) || response.status >= 500 && response.status <= 599) {
@@ -1151,16 +1193,30 @@ function sitemapContainsAnyId(url: string, ids: number[]): boolean {
 }
 
 function urlMatchesBrand(input: string, brand: string): boolean {
-  const slug = normalizedSlug(input);
-  if (!slug) return false;
+  return yandexBrandMatchScore(input, brand) >= 0;
+}
 
-  return aliasesForBrand(brand).some((alias) => {
+function yandexBrandMatchScore(input: string, brand: string): number {
+  const slug = normalizedSlug(input);
+  if (!slug) return -1;
+
+  const scores = aliasesForBrand(brand).flatMap((alias) => {
     const normalizedAlias = normalizeForSlug(alias);
     const transliteratedAlias = normalizeForSlug(transliterateForYandex(alias));
     return [normalizedAlias, transliteratedAlias]
       .filter(Boolean)
-      .some((candidate) => ` ${slug} `.includes(` ${candidate} `));
+      .filter((candidate) => ` ${slug} `.includes(` ${candidate} `))
+      .map((candidate) => candidate.replace(/\s+/g, "").length);
   });
+  return scores.length > 0 ? Math.max(...scores) : -1;
+}
+
+function bestMatchingBrandKeys(input: string, brands: readonly string[]): Set<string> {
+  const matches = brands
+    .map((brand) => ({ key: brandKey(brand), score: yandexBrandMatchScore(input, brand) }))
+    .filter(({ score }) => score >= 0);
+  const bestScore = Math.max(-1, ...matches.map(({ score }) => score));
+  return new Set(matches.filter(({ score }) => score === bestScore).map(({ key }) => key));
 }
 
 function yandexBrandTokens(brand: string): string[] {
@@ -1179,11 +1235,16 @@ function validYandexBatchProof(proof: unknown, sitemaps: string[], brands: strin
     value.verifiedSitemaps.length !== sitemaps.length ||
     value.verifiedSitemaps.some((sitemap, index) => sitemap !== sitemaps[index]) ||
     !Array.isArray(value.matches)) return false;
+  const tombstonedSitemaps = value.tombstonedSitemaps ?? [];
+  if (!Array.isArray(tombstonedSitemaps) || new Set(tombstonedSitemaps).size !== tombstonedSitemaps.length ||
+    tombstonedSitemaps.some((sitemap) => typeof sitemap !== "string" ||
+      !sitemaps.includes(sitemap) || !isKnownYandexIndexTombstoneSitemap(sitemap))) return false;
   const brandKeys = new Set(brands.map(brandKey));
   const sitemapSet = new Set(sitemaps);
   return value.matches.every((match) => Boolean(match) && typeof match === "object" &&
     typeof match.brand === "string" && brandKeys.has(brandKey(match.brand)) &&
-    typeof match.url === "string" && isAllowedProductUrl(match.url) && urlMatchesBrand(match.url, match.brand) &&
+    typeof match.url === "string" && isAllowedProductUrl(match.url) &&
+    bestMatchingBrandKeys(match.url, brands).has(brandKey(match.brand)) &&
     typeof match.sitemap === "string" && sitemapSet.has(match.sitemap));
 }
 

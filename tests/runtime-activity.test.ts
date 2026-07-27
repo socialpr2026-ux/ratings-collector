@@ -51,16 +51,26 @@ describe("live runtime activity trace", () => {
           stage: "discovery",
           status: "active",
           label: "Google Translate · выдача",
-          channels: ["google_translate"]
+          channels: ["google_translate"],
+          detail: "Проверено 1 из 2"
         });
         signalDiscoveryStarted();
         await discoveryRelease;
         await adapterContext.activity?.({
           operationId: "translated-search",
           stage: "discovery",
+          status: "active",
+          label: "Google Translate · выдача",
+          channels: ["google_translate"],
+          detail: "Проверено 2 из 2"
+        });
+        await adapterContext.activity?.({
+          operationId: "translated-search",
+          stage: "discovery",
           status: "complete",
           label: "Google Translate · выдача",
-          channels: ["google_translate"]
+          channels: ["google_translate"],
+          detail: "Проверено 2 из 2"
         });
         return [{
           domain: "example.com",
@@ -114,6 +124,9 @@ describe("live runtime activity trace", () => {
     releaseDiscovery();
     const finished = await execution;
     expect(finished.activity?.active).toEqual([]);
+    expect(finished.activity?.recent.filter(({ label }) => label === "Google Translate · выдача")).toEqual([
+      expect.objectContaining({ status: "complete", detail: "Проверено 2 из 2" })
+    ]);
     expect(finished.activity?.recent).toEqual(expect.arrayContaining([
       expect.objectContaining({
         stage: "discovery",
