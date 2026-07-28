@@ -290,7 +290,7 @@ function microdataMetrics(html: string, pageUrl: string, brand: string, definiti
   const bestRating = numberFrom(uniqueMetric("bestRating")) ?? 5;
   const reviews = integerFrom(uniqueMetric("reviewCount"));
   const text = $.root().text().replace(/\s+/g, " ");
-  const confirmedZero = /(?:отзывов пока нет|нет отзывов|0\s+отзыв)/i.test(text);
+  const confirmedZero = /(?:отзывов пока нет|нет отзывов|(?:^|[^\d])0\s+отзыв)/i.test(text);
   return {
     title: json.title ?? firstText($, ["h1[itemprop='name']", "h1", "meta[property='og:title']"]),
     canonicalUrl: json.canonicalUrl ?? canonicalFromPage($, pageUrl, definition),
@@ -316,7 +316,7 @@ function parseIrecommend(html: string, pageUrl: string, brand: string): ParsedMe
     firstText($, [".read-all-reviews-link .counter"]) ??
     text.match(/Читать\s+все\s+отзывы\s*([\d\s\u00a0]+)/i)?.[1]
   );
-  const confirmedZero = /(?:отзывов пока нет|нет отзывов|0\s+отзыв)/i.test(text);
+  const confirmedZero = /(?:отзывов пока нет|нет отзывов|(?:^|[^\d])0\s+отзыв)/i.test(text);
   const allReviewsHref = $("a").filter((_index, node) => /читать\s+все\s+отзывы/i.test($(node).text())).first().attr("href");
   const definition = REVIEW_SITE_DEFINITIONS.find((item) => item.domain === "irecommend.ru")!;
   const canonicalUrl = absoluteProductUrl(allReviewsHref, pageUrl, definition) ?? canonicalFromPage($, pageUrl, definition);
@@ -344,6 +344,81 @@ function parseOtzovik(html: string, pageUrl: string, brand: string): ParsedMetri
   const $ = load(html);
   const listingId = $("[data-pid]").first().attr("data-pid")?.trim();
   return { ...parsed, listingId: listingId && /^\d+$/.test(listingId) ? listingId : parsed.listingId };
+}
+
+function otzyvruOrganizationMetrics(html: string, pageUrl: string, brand: string): ParsedMetrics | undefined {
+  const $ = load(html);
+  const page = canonicalizeUrl(pageUrl);
+  const candidates: ParsedMetrics[] = [];
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const node = value as Record<string, unknown>;
+    visit(node["@graph"]);
+    const types = Array.isArray(node["@type"]) ? node["@type"] : [node["@type"]];
+    if (!types.some((type) => String(type).toLocaleLowerCase("en-US") === "organization")) return;
+    const name = typeof node.name === "string" ? node.name.normalize("NFKC").replace(/\s+/g, " ").trim() : "";
+    const aggregate = node.aggregateRating;
+    if (!name || !matchesBrand(name, brand) || !aggregate || typeof aggregate !== "object") return;
+    let sourceUrl: string;
+    try { sourceUrl = canonicalizeUrl(new URL(String(node.url ?? ""), pageUrl).toString()); }
+    catch { return; }
+    if (sourceUrl !== page) return;
+    const rating = aggregate as Record<string, unknown>;
+    const reviews = integerFrom(String(rating.reviewCount ?? ""));
+    const ratingCount = integerFrom(String(rating.ratingCount ?? ""));
+    const rawRating = numberFrom(String(rating.ratingValue ?? ""));
+    const scale = numberFrom(String(rating.bestRating ?? "5")) ?? 5;
+    if (reviews === undefined || rawRating === undefined || scale <= 0 || scale > 5 || rawRating <= 0 || rawRating > scale) return;
+    candidates.push({
+      title: name,
+      canonicalUrl: sourceUrl,
+      reviews,
+      rating: normalizeRating(rawRating, scale),
+      ratingCount,
+      rawRating,
+      rawRatingScale: scale,
+      source: "otzyvru-json-ld-organization"
+    });
+  };
+  $("script[type='application/ld+json']").each((_index, node) => {
+    try { visit(JSON.parse($(node).text()) as unknown); }
+    catch { /* malformed unrelated JSON-LD */ }
+  });
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+function parseOtzyvru(html: string, pageUrl: string, brand: string): ParsedMetrics {
+  const definition = REVIEW_SITE_DEFINITIONS.find((item) => item.domain === "otzyvru.com")!;
+  const parsed = microdataMetrics(html, pageUrl, brand, definition);
+  const organization = otzyvruOrganizationMetrics(html, pageUrl, brand);
+  const $ = load(html);
+  const summary = $(".item-card #descr").first();
+  const visibleRating = summary.length === 1 ? numberFrom(summary.find(".rtng_value").first().text()) : undefined;
+  const bestRating = summary.length === 1 ? numberFrom(summary.find(".rtng_best").first().text()) ?? 5 : 5;
+  const visibleReviews = summary.length === 1 ? integerFrom(summary.find(".reviews_count").first().text()) : undefined;
+  if (organization && visibleReviews !== undefined && organization.reviews !== visibleReviews) {
+    throw new ParserChangedError("otzyvru.com: JSON-LD и видимый счетчик отзывов расходятся");
+  }
+  if (organization && visibleRating !== undefined && organization.rating !== normalizeRating(visibleRating, bestRating)) {
+    throw new ParserChangedError("otzyvru.com: JSON-LD и видимый рейтинг расходятся");
+  }
+  const numericId = $("h1[data-id]").first().attr("data-id")?.trim();
+  return {
+    ...parsed,
+    title: organization?.title ?? parsed.title ?? firstText($, ["h1", "#itemname"]),
+    canonicalUrl: organization?.canonicalUrl ?? parsed.canonicalUrl,
+    listingId: numericId && /^\d+$/.test(numericId) ? numericId : parsed.listingId,
+    reviews: organization?.reviews ?? visibleReviews ?? parsed.reviews,
+    rating: organization?.rating ?? (visibleRating === undefined ? parsed.rating : normalizeRating(visibleRating, bestRating)),
+    ratingCount: organization?.ratingCount ?? parsed.ratingCount,
+    rawRating: organization?.rawRating ?? visibleRating ?? parsed.rawRating,
+    rawRatingScale: organization?.rawRatingScale ?? (visibleRating === undefined ? parsed.rawRatingScale : bestRating),
+    source: organization?.source ?? (visibleReviews !== undefined && visibleRating !== undefined ? "otzyvru-visible" : parsed.source)
+  };
 }
 
 function parsePravogolosa(html: string, pageUrl: string, brand: string): ParsedMetrics {
@@ -415,11 +490,7 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
     searchUrl: (brand) => `https://www.otzyvru.com/search/?q=${encodeURIComponent(brand)}`,
     isProductUrl: (url) => /^\/[a-z0-9][a-z0-9-]*\/?$/i.test(url.pathname) && !/^\/(?:search|login|register|about|contact-us)\/?$/i.test(url.pathname),
     idFromUrl: (url) => pageId(/\/(?:amp\/)?([a-z0-9][a-z0-9-]*)\/?$/i, url),
-    parse: (html, pageUrl, brand) => {
-      const parsed = microdataMetrics(html, pageUrl, brand, REVIEW_SITE_DEFINITIONS[3]);
-      const numericId = html.match(/<h1\b[^>]*\bdata-id=["'](\d+)["']/i)?.[1];
-      return { ...parsed, listingId: numericId ?? parsed.listingId };
-    }
+    parse: parseOtzyvru
   },
   {
     domain: "uteka.ru",
@@ -483,7 +554,10 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
       url: "https://ru.otzyv.com/kagotsel",
       brand: "Кагоцел"
     },
-    searchUrl: (brand) => `https://ru.otzyv.com/${brandSlugs(brand)[0] ?? ""}`,
+    // The live search route applies a case-sensitive access rule to Cyrillic
+    // queries: its own lowercase form is stable while title-case can return
+    // 403 for the same exact brand.
+    searchUrl: (brand) => `https://ru.otzyv.com/search/?q=${encodeURIComponent(brand.toLocaleLowerCase("ru-RU"))}`,
     isProductUrl: (url) => /^\/[a-z0-9][a-z0-9-]*\/?$/i.test(url.pathname) && !/^\/(?:login|register|meditsina|search)\/?$/i.test(url.pathname),
     idFromUrl: (url) => pageId(/^\/([a-z0-9][a-z0-9-]*)\/?$/i, url),
     parse: (html, pageUrl, brand) => microdataMetrics(html, pageUrl, brand, REVIEW_SITE_DEFINITIONS[8])
@@ -524,6 +598,12 @@ function hasExplicitSearchNoResults($: CheerioAPI, brand: string, domain: string
   if (domain === "irecommend.ru") {
     const heading = $("h1").first().text().replace(/\s+/g, " ").trim();
     return matchesBrand(heading, brand) && /Не нашли\?\s*Попробуйте поиск по сайту/iu.test(text);
+  }
+  if (domain === "otzyvru.com" || domain === "ru.otzyv.com") {
+    const query = $("input[name='q']").first().attr("value")?.replace(/\s+/g, " ").trim();
+    const heading = $("h1").first().text().replace(/\s+/g, " ").trim();
+    return matchesBrand(query || heading, brand) &&
+      /(?:найдено\s+результатов\s*:\s*0|найдено\s*:\s*0\s+результат)/iu.test(text);
   }
   return false;
 }
@@ -814,6 +894,7 @@ export class ReviewSiteAdapter implements SiteAdapter {
   private async discoverDirectBrandPage(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = new Map<string, ProductRef>();
     let provedMissing = 0;
+    let provedNoResults = false;
     const slugs = this.definition.domain === "ru.otzyv.com" ? ruOtzyvBrandSlugs(brand) : brandSlugs(brand);
     for (const slug of slugs) {
       const url = canonicalizeUrl(new URL(slug, this.definition.origin).toString());
@@ -832,8 +913,27 @@ export class ReviewSiteAdapter implements SiteAdapter {
       }
       refs.set(url, this.refFor(url, brand, title));
     }
+    if (!refs.size && provedMissing === slugs.length) {
+      const searchUrl = canonicalizeUrl(this.definition.searchUrl(brand, context));
+      const { html, status } = await this.request(searchUrl, context);
+      if (status < 200 || status >= 300 || isBlockPage(html)) {
+        throw new AdapterBlockedError(`${this.definition.domain} не отдал поиск карточки бренда: HTTP ${status}`);
+      }
+      const $ = load(html);
+      $("a[href]").each((_index, node) => {
+        const title = $(node).text().normalize("NFKC").replace(/\s+/g, " ").trim();
+        if (!title || !matchesBrand(title, brand)) return;
+        const productUrl = absoluteProductUrl($(node).attr("href"), searchUrl, this.definition);
+        if (!productUrl) return;
+        refs.set(productUrl, this.refFor(productUrl, brand, title));
+      });
+      provedNoResults = hasExplicitSearchNoResults($, brand, this.definition.domain);
+      if (!refs.size && !provedNoResults) {
+        throw new AdapterBlockedError(`${this.definition.domain}: поиск не доказал ни карточку бренда, ни отсутствие результатов`);
+      }
+    }
     this.appendHistorical(refs, brand, context);
-    if (!refs.size && provedMissing === slugs.length) return [];
+    if (!refs.size && provedNoResults) return [];
     if (!refs.size) throw new AdapterBlockedError(`${this.definition.domain}: отсутствие карточки бренда не доказано`);
     return [...refs.values()];
   }

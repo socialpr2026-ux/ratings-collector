@@ -97,8 +97,14 @@ type IrecommendTarget = {
 };
 
 type RuOtzyvTarget = {
+  kind: "product";
   source: URL;
   translated: URL;
+} | {
+  kind: "search";
+  source: URL;
+  translated: URL;
+  brand: string;
 };
 
 type UtekaReviewsTarget = {
@@ -131,16 +137,27 @@ function parseUtekaReviewsTarget(target: URL): UtekaReviewsTarget | undefined {
 }
 
 function parseRuOtzyvTarget(target: URL): RuOtzyvTarget | undefined {
-  if (
-    target.protocol !== "https:" || target.hostname !== "ru.otzyv.com" || target.port ||
-    target.username || target.password || target.search || target.hash ||
-    !/^\/[a-z0-9][a-z0-9-]*$/i.test(target.pathname)
-  ) return undefined;
+  if (target.protocol !== "https:" || target.hostname !== "ru.otzyv.com" || target.port ||
+    target.username || target.password || target.hash) return undefined;
+  if (target.pathname === "/search/") {
+    if ([...target.searchParams.keys()].some((key) => key !== "q") || target.searchParams.getAll("q").length !== 1) {
+      return undefined;
+    }
+    const brand = target.searchParams.get("q")?.normalize("NFKC").trim() ?? "";
+    if (brand.length < 2 || brand.length > 160) return undefined;
+    const translated = new URL(target.pathname, "https://ru-otzyv-com.translate.goog");
+    translated.searchParams.set("q", brand);
+    translated.searchParams.set("_x_tr_sl", "ru");
+    translated.searchParams.set("_x_tr_tl", "en");
+    translated.searchParams.set("_x_tr_hl", "en");
+    return { kind: "search", source: new URL(target.toString()), translated, brand };
+  }
+  if (target.search || !/^\/[a-z0-9][a-z0-9-]*$/i.test(target.pathname)) return undefined;
   const translated = new URL(target.pathname, "https://ru-otzyv-com.translate.goog");
   translated.searchParams.set("_x_tr_sl", "ru");
   translated.searchParams.set("_x_tr_tl", "en");
   translated.searchParams.set("_x_tr_hl", "en");
-  return { source: new URL(target.toString()), translated };
+  return { kind: "product", source: new URL(target.toString()), translated };
 }
 
 function parseIrecommendTarget(target: URL): IrecommendTarget | undefined {
@@ -1519,6 +1536,7 @@ function compactOtzovikSearchHtml(html: string, requested: URL, brand: string): 
 }
 
 function compactRuOtzyvTranslateHtml(html: string, requested: RuOtzyvTarget): string | undefined {
+  if (requested.kind !== "product") return undefined;
   if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
   const leadingHtml = html.slice(0, 150_000);
   // A normal review form loads Google's reCAPTCHA script even on a healthy
@@ -1860,6 +1878,47 @@ function compactAptekaRuHtml(html: string, requested: AptekaRuTarget): string | 
   return `<html><head>${base}<link rel="canonical" href="${escapeHtml(requested.source.toString())}">` +
     `<script type="application/ld+json">${JSON.stringify(compactProduct).replace(/</g, "\\u003c")}</script>` +
     `</head><body><h1>${escapeHtml(String(product.name))}</h1>${variantProof}</body></html>`;
+}
+
+function compactRuOtzyvSearchHtml(html: string, requested: RuOtzyvTarget): string | undefined {
+  if (requested.kind !== "search" || !/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
+  const leadingHtml = html.slice(0, 150_000);
+  if (/<(?:form|div|section)\b[^>]*(?:id|class)=["'][^"']*(?:captcha|challenge)[^"']*["']/iu.test(leadingHtml) ||
+    /(?:access denied|unusual traffic|проверка браузера|подтвердите, что вы не робот)/iu.test(leadingHtml)) {
+    return undefined;
+  }
+  const $ = load(html);
+  const baseValue = $("base[href]").first().attr("href");
+  if (baseValue) {
+    try {
+      if (exactUrlSignature(new URL(baseValue)) !== exactUrlSignature(requested.source)) return undefined;
+    } catch { return undefined; }
+  }
+  const query = $("input[name='q']").first().attr("value")?.normalize("NFKC").trim() ?? "";
+  if (query.toLocaleLowerCase("ru-RU") !== requested.brand.toLocaleLowerCase("ru-RU")) return undefined;
+  const text = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+  const declared = Number(text.match(/По вашему запросу найдено:\s*(\d+)\s+результат/iu)?.[1]);
+  if (!Number.isSafeInteger(declared) || declared < 0 || declared > 500) return undefined;
+  if (declared === 0) {
+    return `<html><head><title>${escapeHtml(requested.brand)}</title></head><body>` +
+      `<h1>Поиск отзывов для ${escapeHtml(requested.brand)}</h1>` +
+      `<p>По вашему запросу найдено: 0 результатов.</p></body></html>`;
+  }
+  const results = new Map<string, string>();
+  $("a[href]").each((_index, node) => {
+    const title = $(node).text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    if (!title || !matchesBrand(title, requested.brand)) return;
+    try {
+      const product = new URL($(node).attr("href")!, requested.source);
+      if (product.protocol !== "https:" || product.hostname !== "ru.otzyv.com" || product.search || product.hash ||
+        !/^\/[a-z0-9][a-z0-9-]*\/?$/i.test(product.pathname)) return;
+      results.set(new URL(product.pathname.replace(/\/$/, ""), "https://ru.otzyv.com").toString(), title);
+    } catch { /* malformed search result */ }
+  });
+  if (!results.size || results.size !== declared) return undefined;
+  return `<html><head><title>${escapeHtml(requested.brand)}</title></head><body>` + [...results]
+    .map(([url, title]) => `<a class="result__a" href="${escapeHtml(url)}">${escapeHtml(title)}</a>`).join("\n") +
+    `</body></html>`;
 }
 
 /**
@@ -2910,7 +2969,37 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       }
     });
   }
-  if (ruOtzyvTarget) {
+  if (ruOtzyvTarget?.kind === "search") {
+    const attempts = [
+      { url: ruOtzyvTarget.source, source: "direct-ru-otzyv-search" },
+      { url: ruOtzyvTarget.translated, source: "google-translate-ru-otzyv-search" }
+    ];
+    for (const attempt of attempts) {
+      try {
+        const upstream = await safeFetch(attempt.url.toString(), {
+          method: "GET",
+          redirect: "follow",
+          headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+        }, fetch, 0, 60_000);
+        const html = await readTextBounded(upstream, 4_000_000, 60_000);
+        if (!upstream.ok || !/(?:text\/html|application\/xhtml\+xml)/i.test(upstream.headers.get("content-type") ?? "")) {
+          continue;
+        }
+        const compactHtml = compactRuOtzyvSearchHtml(html, ruOtzyvTarget);
+        if (!compactHtml || compactHtml.length > 100_000) continue;
+        return new Response(compactHtml, {
+          status: 200,
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store",
+            "x-ratings-source": attempt.source
+          }
+        });
+      } catch { /* try the fixed translated route */ }
+    }
+    return json({ error: "ru.otzyv.com search did not prove exact results or an explicit zero" }, 502);
+  }
+  if (ruOtzyvTarget?.kind === "product") {
     const upstream = await safeFetch(ruOtzyvTarget.translated.toString(), {
       method: "GET",
       redirect: "manual",

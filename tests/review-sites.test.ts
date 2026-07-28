@@ -891,6 +891,93 @@ describe("first-party review-site adapters", () => {
     }
   });
 
+  it("reads the exact Otzyvru organization aggregate without mistaking 350 reviews for zero", async () => {
+    const pageUrl = "https://www.otzyvru.com/velgiya-eko";
+    const productHtml = `<html><body><h1 data-id="114193">Велгия Эко отзывы</h1>` +
+      `<script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@graph": [{
+          "@type": "Organization", name: "Велгия Эко", url: pageUrl,
+          aggregateRating: { "@type": "AggregateRating", ratingValue: 4.5, reviewCount: 157, ratingCount: 157, bestRating: 5 }
+        }]
+      })}</script>` +
+      `<div class="item-card"><div id="descr"><b class="rtng_value">4.5</b><b class="rtng_best">5</b>` +
+      `<b class="reviews_count">157</b></div></div><aside>Похожая карточка: 350 отзывов</aside></body></html>`;
+    const adapter = adapterFor("otzyvru.com", (async (input: RequestInfo | URL) =>
+      new URL(input.toString()).pathname === "/velgiya-eko"
+        ? new Response(productHtml)
+        : new Response("missing", { status: 404 })) as typeof fetch);
+
+    const [ref] = await adapter.discover("Велгия Эко", context);
+    await expect(adapter.collect(ref, context)).resolves.toMatchObject({
+      listingId: "velgiya-eko", reviews: 157, rating: 4.5, status: "ok",
+      source: "otzyvru-json-ld-organization"
+    });
+  });
+
+  it("falls back from a missing short Otzyvru slug to the exact search result", async () => {
+    const pageUrl = "https://www.otzyvru.com/tirzetta-inyektsii-dlya-pohudeniya";
+    const requested: string[] = [];
+    const productHtml = `<html><body><h1 data-id="114555">Тирзетта инъекции для похудения</h1>` +
+      `<script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@graph": [{
+          "@type": "Organization", name: "Тирзетта инъекции для похудения", url: pageUrl,
+          aggregateRating: { "@type": "AggregateRating", ratingValue: 4.3, reviewCount: 269, ratingCount: 269, bestRating: 5 }
+        }]
+      })}</script>` +
+      `<div class="item-card"><div id="descr"><b class="rtng_value">4.3</b><b class="rtng_best">5</b>` +
+      `<b class="reviews_count">269</b></div></div></body></html>`;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      requested.push(`${url.pathname}${url.search}`);
+      if (url.pathname === "/tirzetta") return new Response("missing", { status: 404 });
+      if (url.pathname === "/search/") return new Response(
+        `<html><body><h1>Результаты поиска по запросу «Тирзетта»</h1>` +
+        `<p>По вашему запросу найдено результатов: 1</p>` +
+        `<a href="${pageUrl}">Тирзетта инъекции для похудения</a></body></html>`
+      );
+      if (url.pathname === "/tirzetta-inyektsii-dlya-pohudeniya") return new Response(productHtml);
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("otzyvru.com", fetchMock);
+
+    const refs = await adapter.discover("Тирзетта", context);
+    const result = await adapter.collect(refs[0], context);
+
+    expect(refs).toMatchObject([{ listingId: "tirzetta-inyektsii-dlya-pohudeniya", url: pageUrl }]);
+    expect(result).toMatchObject({ reviews: 269, rating: 4.3, status: "ok" });
+    expect(requested).toEqual([
+      "/tirzetta", "/search/?q=%D0%A2%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0",
+      "/tirzetta-inyektsii-dlya-pohudeniya"
+    ]);
+  });
+
+  it("uses the official ru.otzyv.com search to prove an exact no-results outcome", async () => {
+    const requested: string[] = [];
+    const adapter = adapterFor("ru.otzyv.com", (async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      requested.push(`${url.pathname}${url.search}`);
+      if (url.pathname === "/tirzetta") return new Response("missing", { status: 404 });
+      return new Response(`<html><body><input name="q" value="Тирзетта"><h1>Поиск отзывов для Тирзетта</h1>` +
+        `<p>По вашему запросу найдено: 0 результатов.</p></body></html>`);
+    }) as typeof fetch);
+
+    await expect(adapter.discover("Тирзетта", context)).resolves.toEqual([]);
+    expect(requested).toEqual([
+      "/tirzetta", "/search/?q=%D1%82%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0"
+    ]);
+  });
+
+  it("keeps an unknown Otzyv search shape fail-closed after the short slug is missing", async () => {
+    const adapter = adapterFor("otzyvru.com", (async (input: RequestInfo | URL) =>
+      new URL(input.toString()).pathname === "/tirzetta"
+        ? new Response("missing", { status: 404 })
+        : new Response("<html><body><h1>Результаты поиска Тирзетта</h1></body></html>")) as typeof fetch);
+
+    await expect(adapter.discover("Тирзетта", context)).rejects.toMatchObject({ code: "blocked" });
+  });
+
   it("health-checks and discovers the live ru.otzyv.com ts slug without touching its protected homepage", async () => {
     const requested: string[] = [];
     const productHtml = `<h1>Кагоцел отзывы</h1><script type="application/ld+json">` +

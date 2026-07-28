@@ -103,6 +103,24 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("routes a bounded ru.otzyv.com search through fixed function egress without Sandbox", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response("compact search proof"));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const url = "https://ru.otzyv.com/search/?q=%D0%A2%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0";
+
+    const response = await routedFetch(url);
+
+    expect(await response.text()).toBe("compact search proof");
+    expect(JSON.parse(String((directFetch.mock.calls[0]?.[1] as RequestInit).body))).toEqual({ url });
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("prefers fixed function egress for Wildberries buyer JSON without acquiring Sandbox", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn().mockResolvedValueOnce(new Response('{"products":[]}'));

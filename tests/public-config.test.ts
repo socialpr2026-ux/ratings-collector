@@ -659,6 +659,46 @@ describe("static ru.otzyv.com product gateway", () => {
     expect(upstream).toHaveBeenCalledOnce();
   });
 
+  it("returns a compact explicit zero from the bounded ru.otzyv.com search route", async () => {
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      expect(input.toString()).toBe("https://ru.otzyv.com/search/?q=%D0%A2%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0");
+      return new Response(`<html><body><input name="q" value="Тирзетта">` +
+        `<h1>Поиск отзывов для Тирзетта</h1><p>По вашему запросу найдено: 0 результатов.</p></body></html>`, {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway("https://ru.otzyv.com/search/?q=%D0%A2%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0");
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("direct-ru-otzyv-search");
+    expect(proof).toContain("найдено: 0 результатов");
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to the source-bound translated ru.otzyv.com search after a direct access block", async () => {
+    const upstream = vi.fn()
+      .mockResolvedValueOnce(new Response("forbidden", { status: 403, headers: { "content-type": "text/html" } }))
+      .mockResolvedValueOnce(new Response(
+        `<html><head><base href="https://ru.otzyv.com/search/?q=%D0%A2%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0"></head>` +
+        `<body><input name="q" value="Тирзетта"><h1>Поиск отзывов для Тирзетта</h1>` +
+        `<p>По вашему запросу найдено: 0 результатов.</p></body></html>`,
+        { headers: { "content-type": "text/html; charset=utf-8" } }
+      ));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway("https://ru.otzyv.com/search/?q=%D0%A2%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0");
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-ru-otzyv-search");
+    expect(new URL(String(upstream.mock.calls[1]?.[0]))).toMatchObject({
+      hostname: "ru-otzyv-com.translate.goog", pathname: "/search/"
+    });
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects query parameters, source mismatches and protection pages fail-closed", async () => {
     const upstream = vi.fn()
       .mockResolvedValueOnce(new Response(translated("https://ru.otzyv.com/another-product"), {
@@ -674,6 +714,14 @@ describe("static ru.otzyv.com product gateway", () => {
     expect((await callGateway("https://ru.otzyv.com/kagotsel")).status).toBe(502);
     expect((await callGateway("https://ru.otzyv.com/kagotsel")).status).toBe(502);
     expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects unbounded ru.otzyv.com search parameters before egress", async () => {
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    expect((await callGateway("https://ru.otzyv.com/search/?q=%D0%A2%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0&next=x")).status).toBe(400);
+    expect(upstream).not.toHaveBeenCalled();
   });
 });
 
