@@ -53,6 +53,18 @@ const PRODUCTS = [
   }
 ] as const;
 
+const KAGOCEL_FAMILY = {
+  id: "tag-7419",
+  tagId: "7419",
+  brand: "Кагоцел",
+  url: `${ORIGIN}/tag/kagotsel/`,
+  variants: [
+    { name: "Кагоцел таблетки 12мг, №10", url: `${ORIGIN}/product/kagotsel_tab_12mg_10/` },
+    { name: "Кагоцел таблетки 12мг, №30", url: `${ORIGIN}/product/kagotsel_tab__12mg__30/` },
+    { name: "Кагоцел таблетки 12мг, №20", url: `${ORIGIN}/product/kagotsel_tab__12mg__20/` }
+  ]
+} as const;
+
 type TestProduct = typeof PRODUCTS[number];
 
 function escapeAttribute(value: unknown): string {
@@ -116,6 +128,77 @@ function fetchProducts(overrides: Partial<Record<string, Response>> = {}): typeo
   }) as unknown as typeof fetch;
 }
 
+type FamilyScore = number | "unknown";
+
+function familyPage(options: {
+  aboutBrand?: string;
+  headingCount?: number;
+  scores?: readonly FamilyScore[];
+} = {}): string {
+  const scores = options.scores ?? [5, 5, 4, 5, 4, 5];
+  const headingCount = options.headingCount ?? scores.length;
+  const graph = [
+    {
+      "@type": "CollectionPage",
+      "@id": `${KAGOCEL_FAMILY.url}#collectionpage`,
+      url: KAGOCEL_FAMILY.url,
+      name: KAGOCEL_FAMILY.brand,
+      mainEntity: { "@id": `${KAGOCEL_FAMILY.url}#itemlist` },
+      about: { "@type": "Brand", name: options.aboutBrand ?? KAGOCEL_FAMILY.brand }
+    },
+    {
+      "@type": "ItemList",
+      "@id": `${KAGOCEL_FAMILY.url}#itemlist`,
+      url: KAGOCEL_FAMILY.url,
+      name: `Список товаров ${KAGOCEL_FAMILY.brand}`,
+      numberOfItems: KAGOCEL_FAMILY.variants.length,
+      itemListElement: KAGOCEL_FAMILY.variants.map((variant, index) => ({
+        "@type": "ListItem",
+        position: index + 1,
+        item: {
+          "@type": "Product",
+          "@id": `${variant.url}#product`,
+          name: variant.name,
+          url: variant.url,
+          brand: { "@type": "Brand", name: KAGOCEL_FAMILY.brand }
+        }
+      }))
+    }
+  ];
+  const reviews = scores.map((score, index) => {
+    const stars = score === "unknown"
+      ? '<span class="product__star half-star-old"></span>'
+      : Array.from({ length: score }, () => '<span class="product__star star-old"></span>').join("");
+    return `<div class="tag-review">
+      <div class="review-name">Покупатель ${index + 1}</div>
+      <div class="product__stars">${stars}</div>
+      <div class="review-date">0${index + 1} февраля 2024</div>
+      <div class="review-text">Проверенный отзыв ${index + 1}</div>
+    </div>`;
+  }).join("");
+  return `<!doctype html><html><head>
+    <link rel="canonical" href="${KAGOCEL_FAMILY.url}">
+    <script type="application/ld+json">${JSON.stringify({ "@context": "https://schema.org/", "@graph": graph })}</script>
+  </head><body><h1>${KAGOCEL_FAMILY.brand}</h1>
+    <div id="tag-reviews">
+      <h2>Отзывы (${headingCount})</h2>
+      <div class="product__raiting-big product__stars">
+        ${Array.from({ length: 4 }, () => '<span class="product__star star-old"></span>').join("")}
+        <span class="product__star half-star-old"></span><span>Общий рейтинг</span>
+      </div>
+      <input type="hidden" name="tagId" value="${KAGOCEL_FAMILY.tagId}">
+      <div class="tag-reviews">${reviews}</div>
+    </div>
+  </body></html>`;
+}
+
+function fetchFamilyPage(html: string): typeof fetch {
+  return vi.fn(async (input: string | URL | Request) => {
+    expect(new URL(String(input)).toString()).toBe(KAGOCEL_FAMILY.url);
+    return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+  }) as unknown as typeof fetch;
+}
+
 describe("VitaExpressAdapter", () => {
   it("discovers exactly the three proven Biviart variants and never invents Intensive", async () => {
     const fetchMock = fetchProducts();
@@ -157,6 +240,48 @@ describe("VitaExpressAdapter", () => {
 
     await expect(adapter.discover("Бактоблис", { ...CONTEXT, runId: "bound-name-baktoblis" }))
       .resolves.toHaveLength(5);
+  });
+
+  it("publishes one Kagocel family row from six exact stars instead of duplicating its three variants", async () => {
+    const evidence = new MemoryEvidenceStore();
+    const fetchMock = fetchFamilyPage(familyPage());
+    const adapter = new VitaExpressAdapter(evidence, fetchMock);
+    const context = { ...CONTEXT, runId: "kagocel-family" };
+
+    const refs = await adapter.discover(KAGOCEL_FAMILY.brand, context);
+    expect(refs).toEqual([expect.objectContaining({
+      listingId: KAGOCEL_FAMILY.id,
+      brand: KAGOCEL_FAMILY.brand,
+      url: KAGOCEL_FAMILY.url,
+      title: KAGOCEL_FAMILY.brand
+    })]);
+    await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({
+      listingId: KAGOCEL_FAMILY.id,
+      product: KAGOCEL_FAMILY.brand,
+      reviews: 6,
+      writtenReviewCount: 6,
+      ratingCount: 6,
+      rating: 4.7,
+      status: "ok",
+      aggregateGroupId: "vitaexpress:family:tag-7419",
+      source: "vitaexpress-source-bound-family-review-stars",
+      productEvidence: {
+        scope: "product_family",
+        variants: KAGOCEL_FAMILY.variants.map((variant) => variant.name)
+      }
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(evidence.items.size).toBe(1);
+  });
+
+  it.each([
+    ["a different CollectionPage brand", familyPage({ aboutBrand: "Кагоцил" })],
+    ["an incomplete review list", familyPage({ headingCount: 6, scores: [5, 5, 4, 5, 4] })],
+    ["unknown per-review star markup", familyPage({ scores: [5, 5, 4, 5, 4, "unknown"] })]
+  ])("fails the Kagocel family closed on %s", async (_case, html) => {
+    const adapter = new VitaExpressAdapter(new MemoryEvidenceStore(), fetchFamilyPage(html));
+    await expect(adapter.discover(KAGOCEL_FAMILY.brand, { ...CONTEXT, runId: `bad-family-${_case}` }))
+      .rejects.toBeInstanceOf(ParserChangedError);
   });
 
   it("publishes only the proven empty-review contract and preserves absent rating as null", async () => {

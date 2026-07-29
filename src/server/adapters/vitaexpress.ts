@@ -27,6 +27,14 @@ type ExactProduct = {
   requiredPhrases: readonly string[];
 };
 
+type ExactFamily = {
+  id: string;
+  tagId: string;
+  brand: "Кагоцел";
+  url: string;
+  variants: readonly { name: string; url: string }[];
+};
+
 type ParsedPage = {
   canonicalUrl: string;
   title: string;
@@ -38,6 +46,17 @@ type ParsedPage = {
 };
 
 type FetchedPage = ParsedPage & {
+  body: string;
+  status: number;
+};
+
+type ParsedFamilyPage = ParsedPage & {
+  rating: number;
+  starScores: number[];
+  starTotal: number;
+};
+
+type FetchedFamilyPage = ParsedFamilyPage & {
   body: string;
   status: number;
 };
@@ -111,12 +130,26 @@ const EXACT_PRODUCTS: readonly ExactProduct[] = [
   }
 ] as const;
 
+const KAGOCEL_FAMILY: ExactFamily = {
+  id: "tag-7419",
+  tagId: "7419",
+  brand: "Кагоцел",
+  url: `${ORIGIN}/tag/kagotsel/`,
+  variants: [
+    { name: "Кагоцел таблетки 12мг, №10", url: `${ORIGIN}/product/kagotsel_tab_12mg_10/` },
+    { name: "Кагоцел таблетки 12мг, №30", url: `${ORIGIN}/product/kagotsel_tab__12mg__30/` },
+    { name: "Кагоцел таблетки 12мг, №20", url: `${ORIGIN}/product/kagotsel_tab__12mg__20/` }
+  ]
+};
+
 const PRODUCTS_BY_ID = new Map(EXACT_PRODUCTS.map((product) => [product.id, product]));
 const PRODUCTS_BY_BRAND = new Map<string, ExactProduct[]>();
 for (const product of EXACT_PRODUCTS) {
   const key = normalizeText(product.brand);
   PRODUCTS_BY_BRAND.set(key, [...(PRODUCTS_BY_BRAND.get(key) ?? []), product]);
 }
+const FAMILIES_BY_ID = new Map([[KAGOCEL_FAMILY.id, KAGOCEL_FAMILY]]);
+const FAMILIES_BY_BRAND = new Map([[normalizeText(KAGOCEL_FAMILY.brand), KAGOCEL_FAMILY]]);
 const HEALTH_PRODUCT = PRODUCTS_BY_ID.get("178185")!;
 
 function compactText(value: string): string {
@@ -164,6 +197,171 @@ function productEvidence(product: ExactProduct, title: string): ProductEvidence 
     identifiers: [{ type: "product_id", value: product.id }],
     imageUrls: [],
     instructionUrls: []
+  };
+}
+
+function hasJsonLdType(value: Record<string, unknown>, expected: string): boolean {
+  const type = value["@type"];
+  return type === expected || Array.isArray(type) && type.includes(expected);
+}
+
+function exactUrl(value: unknown, expected: string): boolean {
+  if (typeof value !== "string") return false;
+  try { return new URL(value, ORIGIN).toString() === expected; }
+  catch { return false; }
+}
+
+function parseExactFamilyPage(body: string, family: ExactFamily): ParsedFamilyPage {
+  const $ = load(body);
+  const titleNodes = $("h1");
+  const title = compactText(titleNodes.first().text());
+  if (titleNodes.length !== 1 || normalizeText(title) !== normalizeText(family.brand)) {
+    throw new ParserChangedError(`${DOMAIN}:${family.id}: exact family title changed`);
+  }
+
+  const canonicalNodes = $("link[rel='canonical'][href]");
+  if (canonicalNodes.length !== 1 || !exactUrl(canonicalNodes.first().attr("href"), family.url)) {
+    throw new ParserChangedError(`${DOMAIN}:${family.id}: canonical family URL changed`);
+  }
+
+  const jsonLdRecords: Record<string, unknown>[] = [];
+  for (const script of $("script[type='application/ld+json']").toArray()) {
+    const raw = $(script).text().trim();
+    if (!raw) continue;
+    if (raw.length > 250_000) {
+      throw new ParserChangedError(`${DOMAIN}:${family.id}: family JSON-LD is oversized`);
+    }
+    let value: unknown;
+    try { value = JSON.parse(raw); }
+    catch { throw new ParserChangedError(`${DOMAIN}:${family.id}: family JSON-LD is invalid`); }
+    if (!isRecord(value)) continue;
+    const graph = value["@graph"];
+    if (Array.isArray(graph)) jsonLdRecords.push(...graph.filter(isRecord));
+    else jsonLdRecords.push(value);
+  }
+
+  const collectionId = `${family.url}#collectionpage`;
+  const itemListId = `${family.url}#itemlist`;
+  const collections = jsonLdRecords.filter((item) =>
+    hasJsonLdType(item, "CollectionPage") && item["@id"] === collectionId && exactUrl(item.url, family.url)
+  );
+  if (collections.length !== 1) {
+    throw new ParserChangedError(`${DOMAIN}:${family.id}: exact family CollectionPage proof changed`);
+  }
+  const collection = collections[0];
+  const about = collection.about;
+  const mainEntity = collection.mainEntity;
+  if (collection.name !== family.brand || !isRecord(about) || !hasJsonLdType(about, "Brand") ||
+      about.name !== family.brand || !isRecord(mainEntity) || mainEntity["@id"] !== itemListId) {
+    throw new ParserChangedError(`${DOMAIN}:${family.id}: CollectionPage is not bound to the exact brand family`);
+  }
+
+  const itemLists = jsonLdRecords.filter((item) =>
+    hasJsonLdType(item, "ItemList") && item["@id"] === itemListId && exactUrl(item.url, family.url)
+  );
+  if (itemLists.length !== 1) {
+    throw new ParserChangedError(`${DOMAIN}:${family.id}: exact family ItemList proof changed`);
+  }
+  const itemList = itemLists[0];
+  const elements = itemList.itemListElement;
+  if (itemList.name !== `Список товаров ${family.brand}` || itemList.numberOfItems !== family.variants.length ||
+      !Array.isArray(elements) || elements.length !== family.variants.length) {
+    throw new ParserChangedError(`${DOMAIN}:${family.id}: exact family variant count changed`);
+  }
+
+  const provenVariants = new Map<string, Record<string, unknown>>();
+  const positions = new Set<number>();
+  for (const element of elements) {
+    if (!isRecord(element) || !hasJsonLdType(element, "ListItem") ||
+        !Number.isInteger(element.position) || Number(element.position) < 1) {
+      throw new ParserChangedError(`${DOMAIN}:${family.id}: family variant ListItem changed`);
+    }
+    const item = element.item;
+    if (!isRecord(item) || !hasJsonLdType(item, "Product") || typeof item.url !== "string" ||
+        provenVariants.has(item.url)) {
+      throw new ParserChangedError(`${DOMAIN}:${family.id}: family variant Product proof changed`);
+    }
+    positions.add(Number(element.position));
+    provenVariants.set(item.url, item);
+  }
+  if (positions.size !== family.variants.length ||
+      [...positions].some((position) => position < 1 || position > family.variants.length)) {
+    throw new ParserChangedError(`${DOMAIN}:${family.id}: family variant positions changed`);
+  }
+  for (const variant of family.variants) {
+    const item = provenVariants.get(variant.url);
+    const brand = item?.brand;
+    if (!item || item.name !== variant.name || item["@id"] !== `${variant.url}#product` ||
+        !exactUrl(item.url, variant.url) || !isRecord(brand) || !hasJsonLdType(brand, "Brand") ||
+        brand.name !== family.brand) {
+      throw new ParserChangedError(`${DOMAIN}:${family.id}: exact family variant identity changed`);
+    }
+  }
+
+  const reviewBlocks = $("#tag-reviews");
+  const reviewBlock = reviewBlocks.first();
+  const headings = reviewBlock.children("h2");
+  const headingMatch = /^Отзывы\s*\((\d+)\)$/u.exec(compactText(headings.first().text()));
+  const tagIds = reviewBlock.find("input[type='hidden'][name='tagId']");
+  const reviewLists = reviewBlock.children(".tag-reviews");
+  if (reviewBlocks.length !== 1 || headings.length !== 1 || !headingMatch ||
+      tagIds.length !== 1 || tagIds.first().attr("value") !== family.tagId || reviewLists.length !== 1) {
+    throw new ParserChangedError(`${DOMAIN}:${family.id}: source-bound family review block changed`);
+  }
+
+  const reviewCount = Number(headingMatch[1]);
+  const reviewNodes = reviewLists.first().children(".tag-review");
+  if (!Number.isSafeInteger(reviewCount) || reviewCount <= 0 || reviewNodes.length !== reviewCount ||
+      reviewLists.first().children().length !== reviewNodes.length) {
+    throw new ParserChangedError(`${DOMAIN}:${family.id}: family review count is incomplete`);
+  }
+
+  const starScores: number[] = [];
+  for (const review of reviewNodes.toArray()) {
+    const item = $(review);
+    const names = item.children(".review-name");
+    const dates = item.children(".review-date");
+    const texts = item.children(".review-text");
+    const starBlocks = item.children(".product__stars");
+    if (names.length !== 1 || dates.length !== 1 || texts.length !== 1 || starBlocks.length !== 1 ||
+        !compactText(names.text()) || !compactText(dates.text()) || !compactText(texts.text())) {
+      throw new ParserChangedError(`${DOMAIN}:${family.id}: family review item is incomplete`);
+    }
+    const stars = starBlocks.first().children();
+    if (stars.length < 1 || stars.length > 5 || starBlocks.first().find(".product__star").length !== stars.length) {
+      throw new ParserChangedError(`${DOMAIN}:${family.id}: family review star score is incomplete`);
+    }
+    for (const star of stars.toArray()) {
+      const classes = compactText($(star).attr("class") ?? "").split(" ").filter(Boolean).sort();
+      if (star.tagName !== "span" || classes.join(" ") !== "product__star star-old") {
+        throw new ParserChangedError(`${DOMAIN}:${family.id}: unknown family review star markup`);
+      }
+    }
+    starScores.push(stars.length);
+  }
+
+  const starTotal = starScores.reduce((sum, score) => sum + score, 0);
+  return {
+    canonicalUrl: family.url,
+    title,
+    productEvidence: {
+      scope: "product_family",
+      signals: [
+        { source: "title", text: title },
+        { source: "url", text: family.url },
+        ...family.variants.map((variant) => ({ source: "variant" as const, text: variant.name }))
+      ],
+      variants: family.variants.map((variant) => variant.name),
+      identifiers: [],
+      imageUrls: [],
+      instructionUrls: []
+    },
+    reviews: reviewCount,
+    writtenReviewCount: reviewCount,
+    rating: Math.round((starTotal / reviewCount) * 10) / 10,
+    ratingCount: reviewCount,
+    starScores,
+    starTotal
   };
 }
 
@@ -255,6 +453,7 @@ export class VitaExpressAdapter implements SiteAdapter {
   readonly id = DOMAIN;
   readonly supportedDomains = [DOMAIN, `www.${DOMAIN}`] as const;
   private readonly pageCache = new Map<string, Promise<FetchedPage>>();
+  private readonly familyPageCache = new Map<string, Promise<FetchedFamilyPage>>();
 
   constructor(
     private readonly evidence: EvidenceStore,
@@ -277,6 +476,20 @@ export class VitaExpressAdapter implements SiteAdapter {
   }
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
+    const family = FAMILIES_BY_BRAND.get(normalizeText(brand));
+    if (family) {
+      const page = await this.fetchFamily(family, context);
+      return [{
+        domain: DOMAIN,
+        platform: DOMAIN,
+        listingId: family.id,
+        brand,
+        url: family.url,
+        title: page.title,
+        metadata: { discovery: "vitaexpress-bounded-exact-family-page", variantCount: family.variants.length }
+      }];
+    }
+
     const expected = PRODUCTS_BY_BRAND.get(normalizeText(brand));
     if (!expected) {
       throw new ParserChangedError(`${DOMAIN}: brand ${brand} is outside the bounded exact registry`);
@@ -298,6 +511,9 @@ export class VitaExpressAdapter implements SiteAdapter {
   }
 
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
+    const family = FAMILIES_BY_ID.get(ref.listingId);
+    if (family) return this.collectFamily(ref, family, context);
+
     const product = PRODUCTS_BY_ID.get(ref.listingId);
     if (!product || normalizeText(product.brand) !== normalizeText(ref.brand) || ref.url !== product.url) {
       throw new ParserChangedError(`${DOMAIN}: product reference ${ref.listingId} is outside the bounded exact registry`);
@@ -346,6 +562,55 @@ export class VitaExpressAdapter implements SiteAdapter {
     };
   }
 
+  private async collectFamily(ref: ProductRef, family: ExactFamily, context: AdapterContext): Promise<Observation> {
+    if (normalizeText(ref.brand) !== normalizeText(family.brand) || ref.url !== family.url) {
+      throw new ParserChangedError(`${DOMAIN}: family reference ${ref.listingId} is outside the bounded exact registry`);
+    }
+    const capturedAt = new Date().toISOString();
+    const page = await this.fetchFamily(family, context);
+    const source = "vitaexpress-source-bound-family-review-stars";
+    const evidenceRef = await this.evidence.put({
+      capturedAt,
+      url: family.url,
+      status: page.status,
+      bodyDigest: createHash("sha256").update(page.body).digest("hex"),
+      parsed: {
+        listingId: family.id,
+        tagId: family.tagId,
+        title: page.title,
+        canonicalUrl: page.canonicalUrl,
+        variants: family.variants.map((variant) => ({ name: variant.name, url: variant.url })),
+        reviews: page.reviews,
+        writtenReviewCount: page.writtenReviewCount,
+        rating: page.rating,
+        ratingCount: page.ratingCount,
+        starScores: page.starScores,
+        starTotal: page.starTotal,
+        countMeaning: "complete source-bound #tag-reviews items; rating computed from exact item stars"
+      },
+      productEvidence: page.productEvidence,
+      source
+    });
+    return {
+      domain: DOMAIN,
+      platform: DOMAIN,
+      listingId: family.id,
+      brand: ref.brand,
+      canonicalUrl: page.canonicalUrl,
+      product: page.title,
+      reviews: page.reviews,
+      writtenReviewCount: page.writtenReviewCount,
+      rating: page.rating,
+      ratingCount: page.ratingCount,
+      status: "ok",
+      capturedAt,
+      evidenceRef,
+      aggregateGroupId: `vitaexpress:family:${family.id}`,
+      productEvidence: page.productEvidence,
+      source
+    };
+  }
+
   private fetchExact(product: ExactProduct, context: AdapterContext): Promise<FetchedPage> {
     if (!context.runId) return this.loadExact(product, context);
     const key = `${context.runId}:${product.id}`;
@@ -356,6 +621,19 @@ export class VitaExpressAdapter implements SiteAdapter {
       throw error;
     });
     this.pageCache.set(key, pending);
+    return pending;
+  }
+
+  private fetchFamily(family: ExactFamily, context: AdapterContext): Promise<FetchedFamilyPage> {
+    if (!context.runId) return this.loadFamily(family, context);
+    const key = `${context.runId}:${family.id}`;
+    const cached = this.familyPageCache.get(key);
+    if (cached) return cached;
+    const pending = this.loadFamily(family, context).catch((error) => {
+      this.familyPageCache.delete(key);
+      throw error;
+    });
+    this.familyPageCache.set(key, pending);
     return pending;
   }
 
@@ -395,5 +673,43 @@ export class VitaExpressAdapter implements SiteAdapter {
     }
 
     return { ...parseExactPage(body, product), body, status: response.status };
+  }
+
+  private async loadFamily(family: ExactFamily, context: AdapterContext): Promise<FetchedFamilyPage> {
+    let response: Response;
+    try {
+      response = await safeFetch(family.url, {
+        headers: {
+          accept: "text/html,application/xhtml+xml",
+          "accept-language": "ru-RU,ru;q=0.9",
+          "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
+        },
+        signal: context.signal
+      }, context.fetch ?? this.fetchImpl);
+    } catch (error) {
+      throw new AdapterBlockedError(`${DOMAIN}:${family.id}: request failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    let body: string;
+    try { body = await readTextBounded(response, MAX_DOCUMENT_BYTES); }
+    catch (error) {
+      throw new AdapterBlockedError(`${DOMAIN}:${family.id}: response could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    if (BLOCKED_STATUSES.has(response.status) || response.status >= 500 || isBlockedBody(body)) {
+      throw new AdapterBlockedError(`${DOMAIN}:${family.id}: blocked response HTTP ${response.status}`);
+    }
+    if (response.status === 404 || response.status === 410) {
+      throw new ParserChangedError(`${DOMAIN}:${family.id}: expected exact family page disappeared (HTTP ${response.status})`);
+    }
+    if (!response.ok) {
+      throw new AdapterBlockedError(`${DOMAIN}:${family.id}: unexpected HTTP ${response.status}`);
+    }
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType && !/text\/html|application\/xhtml\+xml/iu.test(contentType)) {
+      throw new ParserChangedError(`${DOMAIN}:${family.id}: family page returned non-HTML content`);
+    }
+
+    return { ...parseExactFamilyPage(body, family), body, status: response.status };
   }
 }
