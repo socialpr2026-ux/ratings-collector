@@ -17,6 +17,7 @@ const ACCESS_STATUSES = new Set([401, 403, 429, 498]);
 
 const EXPECTED_IDS = new Map<string, readonly string[]>([
   [normalizeText("Бивиарт"), ["854959", "854538", "945500", "854961"]],
+  [normalizeText("Кагоцел"), ["2337", "128266", "512741"]],
   [normalizeText("Окусалин"), ["142672", "126170"]],
   [normalizeText("Офтаринт"), ["555978"]],
   [normalizeText("Таустин"), ["149212"]]

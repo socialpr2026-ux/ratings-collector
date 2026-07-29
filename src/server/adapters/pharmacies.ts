@@ -163,6 +163,7 @@ async function evidenceObservation(
     title: string;
     reviews: number;
     rating: number | null;
+    ratingUnavailable?: boolean;
     ratingCount?: number | null;
     capturedAt: string;
     html: string;
@@ -187,6 +188,7 @@ async function evidenceObservation(
       canonicalUrl: input.canonicalUrl,
       reviews: input.reviews,
       rating: input.rating,
+      ...(input.ratingUnavailable ? { ratingUnavailable: true } : {}),
       ratingCount: input.ratingCount ?? null
     },
     productEvidence,
@@ -203,6 +205,7 @@ async function evidenceObservation(
     rating: input.reviews === 0 ? null : input.rating,
     rawRating: input.rating,
     rawRatingScale: 5,
+    ...(input.ratingUnavailable ? { ratingUnavailable: true } : {}),
     ratingCount: input.ratingCount,
     status: input.reviews === 0 ? "no_reviews" : "ok",
     capturedAt: input.capturedAt,
@@ -527,14 +530,25 @@ export class RiglaAdapter extends PharmacyAdapter {
       const id = String(object.id ?? "").trim();
       if (!id || reviewIds.has(id)) throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: дублирован или отсутствует ID отзыва`);
       reviewIds.add(id);
-      const values = Array.isArray(object.ratings)
-        ? object.ratings.map((entry) => rating((entry as { value?: unknown })?.value)).filter((value): value is number => value !== undefined)
-        : [];
-      if (values.length !== 1) throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: у отзыва нет единственной общей оценки`);
-      ratings.push(values[0]);
+      if (!Array.isArray(object.ratings)) {
+        throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: некорректное состояние оценки отзыва`);
+      }
+      if (object.ratings.length === 0) continue;
+      const value = object.ratings.length === 1
+        ? rating((object.ratings[0] as { value?: unknown })?.value)
+        : undefined;
+      if (value === undefined) {
+        throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: у отзыва нет единственной общей оценки`);
+      }
+      ratings.push(value);
     }
     const reviews = reviewItems.length;
-    const average = reviews ? Math.round(ratings.reduce((sum, value) => sum + value, 0) / reviews * 100) / 100 : null;
+    const ratingUnavailable = reviews > 0 && ratings.length !== reviews;
+    // A complete, unique review list proves the written-review count, but a
+    // partial set of stars cannot prove the product's aggregate rating.
+    const average = reviews > 0 && !ratingUnavailable
+      ? Math.round(ratings.reduce((sum, value) => sum + value, 0) / reviews * 100) / 100
+      : null;
     return evidenceObservation(this.evidence, {
       domain: RIGLA_DOMAIN,
       listingId: ref.listingId,
@@ -543,6 +557,7 @@ export class RiglaAdapter extends PharmacyAdapter {
       title,
       reviews,
       rating: average,
+      ratingUnavailable,
       ratingCount: ratings.length,
       capturedAt: new Date().toISOString(),
       html: result.html,

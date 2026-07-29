@@ -11,6 +11,9 @@ const PRODUCTS = new Map([
   ["854538", "БИВИАРТ УЛЬТРА ГРОТЕКС р-р офтальмологич. фл.- кап. 0,3% 10 мл"],
   ["945500", "БИВИАРТ ИНТЕНСИВ ГРОТЕКС р-р офтальмологич. фл.- кап. 10 мл"],
   ["854961", "БИВИАРТ СОФТ ГРОТЕКС р-р офтальмологич. фл.- кап. 0,1% 10 мл"],
+  ["2337", "КАГОЦЕЛ табл. 12 мг №10"],
+  ["128266", "КАГОЦЕЛ табл. 12 мг №20"],
+  ["512741", "КАГОЦЕЛ табл. 12 мг №30"],
   ["142672", "ОКУСАЛИН р-р офтальмологич. амп. пласт. 3% 2 мл №10"],
   ["126170", "ОКУСАЛИН ГРОТЕКС капли глазные 3% амп. пласт. 1 мл №10"],
   ["555978", "ОФТАРИНТ капли глазные фл.- кап. 10 мл"],
@@ -103,6 +106,60 @@ describe("MaksavitAdapter", () => {
       item.url === productUrl(item.listingId) && item.title === PRODUCTS.get(item.listingId)
     )).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(8);
+  });
+
+  it("returns three source-bound no_reviews rows for the bounded Кагоцел products", async () => {
+    const evidence = new MemoryEvidenceStore();
+    const fetchMock = exactFetch();
+    const adapter = new MaksavitAdapter(evidence, fetchMock);
+
+    const refs = await adapter.discover("Кагоцел", CONTEXT);
+    expect(refs.map(({ listingId, title, url }) => ({ listingId, title, url }))).toEqual([
+      { listingId: "2337", title: PRODUCTS.get("2337"), url: productUrl("2337") },
+      { listingId: "128266", title: PRODUCTS.get("128266"), url: productUrl("128266") },
+      { listingId: "512741", title: PRODUCTS.get("512741"), url: productUrl("512741") }
+    ]);
+
+    const observations = await Promise.all(refs.map((product) => adapter.collect(product, CONTEXT)));
+    expect(observations.map((observation) => ({
+      listingId: observation.listingId,
+      canonicalUrl: observation.canonicalUrl,
+      product: observation.product,
+      reviews: observation.reviews,
+      writtenReviewCount: observation.writtenReviewCount,
+      rating: observation.rating,
+      ratingCount: observation.ratingCount,
+      status: observation.status,
+      source: observation.source
+    }))).toEqual(refs.map((product) => ({
+      listingId: product.listingId,
+      canonicalUrl: product.url,
+      product: product.title,
+      reviews: 0,
+      writtenReviewCount: 0,
+      rating: null,
+      ratingCount: 0,
+      status: "no_reviews",
+      source: "maksavit-visible-product-feedback:google-translate"
+    })));
+    expect(observations.every((observation) =>
+      observation.productEvidence?.identifiers.some((identifier) =>
+        identifier.type === "product_id" && identifier.value === observation.listingId
+      )
+    )).toBe(true);
+    expect([...evidence.items.values()]).toEqual(
+      expect.arrayContaining(refs.map((product) => expect.objectContaining({
+        parsed: expect.objectContaining({
+          listingId: product.listingId,
+          canonicalUrl: product.url,
+          reviews: 0,
+          rating: null,
+          ignoredTemplateAggregate: true
+        })
+      })))
+    );
+    expect(evidence.items.size).toBe(3);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("publishes only the strict visible zero and ignores the contradictory template AggregateRating 5/1", async () => {
@@ -199,20 +256,21 @@ describe("MaksavitAdapter", () => {
     });
   });
 
-  liveIt("proves all eight exact live cards and their visible zero state", async () => {
+  liveIt("proves all eleven exact live cards and their visible zero state", async () => {
     const adapter = new MaksavitAdapter(new MemoryEvidenceStore());
     const refsByBrand = await Promise.all([
       adapter.discover("Бивиарт", { region: "Москва", runId: "maksavit-live" }),
+      adapter.discover("Кагоцел", { region: "Москва", runId: "maksavit-live" }),
       adapter.discover("Окусалин", { region: "Москва", runId: "maksavit-live" }),
       adapter.discover("Офтаринт", { region: "Москва", runId: "maksavit-live" }),
       adapter.discover("Таустин", { region: "Москва", runId: "maksavit-live" })
     ]);
-    expect(refsByBrand.map((refs) => refs.length)).toEqual([4, 2, 1, 1]);
+    expect(refsByBrand.map((refs) => refs.length)).toEqual([4, 3, 2, 1, 1]);
 
     const observations = await Promise.all(refsByBrand.flatMap((refs) => refs).map((product) =>
       adapter.collect(product, { region: "Москва", runId: "maksavit-live" })
     ));
-    expect(observations).toHaveLength(8);
+    expect(observations).toHaveLength(11);
     expect(observations.every((observation) =>
       observation.reviews === 0 &&
       observation.writtenReviewCount === 0 &&

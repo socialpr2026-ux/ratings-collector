@@ -221,9 +221,37 @@ describe("RiglaAdapter", () => {
     });
   });
 
-  it("fails closed when a written review has no single product rating", async () => {
-    const malformed = fixtures.riglaProduct.replace('"ratings":[{"attribute_code":"Оценка","value":4}]', '"ratings":[]');
-    const adapter = new RiglaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(malformed)) as unknown as typeof fetch);
+  it("preserves the complete Rigla review count when one review has no rating", async () => {
+    const partiallyRated = fixtures.riglaProduct.replace(
+      '"ratings":[{"attribute_code":"Оценка","value":4}]',
+      '"ratings":[]'
+    );
+    const adapter = new RiglaAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(partiallyRated)
+    ) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "rigla.ru", platform: "rigla.ru", listingId: "15027", brand: "Кагоцел",
+      url: "https://www.rigla.ru/product/kagotsel-tab-12mg-no10-15027", metadata: {}
+    }, context)).resolves.toMatchObject({
+      reviews: 3,
+      rating: null,
+      rawRating: null,
+      ratingCount: 2,
+      ratingUnavailable: true,
+      status: "ok"
+    });
+  });
+
+  it("keeps malformed Rigla rating state fail-closed", async () => {
+    const malformed = fixtures.riglaProduct.replace(
+      '"ratings":[{"attribute_code":"Оценка","value":4}]',
+      '"ratings":{"attribute_code":"Оценка","value":4}'
+    );
+    const adapter = new RiglaAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(malformed)
+    ) as unknown as typeof fetch);
+
     await expect(adapter.collect({
       domain: "rigla.ru", platform: "rigla.ru", listingId: "15027", brand: "Кагоцел",
       url: "https://www.rigla.ru/product/kagotsel-tab-12mg-no10-15027", metadata: {}
