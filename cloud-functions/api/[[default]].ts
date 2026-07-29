@@ -2088,7 +2088,12 @@ function yandexProductMatchScore(input: string, tokens: string[]): number {
 
 class NonRetryableYandexBatchShardError extends Error {}
 
-const YANDEX_BATCH_SHARD_ATTEMPT_MS = 25_000;
+// A complete live model shard can take just over 30 seconds to cross the
+// EdgeOne fixed-function boundary even when the same first-party response is
+// locally available in a few seconds. Keep two bounded attempts below the
+// 120-second function ceiling while allowing that proven healthy transfer to
+// finish instead of misclassifying a complete XML document as truncated.
+const YANDEX_BATCH_SHARD_ATTEMPT_MS = 50_000;
 const YANDEX_BATCH_SHARD_ATTEMPTS = 2;
 
 async function fetchCompleteYandexBatchShard(sitemap: string): Promise<{

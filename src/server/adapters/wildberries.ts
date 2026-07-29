@@ -624,6 +624,7 @@ export class WildberriesAdapter implements SiteAdapter {
     }
 
     const refsByRoot = new Map<string, ProductRef[]>();
+    const missingNmMetricsByRoot = new Map<string, ProductRef[]>();
     for (const ref of refs) {
       const card = cards.get(ref.listingId);
       if (!card) throw new AdapterBlockedError(`Wildberries card batch omitted requested nmId ${ref.listingId}`);
@@ -636,9 +637,12 @@ export class WildberriesAdapter implements SiteAdapter {
       const rootId = firstDefinedId(card.product, ["root", "rootId", "imtId", "imtID"]);
       const feedbackCount = firstDefinedInteger(card.product, ["nmFeedbacks"]);
       const rating = firstDefinedNumber(card.product, ["nmReviewRating"]);
-      if (feedbackCount === undefined || rating === undefined || rating < 0 || rating > 5 ||
-        (feedbackCount > 0 && rating === 0)) {
-        throw new ParserChangedError(`Wildberries card ${ref.listingId} has invalid nm-specific metrics`);
+      const hasValidNmMetrics = feedbackCount !== undefined && rating !== undefined && rating >= 0 && rating <= 5 &&
+        (feedbackCount === 0 || rating > 0);
+      if (!hasValidNmMetrics && !rootId) {
+        throw new ParserChangedError(
+          `Wildberries card ${ref.listingId} has invalid nm-specific metrics and no root proof route`
+        );
       }
 
       ref.title = title;
@@ -647,17 +651,27 @@ export class WildberriesAdapter implements SiteAdapter {
         source: "wildberries-card-v4-batch",
         ...(identity.sourceBrand ? { sourceBrand: identity.sourceBrand } : {}),
         ...(rootId ? { rootId } : {}),
-        nmFeedbacks: feedbackCount,
-        nmReviewRating: rating,
-        cardNmFeedbacks: feedbackCount,
-        cardNmReviewRating: rating,
         evidenceRef: card.evidenceRef
       };
+      delete ref.metadata.nmFeedbacks;
+      delete ref.metadata.nmReviewRating;
+      delete ref.metadata.cardNmFeedbacks;
+      delete ref.metadata.cardNmReviewRating;
       delete ref.metadata.resolvedFeedbackCount;
       delete ref.metadata.resolvedRating;
       delete ref.metadata.ratingCount;
       delete ref.metadata.writtenReviewCount;
       delete ref.metadata.aggregateGroupId;
+      if (hasValidNmMetrics) {
+        ref.metadata.nmFeedbacks = feedbackCount;
+        ref.metadata.nmReviewRating = rating;
+        ref.metadata.cardNmFeedbacks = feedbackCount;
+        ref.metadata.cardNmReviewRating = rating;
+      } else {
+        const missing = missingNmMetricsByRoot.get(rootId!) ?? [];
+        missing.push(ref);
+        missingNmMetricsByRoot.set(rootId!, missing);
+      }
 
       if (rootId) {
         const members = refsByRoot.get(rootId) ?? [];
@@ -667,6 +681,10 @@ export class WildberriesAdapter implements SiteAdapter {
     }
 
     for (const [rootId, members] of refsByRoot) {
+      const missingNmMetrics = missingNmMetricsByRoot.get(rootId);
+      if (missingNmMetrics?.length) {
+        await this.resolveRequiredRootNmMetrics(rootId, missingNmMetrics, context);
+      }
       const byFingerprint = new Map<string, ProductRef[]>();
       for (const member of members) {
         const feedbackCount = metadataInteger(member.metadata, "nmFeedbacks");
@@ -686,6 +704,43 @@ export class WildberriesAdapter implements SiteAdapter {
     }
 
     for (const ref of refs) ref.metadata.cardBatchVerified = true;
+  }
+
+  private async resolveRequiredRootNmMetrics(
+    rootId: string,
+    requiredMembers: ProductRef[],
+    context: AdapterContext
+  ): Promise<void> {
+    const { payload, evidenceUrl } = await this.fetchRootFeedback(rootId, context);
+    if (!isObject(payload) || !Array.isArray(payload.nmValuationDistribution) ||
+      payload.nmValuationDistribution.length === 0) {
+      throw new ParserChangedError(`Wildberries root ${rootId} has no exact nm distribution`);
+    }
+    const byListingId = new Map<string, DistributionMetrics>();
+    for (const item of payload.nmValuationDistribution) {
+      if (!isObject(item)) throw new ParserChangedError(`Wildberries root ${rootId} has malformed nm distribution`);
+      const listingId = firstDefinedId(item, ["nm", "nmId", "nmID"]);
+      const metrics = distributionMetrics(item.valuationDistribution);
+      if (!listingId || !metrics || byListingId.has(listingId)) {
+        throw new ParserChangedError(`Wildberries root ${rootId} has invalid nm distribution`);
+      }
+      byListingId.set(listingId, metrics);
+    }
+    const missing = requiredMembers.filter((member) => !byListingId.has(member.listingId));
+    if (missing.length > 0) {
+      throw new ParserChangedError(
+        `Wildberries root ${rootId} does not contain exact nm distribution for ${missing.map(({ listingId }) => listingId).join(",")}`
+      );
+    }
+    for (const member of requiredMembers) {
+      const metrics = byListingId.get(member.listingId)!;
+      member.metadata.resolvedFeedbackCount = metrics.ratingCount;
+      member.metadata.ratingCount = metrics.ratingCount;
+      member.metadata.resolvedRating = metrics.rating;
+      member.metadata.source = "wildberries-root-nm-distribution";
+      member.metadata.evidenceRef = evidenceUrl;
+      delete member.metadata.aggregateGroupId;
+    }
   }
 
   private async resolveRootMetrics(

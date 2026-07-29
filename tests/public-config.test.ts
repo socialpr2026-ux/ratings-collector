@@ -1648,6 +1648,49 @@ describe("fixed first-party collection egress", () => {
     }]);
   });
 
+  it("allows a complete Yandex batch shard to cross the observed 31-second edge boundary", async () => {
+    vi.useFakeTimers();
+    try {
+      const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_1110000000-1119999999-0.xml";
+      const upstream = vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 31_000));
+        return new Response(
+          "<urlset><url><loc>https://reviews.yandex.ru/product/kagotsel--1115000000</loc></url></urlset>",
+          { headers: { "content-type": "application/xml" } }
+        );
+      });
+      vi.stubGlobal("fetch", upstream);
+      const responsePromise = staticReviewFetch(new Request(
+        "https://ratings.example/api/internal/static-review-fetch",
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({
+            url: "https://reviews.yandex.ru/ugcpub/__ratings_batch__",
+            yandexBatch: {
+              sitemaps: [sitemap],
+              brands: [{ brand: "Кагоцел", tokens: ["kagotsel"] }]
+            }
+          })
+        }
+      ), { INTERNAL_AGENT_TOKEN: token });
+
+      await vi.waitFor(() => expect(upstream).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(31_000);
+      const response = await responsePromise;
+      const proof = await response.json() as { processed: number; matches: Array<{ url: string }> };
+
+      expect(response.status).toBe(200);
+      expect(upstream).toHaveBeenCalledOnce();
+      expect(proof).toMatchObject({
+        processed: 1,
+        matches: [{ url: "https://reviews.yandex.ru/product/kagotsel--1115000000" }]
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("recognizes only proven Yandex index tombstones and keeps other shard failures closed", async () => {
     const tombstone = "https://reviews.yandex.ru/ugcpub/sitemap_model_5880000000-5889999999-0.xml";
     const unknown = "https://reviews.yandex.ru/ugcpub/sitemap_model_5890000000-5899999999-0.xml";

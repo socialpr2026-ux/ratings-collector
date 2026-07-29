@@ -467,6 +467,85 @@ describe("WildberriesAdapter.discover", () => {
     expect(observations.every((item) => item.aggregateGroupId === undefined)).toBe(true);
   });
 
+  it("recovers three exact Kagocel cards when card v4 omits nm metrics", async () => {
+    const searchProducts = [
+      { id: 822662670, root: 907227394, brand: "Кагоцел", name: "Кагоцел таблетки 12 мг 10 шт", nmFeedbacks: 68, nmReviewRating: 5 },
+      { id: 822686443, root: 907251168, brand: "Кагоцел", name: "Кагоцел таблетки 12 мг 20 шт", nmFeedbacks: 110, nmReviewRating: 4.9 },
+      { id: 822671923, root: 907236647, brand: "Кагоцел", name: "Кагоцел таблетки 12 мг 30 шт", nmFeedbacks: 79, nmReviewRating: 5 }
+    ];
+    const cardProducts = searchProducts.map(({ nmFeedbacks: _count, nmReviewRating: _rating, ...product }) => ({
+      ...product,
+      feedbacks: 999,
+      reviewRating: 4.1
+    }));
+    const distributions = new Map<string, Record<string, number>>([
+      ["907227394", { 1: 0, 2: 0, 3: 0, 4: 7, 5: 61 }],
+      ["907251168", { 1: 0, 2: 0, 3: 0, 4: 11, 5: 99 }],
+      ["907236647", { 1: 0, 2: 0, 3: 0, 4: 1, 5: 78 }]
+    ]);
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 3, products: searchProducts });
+      if (url.hostname === "card.wb.ru") return jsonResponse({ products: cardProducts });
+      if (url.hostname === "feedbacks1.wb.ru") {
+        const rootId = url.pathname.split("/").at(-1)!;
+        const product = searchProducts.find(({ root }) => String(root) === rootId)!;
+        return jsonResponse({
+          feedbackCount: 999,
+          valuation: 4.1,
+          nmValuationDistribution: [{ nm: product.id, valuationDistribution: distributions.get(rootId) }]
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("Кагоцел", context({ runId: "kagocel-card-v4-without-nm" }));
+
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context())));
+
+    expect(observations).toMatchObject([
+      { listingId: "822662670", reviews: 68, ratingCount: 68, rating: 4.9, source: "wildberries-root-nm-distribution" },
+      { listingId: "822686443", reviews: 110, ratingCount: 110, rating: 4.9, source: "wildberries-root-nm-distribution" },
+      { listingId: "822671923", reviews: 79, ratingCount: 79, rating: 5, source: "wildberries-root-nm-distribution" }
+    ]);
+    expect(observations.every((item) => item.aggregateGroupId === undefined)).toBe(true);
+  });
+
+  it("keeps a card-v4 nm omission blocked when the root lacks the exact nm distribution", async () => {
+    const searchProduct = {
+      id: 822662670,
+      root: 907227394,
+      brand: "Кагоцел",
+      name: "Кагоцел таблетки 12 мг 10 шт",
+      nmFeedbacks: 68,
+      nmReviewRating: 5
+    };
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 1, products: [searchProduct] });
+      if (url.hostname === "card.wb.ru") {
+        const { nmFeedbacks: _count, nmReviewRating: _rating, ...card } = searchProduct;
+        return jsonResponse({ products: [{ ...card, feedbacks: 68, reviewRating: 5 }] });
+      }
+      if (url.hostname === "feedbacks1.wb.ru") {
+        return jsonResponse({
+          feedbackCount: 68,
+          valuation: 5,
+          nmValuationDistribution: [
+            { nm: 999999999, valuationDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 68 } }
+          ]
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("Кагоцел", context({ runId: "kagocel-missing-exact-nm-distribution" }));
+
+    await expect(adapter.collect(refs[0]!, context())).rejects.toThrow(
+      /does not contain exact nm distribution for 822662670/
+    );
+  });
+
   it("marks a proven root-only aggregate for family-row collapse", async () => {
     const products = [
       { id: 801, root: 9901, brand: "BrandX", name: "BrandX comfort", nmReviewRating: 4.8, nmFeedbacks: 50 },

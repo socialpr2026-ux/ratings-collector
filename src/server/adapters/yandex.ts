@@ -34,7 +34,7 @@ const SHOP_SITEMAP_RANGES = new Set([
 const MODEL_ID_AT_END = /--(\d+)(?:[/?#]|$)/;
 // The gateway has two shard workers and a 120-second platform ceiling. A
 // two-shard package is one wave and stays below the Agent's transport deadline
-// even when both exact 25-second shard attempts are needed. Two gateway calls
+// even when both exact 50-second shard attempts are needed. Two gateway calls
 // still keep the proven production peak at four upstream shards.
 const YANDEX_BATCH_CHUNK_SIZE = 2;
 const YANDEX_BATCH_CONCURRENCY = 2;
