@@ -228,7 +228,18 @@ abstract class AdditionalPharmacyAdapter implements SiteAdapter {
 }
 
 const APTEKA_DOMAIN = "apteka.ru";
+const APTEKA_TRANSLATE_HOST = "apteka-ru.translate.goog";
 const APTEKA_PRODUCT = /^\/product\/([a-z0-9-]+-([a-f0-9]{24}))\/?$/i;
+const APTEKA_PREPARATION_SLUG_ALIASES: Record<string, readonly string[]> = {
+  "кагоцел": ["kagoczel"]
+};
+
+function aptekaPreparationSlugs(brand: string): string[] {
+  return [...new Set([
+    ...transliteratedSlugs(brand),
+    ...(APTEKA_PREPARATION_SLUG_ALIASES[normalizeText(brand)] ?? [])
+  ])];
+}
 
 function aptekaRef(value: string, expectedId?: string): { id: string; url: string } | undefined {
   try {
@@ -302,7 +313,7 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
     const canaryId = "5e3268eaca7bdc000192d316";
     const canaryUrl = `https://${APTEKA_DOMAIN}/product/oczillokokczinum-30-sht-granuly-${canaryId}/`;
     try {
-      const page = await requestPage(new URL(canaryUrl), context, this.fetchImpl, "apteka-ru.translate.goog");
+      const page = await requestPage(new URL(canaryUrl), context, this.fetchImpl, APTEKA_TRANSLATE_HOST);
       const products = jsonLdProducts(page.$).filter((item) => String(item.sku ?? "") === canaryId);
       if (products.length !== 1 || !matchesBrand(compactText(String(products[0].name ?? "")), "Оциллококцинум")) {
         throw new ParserChangedError(`${this.id}: control Product JSON-LD is missing or ambiguous`);
@@ -315,21 +326,17 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = historicalRefs(APTEKA_DOMAIN, brand, context, aptekaRef);
-    const slugs = transliteratedSlugs(brand);
+    const slugs = aptekaPreparationSlugs(brand);
     for (const slug of slugs) {
       const source = new URL(`https://${APTEKA_DOMAIN}/preparation/${slug}/`);
       let page: HtmlPage;
       try {
-        page = await requestPage(source, context, this.fetchImpl);
+        page = await requestPage(source, context, this.fetchImpl, APTEKA_TRANSLATE_HOST);
       } catch (error) {
-        // Preparation pages are only a fast discovery hint. Some valid brands
-        // have no preparation route and the fixed Function egress can surface
-        // that optional lookup as a transient upstream status. Keep walking
-        // the bounded transliteration candidates and let the filtered,
-        // first-party product sitemap remain the authoritative fallback.
-        // Any access failure on this optional hint is non-authoritative. The
-        // filtered first-party sitemap below remains the bounded proof source;
-        // parser/content errors still fail closed instead of being hidden.
+        // Preparation pages are only a fast, source-bound SSR discovery hint.
+        // Keep walking the bounded transliterations when that optional route
+        // is unavailable; the filtered first-party sitemap remains the
+        // authoritative fallback. Parser/content errors still fail closed.
         if (error instanceof AdapterBlockedError) continue;
         throw error;
       }
@@ -374,7 +381,7 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
     // source-bound Translate SSR route returns the same canonical Product
     // JSON-LD. Keep discovery on the first-party sitemap and collect the exact
     // proven product through that bounded gateway.
-    const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl, "apteka-ru.translate.goog");
+    const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl, APTEKA_TRANSLATE_HOST);
     const products = jsonLdProducts(page.$).filter((item) => String(item.sku ?? "") === ref.listingId);
     if (products.length !== 1) throw new ParserChangedError(`${APTEKA_DOMAIN}:${ref.listingId}: exact Product JSON-LD is missing or ambiguous`);
     const product = products[0];
@@ -706,6 +713,28 @@ const BUD_BOUNDED_EXACT_PRODUCTS: Record<string, Array<{ id: string; url: string
       url: `https://www.${BUD_DOMAIN}/product/baktoblis-poroshok-v-sashe-paketakh-1500mg-no30-6000866`,
       title: "Бактоблис порошок в саше-пакетах 1500 мг №30"
     }
+  ],
+  "кагоцел": [
+    {
+      id: "15027",
+      url: `https://www.${BUD_DOMAIN}/product/kagotsel-tab-12mg-no10-15027`,
+      title: "Кагоцел таблетки 0,012г №10"
+    },
+    {
+      id: "90933",
+      url: `https://www.${BUD_DOMAIN}/product/90933`,
+      title: "Кагоцел таблетки 0,012г №10"
+    },
+    {
+      id: "106662",
+      url: `https://www.${BUD_DOMAIN}/product/kagotsel-tab-12mg-no20-106662`,
+      title: "Кагоцел таблетки 12мг №20"
+    },
+    {
+      id: "110671",
+      url: `https://www.${BUD_DOMAIN}/product/kagotsel-tab-12mg-no30-110671`,
+      title: "Кагоцел таблетки 12мг №30"
+    }
   ]
 };
 
@@ -878,8 +907,8 @@ export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
     }
 
     const discoveryError = formError ?? letterError;
+    const bounded = boundedBudRefs(brand);
     if (discoveryError) {
-      const bounded = boundedBudRefs(brand);
       if (!bounded.length) throw discoveryError;
       const verified = await Promise.all(bounded.map(async (ref) => {
         const parsedRef = budRef(ref.url, ref.listingId);
@@ -890,6 +919,10 @@ export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
       }));
       liveRefs.clear();
       for (const ref of verified) liveRefs.set(ref.listingId, ref);
+    } else {
+      for (const ref of bounded) {
+        if (!liveRefs.has(ref.listingId)) liveRefs.set(ref.listingId, ref);
+      }
     }
 
     if (!liveRefs.size && !refs.size) {
@@ -1004,6 +1037,10 @@ function ozerkiCanonicalProductRef(value: string | undefined, expectedId: string
   }
 }
 
+function ozerkiMissingFamilyPage(error: unknown): error is AdapterBlockedError {
+  return error instanceof AdapterBlockedError && /\(HTTP 404\)$/.test(error.message);
+}
+
 export class OzerkiAdapter extends AdditionalPharmacyAdapter {
   readonly id = "ozerki.ru:family-reviews-v1";
   readonly supportedDomains = [OZERKI_DOMAIN, `www.${OZERKI_DOMAIN}`] as const;
@@ -1041,11 +1078,21 @@ export class OzerkiAdapter extends AdditionalPharmacyAdapter {
     }
 
     const previous = historicalRefs(OZERKI_DOMAIN, brand, context, ozerkiFamilyRef);
+    let missingPage: AdapterBlockedError | undefined;
     for (const slug of transliteratedSlugs(brand)) {
       const initial = slug[0];
       if (!initial) continue;
       const source = new URL(`https://${OZERKI_DOMAIN}/alphabet/${initial}/${slug}/`);
-      const page = await requestPage(source, context, this.fetchImpl);
+      let page: HtmlPage;
+      try {
+        page = await requestPage(source, context, this.fetchImpl);
+      } catch (error) {
+        if (ozerkiMissingFamilyPage(error)) {
+          missingPage = error;
+          continue;
+        }
+        throw error;
+      }
       const title = compactText(page.$("h1").first().text());
       if (!matchesBrand(title, brand)) {
         throw new ParserChangedError(`${OZERKI_DOMAIN}: exact family page is not bound to ${brand}`);
@@ -1063,6 +1110,7 @@ export class OzerkiAdapter extends AdditionalPharmacyAdapter {
       });
       return [...previous.values()];
     }
+    if (missingPage) throw missingPage;
     throw new ParserChangedError(`${OZERKI_DOMAIN}: no bounded family slug for ${brand}`);
   }
 

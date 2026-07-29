@@ -74,6 +74,61 @@ describe("additional pharmacy adapters", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
+  it("tries Ozerki's exact kagotsel family after kagocel is missing and keeps one 10/20/30 aggregate", async () => {
+    const brand = "Кагоцел";
+    const familyUrl = "https://ozerki.ru/alphabet/k/kagotsel/";
+    const reviewMarkup = Array.from({ length: 23 }, (_, index) =>
+      `<article itemprop="review">Отзыв ${index + 1}</article>`
+    ).join("");
+    const html = `<!doctype html><html><head><base href="${familyUrl}"></head><body>
+      <h1>${brand}</h1>
+      <select aria-label="Варианты упаковки">
+        <option>${brand} таблетки 12 мг №10</option>
+        <option>${brand} таблетки 12 мг №20</option>
+        <option>${brand} таблетки 12 мг №30</option>
+      </select>
+      <div id="feedbackAnchor"><div itemprop="aggregateRating" itemscope itemtype="https://schema.org/AggregateRating">
+        <meta itemprop="reviewCount" content="23"><meta itemprop="ratingCount" content="23">
+        <meta itemprop="ratingValue" content="4.96">${reviewMarkup}
+      </div></div>
+    </body></html>`;
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      return url.pathname === "/alphabet/k/kagocel/"
+        ? new Response("missing", { status: 404 })
+        : new Response(html, { status: 200, headers: { "content-type": "text/html" } });
+    });
+    const adapter = new OzerkiAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    const refs = await adapter.discover(brand, context);
+    expect(refs).toMatchObject([{
+      listingId: "family-kagotsel",
+      url: familyUrl,
+      metadata: { discovery: "ozerki-exact-family-page" }
+    }]);
+    await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({
+      listingId: "family-kagotsel",
+      reviews: 23,
+      writtenReviewCount: 23,
+      ratingCount: 23,
+      rating: 4.96,
+      aggregateGroupId: "ozerki:family:family-kagotsel",
+      productEvidence: {
+        scope: "product_family",
+        variants: expect.arrayContaining([
+          `${brand} таблетки 12 мг №10`,
+          `${brand} таблетки 12 мг №20`,
+          `${brand} таблетки 12 мг №30`
+        ])
+      }
+    });
+    expect(fetchSpy.mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
+      "/alphabet/k/kagocel/",
+      "/alphabet/k/kagotsel/",
+      "/alphabet/k/kagotsel/"
+    ]);
+  });
+
   it("fails closed when Ozerki family counts are not backed by exact review markup", async () => {
     const brand = "\u0410\u043a\u0432\u0430\u041e\u043f\u0442\u0438\u043a";
     const familyUrl = "https://ozerki.ru/alphabet/a/akvaoptik/";
@@ -217,7 +272,10 @@ describe("additional pharmacy adapters", () => {
     })}</script></head><body><h1>Оциллококцинум 30 шт. гранулы</h1>${aptekaSelectedVariant(productUrl, "Оциллококцинум 30 шт. гранулы", 57, 4.9)}</body></html>`;
     const fetchSpy = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
-      return new Response(url.pathname.startsWith("/preparation/") ? preparation : product, {
+      if (url.pathname.startsWith("/preparation/") && url.pathname !== new URL(preparationUrl).pathname) {
+        return new Response("missing", { status: 404 });
+      }
+      return new Response(url.pathname === new URL(preparationUrl).pathname ? preparation : product, {
         status: 200, headers: { "content-type": "text/html" }
       });
     });
@@ -235,8 +293,47 @@ describe("additional pharmacy adapters", () => {
       status: "ok"
     });
     expect(fetchSpy.mock.calls.map(([input]) => new URL(String(input)).hostname)).toEqual([
-      "apteka.ru",
+      "apteka-ru.translate.goog",
+      "apteka-ru.translate.goog",
       "apteka-ru.translate.goog"
+    ]);
+  });
+
+  it("discovers the three current Apteka.ru Кагоцел cards through translated kagoczel SSR", async () => {
+    const brand = "Кагоцел";
+    const cards = [
+      ["5e3275a565b5ab0001657670", "10"],
+      ["5e3267bb65b5ab0001650df1", "20"],
+      ["5e72213198826b00010741c6", "30"]
+    ].map(([id, count]) => ({
+      id,
+      title: `${brand} 12 мг ${count} шт. таблетки`,
+      url: `https://apteka.ru/product/kagoczel-12-mg-${count}-sht-tabletki-${id}/`
+    }));
+    const preparationUrl = "https://apteka.ru/preparation/kagoczel/";
+    const preparation = translated(preparationUrl, `<main><h1>${brand}</h1>${cards.map((card) =>
+      `<article class="product"><a href="${card.url}" aria-label="${card.title}">${card.title}</a></article>`
+    ).join("")}</main>`);
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      expect(url.hostname).toBe("apteka-ru.translate.goog");
+      return url.pathname === "/preparation/kagoczel/"
+        ? new Response(preparation, { status: 200, headers: { "content-type": "text/html" } })
+        : new Response("missing", { status: 404 });
+    });
+
+    const refs = await new AptekaRuAdapter(
+      new MemoryEvidenceStore(),
+      fetchSpy as unknown as typeof fetch
+    ).discover(brand, context);
+
+    expect(refs.map(({ listingId, url }) => ({ listingId, url }))).toEqual(
+      cards.map((card) => ({ listingId: card.id, url: card.url }))
+    );
+    expect(fetchSpy.mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
+      "/preparation/kagocel/",
+      "/preparation/kagotsel/",
+      "/preparation/kagoczel/"
     ]);
   });
 
@@ -510,7 +607,7 @@ describe("additional pharmacy adapters", () => {
       .rejects.toThrow(/unknown executable suffix/);
   });
 
-  it("falls back to the translated letter index when the brand form was removed", async () => {
+  it("uses the translated letter index and completes it with bounded refs when the brand form was removed", async () => {
     const formSource = "https://www.budzdorov.ru/forms/baktoblis";
     const letterSource = "https://www.budzdorov.ru/letter/%D0%91";
     const productPath = "/product/baktoblis-tab-dlya-rassasyv-30g-no30-109834";
@@ -525,10 +622,13 @@ describe("additional pharmacy adapters", () => {
       return new Response(letter, { status: 200, headers: { "content-type": "text/html" } });
     });
 
-    await expect(new BudZdorovAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch)
-      .discover("Бактоблис", context)).resolves.toMatchObject([
-      { listingId: "109834", url: `https://www.budzdorov.ru${productPath}` }
-    ]);
+    const refs = await new BudZdorovAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch)
+      .discover("Бактоблис", context);
+    expect(refs.map((ref) => ref.listingId).sort()).toEqual(["109834", "5005555", "5005556", "6000866"]);
+    expect(refs.find((ref) => ref.listingId === "109834")).toMatchObject({
+      url: `https://www.budzdorov.ru${productPath}`,
+      metadata: { discovery: "translated-first-party-letter-index" }
+    });
     expect(new URL(String(fetchSpy.mock.calls[0][0])).pathname).toBe(new URL(formSource).pathname);
   });
 
@@ -576,6 +676,71 @@ describe("additional pharmacy adapters", () => {
       .toMatchObject({ reviews: 0, rating: null, status: "no_reviews" });
     expect(observations.find((item) => item.listingId === "6000866"))
       .toMatchObject({ reviews: 0, rating: null, status: "no_reviews" });
+  });
+
+  it("verifies the four bounded exact Кагоцел cards and preserves their per-card review counts", async () => {
+    const brand = "Кагоцел";
+    type Review = { id: number; ratings: Array<{ attribute_code: string; value: number }> };
+    const products = new Map<string, { id: string; title: string; reviews: Review[] }>([
+      ["/product/kagotsel-tab-12mg-no10-15027", {
+        id: "15027", title: `${brand} таблетки 0,012г №10`,
+        reviews: [
+          { id: 9094, ratings: [{ attribute_code: "Оценка", value: 5 }] },
+          { id: 8892, ratings: [{ attribute_code: "Оценка", value: 5 }] },
+          { id: 8015, ratings: [] },
+          { id: 4688, ratings: [{ attribute_code: "Оценка", value: 5 }] },
+          { id: 1345, ratings: [{ attribute_code: "Оценка", value: 5 }] },
+          { id: 1250, ratings: [] }
+        ]
+      }],
+      ["/product/90933", { id: "90933", title: `${brand} таблетки 0,012г №10`, reviews: [] }],
+      ["/product/kagotsel-tab-12mg-no20-106662", {
+        id: "106662", title: `${brand} таблетки 12мг №20`,
+        reviews: [1, 2, 3, 4].map((id) => ({ id, ratings: [{ attribute_code: "Оценка", value: 5 }] }))
+      }],
+      ["/product/kagotsel-tab-12mg-no30-110671", {
+        id: "110671", title: `${brand} таблетки 12мг №30`,
+        reviews: [
+          { id: 6, ratings: [] },
+          ...[1, 2, 3, 4, 5].map((id) => ({ id, ratings: [{ attribute_code: "Оценка", value: 5 }] }))
+        ]
+      }]
+    ]);
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.startsWith("/forms/")) return new Response("missing", { status: 404 });
+      if (url.pathname.startsWith("/letter/")) return new Response("gateway", { status: 502 });
+      const product = products.get(url.pathname);
+      if (!product) throw new Error(`unexpected Bud Zdorov route: ${url.pathname}`);
+      const source = `https://www.budzdorov.ru${url.pathname}`;
+      return new Response(translated(source,
+        `<h1>${product.title}</h1><div allreviewsqty="${product.reviews.length}"></div>` +
+        `<script>window.__INITIAL_STATE__=${JSON.stringify({ productView: { reviews: product.reviews } })};document.currentScript.remove()</script>`), {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const adapter = new BudZdorovAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    const refs = await adapter.discover(brand, context);
+    expect(refs.map((ref) => ref.listingId).sort()).toEqual(["106662", "110671", "15027", "90933"]);
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context)));
+    const actual = observations.map((item) => ({
+      listingId: item.listingId,
+      reviews: item.reviews,
+      rating: item.rating,
+      status: item.status
+    })).sort((left, right) => left.listingId.localeCompare(right.listingId));
+    expect(actual).toEqual([
+      { listingId: "106662", reviews: 4, rating: 5, status: "ok" },
+      { listingId: "110671", reviews: 6, rating: null, status: "ok" },
+      { listingId: "15027", reviews: 6, rating: null, status: "ok" },
+      { listingId: "90933", reviews: 0, rating: null, status: "no_reviews" }
+    ]);
+    for (const id of ["15027", "110671"]) {
+      expect(observations.find((item) => item.listingId === id)).toMatchObject({ ratingUnavailable: true });
+    }
+    expect(observations.find((item) => item.listingId === "106662")).not.toHaveProperty("ratingUnavailable");
   });
 
   it("unions form and alphabet discovery for all four eye-care brands and excludes Taurin/Taufon analogs", async () => {
@@ -651,7 +816,7 @@ describe("additional pharmacy adapters", () => {
       .discover("Таустин", context)).rejects.toBeInstanceOf(AdapterBlockedError);
   });
 
-  it("checks the requested Bud Zdorov brand and reuses its successful discovery in the same run", async () => {
+  it("unions partial live Bud Zdorov discovery with bounded exact refs and reuses the full set", async () => {
     const brand = "\u041a\u0430\u0433\u043e\u0446\u0435\u043b";
     const formSource = "https://www.budzdorov.ru/forms/kagocel";
     const productPath = "/product/kagotsel-tab-12mg-no20-106662";
@@ -673,9 +838,17 @@ describe("additional pharmacy adapters", () => {
 
     const health = await adapter.healthCheck(runContext);
     expect(health, health.message).toMatchObject({ ok: true });
-    await expect(adapter.discover(brand, runContext)).resolves.toMatchObject([
-      { listingId: "106662", url: `https://www.budzdorov.ru${productPath}` }
-    ]);
+    const refs = await adapter.discover(brand, runContext);
+    expect(refs.map((ref) => ref.listingId).sort()).toEqual(["106662", "110671", "15027", "90933"]);
+    expect(refs.find((ref) => ref.listingId === "106662")).toMatchObject({
+      url: `https://www.budzdorov.ru${productPath}`,
+      metadata: { discovery: "translated-first-party-form+letter-union" }
+    });
+    for (const id of ["15027", "90933", "110671"]) {
+      expect(refs.find((ref) => ref.listingId === id)).toMatchObject({
+        metadata: { discovery: "bounded-exact-product-registry" }
+      });
+    }
     expect(fetchSpy).toHaveBeenCalledTimes(3);
   });
 
