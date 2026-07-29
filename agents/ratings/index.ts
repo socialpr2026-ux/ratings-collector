@@ -215,18 +215,29 @@ export function browserFetch(
       request.signal.throwIfAborted();
 
       const middle = Math.ceil(payload.sitemaps.length / 2);
-      const left = await splitTimedOutProof({ ...payload, sitemaps: payload.sitemaps.slice(0, middle) });
-      if (!left.ok) return left;
-      const leftProof = await left.json() as {
+      // Both halves are independent and the production adapter sends two-shard
+      // groups. Recover them in parallel so the bounded 125-second gateway
+      // attempts remain inside the adapter's 330-second transport deadline.
+      // Proof is still fail-closed: neither half is accepted on its own.
+      const [left, right] = await Promise.all([
+        splitTimedOutProof({ ...payload, sitemaps: payload.sitemaps.slice(0, middle) }),
+        splitTimedOutProof({ ...payload, sitemaps: payload.sitemaps.slice(middle) })
+      ]);
+      if (!left.ok || !right.ok) {
+        if (!left.ok) {
+          await right.body?.cancel().catch(() => undefined);
+          return left;
+        }
+        await left.body?.cancel().catch(() => undefined);
+        return right;
+      }
+      const [leftProof, rightProof] = await Promise.all([
+        left.json(),
+        right.json()
+      ]) as Array<{
         processed?: unknown; firstSitemap?: unknown; lastSitemap?: unknown;
         verifiedSitemaps?: unknown; tombstonedSitemaps?: unknown; matches?: unknown;
-      };
-      const right = await splitTimedOutProof({ ...payload, sitemaps: payload.sitemaps.slice(middle) });
-      if (!right.ok) return right;
-      const rightProof = await right.json() as {
-        processed?: unknown; firstSitemap?: unknown; lastSitemap?: unknown;
-        verifiedSitemaps?: unknown; tombstonedSitemaps?: unknown; matches?: unknown;
-      };
+      }>;
       if (!Array.isArray(leftProof.matches) || !Array.isArray(rightProof.matches) ||
         !Array.isArray(leftProof.verifiedSitemaps) || !Array.isArray(rightProof.verifiedSitemaps)) {
         return json({ error: "Split Yandex batch proof is unreadable" }, 502);

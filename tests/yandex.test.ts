@@ -380,14 +380,13 @@ describe("YandexAdapter discovery", () => {
     await expect(adapter.discover("oscillococcinum", context())).rejects.toBeInstanceOf(AdapterBlockedError);
   });
 
-  it("settles an in-flight sibling and reports only the original failed package", async () => {
+  it("aborts an in-flight sibling and reports only the original failed package", async () => {
     const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
     const maps = Array.from({ length: 16 }, (_value, index) =>
       `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
     );
     const activity: AdapterActivityEvent[] = [];
     let siblingAborted = false;
-    let resolveSibling: (() => void) | undefined;
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : input.toString();
       if (url === INDEX) return xmlResponse(sitemapIndex(maps));
@@ -395,7 +394,7 @@ describe("YandexAdapter discovery", () => {
       if (request.sitemaps[0] === maps[0]) return new Response(JSON.stringify({
         error: `Yandex batch shard remained unproven: ${maps[0]}`
       }), { status: 502, headers: { "content-type": "application/json" } });
-      return await new Promise<Response>((resolve) => {
+      return await new Promise<Response>((_resolve) => {
         const signal = init?.signal;
         if (!signal) throw new Error("missing batch abort signal");
         const onAbort = () => {
@@ -403,13 +402,6 @@ describe("YandexAdapter discovery", () => {
         };
         if (signal.aborted) onAbort();
         else signal.addEventListener("abort", onAbort, { once: true });
-        resolveSibling = () => resolve(new Response(JSON.stringify({
-          processed: request.sitemaps.length,
-          firstSitemap: request.sitemaps[0],
-          lastSitemap: request.sitemaps.at(-1),
-          verifiedSitemaps: request.sitemaps,
-          matches: []
-        }), { headers: { "content-type": "application/json" } }));
       });
     });
     const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
@@ -419,13 +411,13 @@ describe("YandexAdapter discovery", () => {
     const discovery = adapter.discover("Церетон", context({
       activity: async (event) => { activity.push(event); }
     }));
+    const rejection = discovery.catch((error) => error);
     await vi.waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(4));
-    expect(siblingAborted).toBe(false);
-    resolveSibling!();
-    await expect(discovery).rejects.toMatchObject({
+    await vi.waitFor(() => expect(siblingAborted).toBe(true));
+    await expect(rejection).resolves.toMatchObject({
       message: `Yandex batch proof failed with HTTP 502: Yandex batch shard remained unproven: ${maps[0]}`
     });
-    expect(siblingAborted).toBe(false);
+    expect(siblingAborted).toBe(true);
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(4);
     expect(activity.filter((event) => event.status === "warning")).toHaveLength(1);
   });

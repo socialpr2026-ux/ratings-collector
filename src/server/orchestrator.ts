@@ -313,7 +313,9 @@ export class RatingsService {
       () => deadline.abort(new Error("run_deadline_exceeded")),
       RUN_SOFT_DEADLINE_MS
     );
-    deadlineTimer.unref?.();
+    // Keep the deadline referenced for the lifetime of the collection. Some
+    // edge transports do not themselves keep Node's event loop referenced;
+    // unref() allowed a stalled upstream request to outlive this guard.
     try {
       const spreadsheetId = extractSpreadsheetId(run.request.sheetUrl);
       const [products, sourceCards] = await Promise.all([

@@ -525,6 +525,7 @@ export class YandexAdapter implements SiteAdapter {
             });
           }
         } catch (error) {
+          if (batchAbort.signal.aborted && failure !== undefined) return;
           await reportActivity(context, {
             operationId: `yandex:gateway-failure:${index}`,
             stage: "discovery",
@@ -534,6 +535,10 @@ export class YandexAdapter implements SiteAdapter {
             detail: `Пакет ${index + 1} не подтверждён: ${errorMessage(error)}`
           });
           failure ??= error;
+          // A complete scan cannot succeed after one package exhausted its
+          // bounded retries. Interrupt the sibling worker immediately instead
+          // of waiting for another long gateway recovery chain to finish.
+          batchAbort.abort(failure);
           return;
         }
       }

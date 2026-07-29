@@ -625,6 +625,56 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("starts both Yandex split halves before waiting for either proof", async () => {
+    const run = vi.fn(async () => undefined);
+    const releases = new Map<string, (response: Response) => void>();
+    const singletonCalls: string[] = [];
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const forwarded = JSON.parse(String(init?.body)) as {
+        yandexBatch: { sitemaps: string[]; brands: Array<{ brand: string }> };
+      };
+      const sitemaps = forwarded.yandexBatch.sitemaps;
+      if (sitemaps.length === 2) return new Response("split this group", { status: 504 });
+      const sitemap = sitemaps[0]!;
+      singletonCalls.push(sitemap);
+      return await new Promise<Response>((resolve) => releases.set(sitemap, resolve));
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    }) as typeof fetch & { yandexBatchEndpoint?: string };
+
+    const pending = routedFetch(routedFetch.yandexBatchEndpoint!, {
+      method: "POST",
+      body: JSON.stringify({
+        sitemaps: ["left", "right"],
+        brands: [{ brand: "Кагоцел", tokens: ["kagotsel"] }]
+      })
+    });
+
+    await vi.waitFor(() => expect(singletonCalls).toEqual(["left", "right"]));
+    for (const sitemap of singletonCalls) {
+      releases.get(sitemap)!(new Response(JSON.stringify({
+        processed: 1,
+        firstSitemap: sitemap,
+        lastSitemap: sitemap,
+        verifiedSitemaps: [sitemap],
+        matches: []
+      }), { headers: { "content-type": "application/json" } }));
+    }
+
+    const response = await pending;
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      processed: 2,
+      firstSitemap: "left",
+      lastSitemap: "right",
+      verifiedSitemaps: ["left", "right"]
+    });
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("returns a persistent singleton Yandex failure without retrying the same payload", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async () =>
