@@ -14,7 +14,9 @@ const YANDEX_INDEX_TOMBSTONE_SITEMAPS = new Set([
   "https://reviews.yandex.ru/ugcpub/sitemap_model_5940000000-5949999999-0.xml",
   "https://reviews.yandex.ru/ugcpub/sitemap_model_5950000000-5959999999-0.xml",
   "https://reviews.yandex.ru/ugcpub/sitemap_model_5960000000-5969999999-0.xml",
-  "https://reviews.yandex.ru/ugcpub/sitemap_model_5970000000-5979999999-0.xml"
+  "https://reviews.yandex.ru/ugcpub/sitemap_model_5970000000-5979999999-0.xml",
+  "https://reviews.yandex.ru/ugcpub/sitemap_model_6020000000-6029999999-0.xml",
+  "https://reviews.yandex.ru/ugcpub/sitemap_model_6030000000-6039999999-0.xml"
 ]);
 
 export function isKnownYandexIndexTombstoneSitemap(input: string | URL): boolean {

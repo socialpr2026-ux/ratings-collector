@@ -13,13 +13,17 @@ const MAP_C = "https://reviews.yandex.ru/ugcpub/sitemap_model_500000000-50999999
 const MAP_695 = "https://reviews.yandex.ru/ugcpub/sitemap_model_690000000-699999999-0.xml";
 const MAP_588_TOMBSTONE = "https://reviews.yandex.ru/ugcpub/sitemap_model_5880000000-5889999999-0.xml";
 const MAP_590_TOMBSTONE = "https://reviews.yandex.ru/ugcpub/sitemap_model_5900000000-5909999999-0.xml";
+const MAP_602_TOMBSTONE = "https://reviews.yandex.ru/ugcpub/sitemap_model_6020000000-6029999999-0.xml";
+const MAP_603_TOMBSTONE = "https://reviews.yandex.ru/ugcpub/sitemap_model_6030000000-6039999999-0.xml";
 const CURRENT_INDEX_TOMBSTONES = [
   MAP_588_TOMBSTONE,
   MAP_590_TOMBSTONE,
   ...Array.from({ length: 7 }, (_value, index) => {
     const start = 5_910_000_000 + index * 10_000_000;
     return `https://reviews.yandex.ru/ugcpub/sitemap_model_${start}-${start + 9_999_999}-0.xml`;
-  })
+  }),
+  MAP_602_TOMBSTONE,
+  MAP_603_TOMBSTONE
 ];
 const SHOP_MAP_SYMBOLS = "https://reviews.yandex.ru/ugcpub/sitemap_shop_%25-%26-0.xml";
 const SHOP_MAP_DIGITS = "https://reviews.yandex.ru/ugcpub/sitemap_shop_0-1-0.xml";

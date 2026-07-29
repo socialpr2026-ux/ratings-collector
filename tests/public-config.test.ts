@@ -1691,9 +1691,13 @@ describe("fixed first-party collection egress", () => {
     }
   });
 
-  it("recognizes only proven Yandex index tombstones and keeps other shard failures closed", async () => {
-    const tombstone = "https://reviews.yandex.ru/ugcpub/sitemap_model_5880000000-5889999999-0.xml";
-    const unknown = "https://reviews.yandex.ru/ugcpub/sitemap_model_5890000000-5899999999-0.xml";
+  it("recognizes only proven Yandex index tombstones and keeps adjacent shard failures closed", async () => {
+    const tombstones = [
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_5880000000-5889999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_6020000000-6029999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_6030000000-6039999999-0.xml"
+    ];
+    const unknown = "https://reviews.yandex.ru/ugcpub/sitemap_model_6040000000-6049999999-0.xml";
     const callBatch = (sitemap: string) => staticReviewFetch(new Request(
       "https://ratings.example/api/internal/static-review-fetch",
       {
@@ -1711,11 +1715,13 @@ describe("fixed first-party collection egress", () => {
     const missingFetch = vi.fn(async () => new Response(null, { status: 404 }));
     vi.stubGlobal("fetch", missingFetch);
 
-    const known = await callBatch(tombstone);
-    const proof = await known.json() as { processed: number; tombstonedSitemaps?: string[] };
-    expect(known.status).toBe(200);
-    expect(proof).toMatchObject({ processed: 1, tombstonedSitemaps: [tombstone] });
-    expect(missingFetch).toHaveBeenCalledOnce();
+    for (const tombstone of tombstones) {
+      const known = await callBatch(tombstone);
+      const proof = await known.json() as { processed: number; tombstonedSitemaps?: string[] };
+      expect(known.status).toBe(200);
+      expect(proof).toMatchObject({ processed: 1, tombstonedSitemaps: [tombstone] });
+    }
+    expect(missingFetch).toHaveBeenCalledTimes(tombstones.length);
 
     const unknownFetch = vi.fn(async () => new Response(null, { status: 404 }));
     vi.stubGlobal("fetch", unknownFetch);
@@ -1726,7 +1732,7 @@ describe("fixed first-party collection egress", () => {
 
     const blockedFetch = vi.fn(async () => new Response("blocked", { status: 403 }));
     vi.stubGlobal("fetch", blockedFetch);
-    const blocked = await callBatch(tombstone);
+    const blocked = await callBatch(tombstones[0]!);
     expect(blocked.status).toBe(502);
     expect(await blocked.text()).not.toContain('"processed":1');
     expect(blockedFetch).toHaveBeenCalledOnce();
