@@ -12,14 +12,20 @@ const MAP_B = "https://reviews.yandex.ru/ugcpub/sitemap_model_260000000-26999999
 const MAP_C = "https://reviews.yandex.ru/ugcpub/sitemap_model_500000000-509999999-0.xml";
 const MAP_695 = "https://reviews.yandex.ru/ugcpub/sitemap_model_690000000-699999999-0.xml";
 const MAP_588_TOMBSTONE = "https://reviews.yandex.ru/ugcpub/sitemap_model_5880000000-5889999999-0.xml";
+const MAP_589_TOMBSTONE = "https://reviews.yandex.ru/ugcpub/sitemap_model_5890000000-5899999999-0.xml";
 const MAP_590_TOMBSTONE = "https://reviews.yandex.ru/ugcpub/sitemap_model_5900000000-5909999999-0.xml";
 const MAP_602_TOMBSTONE = "https://reviews.yandex.ru/ugcpub/sitemap_model_6020000000-6029999999-0.xml";
 const MAP_603_TOMBSTONE = "https://reviews.yandex.ru/ugcpub/sitemap_model_6030000000-6039999999-0.xml";
 const CURRENT_INDEX_TOMBSTONES = [
   MAP_588_TOMBSTONE,
+  MAP_589_TOMBSTONE,
   MAP_590_TOMBSTONE,
   ...Array.from({ length: 7 }, (_value, index) => {
     const start = 5_910_000_000 + index * 10_000_000;
+    return `https://reviews.yandex.ru/ugcpub/sitemap_model_${start}-${start + 9_999_999}-0.xml`;
+  }),
+  ...Array.from({ length: 4 }, (_value, index) => {
+    const start = 5_980_000_000 + index * 10_000_000;
     return `https://reviews.yandex.ru/ugcpub/sitemap_model_${start}-${start + 9_999_999}-0.xml`;
   }),
   MAP_602_TOMBSTONE,

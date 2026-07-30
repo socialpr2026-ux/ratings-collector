@@ -1694,6 +1694,9 @@ describe("fixed first-party collection egress", () => {
   it("recognizes only proven Yandex index tombstones and keeps adjacent shard failures closed", async () => {
     const tombstones = [
       "https://reviews.yandex.ru/ugcpub/sitemap_model_5880000000-5889999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_5890000000-5899999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_5980000000-5989999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_6010000000-6019999999-0.xml",
       "https://reviews.yandex.ru/ugcpub/sitemap_model_6020000000-6029999999-0.xml",
       "https://reviews.yandex.ru/ugcpub/sitemap_model_6030000000-6039999999-0.xml"
     ];

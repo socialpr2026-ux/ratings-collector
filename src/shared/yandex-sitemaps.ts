@@ -7,6 +7,7 @@
  */
 const YANDEX_INDEX_TOMBSTONE_SITEMAPS = new Set([
   "https://reviews.yandex.ru/ugcpub/sitemap_model_5880000000-5889999999-0.xml",
+  "https://reviews.yandex.ru/ugcpub/sitemap_model_5890000000-5899999999-0.xml",
   "https://reviews.yandex.ru/ugcpub/sitemap_model_5900000000-5909999999-0.xml",
   "https://reviews.yandex.ru/ugcpub/sitemap_model_5910000000-5919999999-0.xml",
   "https://reviews.yandex.ru/ugcpub/sitemap_model_5920000000-5929999999-0.xml",
@@ -15,6 +16,10 @@ const YANDEX_INDEX_TOMBSTONE_SITEMAPS = new Set([
   "https://reviews.yandex.ru/ugcpub/sitemap_model_5950000000-5959999999-0.xml",
   "https://reviews.yandex.ru/ugcpub/sitemap_model_5960000000-5969999999-0.xml",
   "https://reviews.yandex.ru/ugcpub/sitemap_model_5970000000-5979999999-0.xml",
+  "https://reviews.yandex.ru/ugcpub/sitemap_model_5980000000-5989999999-0.xml",
+  "https://reviews.yandex.ru/ugcpub/sitemap_model_5990000000-5999999999-0.xml",
+  "https://reviews.yandex.ru/ugcpub/sitemap_model_6000000000-6009999999-0.xml",
+  "https://reviews.yandex.ru/ugcpub/sitemap_model_6010000000-6019999999-0.xml",
   "https://reviews.yandex.ru/ugcpub/sitemap_model_6020000000-6029999999-0.xml",
   "https://reviews.yandex.ru/ugcpub/sitemap_model_6030000000-6039999999-0.xml"
 ]);
