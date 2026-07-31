@@ -35,11 +35,12 @@ const SHOP_SITEMAP_RANGES = new Set([
   })
 ]);
 const MODEL_ID_AT_END = /--(\d+)(?:[/?#]|$)/;
-// The gateway has two shard workers and a 120-second platform ceiling. A
-// two-shard package is one wave and stays below the Agent's transport deadline.
-// Four gateway calls keep the full 330-shard pass bounded at eight upstream
-// shards without changing the exact per-shard proof contract.
-const YANDEX_BATCH_CHUNK_SIZE = 2;
+// Four concurrent singleton calls are the proven stable EdgeOne boundary for
+// multi-megabyte Yandex maps. Two shards per Function multiplied that into
+// eight simultaneous response streams and still produced truncated XML after
+// the parser memory was fixed. Keep one exact proof per request so transport
+// and progress checkpoints remain source-bound to a single shard.
+const YANDEX_BATCH_CHUNK_SIZE = 1;
 const YANDEX_BATCH_CONCURRENCY = 4;
 const YANDEX_PROGRESS_SITEMAP_INTERVAL = 32;
 

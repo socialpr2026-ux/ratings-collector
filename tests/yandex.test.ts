@@ -312,10 +312,10 @@ describe("YandexAdapter discovery", () => {
       { listingId: "170000001", brand: "oscillococcinum" }
     ]);
     expect(batches.flat()).toEqual(maps);
-    expect(batches.every((batch) => batch.length >= 1 && batch.length <= 2)).toBe(true);
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(Math.ceil(maps.length / 2));
+    expect(batches.every((batch) => batch.length === 1)).toBe(true);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(maps.length);
     expect(fetchMock.mock.calls.filter(([input]) => maps.includes(String(input)))).toHaveLength(0);
-    expect(fetch).toHaveBeenCalledTimes(1 + Math.ceil(maps.length / 2));
+    expect(fetch).toHaveBeenCalledTimes(1 + maps.length);
   });
 
   it("keeps four bounded gateway workers and checkpoints verified full-scan milestones", async () => {
@@ -355,7 +355,7 @@ describe("YandexAdapter discovery", () => {
 
     expect(processed.sort()).toEqual([...maps].sort());
     expect(peak).toBe(4);
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(18);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(36);
     expect(activity.map((event) => ({ operationId: event.operationId, status: event.status, detail: event.detail }))).toEqual([
       {
         operationId: "yandex:gateway-progress",
@@ -370,9 +370,9 @@ describe("YandexAdapter discovery", () => {
     ]);
   });
 
-  it("rejects a batch proof that omits a requested middle shard", async () => {
+  it("rejects a singleton batch proof that omits the requested shard", async () => {
     const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
-    const maps = [MAP_A, MAP_B];
+    const maps = [MAP_A];
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : input.toString();
       if (url === INDEX) return xmlResponse(sitemapIndex(maps));
@@ -381,7 +381,7 @@ describe("YandexAdapter discovery", () => {
         processed: request.sitemaps.length,
         firstSitemap: request.sitemaps[0],
         lastSitemap: request.sitemaps.at(-1),
-        verifiedSitemaps: [request.sitemaps[0]],
+        verifiedSitemaps: [],
         matches: []
       }), { headers: { "content-type": "application/json" } });
     });
@@ -394,7 +394,7 @@ describe("YandexAdapter discovery", () => {
 
   it("retries the same exact batch after a transient gateway network failure", async () => {
     const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
-    const maps = [MAP_A, MAP_B];
+    const maps = [MAP_A];
     let batchAttempts = 0;
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : input.toString();
@@ -435,7 +435,7 @@ describe("YandexAdapter discovery", () => {
 
   it.each([500, 502, 503, 504])("retries only the transient HTTP %i batch without restarting proven sitemap chunks", async (failureStatus) => {
     const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
-    const maps = [MAP_A, MAP_B];
+    const maps = [MAP_A];
     let batchAttempts = 0;
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : input.toString();
@@ -480,7 +480,7 @@ describe("YandexAdapter discovery", () => {
 
   it("does not repeat a failed Agent recovery chain at the adapter layer by default", async () => {
     const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
-    const maps = [MAP_A, MAP_B];
+    const maps = [MAP_A];
     let batchAttempts = 0;
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = input instanceof Request ? input.url : input.toString();
