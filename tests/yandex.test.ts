@@ -490,7 +490,7 @@ describe("YandexAdapter discovery", () => {
       const sitemap = request.sitemaps[0]!;
       if (sitemap === MAP_A) {
         failedShardAttempts += 1;
-        if (failedShardAttempts <= 2) {
+        if (failedShardAttempts <= 1) {
           return new Response(JSON.stringify({ error: "transient exact egress stall" }), {
             status: 502,
             headers: { "content-type": "application/json" }
@@ -516,8 +516,8 @@ describe("YandexAdapter discovery", () => {
     await expect(adapter.discover("baktoblis", context({
       activity: async (event) => { activity.push(event); }
     }))).resolves.toMatchObject([{ listingId: "1234567", brand: "baktoblis" }]);
-    expect(failedShardAttempts).toBe(3);
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(4);
+    expect(failedShardAttempts).toBe(2);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(3);
     expect(activity.filter((event) => event.operationId === "yandex:gateway-recovery").map(({ status }) => status))
       .toEqual(["active", "complete"]);
   });
@@ -542,9 +542,9 @@ describe("YandexAdapter discovery", () => {
     await expect(adapter.discover("Энтеролактис", context())).rejects.toMatchObject({
       message: expect.stringContaining("terminated")
     });
-    expect(batchAttempts).toBe(4);
+    expect(batchAttempts).toBe(2);
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST").map(([, init]) => init?.body))
-      .toEqual(Array.from({ length: 4 }, () => fetchMock.mock.calls[1]![1]?.body));
+      .toEqual(Array.from({ length: 2 }, () => fetchMock.mock.calls[1]![1]?.body));
   });
 
   it("bounds a gateway request that never returns and fails closed", async () => {
@@ -567,7 +567,7 @@ describe("YandexAdapter discovery", () => {
     await expect(adapter.discover("Бактоблис", context())).rejects.toMatchObject({
       message: expect.stringContaining("Yandex batch proof request failed")
     });
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(4);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(2);
   });
 
   it("rejects a partial batch aggregate even when an earlier chunk contained a match", async () => {
@@ -631,7 +631,7 @@ describe("YandexAdapter discovery", () => {
     const postedSitemaps = fetchMock.mock.calls
       .filter(([, init]) => init?.method === "POST")
       .map(([, init]) => (JSON.parse(String(init?.body)) as { sitemaps: string[] }).sitemaps[0]);
-    expect(postedSitemaps.filter((sitemap) => sitemap === maps[0])).toHaveLength(4);
+    expect(postedSitemaps.filter((sitemap) => sitemap === maps[0])).toHaveLength(2);
     for (const sitemap of maps.slice(1)) expect(postedSitemaps.filter((value) => value === sitemap)).toHaveLength(1);
     expect(activity.filter((event) => event.status === "warning")).toHaveLength(1);
   });

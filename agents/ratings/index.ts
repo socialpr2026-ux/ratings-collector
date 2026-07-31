@@ -57,10 +57,12 @@ export function transientRecoveryDelayMs(
 
 const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);
 const YANDEX_BATCH_ENDPOINT = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
-// EdgeOne terminates a Cloud Function at 120 seconds. Waiting beyond that
-// horizon prevents a synthetic timeout from starting a recursive split while
-// the original invocation can still be consuming the same Yandex shards.
-export const YANDEX_BATCH_GATEWAY_TIMEOUT_MS = 125_000;
+// The singleton fixed Function owns a 55-second exact-shard budget and the
+// public boundary closes around sixty seconds. Give that response a small
+// delivery margin, then release the Agent lane so the adapter's failed-shard
+// recovery round can continue; the old 125-second two-shard split budget only
+// doubled every stalled singleton pause.
+export const YANDEX_BATCH_GATEWAY_TIMEOUT_MS = 70_000;
 type YandexBatchCapableFetch = typeof fetch & { yandexBatchEndpoint?: string };
 type YandexMarketCapableFetch = YandexBatchCapableFetch & { yandexMarketBrowserEndpoint?: string };
 
