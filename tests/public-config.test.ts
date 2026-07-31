@@ -1613,39 +1613,50 @@ describe("fixed first-party collection egress", () => {
     expect(await response.text()).toContain("first shard failed");
   });
 
-  it("retries only a transiently truncated Yandex batch shard and accepts its complete second proof", async () => {
-    const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_1220000000-1229999999-0.xml";
-    const upstream = vi.fn(async () => upstream.mock.calls.length === 1
-      ? new Response("<urlset>", { headers: { "content-type": "application/xml" } })
-      : new Response(
-        "<urlset><url><loc>https://reviews.yandex.ru/product/oscillococcinum--1225000000</loc></url></urlset>",
-        { headers: { "content-type": "application/xml" } }
-      ));
-    vi.stubGlobal("fetch", upstream);
-    const response = await staticReviewFetch(new Request(
-      "https://ratings.example/api/internal/static-review-fetch",
-      {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          url: "https://reviews.yandex.ru/ugcpub/__ratings_batch__",
-          yandexBatch: {
-            sitemaps: [sitemap],
-            brands: [{ brand: "oscillococcinum", tokens: ["oscillococcinum"] }]
-          }
-        })
-      }
-    ), { INTERNAL_AGENT_TOKEN: token });
-    const proof = await response.json() as { processed: number; matches: Array<{ url: string }> };
+  it("recovers one exact Yandex shard after two fast incomplete XML copies", async () => {
+    vi.useFakeTimers();
+    try {
+      const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_1220000000-1229999999-0.xml";
+      const upstream = vi.fn(async () => upstream.mock.calls.length <= 2
+        ? new Response("<urlset>", { headers: { "content-type": "application/xml" } })
+        : new Response(
+          "<urlset><url><loc>https://reviews.yandex.ru/product/oscillococcinum--1225000000</loc></url></urlset>",
+          { headers: { "content-type": "application/xml" } }
+        ));
+      vi.stubGlobal("fetch", upstream);
+      const responsePromise = staticReviewFetch(new Request(
+        "https://ratings.example/api/internal/static-review-fetch",
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({
+            url: "https://reviews.yandex.ru/ugcpub/__ratings_batch__",
+            yandexBatch: {
+              sitemaps: [sitemap],
+              brands: [{ brand: "oscillococcinum", tokens: ["oscillococcinum"] }]
+            }
+          })
+        }
+      ), { INTERNAL_AGENT_TOKEN: token });
 
-    expect(response.status).toBe(200);
-    expect(upstream).toHaveBeenCalledTimes(2);
-    expect(proof.processed).toBe(1);
-    expect(proof.matches).toEqual([{
-      brand: "oscillococcinum",
-      url: "https://reviews.yandex.ru/product/oscillococcinum--1225000000",
-      sitemap
-    }]);
+      await vi.waitFor(() => expect(upstream).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(upstream).toHaveBeenCalledTimes(2));
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => expect(upstream).toHaveBeenCalledTimes(3));
+      const response = await responsePromise;
+      const proof = await response.json() as { processed: number; matches: Array<{ url: string }> };
+
+      expect(response.status).toBe(200);
+      expect(proof.processed).toBe(1);
+      expect(proof.matches).toEqual([{
+        brand: "oscillococcinum",
+        url: "https://reviews.yandex.ru/product/oscillococcinum--1225000000",
+        sitemap
+      }]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("allows a complete Yandex batch shard to cross the observed 31-second edge boundary", async () => {

@@ -248,10 +248,10 @@ export class YandexAdapter implements SiteAdapter {
     // verified transfer can legitimately take more than 20 seconds; keep the
     // safety deadline, but do not misclassify a healthy shard as blocked.
     this.sitemapReadTimeoutMs = boundedInteger(options.sitemapReadTimeoutMs, 60_000, 1, 120_000);
-    // The Agent bounds one gateway transport at 95 seconds and may then split
-    // one four-shard package recursively (4→2→1). Keep enough time for that
-    // exact recovery chain while the explicit race still guarantees a finite
-    // outcome even when the edge fetch implementation ignores AbortSignal.
+    // The Agent bounds one gateway transport beyond the Function's 120-second
+    // ceiling and may then split one two-shard package into exact singletons.
+    // Keep enough time for that recovery chain while the explicit race still
+    // guarantees a finite outcome when an edge fetch ignores AbortSignal.
     this.batchRequestTimeoutMs = boundedInteger(options.batchRequestTimeoutMs, 330_000, 1, 360_000);
     // Product-page traffic can pass through the same fixed gateway as sitemap
     // traffic. Bound every direct/translated page request independently so a

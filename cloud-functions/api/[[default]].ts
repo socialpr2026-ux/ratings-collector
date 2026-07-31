@@ -2067,23 +2067,32 @@ function parseYandexBatchRequest(value: unknown): YandexBatchRequest | undefined
   return { sitemaps, brands };
 }
 
-function yandexProductMatchScore(input: string, tokens: string[]): number {
-  try {
-    const url = new URL(input);
-    const slug = decodeURIComponent(url.pathname.split("/").filter(Boolean).at(-1) ?? "")
-      .replace(/--\d+$/, "")
-      .normalize("NFKC")
-      .toLocaleLowerCase("ru-RU")
-      .replace(/ё/g, "е")
-      .replace(/[^a-zа-я0-9]+/giu, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (!slug) return -1;
-    const matches = tokens
-      .filter((token) => ` ${slug} `.includes(` ${token} `))
-      .map((token) => token.replace(/\s+/g, "").length);
-    return matches.length > 0 ? Math.max(...matches) : -1;
-  } catch { return -1; }
+type PreparedYandexBrand = {
+  brand: string;
+  tokens: Array<{ value: string; score: number }>;
+};
+
+function yandexProductSlug(input: string): string | undefined {
+  // Every input has already passed the exact source/range proof above. Avoid
+  // constructing the same URL once per requested brand for every one of the
+  // millions of sitemap locations in a complete index scan.
+  const route = input.match(/^https:\/\/reviews\.yandex\.ru\/product\/([a-z0-9][a-z0-9_-]*)?--\d+$/i);
+  if (!route) return undefined;
+  return (route[1] ?? "")
+    .normalize("NFKC")
+    .toLocaleLowerCase("ru-RU")
+    .replace(/[^a-zа-я0-9]+/giu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function yandexProductMatchScore(slug: string, tokens: PreparedYandexBrand["tokens"]): number {
+  let best = -1;
+  const paddedSlug = ` ${slug} `;
+  for (const token of tokens) {
+    if (token.score > best && paddedSlug.includes(` ${token.value} `)) best = token.score;
+  }
+  return best;
 }
 
 class NonRetryableYandexBatchShardError extends Error {}
@@ -2094,27 +2103,33 @@ class NonRetryableYandexBatchShardError extends Error {}
 // 120-second function ceiling while allowing that proven healthy transfer to
 // finish instead of misclassifying a complete XML document as truncated.
 const YANDEX_BATCH_SHARD_ATTEMPT_MS = 50_000;
-const YANDEX_BATCH_SHARD_ATTEMPTS = 2;
+const YANDEX_BATCH_SHARD_TOTAL_MS = 110_000;
+const YANDEX_BATCH_SHARD_MIN_ATTEMPT_MS = 10_000;
+const YANDEX_BATCH_SHARD_ATTEMPTS = 3;
 
 async function fetchCompleteYandexBatchShard(sitemap: string): Promise<{
   locations: string[];
   tombstoned: boolean;
 }> {
   const target = new URL(sitemap);
+  const shardStartedAt = Date.now();
   let lastError: unknown;
   for (let attempt = 1; attempt <= YANDEX_BATCH_SHARD_ATTEMPTS; attempt += 1) {
+    const remainingBudgetMs = YANDEX_BATCH_SHARD_TOTAL_MS - (Date.now() - shardStartedAt);
+    if (remainingBudgetMs < YANDEX_BATCH_SHARD_MIN_ATTEMPT_MS) break;
+    const attemptBudgetMs = Math.min(YANDEX_BATCH_SHARD_ATTEMPT_MS, remainingBudgetMs);
     const startedAt = Date.now();
     const attemptAbort = new AbortController();
     const attemptTimer = setTimeout(() => {
       attemptAbort.abort(new Error("Yandex batch shard attempt deadline exceeded"));
-    }, YANDEX_BATCH_SHARD_ATTEMPT_MS);
+    }, attemptBudgetMs);
     try {
       const upstream = await safeFetch(target.toString(), {
         method: "GET",
         redirect: "follow",
         signal: attemptAbort.signal,
         headers: { accept: "application/xml,text/xml", "accept-language": "ru-RU,ru;q=0.9" }
-      }, fetch, 4, YANDEX_BATCH_SHARD_ATTEMPT_MS);
+      }, fetch, 4, attemptBudgetMs);
       if (!upstream.ok) {
         await upstream.body?.cancel().catch(() => undefined);
         if (upstream.status === 404 && isKnownYandexIndexTombstoneSitemap(target)) {
@@ -2126,7 +2141,7 @@ async function fetchCompleteYandexBatchShard(sitemap: string): Promise<{
         }
         throw new Error(message);
       }
-      const remainingMs = Math.max(1, YANDEX_BATCH_SHARD_ATTEMPT_MS - (Date.now() - startedAt));
+      const remainingMs = Math.max(1, attemptBudgetMs - (Date.now() - startedAt));
       const xml = await readTextBounded(upstream, 12_000_000, remainingMs);
       const locations = extractCompleteYandexModelLocations(xml, target);
       if (!locations) throw new Error("Yandex batch shard did not prove complete exact XML");
@@ -2134,7 +2149,15 @@ async function fetchCompleteYandexBatchShard(sitemap: string): Promise<{
     } catch (error) {
       lastError = error;
       if (error instanceof NonRetryableYandexBatchShardError || attempt === YANDEX_BATCH_SHARD_ATTEMPTS) break;
-      await new Promise((resolve) => setTimeout(resolve, attempt * 100));
+      // A fast HTTP 200 with incomplete XML can be a transient in-progress
+      // sitemap object. Give that object time to settle, but start another
+      // attempt only when at least ten useful seconds remain inside the fixed
+      // Function's 120-second ceiling. Two slow 50-second attempts therefore
+      // stay the maximum; only fast failures can use the third attempt.
+      const retryDelayMs = attempt * 1_000;
+      const budgetAfterDelay = YANDEX_BATCH_SHARD_TOTAL_MS - (Date.now() - shardStartedAt) - retryDelayMs;
+      if (budgetAfterDelay < YANDEX_BATCH_SHARD_MIN_ATTEMPT_MS) break;
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     } finally {
       clearTimeout(attemptTimer);
     }
@@ -2152,6 +2175,10 @@ async function collectYandexBatch(batch: YandexBatchRequest): Promise<{
 }> {
   const matches: Array<{ brand: string; url: string; sitemap: string }> = [];
   const tombstonedSitemaps: string[] = [];
+  const preparedBrands: PreparedYandexBrand[] = batch.brands.map(({ brand, tokens }) => ({
+    brand,
+    tokens: tokens.map((value) => ({ value, score: value.replace(/\s+/g, "").length }))
+  }));
   let cursor = 0;
   let failure: unknown;
   const workers = Array.from({ length: Math.min(2, batch.sitemaps.length) }, async () => {
@@ -2164,12 +2191,23 @@ async function collectYandexBatch(batch: YandexBatchRequest): Promise<{
         if (shard.tombstoned) tombstonedSitemaps.push(sitemap);
         const productUrls = shard.locations;
         for (const productUrl of productUrls) {
-          const matched = batch.brands
-            .map((brand) => ({ brand, score: yandexProductMatchScore(productUrl, brand.tokens) }))
-            .filter(({ score }) => score >= 0);
-          const bestScore = Math.max(-1, ...matched.map(({ score }) => score));
-          for (const { brand, score } of matched) {
-            if (score === bestScore) matches.push({ brand: brand.brand, url: productUrl, sitemap });
+          const slug = yandexProductSlug(productUrl);
+          // fetchCompleteYandexBatchShard has already proven this exact route;
+          // keep the guard fail-closed if the two parsers ever drift apart.
+          if (slug === undefined) throw new Error(`Yandex batch matcher rejected a proven product route: ${productUrl}`);
+          let bestScore = -1;
+          const matchedBrands: string[] = [];
+          for (const brand of preparedBrands) {
+            const score = yandexProductMatchScore(slug, brand.tokens);
+            if (score < bestScore || score < 0) continue;
+            if (score > bestScore) {
+              bestScore = score;
+              matchedBrands.length = 0;
+            }
+            matchedBrands.push(brand.brand);
+          }
+          for (const brand of matchedBrands) {
+            matches.push({ brand, url: productUrl, sitemap });
           }
         }
       } catch (error) {
