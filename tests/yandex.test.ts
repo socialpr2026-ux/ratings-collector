@@ -141,6 +141,39 @@ describe("YandexAdapter discovery", () => {
     });
   });
 
+  it("falls back to the exhaustive Reviews index when Market browser proof is unavailable", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url.startsWith("https://market.yandex.ru/search?")) {
+        throw new AdapterBlockedError("EdgeOne Sandbox is unavailable: HTTP 524");
+      }
+      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A]));
+      if (url === MAP_A) return xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/enterolaktis-plyus--111"
+      ]));
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexMarketBrowserEndpoint?: string };
+    fetch.yandexMarketBrowserEndpoint = "https://market.yandex.ru/search";
+    const activity: AdapterActivityEvent[] = [];
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 2 });
+
+    const refs = await adapter.discover("Энтеролактис", context({
+      brands: ["Энтеролактис"],
+      activity: async (event) => { activity.push(event); }
+    }));
+
+    expect(refs).toMatchObject([{
+      listingId: "111",
+      url: "https://reviews.yandex.ru/product/enterolaktis-plyus--111",
+      metadata: { discovery: "reviews_sitemap", sourceSitemap: MAP_A }
+    }]);
+    expect(activity).toContainEqual(expect.objectContaining({
+      operationId: "yandex:market-to-reviews-fallback",
+      status: "warning"
+    }));
+  });
+
   it("discovers model cards by Cyrillic brand transliteration and deduplicates modelId", async () => {
     const fetch = routeFetch({
       [INDEX]: xmlResponse(sitemapIndex([MAP_A, MAP_B])),

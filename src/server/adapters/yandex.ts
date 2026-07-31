@@ -11,7 +11,7 @@ import { aliasesForBrand, matchesBrand, normalizeRating } from "../utils/normali
 import { readTextBounded } from "../utils/safe-fetch.js";
 import { canonicalizeUrl } from "../utils/urls.js";
 import { extractPageProductEvidence, titleProvesProductVariant } from "../utils/product-evidence.js";
-import { AdapterBlockedError, ParserChangedError } from "./errors.js";
+import { AdapterBlockedError, AdapterQuotaError, ParserChangedError } from "./errors.js";
 
 const DEFAULT_SITEMAP_INDEX = "https://reviews.yandex.ru/ugcpub/sitemap.xml";
 const REVIEWS_ORIGIN = "https://reviews.yandex.ru";
@@ -314,22 +314,36 @@ export class YandexAdapter implements SiteAdapter {
 
     const fetcher = (context.fetch ?? this.fallbackFetch) as YandexCapableFetch;
     if (fetcher.yandexMarketBrowserEndpoint) {
-      for (const ref of await this.discoverMarketCards(
-        fetcher.yandexMarketBrowserEndpoint,
-        brand,
-        context
-      )) {
-        refs.set(ref.listingId, ref);
-      }
-      if (refs.size > this.maxCandidates) {
-        throw new AdapterBlockedError(
-          `Yandex Market discovery for ${brand} found more than ${this.maxCandidates} distinct cards`
+      try {
+        for (const ref of await this.discoverMarketCards(
+          fetcher.yandexMarketBrowserEndpoint,
+          brand,
+          context
+        )) {
+          refs.set(ref.listingId, ref);
+        }
+        if (refs.size > this.maxCandidates) {
+          throw new AdapterBlockedError(
+            `Yandex Market discovery for ${brand} found more than ${this.maxCandidates} distinct cards`
+          );
+        }
+        return [...refs.values()].sort((a, b) =>
+          Number(knownSet.has(b.listingId)) - Number(knownSet.has(a.listingId)) ||
+          (a.title ?? "").localeCompare(b.title ?? "", "ru") || compareIds(a.listingId, b.listingId)
         );
+      } catch (error) {
+        if (!(error instanceof AdapterBlockedError) && !(error instanceof AdapterQuotaError) &&
+          !(error instanceof ParserChangedError)) throw error;
+        if (context.signal?.aborted) throw error;
+        await reportActivity(context, {
+          operationId: "yandex:market-to-reviews-fallback",
+          stage: "discovery",
+          status: "warning",
+          label: "Yandex: резервный полный индекс",
+          channels: ["gateway"],
+          detail: `Market proof недоступен; проверяем полный Reviews index: ${errorMessage(error)}`
+        });
       }
-      return [...refs.values()].sort((a, b) =>
-        Number(knownSet.has(b.listingId)) - Number(knownSet.has(a.listingId)) ||
-        (a.title ?? "").localeCompare(b.title ?? "", "ru") || compareIds(a.listingId, b.listingId)
-      );
     }
 
     const brands = uniqueDiscoveryBrands(brand, context.brands ?? []);

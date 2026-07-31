@@ -583,7 +583,7 @@ describe("WildberriesAdapter.discover", () => {
       if (url.hostname === "feedbacks1.wb.ru") {
         return jsonResponse({
           feedbackCount: 68,
-          valuation: 5,
+          valuation: 0,
           nmValuationDistribution: [
             { nm: 999999999, valuationDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 68 } }
           ]
@@ -637,6 +637,42 @@ describe("WildberriesAdapter.discover", () => {
     });
     expect(observation.evidenceRef).toBe("https://feedbacks1.wb.ru/feedbacks/v2/393735497");
     expect(observation).not.toHaveProperty("rawRating");
+  });
+
+  it("collapses a root aggregate when card v4 omits metrics and the nm distribution covers only one variant", async () => {
+    const products = [790240262, 790240263, 790240264, 790240265].map((id, index) => ({
+      id,
+      root: 828092104,
+      brand: "Энтеролактис",
+      name: `Энтеролактис Плюс капсулы вариант ${index + 1}`
+    }));
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: products.length, products });
+      if (url.hostname === "card.wb.ru") return jsonResponse({ products });
+      if (url.hostname === "feedbacks1.wb.ru") {
+        return jsonResponse({
+          feedbackCount: 1,
+          valuation: "5.0",
+          valuationDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 1 },
+          nmValuationDistribution: [{
+            nm: 790240265,
+            valuationDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 1 }
+          }]
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("Энтеролактис", context({ runId: "partial-nm-root-aggregate" }));
+
+    const observations = await Promise.all(refs.map((item) => adapter.collect(item, context())));
+
+    expect(observations).toHaveLength(4);
+    expect(observations.every((item) => item.reviews === 1 && item.writtenReviewCount === 1 &&
+      item.ratingCount === 1 && item.rating === 5 &&
+      item.aggregateGroupId === "wildberries:root:828092104" &&
+      item.source === "wildberries-root-family-aggregate")).toBe(true);
   });
 
   it("marks a proven root-only aggregate for family-row collapse", async () => {

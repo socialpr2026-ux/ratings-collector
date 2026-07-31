@@ -206,6 +206,30 @@ function applyExplicitRootZero(
   return true;
 }
 
+function applySharedRootAggregate(
+  rootId: string,
+  members: ProductRef[],
+  payload: JsonObject,
+  evidenceUrl: string
+): boolean {
+  if (applyExplicitRootZero(rootId, members, payload, evidenceUrl)) return true;
+  const feedbackCount = asNonnegativeInteger(payload.feedbackCount);
+  const rating = asFiniteNumber(payload.valuation);
+  if (feedbackCount === undefined || rating === undefined || rating < 0 || rating > 5 ||
+    (feedbackCount > 0 && rating === 0)) return false;
+  const rootDistribution = distributionMetrics(payload.valuationDistribution);
+  for (const member of members) {
+    member.metadata.resolvedFeedbackCount = feedbackCount;
+    member.metadata.writtenReviewCount = feedbackCount;
+    if (rootDistribution) member.metadata.ratingCount = rootDistribution.ratingCount;
+    member.metadata.resolvedRating = feedbackCount === 0 ? 0 : rating;
+    member.metadata.aggregateGroupId = `wildberries:root:${rootId}`;
+    member.metadata.source = "wildberries-root-family-aggregate";
+    member.metadata.evidenceRef = evidenceUrl;
+  }
+  return true;
+}
+
 function parseProductPage(payload: unknown): ProductPage {
   if (!isObject(payload)) {
     throw new ParserChangedError("Wildberries returned a non-object payload");
@@ -783,7 +807,7 @@ export class WildberriesAdapter implements SiteAdapter {
     for (const [rootId, members] of refsByRoot) {
       const missingNmMetrics = missingNmMetricsByRoot.get(rootId);
       if (missingNmMetrics?.length) {
-        await this.resolveRequiredRootNmMetrics(rootId, missingNmMetrics, context);
+        await this.resolveRequiredRootNmMetrics(rootId, members, missingNmMetrics, context);
       }
       const byFingerprint = new Map<string, ProductRef[]>();
       for (const member of members) {
@@ -808,6 +832,7 @@ export class WildberriesAdapter implements SiteAdapter {
 
   private async resolveRequiredRootNmMetrics(
     rootId: string,
+    rootMembers: ProductRef[],
     requiredMembers: ProductRef[],
     context: AdapterContext
   ): Promise<void> {
@@ -829,6 +854,11 @@ export class WildberriesAdapter implements SiteAdapter {
     }
     const missing = requiredMembers.filter((member) => !byListingId.has(member.listingId));
     if (missing.length > 0) {
+      // Wildberries may expose one exact root aggregate while publishing an
+      // nm distribution for only one of several variants. Bind that aggregate
+      // to the proven root and collapse it once; never duplicate it across the
+      // missing SKUs or substitute unrelated per-card counters.
+      if (applySharedRootAggregate(rootId, rootMembers, payload, evidenceUrl)) return;
       throw new ParserChangedError(
         `Wildberries root ${rootId} does not contain exact nm distribution for ${missing.map(({ listingId }) => listingId).join(",")}`
       );
@@ -854,22 +884,8 @@ export class WildberriesAdapter implements SiteAdapter {
     if (!isObject(payload)) throw new ParserChangedError(`Wildberries root ${rootId} returned a non-object payload`);
 
     const applySharedAggregate = () => {
-      if (applyExplicitRootZero(rootId, members, payload, evidenceUrl)) return;
-      const feedbackCount = asNonnegativeInteger(payload.feedbackCount);
-      const rating = asFiniteNumber(payload.valuation);
-      if (feedbackCount === undefined || rating === undefined || rating < 0 || rating > 5 ||
-        (feedbackCount > 0 && rating === 0)) {
+      if (!applySharedRootAggregate(rootId, members, payload, evidenceUrl)) {
         throw new ParserChangedError(`Wildberries root ${rootId} has no valid shared aggregate`);
-      }
-      const rootDistribution = distributionMetrics(payload.valuationDistribution);
-      for (const member of members) {
-        member.metadata.resolvedFeedbackCount = feedbackCount;
-        member.metadata.writtenReviewCount = feedbackCount;
-        if (rootDistribution) member.metadata.ratingCount = rootDistribution.ratingCount;
-        member.metadata.resolvedRating = feedbackCount === 0 ? 0 : rating;
-        member.metadata.aggregateGroupId = `wildberries:root:${rootId}`;
-        member.metadata.source = "wildberries-root-family-aggregate";
-        member.metadata.evidenceRef = evidenceUrl;
       }
     };
 
