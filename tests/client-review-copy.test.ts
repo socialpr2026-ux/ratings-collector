@@ -5,6 +5,7 @@ import {
   canConfirmObservation,
   canPublishSuccessfulPartitions,
   canRetryFailedPartitions,
+  hasCurrentPartialPublication,
   finalProductLabel,
   friendlyErrorMessage,
   friendlyIssueText,
@@ -101,6 +102,15 @@ describe("plain-language feedback", () => {
     const message = friendlyErrorMessage("Неожиданная ошибка оформления", "publish");
     expect(message).toBe("Не удалось записать данные в Google Таблицу. Результат сбора сохранён — повторите запись.");
     expect(message).not.toContain("Редактор");
+  });
+
+  it("does not misreport a collector quota embedded in a publication failure", () => {
+    const message = friendlyErrorMessage(
+      "Публикация заблокирована: ozon.ru / Энтеролактис: Monthly sandbox GB-s quota exceeded",
+      "publish"
+    );
+    expect(message).toBe("Не удалось записать данные в Google Таблицу. Результат сбора сохранён — повторите запись.");
+    expect(message).not.toContain("лимит сбора");
   });
 
   it("keeps the affected site while simplifying QA blockers", () => {
@@ -212,6 +222,29 @@ describe("failed partition retry eligibility", () => {
     expect(canRetryFailedPartitions("running", 1)).toBe(false);
     expect(canRetryFailedPartitions("publishing", 1)).toBe(false);
     expect(canRetryFailedPartitions("published", 1)).toBe(false);
+  });
+});
+
+describe("partial publication checkpoint", () => {
+  it("recognizes a current partial write while the run remains retryable", () => {
+    expect(hasCurrentPartialPublication({
+      status: "review",
+      payloadHash: "partial-hash",
+      publicationExclusions: [{
+        domain: "ozon.ru",
+        brand: "Энтеролактис",
+        reason: "quota",
+        excludedAt: "2026-07-31T08:00:00.000Z"
+      }],
+      publication: {
+        runId: "run-1",
+        spreadsheetId: "sheet-1",
+        month: "2026-07",
+        payloadHash: "partial-hash",
+        publishedAt: "2026-07-31T08:01:00.000Z",
+        updatedRange: "'Ratings Энтеролактис'!A1:F54"
+      }
+    })).toBe(true);
   });
 });
 

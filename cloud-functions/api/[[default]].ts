@@ -3302,7 +3302,12 @@ export default async function onRequest(context: Context): Promise<Response> {
       if (!run) return json({ error: "Запуск не найден" }, 404);
       assertOwner(run, user);
       if (reconcileStaleCollectionCheckpoint(run)) await repository.saveRun(run);
-      if (run.status !== "published") run = await reconcileBrowserPublication(repository, run);
+      // Older deployments marked a successful partial write as fully
+      // published. Reconcile those stored runs too so failed-only retry becomes
+      // available without creating a replacement run.
+      if (run.status !== "published" || (run.publicationExclusions?.length ?? 0) > 0) {
+        run = await reconcileBrowserPublication(repository, run);
+      }
       return json(pagedRun(run, url));
     }
     if (context.request.method === "POST" && publishMatch) {

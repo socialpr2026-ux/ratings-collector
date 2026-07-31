@@ -74,9 +74,8 @@ export function validateRun(run: RunState): QaResult {
       blockers.push(`${item.domain}:${item.listingId}: карточка вне запрошенного набора`);
     }
     const partitionKey = `${item.domain}\u0000${item.brand}`;
-    if (excludedKeys.has(partitionKey)) {
-      blockers.push(`${item.domain}:${item.listingId}: карточка исключённого раздела попала в публикацию`);
-    }
+    // Exact cards from a failed partition remain in the run as a recovery
+    // checkpoint. Publication scopes them out via publicationExclusions.
     observationsByPartition.set(partitionKey, (observationsByPartition.get(partitionKey) ?? 0) + 1);
     const key = productKey(item.domain, item.listingId);
     if (seen.has(key)) blockers.push(`Дубликат устойчивого ID: ${key}`);

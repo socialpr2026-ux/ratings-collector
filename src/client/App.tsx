@@ -9,6 +9,7 @@ import {
   brandSheetDestinationText,
   canConfirmObservation,
   canPublishSuccessfulPartitions,
+  hasCurrentPartialPublication,
   canRetryFailedPartitions,
   finalProductLabel,
   friendlyErrorMessage,
@@ -831,6 +832,7 @@ export function App() {
     failedPartitionCount,
     reviewItems.length
   ));
+  const partialPublicationCompleted = Boolean(run && hasCurrentPartialPublication(run));
   const cleanReviewReady = Boolean(run?.status === "review" && reviewItems.length === 0 && failedPartitionCount === 0 && run.qa?.ok !== false);
   const reviewSectionTitle = run?.status === "published"
     ? "Результат записан"
@@ -1215,7 +1217,7 @@ export function App() {
 
         {(partitionSummary?.failed ?? 0) > 0 && run.status !== "published" && <div className="collection-warning" role="status">
           <span className="notice-icon" aria-hidden="true">!</span>
-          <div><strong>{collectionIsContinuing ? busyAction === "continue" ? "Автоматически продолжаем с сохранённого места…" : "Повторно проверяем проблемные площадки…" : canPublishCompletedOnly ? "Часть проверок не завершена" : "Сбор неполный — публикация отключена"}</strong><p>{collectionIsContinuing ? "Готовые результаты остаются на месте. После завершения список и проверка публикации обновятся автоматически." : canPublishCompletedOnly ? "Успешные бренды и площадки сохранены. Их можно записать сейчас, а неуспешные проверки повторить позже." : "Данные не будут записаны частично. Можно повторить только неуспешные площадки, не запуская весь сбор заново."}</p></div>
+          <div><strong>{collectionIsContinuing ? busyAction === "continue" ? "Автоматически продолжаем с сохранённого места…" : "Повторно проверяем проблемные площадки…" : partialPublicationCompleted ? "Готовая часть уже записана" : canPublishCompletedOnly ? "Часть проверок не завершена" : "Сбор неполный — публикация отключена"}</strong><p>{collectionIsContinuing ? "Готовые результаты остаются на месте. После завершения список и проверка публикации обновятся автоматически." : partialPublicationCompleted ? "Повторите только проблемные площадки. Уже записанные карточки сохранятся, а восстановленные результаты можно будет дописать без дублей." : canPublishCompletedOnly ? "Успешные бренды и площадки сохранены. Их можно записать сейчас, а неуспешные проверки повторить позже." : "Данные не будут записаны частично. Можно повторить только неуспешные площадки, не запуская весь сбор заново."}</p></div>
           <div className="collection-warning-actions">
             {canRetry && <button className="button button-secondary" type="button" onClick={retryFailedPartitions} disabled={busy}>{collectionIsContinuing ? "Продолжаем…" : "Повторить неуспешные площадки"}</button>}
             <a className="button button-quiet" href="#publish-status">Посмотреть причины</a>
@@ -1333,7 +1335,7 @@ export function App() {
       {run?.qa && <section id="publish-status" className={`card publish-card ${run.qa.ok ? "publish-ready" : "publish-blocked"}`} aria-labelledby="publish-title">
         <div className="publish-summary">
           <span className="publish-icon" aria-hidden="true">{run.qa.ok ? "✓" : "!"}</span>
-          <div><p className="section-number">Шаг 4</p><h2 id="publish-title">{run.status === "published" ? "Готово — таблица обновлена" : run.qa.ok ? "Всё готово к записи" : canPublishCompletedOnly ? "Готовые результаты можно записать" : "Сначала устраните замечания"}</h2><p>{run.status === "published" ? `Данные за ${formatMonth(run.request.month)} сохранены в ${brandSheetDestinationText(publicationSummary.brands)}: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")}.` : run.qa.ok ? `Будет записано: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")} за ${formatMonth(run.request.month)} ${BRAND_SHEET_COLUMNS_TEXT}` : canPublishCompletedOnly ? `Будут записаны ${publicationSummary.cards} ${plural(publicationSummary.cards, "готовая карточка", "готовые карточки", "готовых карточек")} из ${successfulPartitionCount} ${plural(successfulPartitionCount, "успешно завершённой проверки", "успешно завершённых проверок", "успешно завершённых проверок")}. Неуспешные сочетания площадок и брендов останутся пустыми за текущий месяц; их ошибки не станут нулями.` : "Разберите отмеченные карточки или повторите проблемные площадки."}</p></div>
+          <div><p className="section-number">Шаг 4</p><h2 id="publish-title">{run.status === "published" ? "Готово — таблица обновлена" : partialPublicationCompleted ? "Готовые результаты записаны" : canPublishCompletedOnly ? "Готовые результаты можно записать" : run.qa.ok ? "Всё готово к записи" : "Сначала устраните замечания"}</h2><p>{run.status === "published" ? `Данные за ${formatMonth(run.request.month)} сохранены в ${brandSheetDestinationText(publicationSummary.brands)}: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")}.` : partialPublicationCompleted ? `${publicationSummary.cards} ${plural(publicationSummary.cards, "готовая карточка уже записана", "готовые карточки уже записаны", "готовых карточек уже записаны")}. Повторите ${failedPartitionCount} ${plural(failedPartitionCount, "неуспешную проверку", "неуспешные проверки", "неуспешных проверок")}; восстановленные данные можно будет дописать без потерь и дублей.` : canPublishCompletedOnly ? `Будут записаны ${publicationSummary.cards} ${plural(publicationSummary.cards, "готовая карточка", "готовые карточки", "готовых карточек")} из ${successfulPartitionCount} ${plural(successfulPartitionCount, "успешно завершённой проверки", "успешно завершённых проверок", "успешно завершённых проверок")}. Неуспешные сочетания площадок и брендов останутся пустыми за текущий месяц; их ошибки не станут нулями.` : run.qa.ok ? `Будет записано: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")} за ${formatMonth(run.request.month)} ${BRAND_SHEET_COLUMNS_TEXT}` : "Разберите отмеченные карточки или повторите проблемные площадки."}</p></div>
         </div>
 
         {run.status === "published" && run.request.domains.includes("market.yandex.ru") && run.request.discoveryMode !== "refresh" && <div className="discovery-followup">
@@ -1352,10 +1354,10 @@ export function App() {
               {canPublishCompletedOnly && <button
                 className="button button-secondary"
                 type="button"
-                disabled={busy}
+                disabled={busy || partialPublicationCompleted}
                 onClick={() => publish(true)}
-              >{busyAction === "publish" ? "Записываем готовые данные…" : "Записать готовые результаты"}</button>}
-              <button className="button button-primary" type="button" disabled={!run.qa.ok || busy || run.status === "failed"} onClick={() => publish(false)}>{busyAction === "publish" ? "Записываем…" : "Записать в таблицу"} <span aria-hidden="true">→</span></button>
+              >{partialPublicationCompleted ? "Готовые результаты записаны" : busyAction === "publish" ? "Записываем готовые данные…" : "Записать готовые результаты"}</button>}
+              <button className="button button-primary" type="button" disabled={!run.qa.ok || failedPartitionCount > 0 || busy || run.status === "failed"} onClick={() => publish(false)}>{busyAction === "publish" ? "Записываем…" : "Записать в таблицу"} <span aria-hidden="true">→</span></button>
             </>}
         </div>
       </section>}

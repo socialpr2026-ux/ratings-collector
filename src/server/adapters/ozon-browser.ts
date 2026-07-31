@@ -8,7 +8,7 @@ import type {
   SiteAdapter
 } from "../../shared/types.js";
 import { matchesBrand, normalizeRating } from "../utils/normalize.js";
-import { AdapterBlockedError, ParserChangedError } from "./errors.js";
+import { AdapterBlockedError, AdapterQuotaError, ParserChangedError } from "./errors.js";
 
 const SEARCH_ENDPOINT = "https://www.ozon.ru/api/composer-api.bx/page/json/v2";
 const TRANSLATE_ORIGIN = "https://www-ozon-ru.translate.goog";
@@ -930,10 +930,12 @@ export class OzonBrowserAdapter implements SiteAdapter {
       if (product.reviews === null || product.reviews <= 0 || product.rating === null || product.rating <= 0) return false;
       return (metricFrequency.get(`${product.reviews}\u0000${product.rating}`) ?? 0) > 1;
     };
-    await mapWithConcurrency(
-      matchedProducts.filter(needsExactPrefetch),
-      this.detailConcurrency,
-      async (product, index) => {
+    let partialFailure: AdapterBlockedError | AdapterQuotaError | ParserChangedError | undefined;
+    try {
+      await mapWithConcurrency(
+        matchedProducts.filter(needsExactPrefetch),
+        this.detailConcurrency,
+        async (product, index) => {
         if (index > 0 && this.detailDelayMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, this.detailDelayMs));
           context.signal?.throwIfAborted();
@@ -1025,9 +1027,25 @@ export class OzonBrowserAdapter implements SiteAdapter {
         setBounded(this.exactProductCache, proofCacheKey, exact, 5_000);
         exactMetrics.set(product.listingId, exact);
         return exact;
-      }
-    );
-    return matchedProducts.map((product): ProductRef => {
+        }
+      );
+    } catch (error) {
+      if (
+        !(error instanceof AdapterBlockedError) &&
+        !(error instanceof AdapterQuotaError) &&
+        !(error instanceof ParserChangedError)
+      ) throw error;
+      partialFailure = error;
+    }
+    const publishableProducts = partialFailure
+      ? matchedProducts.filter((product) =>
+        !needsExactPrefetch(product) ||
+        exactMetrics.has(product.listingId) ||
+        searchTileFallbacks.has(product.listingId)
+      )
+      : matchedProducts;
+    if (partialFailure && publishableProducts.length === 0) throw partialFailure;
+    return publishableProducts.map((product): ProductRef => {
       const exact = exactMetrics.get(product.listingId);
       const searchTileFallback = searchTileFallbacks.get(product.listingId);
       return {
@@ -1043,8 +1061,15 @@ export class OzonBrowserAdapter implements SiteAdapter {
         reviewCount: exact ? exact.reviews : product.reviews,
         rawRating: exact ? exact.rawRating : product.rawRating,
         rawReviewCount: product.rawReviewCount,
-        capturedAt,
-        source: product.source,
+         capturedAt,
+         source: product.source,
+        ...(partialFailure ? {
+          partialDiscoveryStatus: partialFailure instanceof AdapterQuotaError
+            ? "quota_exceeded"
+            : partialFailure instanceof ParserChangedError ? "parser_changed" : "blocked",
+          partialDiscoveryMessage: partialFailure.message,
+          partialDiscoveryTotal: matchedProducts.length
+        } : {}),
         ...(searchTileFallback ? {
           exactProductFallback: "search_tile",
           exactProductFallbackReason: searchTileFallback

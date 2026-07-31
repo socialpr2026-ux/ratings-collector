@@ -826,7 +826,7 @@ describe("Ozon browser collector", () => {
     });
   });
 
-  it("reuses completed search and product proofs when only the last Ozon card remains blocked", async () => {
+  it("returns and reuses completed product proofs when only the last Ozon card remains blocked", async () => {
     const items = [
       translatedTile("730001", "Бактоблис саше №10", "4.9", 11),
       translatedTile("730002", "Бактоблис саше №30", "4.8", 12),
@@ -864,8 +864,17 @@ describe("Ozon browser collector", () => {
     });
     const runContext = { ...context, runId: "run-baktoblis", brands: ["Бактоблис"] };
 
-    await expect(adapter.discover("Бактоблис", runContext)).rejects.toThrow("product composer");
-    await expect(adapter.discover("Бактоблис", runContext)).rejects.toThrow("product composer");
+    const first = await adapter.discover("Бактоблис", runContext);
+    const second = await adapter.discover("Бактоблис", runContext);
+
+    expect(first.map(({ listingId }) => listingId)).toEqual(["730001", "730002"]);
+    expect(second.map(({ listingId }) => listingId)).toEqual(["730001", "730002"]);
+    expect(first.every((ref) =>
+      ref.metadata.partialDiscoveryStatus === "blocked" &&
+      ref.metadata.partialDiscoveryTotal === 3 &&
+      String(ref.metadata.partialDiscoveryMessage).includes("product composer")
+    )).toBe(true);
+    await expect(Promise.all(first.map((ref) => adapter.collect(ref, runContext)))).resolves.toHaveLength(2);
 
     expect(searchCalls).toBe(1);
     expect(detailCalls.get("730001")).toBe(1);

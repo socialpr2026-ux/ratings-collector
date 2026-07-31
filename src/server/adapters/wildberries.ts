@@ -616,9 +616,20 @@ export class WildberriesAdapter implements SiteAdapter {
         cards.set(listingId, { product, evidenceRef: evidenceUrl });
       }
       const missing = [...expected].filter((listingId) => !cards.has(listingId));
-      if (missing.length > 0) {
+      for (const listingId of missing) {
+        const { page: singleton, evidenceUrl: singletonEvidenceUrl } = await this.fetchCard(listingId, context);
+        for (const product of singleton.products) {
+          const returnedId = firstDefinedId(product, ["id", "nmId", "nmID"]);
+          if (returnedId !== listingId || cards.has(returnedId)) {
+            throw new ParserChangedError(`Wildberries singleton card request returned unexpected nmId ${returnedId ?? "unknown"}`);
+          }
+          cards.set(listingId, { product, evidenceRef: singletonEvidenceUrl });
+        }
+      }
+      const stillMissing = missing.filter((listingId) => !cards.has(listingId));
+      if (stillMissing.length > 0) {
         throw new AdapterBlockedError(
-          `Wildberries card batch omitted ${missing.length} requested nmIds: ${missing.join(",")}`
+          `Wildberries card batch and singleton retry omitted ${stillMissing.length} requested nmIds: ${stillMissing.join(",")}`
         );
       }
     }

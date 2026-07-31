@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { RunState } from "../src/shared/types.js";
 import { RatingsService } from "../src/server/orchestrator.js";
 import { MemoryRepository } from "../src/server/repository.js";
+import { AdapterQuotaError } from "../src/server/adapters/errors.js";
 import {
   completeBrowserPublication,
   failBrowserPublication,
@@ -39,7 +40,7 @@ function service(repository: MemoryRepository) {
 }
 
 describe("anonymous browser publication state", () => {
-  it("publishes successful partitions after explicitly excluding failures and removes their partial cards", async () => {
+  it("publishes successful partitions while preserving failed-partition cards for recovery", async () => {
     const repository = new MemoryRepository();
     const ratings = service(repository);
     const current = run();
@@ -52,10 +53,118 @@ describe("anonymous browser publication state", () => {
 
     const scoped = await ratings.excludeFailedPartitionsFromPublication(current.id);
 
-    expect(scoped.observations.map((item) => item.domain)).toEqual(["example.com"]);
+    expect(scoped.observations.map((item) => item.domain)).toEqual(["example.com", "blocked.example"]);
     expect(scoped.publicationExclusions).toMatchObject([{ domain: "blocked.example", brand: "Brand" }]);
     expect(scoped.qa).toMatchObject({ ok: true, blockers: [] });
-    await expect(prepareBrowserPublication(repository, ratings, scoped)).resolves.toMatchObject({ shouldPublish: true });
+    const intent = await prepareBrowserPublication(repository, ratings, scoped);
+    const completed = await completeBrowserPublication(repository, ratings, intent, {
+      range: "A1:F8",
+      verifiedAt: "2026-07-31T07:00:00.000Z",
+      attempts: 1,
+      limitations: [],
+      tabs: [{ tabName: "Ratings Brand", range: "A1:F8" }]
+    });
+    expect(completed.observations.map((item) => item.domain)).toEqual(["example.com", "blocked.example"]);
+    expect(Object.keys((await repository.getSnapshots("test_sheet"))["2026-07"])).toEqual(["example.com:1"]);
+    expect(await repository.listProducts("test_sheet")).toHaveLength(1);
+  });
+
+  it("keeps a partial write retryable, recollects only failures and republishes without duplicate records", async () => {
+    const repository = new MemoryRepository();
+    const calls = new Map<string, number>();
+    let blockedAttempts = 0;
+    const ratings = new RatingsService(repository, async (domain) => ({
+      id: domain,
+      supportedDomains: [domain],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        calls.set(domain, (calls.get(domain) ?? 0) + 1);
+        if (domain === "blocked.example" && blockedAttempts++ === 0) {
+          throw new AdapterQuotaError("temporary quota gate");
+        }
+        return [{
+          domain,
+          platform: domain,
+          listingId: "1",
+          brand,
+          url: `https://${domain}/products/1`,
+          metadata: {}
+        }];
+      },
+      async collect(ref) {
+        return {
+          domain: ref.domain,
+          platform: ref.platform,
+          listingId: ref.listingId,
+          brand: ref.brand,
+          canonicalUrl: ref.url,
+          product: `${ref.brand} таблетки 100 мг №10`,
+          reviews: 12,
+          rating: 4.8,
+          status: "ok" as const,
+          capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+    const created = await ratings.createRun({
+      ...run().request,
+      domains: ["example.com", "blocked.example"]
+    });
+    const collected = await ratings.executeRun(created.id);
+    expect(collected.partitions.map((item) => [item.domain, item.status])).toEqual([
+      ["example.com", "complete"],
+      ["blocked.example", "blocked"]
+    ]);
+
+    const scoped = await ratings.excludeFailedPartitionsFromPublication(created.id);
+    const partialIntent = await prepareBrowserPublication(repository, ratings, scoped);
+    const partial = await completeBrowserPublication(repository, ratings, partialIntent, {
+      range: "A1:F8",
+      verifiedAt: "2026-07-31T08:00:00.000Z",
+      attempts: 1,
+      limitations: [],
+      tabs: [{ tabName: "Ratings Brand", range: "A1:F8" }],
+      verificationMethod: "apps-script-readback"
+    });
+
+    expect(partial.status).toBe("review");
+    expect(partial.publicationExclusions).toHaveLength(1);
+    expect(partial.publication?.payloadHash).toBe(partial.payloadHash);
+    expect(Object.keys((await repository.getSnapshots("test_sheet"))["2026-07"])).toEqual(["example.com:1"]);
+
+    const repeatedPartial = await prepareBrowserPublication(repository, ratings, partial);
+    expect(repeatedPartial).toMatchObject({ shouldPublish: false, run: { status: "review" } });
+    expect((await reconcileBrowserPublication(repository, repeatedPartial.run)).status).toBe("review");
+    const legacyPartial = { ...repeatedPartial.run, status: "published" as const };
+    await repository.saveRun(legacyPartial);
+    expect((await reconcileBrowserPublication(repository, legacyPartial)).status).toBe("review");
+
+    const retried = await ratings.executeRun(created.id);
+    expect(calls).toEqual(new Map([["example.com", 1], ["blocked.example", 2]]));
+    expect(retried.partitions.map((item) => [item.domain, item.status])).toEqual([
+      ["example.com", "complete"],
+      ["blocked.example", "complete"]
+    ]);
+    expect(retried.observations).toHaveLength(2);
+    expect(retried.publicationExclusions).toBeUndefined();
+
+    const fullIntent = await prepareBrowserPublication(repository, ratings, retried);
+    expect(fullIntent.shouldPublish).toBe(true);
+    const completed = await completeBrowserPublication(repository, ratings, fullIntent, {
+      range: "A1:F9",
+      verifiedAt: "2026-07-31T08:05:00.000Z",
+      attempts: 1,
+      limitations: [],
+      tabs: [{ tabName: "Ratings Brand", range: "A1:F9" }],
+      verificationMethod: "apps-script-readback"
+    });
+
+    expect(completed.status).toBe("published");
+    expect(await repository.listProducts("test_sheet")).toHaveLength(2);
+    expect(Object.keys((await repository.getSnapshots("test_sheet"))["2026-07"]).sort()).toEqual([
+      "blocked.example:1",
+      "example.com:1"
+    ]);
   });
 
   it("reserves, commits and deduplicates the same month payload", async () => {

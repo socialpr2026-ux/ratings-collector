@@ -18,6 +18,7 @@ import { GenericSiteAdapter } from "./generic/adapter.js";
 import { profileSite } from "./generic/profiler.js";
 import { validateRun } from "./qa.js";
 import { productKey, type Repository } from "./repository.js";
+import { observationsForPublication } from "./publication-scope.js";
 import { AdapterBlockedError, AdapterQuotaError, ParserChangedError } from "./adapters/errors.js";
 import { safeErrorMessage } from "./utils/error-message.js";
 import { matchesBrand, normalizeText } from "./utils/normalize.js";
@@ -106,6 +107,39 @@ function errorStatus(error: unknown): "blocked" | "quota_exceeded" | "parser_cha
   if (error instanceof AdapterQuotaError) return "quota_exceeded";
   if (error instanceof ParserChangedError) return "parser_changed";
   return "error";
+}
+
+type PartialDiscoveryFailure = {
+  status: "blocked" | "quota_exceeded" | "parser_changed";
+  message: string;
+  total: number;
+};
+
+function partialDiscoveryFailure(refs: readonly ProductRef[]): PartialDiscoveryFailure | undefined {
+  const marked = refs.filter((ref) => ref.metadata.partialDiscoveryStatus !== undefined);
+  if (marked.length === 0) return undefined;
+  if (marked.length !== refs.length) {
+    throw new ParserChangedError("Сборщик смешал полную и частичную выдачу карточек");
+  }
+  const first = marked[0]!.metadata;
+  const status = first.partialDiscoveryStatus;
+  const message = first.partialDiscoveryMessage;
+  const total = first.partialDiscoveryTotal;
+  if (
+    !["blocked", "quota_exceeded", "parser_changed"].includes(String(status)) ||
+    typeof message !== "string" || !message.trim() ||
+    !Number.isSafeInteger(total) || Number(total) < refs.length
+  ) {
+    throw new ParserChangedError("Сборщик вернул некорректный признак частичной выдачи");
+  }
+  if (marked.some((ref) =>
+    ref.metadata.partialDiscoveryStatus !== status ||
+    ref.metadata.partialDiscoveryMessage !== message ||
+    ref.metadata.partialDiscoveryTotal !== total
+  )) {
+    throw new ParserChangedError("Сборщик вернул противоречивые причины частичной выдачи");
+  }
+  return { status: status as PartialDiscoveryFailure["status"], message, total: Number(total) };
 }
 
 function healthCheckFailure(message: string): AdapterBlockedError | AdapterQuotaError | ParserChangedError {
@@ -282,16 +316,11 @@ export class RatingsService {
         return previous && SUCCESSFUL_PARTITION_STATUSES.has(previous.status) ? [previous] : [];
       })
       : [];
-    const preservedPartitionKeys = new Set(preservedPartitions.map((partition) =>
-      partitionKey(partition.domain, partition.brand)
-    ));
     run.status = "running";
     run.errors = isRetry
       ? run.errors.filter((error) => !retryErrorPartitions.has(error.partition) && error.partition !== "orchestrator")
       : [];
-    run.observations = isRetry
-      ? run.observations.filter((observation) => preservedPartitionKeys.has(partitionKey(observation.domain, observation.brand)))
-      : [];
+    if (!isRetry) run.observations = [];
     run.partitions = preservedPartitions;
     run.qa = undefined;
     run.payloadHash = undefined;
@@ -496,6 +525,15 @@ export class RatingsService {
           });
           let activeCollection: string | undefined;
           let activeNormalization: string | undefined;
+          let discoveredCount = 0;
+          let viableDiscovered = 0;
+          let collected = 0;
+          const refreshedKeys = new Set<string>();
+          const previousObservationKeys = new Set([...seen.entries()]
+            .filter(([, observation]) =>
+              observation.domain === domain && normalizeText(observation.brand) === normalizeText(brand)
+            )
+            .map(([key]) => key));
           const retainedSourceCards: SourceCardRecord[] = [];
           const adapterReporter = createAdapterActivityReporter({ domain, brand });
           // Discovery is frequently the longest operation (sitemaps, search
@@ -515,18 +553,22 @@ export class RatingsService {
               signal: deadline.signal,
               activity: adapterReporter.report
             }), domain, brand);
+            const partialFailure = partialDiscoveryFailure(discovered);
+            discoveredCount = discovered.length;
+            viableDiscovered = discovered.length;
             const discoverySignals = runtimeSignals(discovered.map((ref) => ref.metadata));
             activity.complete(discoveryActivity, {
               ...discoverySignals,
-              detail: discovered.length ? `Найдено карточек: ${discovered.length}` : "Поиск завершён без карточек"
+              detail: partialFailure
+                ? `Доказано карточек: ${discovered.length} из ${partialFailure.total}`
+                : discovered.length ? `Найдено карточек: ${discovered.length}` : "Поиск завершён без карточек"
             });
             if (!discovered.length) {
+              for (const key of previousObservationKeys) seen.delete(key);
               this.addPartition(run, domain, brand, "no_results", 0, 0, "Поиск исчерпан, карточек нет");
               await saveProgress();
               return;
             }
-            let collected = 0;
-            let viableDiscovered = discovered.length;
             const previousById = new Map(previousRecords.map((item) => [item.listingId, item]));
             for (const ref of discovered) {
               deadline.signal.throwIfAborted();
@@ -581,6 +623,7 @@ export class RatingsService {
                   // candidate. Its exact missing-page proof means it is not a
                   // current card and must not enter the sheet or review queue.
                   viableDiscovered -= 1;
+                  seen.delete(productKey(observation.domain, observation.listingId));
                   activity.complete(activeNormalization, { detail: "Удалённая карточка исключена" });
                   activeNormalization = undefined;
                   continue;
@@ -629,9 +672,12 @@ export class RatingsService {
                 observation.status = "needs_review";
                 existing.status = "needs_review";
                 run.errors.push({ partition: `${domain}/${brand}`, message: `${key} найден у двух брендов` });
-              } else if (!existing) {
+              } else {
                 seen.set(key, observation);
-                collected += 1;
+                if (!refreshedKeys.has(key)) {
+                  refreshedKeys.add(key);
+                  collected += 1;
+                }
               }
               if (
                 domain === "market.yandex.ru" &&
@@ -653,15 +699,27 @@ export class RatingsService {
               });
               activeNormalization = undefined;
             }
-            this.addPartition(
-              run,
-              domain,
-              brand,
-              viableDiscovered === 0 ? "no_results" : "complete",
-              viableDiscovered,
-              collected,
-              viableDiscovered === 0 ? "Поиск исчерпан, живых карточек нет" : undefined
-            );
+            if (partialFailure) {
+              const message = `${partialFailure.status}: ${partialFailure.message}`;
+              run.errors.push({ partition: `${domain}/${brand}`, message });
+              const retainedCount = [...seen.values()].filter((observation) =>
+                observation.domain === domain && normalizeText(observation.brand) === normalizeText(brand)
+              ).length;
+              this.addPartition(run, domain, brand, "blocked", partialFailure.total, retainedCount, message);
+            } else {
+              for (const key of previousObservationKeys) {
+                if (!refreshedKeys.has(key)) seen.delete(key);
+              }
+              this.addPartition(
+                run,
+                domain,
+                brand,
+                viableDiscovered === 0 ? "no_results" : "complete",
+                viableDiscovered,
+                collected,
+                viableDiscovered === 0 ? "Поиск исчерпан, живых карточек нет" : undefined
+              );
+            }
             if (retainedSourceCards.length > 0) {
               await this.repository.saveSourceCards(spreadsheetId, retainedSourceCards);
             }
@@ -673,7 +731,18 @@ export class RatingsService {
             if (activeCollection) activity.warn(activeCollection, { ...runtimeSignals(message), detail: message });
             if (activeNormalization) activity.warn(activeNormalization, { detail: message });
             run.errors.push({ partition: `${domain}/${brand}`, message: `${kind}: ${message}` });
-            this.addPartition(run, domain, brand, kind === "error" ? "error" : "blocked", 0, 0, `${kind}: ${message}`);
+            const retainedCount = [...seen.values()].filter((observation) =>
+              observation.domain === domain && normalizeText(observation.brand) === normalizeText(brand)
+            ).length;
+            this.addPartition(
+              run,
+              domain,
+              brand,
+              kind === "error" ? "error" : "blocked",
+              Math.max(discoveredCount, retainedCount),
+              Math.max(collected, retainedCount),
+              `${kind}: ${message}`
+            );
           }
           await saveProgress();
         });
@@ -810,7 +879,8 @@ export class RatingsService {
     if (!qa.ok) throw new Error(`Публикация заблокирована: ${qa.blockers.join("; ")}`);
     const spreadsheetId = extractSpreadsheetId(run.request.sheetUrl);
     const existing = new Map((await this.repository.listProducts(spreadsheetId)).map((item) => [item.key, item]));
-    const records: ProductRecord[] = run.observations.map((item) => ({
+    const publishedObservations = observationsForPublication(run);
+    const records: ProductRecord[] = publishedObservations.map((item) => ({
       key: productKey(item.domain, item.listingId), domain: item.domain, listingId: item.listingId,
       brand: item.brand, canonicalUrl: item.canonicalUrl, product: item.product, platform: item.platform,
       groupId: item.groupId,
@@ -825,7 +895,7 @@ export class RatingsService {
         : laterMonth(existing.get(productKey(item.domain, item.listingId))?.lastSeenMonth, run.request.month)
     }));
     await this.repository.saveProducts(spreadsheetId, records);
-    await this.repository.saveSnapshot(spreadsheetId, run.request.month, run.observations);
+    await this.repository.saveSnapshot(spreadsheetId, run.request.month, publishedObservations);
   }
 
   async excludeFailedPartitionsFromPublication(id: string): Promise<RunState> {
@@ -842,7 +912,6 @@ export class RatingsService {
     if (!failed.length) return run;
     if (!successful.length) throw new Error("Нет ни одной успешно проверенной площадки для записи");
 
-    const failedKeys = new Set(failed.map((partition) => partitionKey(partition.domain, partition.brand)));
     const excludedAt = new Date().toISOString();
     run.publicationExclusions = failed.map((partition) => ({
       domain: partition.domain,
@@ -850,12 +919,9 @@ export class RatingsService {
       reason: partition.message ?? partition.status,
       excludedAt
     }));
-    run.observations = run.observations.filter((item) =>
-      !failedKeys.has(partitionKey(item.domain, item.brand))
-    );
     run.payloadHash = stableHash({
       request: run.request,
-      observations: run.observations,
+      observations: observationsForPublication(run),
       publicationExclusions: run.publicationExclusions
     });
     run.status = "review";

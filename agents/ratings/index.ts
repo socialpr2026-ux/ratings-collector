@@ -113,7 +113,11 @@ export function createLazySandboxAcquire(sandbox: Pick<SandboxApi, "commands">):
     .then(() => sandbox.commands.run("true"))
     .then(() => undefined)
     .catch((error) => {
-      throw new AdapterBlockedError(`EdgeOne Sandbox is unavailable: ${safeErrorMessage(error)}`);
+      const message = safeErrorMessage(error);
+      if (/quota|monthly[^.]{0,80}GB-s|limit[^.]{0,80}(?:exceeded|reached)|лимит[^.]{0,80}(?:исчерпан|превышен)/i.test(message)) {
+        throw new AdapterQuotaError(`EdgeOne Sandbox quota is exhausted: ${message}`);
+      }
+      throw new AdapterBlockedError(`EdgeOne Sandbox is unavailable: ${message}`);
     });
 }
 

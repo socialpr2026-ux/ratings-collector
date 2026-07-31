@@ -142,6 +142,68 @@ describe("run orchestration and fail-closed QA", () => {
     expect(second.qa?.ok).toBe(false);
   });
 
+  it("checkpoints proven cards from a partial discovery and merges a failed-only retry", async () => {
+    const repository = new MemoryRepository();
+    let attempt = 0;
+    const service = new RatingsService(repository, async () => ({
+      id: "partial",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand): Promise<ProductRef[]> {
+        attempt += 1;
+        if (attempt === 2) throw new AdapterQuotaError("quota still unavailable");
+        const refs = ["1", ...(attempt >= 3 ? ["2"] : [])].map((listingId) => ({
+          domain: "example.com",
+          platform: "partial",
+          listingId,
+          brand,
+          url: `https://example.com/p/${listingId}`,
+          metadata: attempt === 1 ? {
+            partialDiscoveryStatus: "quota_exceeded",
+            partialDiscoveryMessage: "quota interrupted exact proof",
+            partialDiscoveryTotal: 2
+          } : {}
+        }));
+        return refs;
+      },
+      async collect(ref): Promise<Observation> {
+        return {
+          domain: ref.domain,
+          platform: ref.platform,
+          listingId: ref.listingId,
+          brand: ref.brand,
+          canonicalUrl: ref.url,
+          product: `${ref.brand} таблетки 100 мг №10 SKU ${ref.listingId}`,
+          reviews: attempt,
+          rating: 5,
+          status: "ok",
+          capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+    const id = (await service.createRun(request)).id;
+
+    const partial = await service.executeRun(id);
+    expect(partial.partitions).toMatchObject([{
+      status: "blocked", discovered: 2, collected: 1,
+      message: expect.stringContaining("quota_exceeded")
+    }]);
+    expect(partial.observations).toHaveLength(1);
+    const checkpoint = partial.observations[0];
+
+    const failedAgain = await service.executeRun(id);
+    expect(failedAgain.partitions).toMatchObject([{ status: "blocked", discovered: 1, collected: 1 }]);
+    expect(failedAgain.observations).toEqual([checkpoint]);
+
+    const recovered = await service.executeRun(id);
+    expect(recovered.partitions).toMatchObject([{ status: "complete", discovered: 2, collected: 2 }]);
+    expect(recovered.observations.map(({ listingId, reviews }) => ({ listingId, reviews }))).toEqual([
+      { listingId: "1", reviews: 3 },
+      { listingId: "2", reviews: 3 }
+    ]);
+    expect(recovered.qa).toMatchObject({ ok: true, blockers: [] });
+  });
+
   it("treats a repeated execution after all partitions succeeded as an idempotent no-op", async () => {
     const repository = new MemoryRepository();
     let resolutions = 0;
@@ -238,7 +300,7 @@ describe("run orchestration and fail-closed QA", () => {
     expect(run.observations).toEqual([]);
     expect(run.partitions).toMatchObject([{
       status: "blocked",
-      discovered: 0,
+      discovered: 1,
       collected: 0,
       message: expect.stringContaining("parser_changed")
     }]);

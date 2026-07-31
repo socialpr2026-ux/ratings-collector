@@ -417,7 +417,35 @@ describe("WildberriesAdapter.discover", () => {
     expect(observations.every((item) => item.aggregateGroupId === undefined)).toBe(true);
   });
 
-  it("fails closed when a complete card batch omits a requested nmId", async () => {
+  it("retries only an nmId omitted by a complete card batch", async () => {
+    const searchProducts = [
+      { id: 701, root: 9001, brand: "BrandX", name: "capsules one", nmReviewRating: 0, nmFeedbacks: 0 },
+      { id: 702, root: 9002, brand: "BrandX", name: "capsules two", nmReviewRating: 0, nmFeedbacks: 0 }
+    ];
+    const fetchSpy = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 2, products: searchProducts });
+      if (url.hostname === "card.wb.ru") {
+        return jsonResponse({
+          products: url.searchParams.get("nm") === "702" ? [searchProducts[1]] : [searchProducts[0]]
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    });
+    const fetchMock = fetchSpy as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("BrandX", context({ runId: "incomplete-card-batch" }));
+
+    const first = await adapter.collect(refs[0]!, context());
+    const second = await adapter.collect(refs[1]!, context());
+
+    expect([first.listingId, second.listingId]).toEqual(["701", "702"]);
+    expect(refs.every((ref) => ref.metadata.cardBatchVerified === true)).toBe(true);
+    expect(fetchSpy.mock.calls.filter(([input]) => new URL(String(input)).hostname === "card.wb.ru")
+      .map(([input]) => new URL(String(input)).searchParams.get("nm"))).toEqual(["701;702", "702"]);
+  });
+
+  it("fails closed when batch and singleton verification both omit an nmId", async () => {
     const searchProducts = [
       { id: 701, root: 9001, brand: "BrandX", name: "capsules one", nmReviewRating: 0, nmFeedbacks: 0 },
       { id: 702, root: 9002, brand: "BrandX", name: "capsules two", nmReviewRating: 0, nmFeedbacks: 0 }
@@ -429,9 +457,9 @@ describe("WildberriesAdapter.discover", () => {
       throw new Error(`Unexpected request ${url}`);
     }) as unknown as typeof globalThis.fetch;
     const adapter = createAdapter(fetchMock);
-    const refs = await adapter.discover("BrandX", context({ runId: "incomplete-card-batch" }));
+    const refs = await adapter.discover("BrandX", context({ runId: "incomplete-singleton-card" }));
 
-    await expect(adapter.collect(refs[0]!, context())).rejects.toThrow(/omitted 1 requested nmIds: 702/);
+    await expect(adapter.collect(refs[0]!, context())).rejects.toThrow(/singleton card request returned unexpected nmId 701/);
     expect(refs.every((ref) => ref.metadata.cardBatchVerified !== true)).toBe(true);
   });
 

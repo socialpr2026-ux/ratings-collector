@@ -26,6 +26,7 @@ import {
   PublicationCommitUncertainError
 } from "../../src/server/sheets/publication-state.js";
 import { productKey } from "../../src/server/repository.js";
+import { observationsForPublication } from "../../src/server/publication-scope.js";
 import { readAgentJson } from "../../src/server/utils/agent-request.js";
 import { collectorPublicEndpoint } from "../../src/server/utils/collector-public-endpoint.js";
 import { safeErrorMessage } from "../../src/server/utils/error-message.js";
@@ -314,7 +315,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     const snapshots = await repository.getSnapshots(spreadsheetId);
     const snapshotsBeforePublication = structuredClone(snapshots);
     snapshots[run.request.month] = Object.fromEntries(
-      run.observations.map((item) => [productKey(item.domain, item.listingId), item])
+      observationsForPublication(run).map((item) => [productKey(item.domain, item.listingId), item])
     );
     const publicationRepository = repository;
 

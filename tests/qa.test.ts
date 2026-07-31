@@ -169,7 +169,7 @@ describe("partition completeness QA", () => {
     ]);
   });
 
-  it("accepts an explicitly excluded failed partition only after its partial observations are removed", () => {
+  it("accepts an explicitly excluded failed partition while retaining its partial observations", () => {
     const run = runWithCounts(1, 0, false);
     run.partitions[0] = { ...run.partitions[0], status: "blocked", message: "HTTP 502" };
     run.publicationExclusions = [{
@@ -183,6 +183,6 @@ describe("partition completeness QA", () => {
     });
 
     run.observations = runWithCounts(1, 1).observations;
-    expect(validateRun(run).blockers.join(" ")).toContain("карточка исключённого раздела");
+    expect(validateRun(run)).toMatchObject({ ok: true, blockers: [] });
   });
 });

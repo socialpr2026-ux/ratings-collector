@@ -7,7 +7,7 @@ import {
   transientRecoveryDelayMs,
   YANDEX_BATCH_GATEWAY_TIMEOUT_MS
 } from "../agents/ratings/index.js";
-import { AdapterBlockedError } from "../src/server/adapters/errors.js";
+import { AdapterBlockedError, AdapterQuotaError } from "../src/server/adapters/errors.js";
 import { VaptekeAdapter } from "../src/server/adapters/vapteke.js";
 import { MemoryEvidenceStore } from "../src/server/evidence.js";
 
@@ -386,7 +386,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
     await expect(routedFetch(
       "https://vapteke.ru/product/biviart-komfort-018-10-ml-682542",
       { headers: { "x-ratings-browser": "1" } }
-    )).rejects.toBeInstanceOf(AdapterBlockedError);
+    )).rejects.toBeInstanceOf(AdapterQuotaError);
     expect(run).toHaveBeenCalledOnce();
     expect(directFetch).not.toHaveBeenCalled();
   });
@@ -790,7 +790,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("maps a lazy Sandbox quota failure to AdapterBlockedError", async () => {
+  it("maps a lazy Sandbox quota failure to AdapterQuotaError", async () => {
     const run = vi.fn(async () => {
       throw new Error("Sandbox quota exceeded");
     });
@@ -804,7 +804,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
           "x-ratings-browser-mode": "ozon-composer"
         }
       }
-    )).rejects.toBeInstanceOf(AdapterBlockedError);
+    )).rejects.toBeInstanceOf(AdapterQuotaError);
     expect(run).toHaveBeenCalledOnce();
   });
 
@@ -838,7 +838,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
           "x-ratings-browser-mode": "wildberries-api"
         }
       }
-    )).rejects.toBeInstanceOf(AdapterBlockedError);
+    )).rejects.toBeInstanceOf(AdapterQuotaError);
     expect(run).toHaveBeenCalledOnce();
   });
 
@@ -880,6 +880,18 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
     await Promise.all([acquire(), acquire()]);
     expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("classifies an exhausted EdgeOne monthly GB-s allowance as quota", async () => {
+    const run = vi.fn(async () => {
+      throw new Error("EdgeOne Sandbox monthly GB-s quota exceeded; requestId=test-request");
+    });
+    const acquire = createLazySandboxAcquire(sandbox(run));
+
+    await expect(acquire()).rejects.toMatchObject({
+      code: "quota_exceeded",
+      message: expect.stringMatching(/monthly GB-s quota exceeded/)
+    });
   });
 });
 
