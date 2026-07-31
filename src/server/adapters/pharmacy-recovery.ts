@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { load, type CheerioAPI } from "cheerio";
 import type { AdapterContext, AdapterHealth, Observation, ProductRef, SiteAdapter } from "../../shared/types.js";
 import type { EvidenceStore } from "../evidence.js";
-import { aliasesForBrand } from "../utils/normalize.js";
+import { aliasesForBrand, normalizeText } from "../utils/normalize.js";
 import { titleProductEvidence } from "../utils/product-evidence.js";
 import { readTextBounded, safeFetch } from "../utils/safe-fetch.js";
 import { canonicalizeUrl } from "../utils/urls.js";
@@ -603,6 +603,16 @@ function asnaProduct($: CheerioAPI): ParsedProduct | undefined {
   const canonical = $("link[rel='canonical']").first().attr("href");
   const parsedRef = canonical && listingId ? asnaRef(canonical, listingId) : undefined;
   const aggregate = root.find("[itemprop='aggregateRating']").first();
+  if (parsedRef && aggregate.length === 0) {
+    const feedback = root.find("#feedBack.product__feedback");
+    const heading = normalizeText(feedback.children("h2.product__feedbackTitle").first().text());
+    const title = normalizeText(root.find("h1").first().text() || $("h1").first().text());
+    const exactEmpty = feedback.length === 1 && title.length > 0 && heading === `оставить отзыв о ${title}` &&
+      feedback.find("#product__feedbackBtnWrapper.product__feedbackBtnWrapper").length === 1 &&
+      root.find("[itemprop='review'], #feedbackListContainer, .product__ratingText").length === 0 &&
+      !/(?:loading|error|ошибка|не удалось загрузить|повторите позже)/iu.test(feedback.text());
+    if (exactEmpty) return { ...parsedRef, reviews: 0, rating: null };
+  }
   const reviews = exactInteger(aggregate.find("meta[itemprop='reviewCount']").first().attr("content"));
   const rating = exactRating(aggregate.find("meta[itemprop='ratingValue']").first().attr("content"));
   if (!parsedRef || reviews === undefined || reviews > 0 && rating === undefined) return undefined;
@@ -622,6 +632,10 @@ function asnaProduct($: CheerioAPI): ParsedProduct | undefined {
   }
   return { ...parsedRef, reviews, rating: reviews === 0 ? null : rating! };
 }
+
+const ASNA_PRODUCT_FAMILY_SLUGS: Record<string, readonly string[]> = {
+  "энтеролактис": ["enterolaktis_plyus", "enterolaktis_duo", "enterolaktis_fibra"]
+};
 
 export class AsnaAdapter implements SiteAdapter {
   readonly id = "asna.ru:translate-v1";
@@ -679,12 +693,17 @@ export class AsnaAdapter implements SiteAdapter {
     // ASNA's current card sitemaps can omit an otherwise live medicine family.
     // Its exact `/product/<brand>/` page is a source-bound first-party listing,
     // so use it only to discover card URLs; every card aggregate is still
-    // fetched and verified independently below.
-    for (const slug of slugs) {
+    // fetched and verified independently below. Prefer the translated renderer
+    // and retain the exact launcher as a bounded fallback.
+    const familySlugs = [...new Set([
+      ...slugs,
+      ...(ASNA_PRODUCT_FAMILY_SLUGS[normalizeText(brand)] ?? [])
+    ])];
+    for (const slug of familySlugs) {
       const family = new URL(`https://www.asna.ru/product/${slug}/`);
       let $: CheerioAPI;
       try {
-        ({ $ } = await translatedPageViaLauncher(family, "www-asna-ru.translate.goog", context, this.fetchImpl));
+        ({ $ } = await translatedPage(family, "www-asna-ru.translate.goog", context, this.fetchImpl, true));
       } catch (error) {
         if (error instanceof AdapterBlockedError || error instanceof ParserChangedError) continue;
         throw error;
@@ -710,9 +729,13 @@ export class AsnaAdapter implements SiteAdapter {
         for (const [existingId, existing] of refs) {
           if (existingId !== parsed.listingId && existing.url === parsed.canonicalUrl) refs.delete(existingId);
         }
+        const sourceTitle = $("h1").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+        const title = sourceTitle && normalizeText(sourceTitle).includes(normalizeText(brand))
+          ? sourceTitle
+          : asnaTitle(parsed.canonicalUrl, brand, slugs);
         refs.set(parsed.listingId, {
           domain: "asna.ru", platform: "asna.ru", listingId: parsed.listingId, brand,
-          url: parsed.canonicalUrl, title: asnaTitle(parsed.canonicalUrl, brand, slugs),
+          url: parsed.canonicalUrl, title,
           metadata: { discovery: preliminary.discovery, reviewCount: parsed.reviews, rating: parsed.rating }
         });
       } catch (error) {

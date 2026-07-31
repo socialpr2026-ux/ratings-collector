@@ -395,6 +395,52 @@ describe("recovered first-party pharmacy adapters", () => {
     expect(fetchMock.mock.calls.some(([input]) => new URL(String(input)).hostname === "translate.google.com")).toBe(true);
   });
 
+  it("recovers all four exact Enterolactis ASNA cards through their current family routes", async () => {
+    const cards = new Map([
+      ["/cards/enterolaktis_plyus_kaps_n15_sofar_spa.html", "921517892"],
+      ["/cards/enterolaktis_duo_sashe_5g_20_sht__sofar_s_p_a.html", "921517893"],
+      ["/cards/enterolaktis_fibra_sirop_i_kapsula_s_poroshkom_v_kryshkakh_10ml_n10_sofar_spa.html", "921517894"],
+      ["/cards/enterolaktis_fibra_sirop_i_kapsula_s_poroshkom_v_kryshkakh_10ml_n12_sofar_spa.html", "921517895"]
+    ]);
+    const families = new Map([
+      ["/product/enterolaktis_plyus/", ["/cards/enterolaktis_plyus_kaps_n15_sofar_spa.html"]],
+      ["/product/enterolaktis_duo/", ["/cards/enterolaktis_duo_sashe_5g_20_sht__sofar_s_p_a.html"]],
+      ["/product/enterolaktis_fibra/", [
+        "/cards/enterolaktis_fibra_sirop_i_kapsula_s_poroshkom_v_kryshkakh_10ml_n10_sofar_spa.html",
+        "/cards/enterolaktis_fibra_sirop_i_kapsula_s_poroshkom_v_kryshkakh_10ml_n12_sofar_spa.html"
+      ]]
+    ]);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www.asna.ru" && url.pathname.startsWith("/sitemap/")) {
+        return new Response("<urlset></urlset>");
+      }
+      if (url.hostname !== "www-asna-ru.translate.goog") throw new Error(`unexpected ${url}`);
+      const source = `https://www.asna.ru${url.pathname}`;
+      if (url.pathname === "/product/enterolaktis/") {
+        return new Response(translated(source, "<main>generic family unavailable</main>"), { headers: { "content-type": "text/html" } });
+      }
+      const familyCards = families.get(url.pathname);
+      if (familyCards) {
+        return new Response(translated(source, familyCards.map((path) =>
+          `<a href="https://www-asna-ru.translate.goog${path}?_x_tr_sl=ru&amp;_x_tr_tl=en">${path}</a>`
+        ).join("")), { headers: { "content-type": "text/html" } });
+      }
+      const sku = cards.get(url.pathname);
+      if (!sku) throw new Error(`unexpected ASNA route: ${url.pathname}`);
+      return new Response(asnaCard(`https://www.asna.ru${url.pathname}`, sku, 0), {
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock as unknown as typeof fetch);
+
+    const refs = await adapter.discover("Энтеролактис", { region: "Москва" });
+    expect(refs.map((item) => item.listingId).sort()).toEqual([...cards.values()].sort());
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, { region: "Москва" })));
+    expect(observations).toHaveLength(4);
+    expect(observations.every((item) => item.reviews === 0 && item.rating === null && item.status === "no_reviews")).toBe(true);
+  });
+
   it("does not publish ASNA's orphan AggregateRating when the feedback list is empty", async () => {
     const card = "https://www.asna.ru/cards/tsereton_400mg_n28_kaps_soteks.html";
     const fetchMock = vi.fn(async () => new Response(asnaCard(card, "20046", 1, false, true), {
@@ -407,6 +453,26 @@ describe("recovered first-party pharmacy adapters", () => {
     }, { region: "Москва" });
 
     expect(result).toMatchObject({ listingId: "20046", reviews: 0, rating: null, status: "no_reviews" });
+  });
+
+  it("accepts ASNA's exact add-review-only product section as an explicit empty state", async () => {
+    const card = "https://www.asna.ru/cards/enterolaktis_plyus_kaps_n15_sofar_spa.html";
+    const title = "Энтеролактис Плюс капсулы 15 шт. Софар С.п.А";
+    const page = translated(card, `<link rel="canonical" href="${card}">
+      <div class="productPage__content product__item" itemscope itemtype="http://schema.org/Product">
+        <h1>${title}</h1><meta itemprop="sku" content="921517892">
+        <div class="product__feedback anchorLink" id="feedBack">
+          <h2 class="product__feedbackTitle product__sectionTitle"><span>Оставить отзыв о</span> ${title}</h2>
+          <div id="product__feedbackBtnWrapper" class="product__feedbackBtnWrapper"></div>
+        </div>
+      </div>`);
+    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(page, {
+      headers: { "content-type": "text/html" }
+    })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "asna.ru", platform: "asna.ru", listingId: "921517892", brand: "Энтеролактис", url: card, metadata: {}
+    }, { region: "Москва" })).resolves.toMatchObject({ reviews: 0, rating: null, status: "no_reviews" });
   });
 
   it("fails closed when a partial ASNA page drops the source-bound feedback section", async () => {

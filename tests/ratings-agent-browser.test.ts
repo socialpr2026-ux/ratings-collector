@@ -901,6 +901,33 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it.each([
+    "https://apteka-ru.translate.goog/product/enterolaktis-duo-20-sht-sashe-po-5-g-6267ea3630197ea53c0caa2c/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
+    "https://www-budzdorov-ru.translate.goog/product/enterolaktis-duo-sashe-5g-no20-bad-5005750?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
+    "https://www-asna-ru.translate.goog/cards/enterolaktis_plyus_kaps_n15_sofar_spa.html?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
+  ])("recovers an exact pharmacy Translate page through free Agent egress after fixed egress fails: %s", async (target) => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (input: RequestInfo | URL) =>
+      typeof input === "string"
+        ? new Response("transient fixed egress failure", { status: 502 })
+        : new Response("exact pharmacy page", { headers: { "content-type": "text/html; charset=utf-8" } })
+    );
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(target);
+
+    expect(await response.text()).toBe("exact pharmacy page");
+    expect(directFetch).toHaveBeenCalledTimes(3);
+    expect(directFetch.mock.calls.slice(0, 2).every(([input]) => input === "https://ratings.example/api/internal/static-review-fetch")).toBe(true);
+    expect(directFetch.mock.calls[2]![0]).toBeInstanceOf(Request);
+    expect((directFetch.mock.calls[2]![0] as Request).url).toBe(new URL(target).toString());
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("accepts only an explicit Yandex Market no-results statement for the requested query", () => {
     expect(hasExplicitYandexMarketNoResults(
       "По запросу «Энтеролактис» ничего не нашли",

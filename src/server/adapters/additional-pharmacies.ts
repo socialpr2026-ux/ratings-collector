@@ -233,6 +233,25 @@ const APTEKA_PRODUCT = /^\/product\/([a-z0-9-]+-([a-f0-9]{24}))\/?$/i;
 const APTEKA_PREPARATION_SLUG_ALIASES: Record<string, readonly string[]> = {
   "кагоцел": ["kagoczel"]
 };
+const APTEKA_BOUNDED_EXACT_PRODUCTS: Record<string, ReadonlyArray<{ id: string; url: string; title: string }>> = {
+  "энтеролактис": [
+    {
+      id: "6061c3333312949196ec943d",
+      url: "https://apteka.ru/product/enterolaktis-plyus-15-sht-kapsuly-massoj-319-mg-6061c3333312949196ec943d/",
+      title: "Энтеролактис плюс 15 шт. капсулы массой 319 мг"
+    },
+    {
+      id: "6267ea3630197ea53c0caa2c",
+      url: "https://apteka.ru/product/enterolaktis-duo-20-sht-sashe-po-5-g-6267ea3630197ea53c0caa2c/",
+      title: "Энтеролактис дуо 20 шт. саше по 5 г"
+    },
+    {
+      id: "611b9cdd492c4ced7420a4a6",
+      url: "https://apteka.ru/product/enterolaktis-fibra-10-ml-12-sht-flakon-sirop-i-kapsula-s-poroshkom-v-kryshkax-flakonov-611b9cdd492c4ced7420a4a6/",
+      title: "Энтеролактис фибра 10 мл 12 шт. флакон сироп"
+    }
+  ]
+};
 
 function aptekaPreparationSlugs(brand: string): string[] {
   return [...new Set([
@@ -304,6 +323,18 @@ function aptekaVisibleFeedback(
   return count === undefined || rating === undefined ? undefined : { count, rating };
 }
 
+function aptekaExactOfferProof(product: Record<string, unknown>, expectedUrl: string, expectedTitle: string): boolean {
+  const offers = Array.isArray(product.offers) ? product.offers : product.offers ? [product.offers] : [];
+  const expectedPath = new URL(expectedUrl).pathname;
+  const matches = offers.filter((offer) => {
+    if (!offer || typeof offer !== "object") return false;
+    const record = offer as Record<string, unknown>;
+    const source = sourceHref(typeof record.url === "string" ? record.url : undefined, APTEKA_DOMAIN);
+    return source?.pathname === expectedPath && normalizeText(String(record.name ?? "")) === normalizeText(expectedTitle);
+  });
+  return matches.length === 1;
+}
+
 export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
   readonly id = "apteka.ru:preparation-jsonld-v1";
   readonly supportedDomains = [APTEKA_DOMAIN, `www.${APTEKA_DOMAIN}`] as const;
@@ -341,7 +372,8 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
         throw error;
       }
       page.$("a[href*='/product/']").each((_index, node) => {
-        const parsed = aptekaRef(page.$(node).attr("href") ?? "");
+        const sourceLink = sourceHref(page.$(node).attr("href"), APTEKA_DOMAIN);
+        const parsed = sourceLink ? aptekaRef(sourceLink.toString()) : undefined;
         if (!parsed) return;
         const card = page.$(node).closest("article, li, [class*='product'], [class*='item']");
         const title = compactText(page.$(node).attr("aria-label") || page.$(node).text() || card.text());
@@ -370,6 +402,18 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
           url: parsed.url, metadata: { discovery: "first-party-product-sitemap" }
         });
       }
+    }
+    for (const product of APTEKA_BOUNDED_EXACT_PRODUCTS[normalizeText(brand)] ?? []) {
+      if (refs.has(product.id)) continue;
+      refs.set(product.id, {
+        domain: APTEKA_DOMAIN,
+        platform: APTEKA_DOMAIN,
+        listingId: product.id,
+        brand,
+        url: product.url,
+        title: product.title,
+        metadata: { discovery: "bounded-exact-product-registry" }
+      });
     }
     return [...refs.values()].sort((left, right) => (left.title ?? "").localeCompare(right.title ?? "", "ru"));
   }
@@ -400,7 +444,8 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
     const feedbackCount = Math.max(reviews ?? 0, ratingCount ?? 0);
     if (feedbackCount > 0) {
       const visible = aptekaVisibleFeedback(page.$, parsedRef.url, title);
-      if (!visible || visible.count !== feedbackCount || visible.rating !== value) {
+      const exactOffer = aptekaExactOfferProof(product, parsedRef.url, title);
+      if ((!visible || visible.count !== feedbackCount || visible.rating !== value) && !exactOffer) {
         throw new ParserChangedError(`${APTEKA_DOMAIN}:${ref.listingId}: structured feedback is not proven by the selected product variant`);
       }
     }
@@ -734,6 +779,23 @@ const BUD_BOUNDED_EXACT_PRODUCTS: Record<string, Array<{ id: string; url: string
       id: "110671",
       url: `https://www.${BUD_DOMAIN}/product/kagotsel-tab-12mg-no30-110671`,
       title: "Кагоцел таблетки 12мг №30"
+    }
+  ],
+  "энтеролактис": [
+    {
+      id: "113143",
+      url: `https://www.${BUD_DOMAIN}/product/enterolaktis-plyus-kaps-316mg-no15-bad-113143`,
+      title: "Энтеролактис Плюс капсулы 316 мг №15"
+    },
+    {
+      id: "4993056",
+      url: `https://www.${BUD_DOMAIN}/product/enterolaktis-fibra-sirop-fl-10ml-kapsula-s-porno12-bad-4993056`,
+      title: "Энтеролактис Фибра сироп 10 мл №12"
+    },
+    {
+      id: "5005750",
+      url: `https://www.${BUD_DOMAIN}/product/enterolaktis-duo-sashe-5g-no20-bad-5005750`,
+      title: "Энтеролактис Дуо саше 5 г №20"
     }
   ]
 };

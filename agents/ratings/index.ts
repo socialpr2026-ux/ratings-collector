@@ -534,7 +534,26 @@ export function browserFetch(
       const maxAttempts = url.hostname === "megamarket-ru.translate.goog" ? 3 : 2;
       for (let attempt = 1; ; attempt += 1) {
         const response = await fetchViaStaticProxy(url, request.signal);
-        if (![429, 502, 503, 504].includes(response.status) || attempt >= maxAttempts) return response;
+        if (![429, 502, 503, 504].includes(response.status)) return response;
+        if (attempt >= maxAttempts) {
+          if ([
+            "apteka-ru.translate.goog",
+            "www-budzdorov-ru.translate.goog",
+            "www-asna-ru.translate.goog"
+          ].includes(url.hostname)) {
+            try {
+              const direct = await fetch(request);
+              if (direct.ok) {
+                await response.body?.cancel().catch(() => undefined);
+                return direct;
+              }
+              await direct.body?.cancel().catch(() => undefined);
+            } catch {
+              request.signal.throwIfAborted();
+            }
+          }
+          return response;
+        }
         await response.body?.cancel().catch(() => undefined);
         request.signal.throwIfAborted();
         // Megamarket's translated product renderer intermittently returns two

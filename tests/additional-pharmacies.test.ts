@@ -353,6 +353,63 @@ describe("additional pharmacy adapters", () => {
     ]);
   });
 
+  it("unions all three exact Enterolactis Apteka.ru cards and verifies each selected aggregate", async () => {
+    const brand = "Энтеролактис";
+    const products = [
+      {
+        id: "6061c3333312949196ec943d",
+        title: "Энтеролактис плюс 15 шт. капсулы массой 319 мг",
+        path: "/product/enterolaktis-plyus-15-sht-kapsuly-massoj-319-mg-6061c3333312949196ec943d/",
+        reviews: 122,
+        rating: 4.9
+      },
+      {
+        id: "6267ea3630197ea53c0caa2c",
+        title: "Энтеролактис дуо 20 шт. саше по 5 г",
+        path: "/product/enterolaktis-duo-20-sht-sashe-po-5-g-6267ea3630197ea53c0caa2c/",
+        reviews: 128,
+        rating: 4.8
+      },
+      {
+        id: "611b9cdd492c4ced7420a4a6",
+        title: "Энтеролактис фибра 10 мл 12 шт. флакон сироп",
+        path: "/product/enterolaktis-fibra-10-ml-12-sht-flakon-sirop-i-kapsula-s-poroshkom-v-kryshkax-flakonov-611b9cdd492c4ced7420a4a6/",
+        reviews: 83,
+        rating: 4.9
+      }
+    ] as const;
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/preparation/enterolaktis/") {
+        const source = "https://apteka.ru/preparation/enterolaktis/";
+        return new Response(translated(source, products.slice(0, 2).map((product) =>
+          `<article><a href="https://apteka-ru.translate.goog${product.path}?_x_tr_sl=ru&amp;_x_tr_tl=en" aria-label="${product.title}">${product.title}</a></article>`
+        ).join("")), { status: 200, headers: { "content-type": "text/html" } });
+      }
+      const product = products.find((item) => item.path === url.pathname);
+      if (!product) throw new Error(`unexpected Apteka.ru route: ${url.pathname}`);
+      const source = `https://apteka.ru${product.path}`;
+      return new Response(translated(source,
+        `<script type="application/ld+json">${JSON.stringify({
+          "@context": "https://schema.org", "@type": "Product", sku: product.id, name: product.title,
+          aggregateRating: { "@type": "AggregateRating", reviewCount: product.reviews, ratingCount: product.reviews, ratingValue: product.rating }
+        })}</script>${aptekaSelectedVariant(source, product.title, product.reviews, product.rating)}`
+      ), { status: 200, headers: { "content-type": "text/html" } });
+    });
+    const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    const refs = await adapter.discover(brand, context);
+    expect(refs.map((item) => item.listingId).sort()).toEqual(products.map((item) => item.id).sort());
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context)));
+    expect(observations).toEqual(expect.arrayContaining(products.map((product) => expect.objectContaining({
+      listingId: product.id,
+      reviews: product.reviews,
+      ratingCount: product.reviews,
+      rating: product.rating,
+      status: "ok"
+    }))));
+  });
+
   it("discovers the three current Apteka.ru Кагоцел cards through translated kagoczel SSR", async () => {
     const brand = "Кагоцел";
     const cards = [
@@ -417,6 +474,24 @@ describe("additional pharmacy adapters", () => {
     await expect(adapter.collect({
       domain: "apteka.ru", platform: "apteka.ru", listingId: id, brand: "Оциллококцинум", url: productUrl, metadata: {}
     }, context)).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
+  it("accepts Apteka.ru's exact self-bound Product offer when the variant strip is absent", async () => {
+    const id = "6267ea3630197ea53c0caa2c";
+    const title = "Энтеролактис дуо 20 шт. саше по 5 г";
+    const productUrl = `https://apteka.ru/product/enterolaktis-duo-20-sht-sashe-po-5-g-${id}/`;
+    const html = translated(productUrl, `<h1>${title}</h1><script type="application/ld+json">${JSON.stringify({
+      "@type": "Product", sku: id, name: title,
+      aggregateRating: { reviewCount: 129, ratingValue: 4.7 },
+      offers: [{ "@type": "Offer", url: new URL(productUrl).pathname, name: title }]
+    })}</script>`);
+    const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(html, {
+      headers: { "content-type": "text/html" }
+    })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "apteka.ru", platform: "apteka.ru", listingId: id, brand: "Энтеролактис", url: productUrl, metadata: {}
+    }, context)).resolves.toMatchObject({ reviews: 129, rating: 4.7, status: "ok" });
   });
 
   it("checks Apteka.ru health against a stable exact Product instead of brand discovery spelling", async () => {
@@ -730,6 +805,39 @@ describe("additional pharmacy adapters", () => {
       .toMatchObject({ reviews: 0, rating: null, status: "no_reviews" });
     expect(observations.find((item) => item.listingId === "6000866"))
       .toMatchObject({ reviews: 0, rating: null, status: "no_reviews" });
+  });
+
+  it("verifies all three bounded exact Enterolactis cards when Bud Zdorov indexes are unavailable", async () => {
+    const brand = "Энтеролактис";
+    const products = new Map([
+      ["/product/enterolaktis-plyus-kaps-316mg-no15-bad-113143", { id: "113143", title: `${brand} Плюс капсулы 316 мг №15` }],
+      ["/product/enterolaktis-fibra-sirop-fl-10ml-kapsula-s-porno12-bad-4993056", { id: "4993056", title: `${brand} Фибра сироп 10 мл №12` }],
+      ["/product/enterolaktis-duo-sashe-5g-no20-bad-5005750", { id: "5005750", title: `${brand} Дуо саше 5 г №20` }]
+    ]);
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/forms/enterolaktis") return new Response("missing", { status: 404 });
+      if (url.pathname === "/letter/%D0%AD") return new Response("gateway", { status: 502 });
+      const product = products.get(url.pathname);
+      if (!product) throw new Error(`unexpected Bud Zdorov route: ${url.pathname}`);
+      const source = `https://www.budzdorov.ru${url.pathname}`;
+      return new Response(translated(source,
+        `<h1>${product.title}</h1><div allreviewsqty="0"></div>` +
+        `<script>window.__INITIAL_STATE__=${JSON.stringify({ productView: { reviews: [] } })};document.currentScript.remove()</script>`), {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const adapter = new BudZdorovAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    const refs = await adapter.discover(brand, context);
+    expect(refs.map((item) => item.listingId).sort()).toEqual(["113143", "4993056", "5005750"]);
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context)));
+    expect(observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ listingId: "113143", reviews: 0, rating: null, status: "no_reviews" }),
+      expect.objectContaining({ listingId: "4993056", reviews: 0, rating: null, status: "no_reviews" }),
+      expect.objectContaining({ listingId: "5005750", reviews: 0, rating: null, status: "no_reviews" })
+    ]));
   });
 
   it("verifies the four bounded exact Кагоцел cards and preserves their per-card review counts", async () => {
