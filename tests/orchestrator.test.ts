@@ -416,6 +416,62 @@ describe("run orchestration and fail-closed QA", () => {
     expect(recovered.qa).toMatchObject({ ok: true, blockers: [] });
   });
 
+  it("restores partial publication and failed-only retry after a checkpoint RPC interruption", async () => {
+    const repository = new MemoryRepository();
+    const service = new RatingsService(repository, async () => new FakeAdapter());
+    const created = await service.createRun({
+      ...request,
+      domains: ["ozon.ru", "market.yandex.ru"],
+      brands: ["Brand"]
+    });
+    created.status = "failed";
+    created.progress = {
+      totalPartitions: 2,
+      completedPartitions: 1,
+      current: "market.yandex.ru / Brand"
+    };
+    created.partitions = [{
+      domain: "ozon.ru", brand: "Brand", status: "complete", discovered: 1, collected: 1
+    }];
+    created.observations = [{
+      domain: "ozon.ru", platform: "ozon", listingId: "1", brand: "Brand",
+      canonicalUrl: "https://ozon.ru/product/1", product: "Brand tablets 100 mg 10",
+      reviews: 12, rating: 4.8, status: "ok", capturedAt: "2026-07-31T14:53:04.804Z"
+    }];
+    created.errors = [{ partition: "orchestrator", message: "Repository RPC HTTP 500: non-JSON response" }];
+    await repository.saveRun(created);
+
+    const recovered = await service.reconcileInterruptedRun(created);
+
+    expect(recovered).toMatchObject({
+      status: "review",
+      progress: { totalPartitions: 2, completedPartitions: 2 },
+      partitions: [
+        { domain: "ozon.ru", status: "complete" },
+        {
+          domain: "market.yandex.ru",
+          status: "blocked",
+          message: expect.stringContaining("Repository RPC HTTP 500")
+        }
+      ]
+    });
+    expect(recovered.progress.current).toBeUndefined();
+    expect(recovered.payloadHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(recovered.qa?.blockers).toEqual([
+      expect.stringContaining("market.yandex.ru / Brand")
+    ]);
+    expect(recovered.errors).toEqual([{
+      partition: "market.yandex.ru/Brand",
+      message: expect.stringContaining("Repository RPC HTTP 500")
+    }]);
+
+    const partial = await service.excludeFailedPartitionsFromPublication(recovered.id);
+    expect(partial.qa).toMatchObject({ ok: true, blockers: [] });
+    expect(partial.publicationExclusions).toMatchObject([{
+      domain: "market.yandex.ru", brand: "Brand"
+    }]);
+  });
+
   it("collects all partitions and only commits history after explicit publication step", async () => {
     const repository = new MemoryRepository(); const service = new RatingsService(repository, async () => new FakeAdapter());
     const created = await service.createRun(request); const run = await service.executeRun(created.id);

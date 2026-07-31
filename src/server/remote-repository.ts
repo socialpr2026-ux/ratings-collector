@@ -58,7 +58,10 @@ export class RemoteRepository implements Repository {
   }
 
   async call<T>(request: RepositoryRpc): Promise<T> {
-    const attempts = RETRYABLE_ACTIONS.has(request.action) ? 3 : 1;
+    // A run checkpoint is idempotent and is the employee's recovery boundary.
+    // Keep retrying it through a short edge rollout/gateway brownout instead of
+    // losing the just-completed partition after only 600 ms of backoff.
+    const attempts = request.action === "saveRun" ? 7 : RETRYABLE_ACTIONS.has(request.action) ? 3 : 1;
     let lastError: unknown;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
@@ -74,14 +77,14 @@ export class RemoteRepository implements Repository {
           value = JSON.parse(text) as typeof value;
         } catch {
           if (attempt < attempts && transientStatus(response.status)) {
-            await this.wait(200 * attempt);
+            await this.wait(Math.min(4_000, 200 * 2 ** (attempt - 1)));
             continue;
           }
           throw new Error(`Repository RPC HTTP ${response.status}: non-JSON response`);
         }
         if (!response.ok) {
           if (attempt < attempts && transientStatus(response.status)) {
-            await this.wait(200 * attempt);
+            await this.wait(Math.min(4_000, 200 * 2 ** (attempt - 1)));
             continue;
           }
           throw new Error(value.error ?? `Repository RPC HTTP ${response.status}`);
@@ -90,7 +93,7 @@ export class RemoteRepository implements Repository {
       } catch (error) {
         lastError = error;
         if (attempt >= attempts || error instanceof Error && /^Repository RPC HTTP \d+:/.test(error.message)) throw error;
-        await this.wait(200 * attempt);
+        await this.wait(Math.min(4_000, 200 * 2 ** (attempt - 1)));
       }
     }
     throw lastError;

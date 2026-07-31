@@ -250,6 +250,53 @@ export class RatingsService {
 
   async getRun(id: string): Promise<RunState | undefined> { return this.repository.getRun(id); }
 
+  /**
+   * Converts a worker-level persistence interruption into an ordinary partial
+   * result. Successful checkpoints stay intact; every request partition that
+   * never reached durable storage becomes an explicit blocked partition. This
+   * keeps both completed-only publication and failed-only retry available.
+   */
+  async reconcileInterruptedRun(run: RunState): Promise<RunState> {
+    const orchestratorErrors = run.errors.filter((error) => error.partition === "orchestrator");
+    if (run.status !== "failed" || orchestratorErrors.length === 0) return run;
+
+    const expectedPartitions = run.request.domains.flatMap((domain) =>
+      run.request.brands.map((brand) => ({ domain, brand, key: partitionKey(domain, brand) }))
+    );
+    const existing = new Set(run.partitions.map((partition) => partitionKey(partition.domain, partition.brand)));
+    const missing = expectedPartitions.filter(({ key }) => !existing.has(key));
+    const interruption = orchestratorErrors.map((error) => error.message).join("; ");
+    const recoveredAt = new Date().toISOString();
+
+    new RunActivityTracker(run, () => recoveredAt);
+    run.errors = run.errors.filter((error) => error.partition !== "orchestrator");
+    for (const { domain, brand } of missing) {
+      const message = `Сбор прерван до сохранения результата: ${interruption}`;
+      run.partitions.push({ domain, brand, status: "blocked", discovered: 0, collected: 0, message });
+      run.errors.push({ partition: `${domain}/${brand}`, message });
+    }
+    run.partitions.sort((left, right) =>
+      run.request.domains.indexOf(left.domain) - run.request.domains.indexOf(right.domain) ||
+      run.request.brands.indexOf(left.brand) - run.request.brands.indexOf(right.brand)
+    );
+    run.observations.sort((left, right) =>
+      run.request.domains.indexOf(left.domain) - run.request.domains.indexOf(right.domain) ||
+      run.request.brands.indexOf(left.brand) - run.request.brands.indexOf(right.brand) ||
+      left.product.localeCompare(right.product, "ru") || left.listingId.localeCompare(right.listingId)
+    );
+    run.progress.totalPartitions = expectedPartitions.length;
+    run.progress.completedPartitions = run.partitions.length;
+    delete run.progress.current;
+    await this.refreshDraftProfileExamples(run);
+    run.payloadHash = stableHash({ request: run.request, observations: run.observations });
+    run.status = "review";
+    run.collectionFinishedAt ??= recoveredAt;
+    run.updatedAt = recoveredAt;
+    run.qa = validateRun(run);
+    await this.repository.saveRun(run);
+    return run;
+  }
+
   async listRecentRuns(ownerEmail?: string, limit = 8): Promise<RunHistoryItem[]> {
     return this.repository.listRecentRuns(ownerEmail, limit);
   }

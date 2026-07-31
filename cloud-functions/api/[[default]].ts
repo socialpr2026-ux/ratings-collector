@@ -3450,6 +3450,7 @@ export default async function onRequest(context: Context): Promise<Response> {
       if (!run) return json({ error: "Запуск не найден" }, 404);
       assertOwner(run, user);
       if (reconcileStaleCollectionCheckpoint(run)) await repository.saveRun(run);
+      run = await service.reconcileInterruptedRun(run);
       // Older deployments marked a successful partial write as fully
       // published. Reconcile those stored runs too so failed-only retry becomes
       // available without creating a replacement run.
@@ -3462,6 +3463,7 @@ export default async function onRequest(context: Context): Promise<Response> {
       let run = await service.getRun(decodeURIComponent(publishMatch[1]));
       if (!run) return json({ error: "Запуск не найден" }, 404);
       assertOwner(run, user);
+      run = await service.reconcileInterruptedRun(run);
       const body = await context.request.json().catch(() => ({})) as { excludeFailedPartitions?: boolean };
       if (body.excludeFailedPartitions === true) {
         run = await service.excludeFailedPartitionsFromPublication(run.id);
