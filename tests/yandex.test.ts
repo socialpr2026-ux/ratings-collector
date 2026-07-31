@@ -318,7 +318,7 @@ describe("YandexAdapter discovery", () => {
     expect(fetch).toHaveBeenCalledTimes(1 + maps.length);
   });
 
-  it("keeps four bounded gateway workers and checkpoints verified full-scan milestones", async () => {
+  it("keeps two bounded gateway workers and checkpoints verified full-scan milestones", async () => {
     const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
     const maps = Array.from({ length: 36 }, (_value, index) =>
       `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
@@ -354,7 +354,7 @@ describe("YandexAdapter discovery", () => {
     }))).resolves.toEqual([]);
 
     expect(processed.sort()).toEqual([...maps].sort());
-    expect(peak).toBe(4);
+    expect(peak).toBe(2);
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(36);
     expect(activity.map((event) => ({ operationId: event.operationId, status: event.status, detail: event.detail }))).toEqual([
       {
@@ -585,13 +585,13 @@ describe("YandexAdapter discovery", () => {
       activity: async (event) => { activity.push(event); }
     }));
     const rejection = discovery.catch((error) => error);
-    await vi.waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(5));
+    await vi.waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(3));
     await vi.waitFor(() => expect(siblingAborted).toBe(true));
     await expect(rejection).resolves.toMatchObject({
       message: `Yandex batch proof failed with HTTP 502: Yandex batch shard remained unproven: ${maps[0]}`
     });
     expect(siblingAborted).toBe(true);
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(5);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(3);
     expect(activity.filter((event) => event.status === "warning")).toHaveLength(1);
   });
 

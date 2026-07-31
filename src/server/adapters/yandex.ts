@@ -41,7 +41,10 @@ const MODEL_ID_AT_END = /--(\d+)(?:[/?#]|$)/;
 // the parser memory was fixed. Keep one exact proof per request so transport
 // and progress checkpoints remain source-bound to a single shard.
 const YANDEX_BATCH_CHUNK_SIZE = 1;
-const YANDEX_BATCH_CONCURRENCY = 4;
+// Sustained four-way Function egress eventually stalled otherwise healthy
+// 0.6-1.8 MB shards in production. Two streamed singleton workers preserve
+// throughput without saturating the fixed first-party transport.
+const YANDEX_BATCH_CONCURRENCY = 2;
 const YANDEX_PROGRESS_SITEMAP_INTERVAL = 32;
 
 type YandexCapableFetch = typeof globalThis.fetch & {
