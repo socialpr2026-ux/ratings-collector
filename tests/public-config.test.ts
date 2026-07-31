@@ -1704,12 +1704,20 @@ describe("fixed first-party collection egress", () => {
     }
   });
 
-  it("allows a complete Yandex batch shard to cross the observed 31-second edge boundary", async () => {
+  it("abandons one stalled Yandex egress and retries the same exact shard inside the public Function ceiling", async () => {
     vi.useFakeTimers();
     try {
       const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_1110000000-1119999999-0.xml";
-      const upstream = vi.fn(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 31_000));
+      const upstream = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (upstream.mock.calls.length === 1) {
+          await new Promise<never>((_resolve, reject) => {
+            const signal = init?.signal;
+            if (!signal) throw new Error("missing exact shard abort signal");
+            const abort = () => reject(signal.reason);
+            if (signal.aborted) abort();
+            else signal.addEventListener("abort", abort, { once: true });
+          });
+        }
         return new Response(
           "<urlset><url><loc>https://reviews.yandex.ru/product/kagotsel--1115000000</loc></url></urlset>",
           { headers: { "content-type": "application/xml" } }
@@ -1732,12 +1740,14 @@ describe("fixed first-party collection egress", () => {
       ), { INTERNAL_AGENT_TOKEN: token });
 
       await vi.waitFor(() => expect(upstream).toHaveBeenCalledOnce());
-      await vi.advanceTimersByTimeAsync(31_000);
+      await vi.advanceTimersByTimeAsync(20_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(upstream).toHaveBeenCalledTimes(2));
       const response = await responsePromise;
       const proof = await response.json() as { processed: number; matches: Array<{ url: string }> };
 
       expect(response.status).toBe(200);
-      expect(upstream).toHaveBeenCalledOnce();
+      expect(upstream).toHaveBeenCalledTimes(2);
       expect(proof).toMatchObject({
         processed: 1,
         matches: [{ url: "https://reviews.yandex.ru/product/kagotsel--1115000000" }]
