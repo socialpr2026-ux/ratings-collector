@@ -245,12 +245,10 @@ export class YandexAdapter implements SiteAdapter {
     this.sitemapConcurrency = boundedInteger(options.sitemapConcurrency, 4, 1, 12);
     this.cacheTtlMs = boundedInteger(options.cacheTtlMs, 30 * 60_000, 0, 24 * 60 * 60_000);
     this.sitemapRetryAttempts = boundedInteger(options.sitemapRetryAttempts, 3, 1, 5);
-    // One Agent request already retries each exact shard inside the fixed
-    // Function and recursively splits a failed two-shard group into parallel
-    // singletons. Repeating that entire chain here multiplied one persistent
-    // upstream termination into a nine-minute wait. Keep the production
-    // default single-pass while retaining an explicit test/diagnostic override.
-    this.batchRetryAttempts = boundedInteger(options.batchRetryAttempts, 1, 1, 2);
+    // Every gateway request now owns exactly one shard. Allow one outer retry
+    // after the Function's bounded recovery because it repeats only that exact
+    // proof; it cannot restart a two-shard split chain or any completed chunk.
+    this.batchRetryAttempts = boundedInteger(options.batchRetryAttempts, 2, 1, 2);
     this.sitemapRetryBaseMs = boundedInteger(options.sitemapRetryBaseMs, 250, 0, 10_000);
     // The fixed EdgeOne route validates and compacts complete multi-megabyte
     // shards before handing them to the adapter. On a cold function the

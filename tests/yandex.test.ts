@@ -478,11 +478,11 @@ describe("YandexAdapter discovery", () => {
       .toEqual([fetchMock.mock.calls[1]![1]?.body, fetchMock.mock.calls[1]![1]?.body]);
   });
 
-  it("does not repeat a failed Agent recovery chain at the adapter layer by default", async () => {
+  it("retries one failed singleton Agent proof once without widening the payload", async () => {
     const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
     const maps = [MAP_A];
     let batchAttempts = 0;
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = input instanceof Request ? input.url : input.toString();
       if (url === INDEX) return xmlResponse(sitemapIndex(maps));
       if (url !== batchEndpoint) throw new Error(`Unexpected request: ${url}`);
@@ -498,7 +498,9 @@ describe("YandexAdapter discovery", () => {
     await expect(adapter.discover("Энтеролактис", context())).rejects.toMatchObject({
       message: expect.stringContaining("terminated")
     });
-    expect(batchAttempts).toBe(1);
+    expect(batchAttempts).toBe(2);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST").map(([, init]) => init?.body))
+      .toEqual([fetchMock.mock.calls[1]![1]?.body, fetchMock.mock.calls[1]![1]?.body]);
   });
 
   it("bounds a gateway request that never returns and fails closed", async () => {
@@ -520,7 +522,7 @@ describe("YandexAdapter discovery", () => {
     await expect(adapter.discover("Бактоблис", context())).rejects.toMatchObject({
       message: expect.stringContaining("Yandex batch proof request failed")
     });
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(2);
   });
 
   it("rejects a partial batch aggregate even when an earlier chunk contained a match", async () => {
@@ -583,13 +585,13 @@ describe("YandexAdapter discovery", () => {
       activity: async (event) => { activity.push(event); }
     }));
     const rejection = discovery.catch((error) => error);
-    await vi.waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(4));
+    await vi.waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(5));
     await vi.waitFor(() => expect(siblingAborted).toBe(true));
     await expect(rejection).resolves.toMatchObject({
       message: `Yandex batch proof failed with HTTP 502: Yandex batch shard remained unproven: ${maps[0]}`
     });
     expect(siblingAborted).toBe(true);
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(4);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(5);
     expect(activity.filter((event) => event.status === "warning")).toHaveLength(1);
   });
 
