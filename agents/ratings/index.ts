@@ -130,6 +130,93 @@ export function hasExplicitYandexMarketNoResults(bodyText: string, query: string
     body.includes(`по запросу ${normalizedQuery} ничего не нашлось`);
 }
 
+type YandexMarketSearchProductProof = {
+  id: string;
+  name: string;
+  url: string;
+  ratingCount?: number;
+  rating?: number;
+  familyId?: string;
+};
+
+function structuredFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const normalized = value.trim().replace(",", ".");
+  if (!/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(normalized)) return undefined;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+export function extractYandexMarketSearchHtmlProof(
+  html: string,
+  query: string,
+  pageNumber: number
+): { query: string; page: number; hasNext: boolean; products: YandexMarketSearchProductProof[] } | undefined {
+  const normalizedQuery = normalizedVisibleText(query);
+  if (!normalizedQuery || !Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > 50) return undefined;
+  const products = new Map<string, YandexMarketSearchProductProof>();
+  const scriptPattern = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+  for (const match of html.matchAll(scriptPattern)) {
+    if (!/\btype\s*=\s*(?:["']application\/ld\+json["']|application\/ld\+json(?:\s|$))/i.test(match[1] ?? "")) continue;
+    let value: unknown;
+    try { value = JSON.parse(match[2] ?? ""); }
+    catch { continue; }
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const itemList = value as Record<string, unknown>;
+    if (itemList["@type"] !== "ItemList" || typeof itemList.name !== "string" ||
+      !normalizedVisibleText(itemList.name).includes(normalizedQuery) || !Array.isArray(itemList.itemListElement)) continue;
+    for (const entry of itemList.itemListElement) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const item = (entry as Record<string, unknown>).item;
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const product = item as Record<string, unknown>;
+      const name = typeof product.name === "string" ? product.name.trim() : "";
+      const rawUrl = typeof product.url === "string" ? product.url :
+        typeof product["@id"] === "string" ? product["@id"] : "";
+      let target: URL;
+      try { target = new URL(rawUrl); }
+      catch { continue; }
+      const id = target.pathname.match(/^\/card\/[a-z0-9][a-z0-9-]*\/(\d+)\/?$/i)?.[1];
+      if (!name || target.origin !== "https://market.yandex.ru" || !id || target.search || target.hash) continue;
+      const proof: YandexMarketSearchProductProof = { id, name, url: target.toString() };
+      const aggregate = product.aggregateRating;
+      if (aggregate && typeof aggregate === "object" && !Array.isArray(aggregate)) {
+        const ratingCount = structuredFiniteNumber((aggregate as Record<string, unknown>).ratingCount);
+        const rating = structuredFiniteNumber((aggregate as Record<string, unknown>).ratingValue);
+        if (ratingCount !== undefined && Number.isSafeInteger(ratingCount) && ratingCount >= 0 &&
+          rating !== undefined && rating >= 0 && rating <= 5 &&
+          (ratingCount === 0 || rating > 0)) {
+          proof.ratingCount = ratingCount;
+          proof.rating = rating;
+        }
+      }
+      const familyId = typeof product.sku === "number" || typeof product.sku === "string"
+        ? String(product.sku).trim()
+        : "";
+      if (/^\d{1,40}$/.test(familyId)) proof.familyId = familyId;
+      products.set(id, proof);
+    }
+  }
+  if (products.size === 0) return undefined;
+
+  let hasNext = false;
+  const hrefPattern = /<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi;
+  for (const match of html.matchAll(hrefPattern)) {
+    const href = (match[1] ?? match[2] ?? match[3] ?? "").replace(/&amp;/gi, "&");
+    try {
+      const target = new URL(href, "https://market.yandex.ru");
+      if (target.origin === "https://market.yandex.ru" && target.pathname === "/search" &&
+        normalizedVisibleText(target.searchParams.get("text") ?? "") === normalizedQuery &&
+        Number(target.searchParams.get("page")) === pageNumber + 1) {
+        hasNext = true;
+        break;
+      }
+    } catch { /* ignore malformed links */ }
+  }
+  return { query, page: pageNumber, hasNext, products: [...products.values()] };
+}
+
 export function browserFetch(
   sandbox: SandboxApi,
   staticProxy?: { endpoint: string; token: string }
@@ -600,6 +687,25 @@ export function browserFetch(
       if (!isSearch && !isCard) {
         throw new Error("Yandex Market browser proof is restricted to bounded search or exact reviews routes");
       }
+      if (isSearch && staticProxy) {
+        try {
+          const proxied = await fetchViaStaticProxy(url, request.signal);
+          const contentType = proxied.headers.get("content-type") ?? "";
+          const contentLength = Number(proxied.headers.get("content-length"));
+          if (proxied.ok && /html/i.test(contentType) &&
+            (!Number.isFinite(contentLength) || contentLength <= 10_000_000)) {
+            const html = await proxied.text();
+            if (html.length <= 10_000_000) {
+              const proof = extractYandexMarketSearchHtmlProof(html, query, Number(pageText));
+              if (proof) return json(proof);
+            }
+          }
+        } catch {
+          // The strict first-party JSON-LD proof was unavailable through fixed
+          // egress. Continue to the rendered browser route without changing a
+          // challenge, timeout or unknown response into an empty result.
+        }
+      }
       let response!: Response;
       queue = queue.catch(() => undefined).then(async () => {
         request.signal.throwIfAborted();
@@ -648,7 +754,70 @@ export function browserFetch(
             }
             const pageNumber = Number(pageText);
             const proof = await page.evaluate(({ query, pageNumber, explicitNoResults }) => {
-              const products = new Map<string, { id: string; name: string; url: string }>();
+              const products = new Map<string, {
+                id: string;
+                name: string;
+                url: string;
+                ratingCount?: number;
+                rating?: number;
+                familyId?: string;
+              }>();
+              const normalizedQuery = query.normalize("NFKC").trim().toLocaleLowerCase("ru-RU");
+              const structuredNumber = (value: unknown): number | undefined => {
+                if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+                if (typeof value !== "string" || !value.trim()) return undefined;
+                const normalized = value.trim().replace(",", ".");
+                if (!/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(normalized)) return undefined;
+                const parsed = Number(normalized);
+                return Number.isFinite(parsed) ? parsed : undefined;
+              };
+              for (const script of document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]')) {
+                let itemList: Record<string, unknown>;
+                try { itemList = JSON.parse(script.textContent ?? "") as Record<string, unknown>; }
+                catch { continue; }
+                if (itemList["@type"] !== "ItemList" || typeof itemList.name !== "string" ||
+                  !itemList.name.normalize("NFKC").toLocaleLowerCase("ru-RU").includes(normalizedQuery) ||
+                  !Array.isArray(itemList.itemListElement)) continue;
+                for (const entry of itemList.itemListElement) {
+                  if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+                  const item = (entry as Record<string, unknown>).item;
+                  if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+                  const product = item as Record<string, unknown>;
+                  const name = typeof product.name === "string" ? product.name.trim() : "";
+                  const rawUrl = typeof product.url === "string" ? product.url :
+                    typeof product["@id"] === "string" ? product["@id"] : "";
+                  let target: URL;
+                  try { target = new URL(rawUrl, window.location.origin); }
+                  catch { continue; }
+                  const match = target.pathname.match(/^\/card\/[a-z0-9][a-z0-9-]*\/(\d+)\/?$/i);
+                  if (!name || target.origin !== "https://market.yandex.ru" || !match) continue;
+                  target.search = "";
+                  target.hash = "";
+                  const proof: {
+                    id: string;
+                    name: string;
+                    url: string;
+                    ratingCount?: number;
+                    rating?: number;
+                    familyId?: string;
+                  } = { id: match[1]!, name, url: target.toString() };
+                  const aggregate = product.aggregateRating;
+                  if (aggregate && typeof aggregate === "object" && !Array.isArray(aggregate)) {
+                    const ratingCount = structuredNumber((aggregate as Record<string, unknown>).ratingCount);
+                    const rating = structuredNumber((aggregate as Record<string, unknown>).ratingValue);
+                    if (ratingCount !== undefined && Number.isSafeInteger(ratingCount) && ratingCount >= 0 &&
+                      rating !== undefined && rating >= 0 && rating <= 5 && (ratingCount === 0 || rating > 0)) {
+                      proof.ratingCount = ratingCount;
+                      proof.rating = rating;
+                    }
+                  }
+                  const familyId = typeof product.sku === "number" || typeof product.sku === "string"
+                    ? String(product.sku).trim()
+                    : "";
+                  if (/^\d{1,40}$/.test(familyId)) proof.familyId = familyId;
+                  products.set(match[1]!, proof);
+                }
+              }
               for (const article of document.querySelectorAll("article")) {
                 const link = article.querySelector<HTMLAnchorElement>('a[href*="/card/"]');
                 if (!link) continue;
@@ -662,7 +831,9 @@ export function browserFetch(
                 const imageTitle = article.querySelector<HTMLImageElement>("img[alt]")?.alt?.trim();
                 const name = imageTitle || link.textContent?.replace(/\s+/g, " ").trim() || "";
                 if (!name) continue;
-                products.set(match[1]!, { id: match[1]!, name, url: target.toString() });
+                if (!products.has(match[1]!)) {
+                  products.set(match[1]!, { id: match[1]!, name, url: target.toString() });
+                }
               }
               let hasNext = false;
               for (const anchor of document.querySelectorAll<HTMLAnchorElement>("a[href]")) {

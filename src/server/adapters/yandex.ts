@@ -22,6 +22,7 @@ const DIRECT_SOURCE = "yandex_reviews_json_ld";
 const TRANSLATE_SOURCE = "yandex_reviews_json_ld_google_translate";
 const MARKET_TRANSLATE_SOURCE = "yandex_market_json_ld_google_translate";
 const MARKET_BROWSER_SOURCE = "yandex_market_json_ld_browser";
+const MARKET_SEARCH_SOURCE = "yandex_market_json_ld_search";
 const MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_\d+-\d+-\d+\.xml$/i;
 const SHOP_SITEMAP_PATH = /^\/ugcpub\/sitemap_shop_((?:[0-9a-z]|%[0-9a-f]{2})-(?:[0-9a-z]|%[0-9a-f]{2}))-\d+\.xml$/i;
 const SHOP_SITEMAP_RANGES = new Set([
@@ -81,7 +82,14 @@ type YandexMarketSearchProof = {
   query: string;
   page: number;
   hasNext: boolean;
-  products: Array<{ id: string; name: string; url: string }>;
+  products: Array<{
+    id: string;
+    name: string;
+    url: string;
+    ratingCount?: number;
+    rating?: number;
+    familyId?: string;
+  }>;
 };
 
 type ProductPage =
@@ -407,7 +415,10 @@ export class YandexAdapter implements SiteAdapter {
           title: product.name,
           metadata: {
             discovery: "yandex-market-rendered-search",
-            sourceSearch: url.toString()
+            sourceSearch: url.toString(),
+            ...(product.ratingCount !== undefined ? { searchRatingCount: product.ratingCount } : {}),
+            ...(product.rating !== undefined ? { searchRating: product.rating } : {}),
+            ...(product.familyId ? { searchFamilyId: product.familyId } : {})
           }
         });
         if (refs.size > this.maxCandidates) {
@@ -700,6 +711,8 @@ export class YandexAdapter implements SiteAdapter {
     const listingId = normalizeListingId(ref.listingId) ?? extractModelId(ref.url) ?? extractMarketCardId(ref.url);
     if (!listingId) throw new ParserChangedError(`Invalid Yandex modelId: ${ref.listingId}`);
     if (isAllowedMarketCardReviewsUrl(ref.url, listingId)) {
+      const searchProof = this.collectMarketSearchProof(ref, listingId, context);
+      if (searchProof) return searchProof;
       return this.collectMarketCard(ref, listingId, context);
     }
 
@@ -866,6 +879,73 @@ export class YandexAdapter implements SiteAdapter {
       evidenceRef: `${canonicalUrl}#json-ld`,
       productEvidence,
       source: page.translated ? TRANSLATE_SOURCE : DIRECT_SOURCE
+    };
+  }
+
+  private collectMarketSearchProof(
+    ref: ProductRef,
+    listingId: string,
+    context: AdapterContext
+  ): Observation | undefined {
+    if (!Object.hasOwn(ref.metadata, "searchRatingCount") && !Object.hasOwn(ref.metadata, "searchRating")) {
+      return undefined;
+    }
+    const ratingCount = parseNonNegativeInteger(ref.metadata.searchRatingCount);
+    const rating = parseFiniteNumber(ref.metadata.searchRating);
+    const sourceSearch = nonEmptyString(ref.metadata.sourceSearch);
+    const title = nonEmptyString(ref.title);
+    if (ratingCount === undefined || rating === undefined || rating < 0 || rating > 5 ||
+      (ratingCount > 0 && rating === 0) || !sourceSearch || !title) {
+      throw new ParserChangedError(`Yandex Market search metrics for card ${listingId} are incomplete`);
+    }
+    let sourceUrl: URL;
+    try { sourceUrl = new URL(sourceSearch); }
+    catch { throw new ParserChangedError(`Yandex Market search proof for card ${listingId} has an invalid URL`); }
+    const sourcePage = sourceUrl.searchParams.get("page") ?? "1";
+    if (sourceUrl.origin !== MARKET_ORIGIN || sourceUrl.pathname !== "/search" ||
+      brandKey(sourceUrl.searchParams.get("text") ?? "") !== brandKey(ref.brand) ||
+      !/^\d+$/.test(sourcePage) || Number(sourcePage) < 1 || Number(sourcePage) > this.maxMarketPages ||
+      [...sourceUrl.searchParams.keys()].some((key) => key !== "text" && key !== "page")) {
+      throw new ParserChangedError(`Yandex Market search proof for card ${listingId} is source-unbound`);
+    }
+    const brands = context.brands?.length ? context.brands : [ref.brand];
+    const brandMatches = bestMatchingTextBrandKeys(title, brands).has(brandKey(ref.brand));
+    const canonicalUrl = canonicalizeUrl(ref.url);
+    const familyId = nonEmptyString(ref.metadata.searchFamilyId);
+    if (familyId && !/^\d{1,40}$/.test(familyId)) {
+      throw new ParserChangedError(`Yandex Market search family for card ${listingId} is invalid`);
+    }
+    return {
+      domain: "market.yandex.ru",
+      platform: this.id,
+      listingId,
+      brand: ref.brand,
+      canonicalUrl,
+      product: title,
+      reviews: ratingCount,
+      rating: ratingCount === 0 ? null : rating,
+      rawRating: ratingCount === 0 ? null : rating,
+      rawRatingScale: 5,
+      ratingCount,
+      status: brandMatches ? (ratingCount === 0 ? "no_reviews" : "ok") : "needs_review",
+      capturedAt: this.now().toISOString(),
+      ...(familyId ? { aggregateGroupId: `yandex:sku:${familyId}` } : {}),
+      evidenceRef: `${sourceUrl.toString()}#json-ld`,
+      productEvidence: {
+        scope: "listing",
+        signals: [
+          { source: "title", text: title },
+          { source: "url", text: canonicalUrl }
+        ],
+        variants: [],
+        identifiers: [
+          { type: "model_id", value: listingId },
+          ...(familyId ? [{ type: "sku" as const, value: familyId }] : [])
+        ],
+        imageUrls: [],
+        instructionUrls: []
+      },
+      source: MARKET_SEARCH_SOURCE
     };
   }
 
@@ -1576,6 +1656,14 @@ function validYandexMarketSearchProof(
     if (typeof product.id !== "string" || !/^\d+$/.test(product.id) || ids.has(product.id) ||
       typeof product.name !== "string" || !product.name.trim() ||
       typeof product.url !== "string" || !isAllowedMarketSearchCardUrl(product.url, product.id)) return false;
+    const hasRatingCount = product.ratingCount !== undefined;
+    const hasRating = product.rating !== undefined;
+    if (hasRatingCount !== hasRating || hasRatingCount && (
+      !Number.isSafeInteger(product.ratingCount) || product.ratingCount! < 0 ||
+      typeof product.rating !== "number" || !Number.isFinite(product.rating) || product.rating < 0 || product.rating > 5 ||
+      product.ratingCount! > 0 && product.rating === 0
+    )) return false;
+    if (product.familyId !== undefined && !/^\d{1,40}$/.test(product.familyId)) return false;
     ids.add(product.id);
   }
   return true;

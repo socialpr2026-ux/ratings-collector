@@ -599,6 +599,46 @@ describe("WildberriesAdapter.discover", () => {
     );
   });
 
+  it("accepts a source-bound root zero when Wildberries has not calculated rating distributions", async () => {
+    const searchProduct = {
+      id: 393735497,
+      root: 393735497,
+      brand: "Энтеролактис",
+      name: "Энтеролактис Плюс капсулы"
+    };
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 1, products: [searchProduct] });
+      if (url.hostname === "card.wb.ru") return jsonResponse({ products: [searchProduct] });
+      if (url.hostname === "feedbacks1.wb.ru") {
+        return jsonResponse({
+          feedbackCount: 0,
+          valuation: "",
+          valuationDistribution: null,
+          nmValuationDistribution: null
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("Энтеролактис", context({ runId: "explicit-root-zero" }));
+
+    const observation = await adapter.collect(refs[0]!, context());
+
+    expect(observation).toMatchObject({
+      listingId: "393735497",
+      reviews: 0,
+      writtenReviewCount: 0,
+      ratingCount: 0,
+      rating: null,
+      status: "no_reviews",
+      aggregateGroupId: "wildberries:root:393735497",
+      source: "wildberries-root-explicit-zero"
+    });
+    expect(observation.evidenceRef).toBe("https://feedbacks1.wb.ru/feedbacks/v2/393735497");
+    expect(observation).not.toHaveProperty("rawRating");
+  });
+
   it("marks a proven root-only aggregate for family-row collapse", async () => {
     const products = [
       { id: 801, root: 9901, brand: "BrandX", name: "BrandX comfort", nmReviewRating: 4.8, nmFeedbacks: 50 },

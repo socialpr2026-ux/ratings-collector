@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   browserFetch,
   createLazySandboxAcquire,
+  extractYandexMarketSearchHtmlProof,
   hasExplicitWildberriesNoResults,
   hasExplicitYandexMarketNoResults,
   shouldAutoRetryInitialCollection,
@@ -910,6 +911,83 @@ describe("ratings Agent lazy Sandbox routing", () => {
       "Энтеролактис"
     )).toBe(false);
     expect(hasExplicitYandexMarketNoResults("Товары временно недоступны", "Энтеролактис")).toBe(false);
+  });
+
+  it("extracts exact search metrics and shared SKU proof from first-party Yandex JSON-LD", () => {
+    const html = `<html><body>
+      <script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        name: "Энтеролактис — купить по низкой цене на Яндекс Маркете",
+        itemListElement: [{
+          "@type": "ListItem",
+          position: 1,
+          item: {
+            "@type": "Product",
+            name: "Энтеролактис Плюс капсулы 319мг 15шт",
+            url: "https://market.yandex.ru/card/enterolaktis-plyus-kaps/103552838402",
+            sku: "101596320306",
+            aggregateRating: { "@type": "AggregateRating", ratingValue: 4.9, ratingCount: 55 }
+          }
+        }]
+      })}</script>
+      <a href="/search?text=${encodeURIComponent("Энтеролактис")}&amp;page=2">Вперёд</a>
+    </body></html>`;
+
+    expect(extractYandexMarketSearchHtmlProof(html, "Энтеролактис", 1)).toEqual({
+      query: "Энтеролактис",
+      page: 1,
+      hasNext: true,
+      products: [{
+        id: "103552838402",
+        name: "Энтеролактис Плюс капсулы 319мг 15шт",
+        url: "https://market.yandex.ru/card/enterolaktis-plyus-kaps/103552838402",
+        ratingCount: 55,
+        rating: 4.9,
+        familyId: "101596320306"
+      }]
+    });
+    expect(extractYandexMarketSearchHtmlProof(html.replace("ratingCount\":55", "ratingCount\":null"),
+      "Энтеролактис", 1)?.products[0]).not.toHaveProperty("ratingCount");
+  });
+
+  it("uses fixed Yandex search JSON-LD proof without acquiring Sandbox", async () => {
+    const run = vi.fn(async () => undefined);
+    const html = `<script type="application/ld+json">${JSON.stringify({
+      "@type": "ItemList",
+      name: "Энтеролактис — купить на Яндекс Маркете",
+      itemListElement: [{
+        item: {
+          "@type": "Product",
+          name: "Энтеролактис Дуо саше 5г 20шт",
+          url: "https://market.yandex.ru/card/enterolaktis-duo-por-sashe/103552838702",
+          sku: "101758091850",
+          aggregateRating: { ratingValue: 4.8, ratingCount: 24 }
+        }
+      }]
+    })}</script>`;
+    const directFetch = vi.fn(async () => new Response(html, {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const url = `https://market.yandex.ru/search?text=${encodeURIComponent("Энтеролактис")}`;
+
+    const response = await routedFetch(url, {
+      headers: { "x-ratings-browser": "1", "x-ratings-browser-mode": "yandex-market-proof" }
+    });
+
+    await expect(response.json()).resolves.toMatchObject({
+      query: "Энтеролактис",
+      page: 1,
+      hasNext: false,
+      products: [{ id: "103552838702", ratingCount: 24, rating: 4.8, familyId: "101758091850" }]
+    });
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(run).not.toHaveBeenCalled();
   });
 
   it("classifies an exhausted EdgeOne monthly GB-s allowance as quota", async () => {

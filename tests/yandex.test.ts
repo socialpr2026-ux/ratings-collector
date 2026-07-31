@@ -54,7 +54,10 @@ describe("YandexAdapter discovery", () => {
             {
               id: "103552838402",
               name: "Энтеролактис Плюс капсулы 319мг 15шт",
-              url: "https://market.yandex.ru/card/enterolaktis-plyus-kaps/103552838402"
+              url: "https://market.yandex.ru/card/enterolaktis-plyus-kaps/103552838402",
+              ratingCount: 55,
+              rating: 4.9,
+              familyId: "101596320306"
             },
             {
               id: "103543425097",
@@ -88,6 +91,16 @@ describe("YandexAdapter discovery", () => {
     expect(refs.every(({ url }) => url.endsWith("/reviews"))).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("sitemap"))).toBe(false);
+
+    await expect(adapter.collect(refs.find(({ listingId }) => listingId === "103552838402")!,
+      context({ brands: ["Энтеролактис"] }))).resolves.toMatchObject({
+      reviews: 55,
+      ratingCount: 55,
+      rating: 4.9,
+      aggregateGroupId: "yandex:sku:101596320306",
+      source: "yandex_market_json_ld_search"
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("collects a rendered exact Market card with source-bound JSON-LD metrics", async () => {

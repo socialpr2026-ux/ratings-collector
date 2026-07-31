@@ -169,6 +169,43 @@ function distributionMetrics(value: unknown): DistributionMetrics | undefined {
   };
 }
 
+function provesExplicitRootZero(payload: JsonObject): boolean {
+  if (asNonnegativeInteger(payload.feedbackCount) !== 0) return false;
+  const valuation = asFiniteNumber(payload.valuation);
+  if (valuation !== undefined && valuation !== 0) return false;
+
+  const rootDistribution = payload.valuationDistribution;
+  if (rootDistribution !== undefined && rootDistribution !== null) {
+    if (!isObject(rootDistribution)) return false;
+    for (let score = 1; score <= 5; score += 1) {
+      if (asNonnegativeInteger(rootDistribution[String(score)]) !== 0) return false;
+    }
+  }
+
+  const nmDistributions = payload.nmValuationDistribution;
+  return nmDistributions === undefined || nmDistributions === null ||
+    (Array.isArray(nmDistributions) && nmDistributions.length === 0);
+}
+
+function applyExplicitRootZero(
+  rootId: string,
+  members: ProductRef[],
+  payload: JsonObject,
+  evidenceUrl: string
+): boolean {
+  if (!provesExplicitRootZero(payload)) return false;
+  for (const member of members) {
+    member.metadata.resolvedFeedbackCount = 0;
+    member.metadata.writtenReviewCount = 0;
+    member.metadata.ratingCount = 0;
+    member.metadata.resolvedRating = 0;
+    member.metadata.aggregateGroupId = `wildberries:root:${rootId}`;
+    member.metadata.source = "wildberries-root-explicit-zero";
+    member.metadata.evidenceRef = evidenceUrl;
+  }
+  return true;
+}
+
 function parseProductPage(payload: unknown): ProductPage {
   if (!isObject(payload)) {
     throw new ParserChangedError("Wildberries returned a non-object payload");
@@ -775,6 +812,7 @@ export class WildberriesAdapter implements SiteAdapter {
     context: AdapterContext
   ): Promise<void> {
     const { payload, evidenceUrl } = await this.fetchRootFeedback(rootId, context);
+    if (isObject(payload) && applyExplicitRootZero(rootId, requiredMembers, payload, evidenceUrl)) return;
     if (!isObject(payload) || !Array.isArray(payload.nmValuationDistribution) ||
       payload.nmValuationDistribution.length === 0) {
       throw new ParserChangedError(`Wildberries root ${rootId} has no exact nm distribution`);
@@ -816,6 +854,7 @@ export class WildberriesAdapter implements SiteAdapter {
     if (!isObject(payload)) throw new ParserChangedError(`Wildberries root ${rootId} returned a non-object payload`);
 
     const applySharedAggregate = () => {
+      if (applyExplicitRootZero(rootId, members, payload, evidenceUrl)) return;
       const feedbackCount = asNonnegativeInteger(payload.feedbackCount);
       const rating = asFiniteNumber(payload.valuation);
       if (feedbackCount === undefined || rating === undefined || rating < 0 || rating > 5 ||
