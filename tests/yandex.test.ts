@@ -387,7 +387,7 @@ describe("YandexAdapter discovery", () => {
     });
     const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
     fetch.yandexBatchEndpoint = batchEndpoint;
-    const adapter = new YandexAdapter({ fetch, maxSitemaps: maps.length, sitemapRetryAttempts: 1 });
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: maps.length, sitemapRetryAttempts: 1, sitemapRetryBaseMs: 0 });
 
     await expect(adapter.discover("baktoblis", context())).rejects.toBeInstanceOf(AdapterBlockedError);
   });
@@ -478,7 +478,51 @@ describe("YandexAdapter discovery", () => {
       .toEqual([fetchMock.mock.calls[1]![1]?.body, fetchMock.mock.calls[1]![1]?.body]);
   });
 
-  it("retries one failed singleton Agent proof once without widening the payload", async () => {
+  it("finishes healthy shards and recovers only the failed singleton in a serial round", async () => {
+    const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const maps = [MAP_A, MAP_B];
+    const activity: AdapterActivityEvent[] = [];
+    let failedShardAttempts = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      const request = JSON.parse(String(init?.body)) as { sitemaps: string[]; brands: Array<{ brand: string }> };
+      const sitemap = request.sitemaps[0]!;
+      if (sitemap === MAP_A) {
+        failedShardAttempts += 1;
+        if (failedShardAttempts <= 2) {
+          return new Response(JSON.stringify({ error: "transient exact egress stall" }), {
+            status: 502,
+            headers: { "content-type": "application/json" }
+          });
+        }
+      }
+      return new Response(JSON.stringify({
+        processed: 1,
+        firstSitemap: sitemap,
+        lastSitemap: sitemap,
+        verifiedSitemaps: [sitemap],
+        matches: sitemap === MAP_A ? [{
+          brand: request.brands[0]!.brand,
+          url: "https://reviews.yandex.ru/product/baktoblis--1234567",
+          sitemap
+        }] : []
+      }), { headers: { "content-type": "application/json" } });
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
+    fetch.yandexBatchEndpoint = batchEndpoint;
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: maps.length, sitemapRetryBaseMs: 0 });
+
+    await expect(adapter.discover("baktoblis", context({
+      activity: async (event) => { activity.push(event); }
+    }))).resolves.toMatchObject([{ listingId: "1234567", brand: "baktoblis" }]);
+    expect(failedShardAttempts).toBe(3);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(4);
+    expect(activity.filter((event) => event.operationId === "yandex:gateway-recovery").map(({ status }) => status))
+      .toEqual(["active", "complete"]);
+  });
+
+  it("defers one failed singleton and retries only its exact proof in the serial recovery round", async () => {
     const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
     const maps = [MAP_A];
     let batchAttempts = 0;
@@ -498,9 +542,9 @@ describe("YandexAdapter discovery", () => {
     await expect(adapter.discover("Энтеролактис", context())).rejects.toMatchObject({
       message: expect.stringContaining("terminated")
     });
-    expect(batchAttempts).toBe(2);
+    expect(batchAttempts).toBe(4);
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST").map(([, init]) => init?.body))
-      .toEqual([fetchMock.mock.calls[1]![1]?.body, fetchMock.mock.calls[1]![1]?.body]);
+      .toEqual(Array.from({ length: 4 }, () => fetchMock.mock.calls[1]![1]?.body));
   });
 
   it("bounds a gateway request that never returns and fails closed", async () => {
@@ -516,13 +560,14 @@ describe("YandexAdapter discovery", () => {
       fetch,
       maxSitemaps: 1,
       sitemapRetryAttempts: 1,
+      sitemapRetryBaseMs: 0,
       batchRequestTimeoutMs: 10
     });
 
     await expect(adapter.discover("Бактоблис", context())).rejects.toMatchObject({
       message: expect.stringContaining("Yandex batch proof request failed")
     });
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(2);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(4);
   });
 
   it("rejects a partial batch aggregate even when an earlier chunk contained a match", async () => {
@@ -553,13 +598,12 @@ describe("YandexAdapter discovery", () => {
     await expect(adapter.discover("oscillococcinum", context())).rejects.toBeInstanceOf(AdapterBlockedError);
   });
 
-  it("aborts an in-flight sibling and reports only the original failed package", async () => {
+  it("finishes healthy siblings and serially retries only the failed singleton before rejecting", async () => {
     const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
-    const maps = Array.from({ length: 16 }, (_value, index) =>
+    const maps = Array.from({ length: 4 }, (_value, index) =>
       `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
     );
     const activity: AdapterActivityEvent[] = [];
-    let siblingAborted = false;
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : input.toString();
       if (url === INDEX) return xmlResponse(sitemapIndex(maps));
@@ -567,31 +611,28 @@ describe("YandexAdapter discovery", () => {
       if (request.sitemaps[0] === maps[0]) return new Response(JSON.stringify({
         error: `Yandex batch shard remained unproven: ${maps[0]}`
       }), { status: 502, headers: { "content-type": "application/json" } });
-      return await new Promise<Response>((_resolve) => {
-        const signal = init?.signal;
-        if (!signal) throw new Error("missing batch abort signal");
-        const onAbort = () => {
-          siblingAborted = true;
-        };
-        if (signal.aborted) onAbort();
-        else signal.addEventListener("abort", onAbort, { once: true });
-      });
+      return new Response(JSON.stringify({
+        processed: 1,
+        firstSitemap: request.sitemaps[0],
+        lastSitemap: request.sitemaps[0],
+        verifiedSitemaps: request.sitemaps,
+        matches: []
+      }), { headers: { "content-type": "application/json" } });
     });
     const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
     fetch.yandexBatchEndpoint = batchEndpoint;
     const adapter = new YandexAdapter({ fetch, maxSitemaps: maps.length, sitemapRetryBaseMs: 0 });
 
-    const discovery = adapter.discover("Церетон", context({
+    await expect(adapter.discover("Церетон", context({
       activity: async (event) => { activity.push(event); }
-    }));
-    const rejection = discovery.catch((error) => error);
-    await vi.waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(3));
-    await vi.waitFor(() => expect(siblingAborted).toBe(true));
-    await expect(rejection).resolves.toMatchObject({
+    }))).rejects.toMatchObject({
       message: `Yandex batch proof failed with HTTP 502: Yandex batch shard remained unproven: ${maps[0]}`
     });
-    expect(siblingAborted).toBe(true);
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(3);
+    const postedSitemaps = fetchMock.mock.calls
+      .filter(([, init]) => init?.method === "POST")
+      .map(([, init]) => (JSON.parse(String(init?.body)) as { sitemaps: string[] }).sitemaps[0]);
+    expect(postedSitemaps.filter((sitemap) => sitemap === maps[0])).toHaveLength(4);
+    for (const sitemap of maps.slice(1)) expect(postedSitemaps.filter((value) => value === sitemap)).toHaveLength(1);
     expect(activity.filter((event) => event.status === "warning")).toHaveLength(1);
   });
 

@@ -45,6 +45,8 @@ const YANDEX_BATCH_CHUNK_SIZE = 1;
 // 0.6-1.8 MB shards in production. Two streamed singleton workers preserve
 // throughput without saturating the fixed first-party transport.
 const YANDEX_BATCH_CONCURRENCY = 2;
+const YANDEX_BATCH_RECOVERY_ROUNDS = 2;
+const YANDEX_BATCH_RECOVERY_DELAY_MS = 5_000;
 const YANDEX_PROGRESS_SITEMAP_INTERVAL = 32;
 
 type YandexCapableFetch = typeof globalThis.fetch & {
@@ -579,10 +581,9 @@ export class YandexAdapter implements SiteAdapter {
       brandKey(brand),
       { brand, refs: new Map() }
     ]));
-    // A failed chunk stops workers from taking new chunks, but an already
-    // running sibling must settle normally before the failure is returned.
-    // Aborting that sibling makes the same error appear against two packages
-    // and can leave fixed-function egress overlapping the next retry.
+    // Complete the healthy singleton proofs even when one transport route
+    // stalls. Only failed shards enter the serial recovery round; no partial
+    // discovery is returned until every index member is proven.
     const batchAbort = new AbortController();
     let callerAborted = false;
     const relayAbort = () => {
@@ -591,7 +592,6 @@ export class YandexAdapter implements SiteAdapter {
     };
     if (context.signal?.aborted) relayAbort();
     else context.signal?.addEventListener("abort", relayAbort, { once: true });
-    let cursor = 0;
     let completedSitemaps = 0;
     let reportedSitemaps = 0;
     let failure: unknown;
@@ -663,51 +663,90 @@ export class YandexAdapter implements SiteAdapter {
       }
     };
 
-    const worker = async (): Promise<void> => {
-      while (failure === undefined && !batchAbort.signal.aborted) {
-        const index = cursor;
-        cursor += 1;
-        if (index >= chunks.length) return;
-        const sitemaps = chunks[index]!;
-        try {
-          await processChunk(sitemaps);
-          completedSitemaps += sitemaps.length;
-          if (
-            completedSitemaps === sitemapUrls.length ||
-            completedSitemaps - reportedSitemaps >= YANDEX_PROGRESS_SITEMAP_INTERVAL
-          ) {
-            reportedSitemaps = completedSitemaps;
-            await reportActivity(context, {
-              operationId: "yandex:gateway-progress",
-              stage: "discovery",
-              status: completedSitemaps === sitemapUrls.length ? "complete" : "active",
-              label: "Полный поиск карточек Yandex",
-              channels: ["gateway"],
-              detail: `Проверено карт индекса: ${completedSitemaps} из ${sitemapUrls.length}`
-            });
+    type PendingGatewayChunk = { index: number; sitemaps: string[]; error?: unknown };
+    const executeRound = async (
+      pending: PendingGatewayChunk[],
+      concurrency: number
+    ): Promise<PendingGatewayChunk[]> => {
+      let roundCursor = 0;
+      const failed: PendingGatewayChunk[] = [];
+      const worker = async (): Promise<void> => {
+        while (!batchAbort.signal.aborted) {
+          const item = pending[roundCursor];
+          roundCursor += 1;
+          if (!item) return;
+          try {
+            await processChunk(item.sitemaps);
+            completedSitemaps += item.sitemaps.length;
+            if (
+              completedSitemaps === sitemapUrls.length ||
+              completedSitemaps - reportedSitemaps >= YANDEX_PROGRESS_SITEMAP_INTERVAL
+            ) {
+              reportedSitemaps = completedSitemaps;
+              await reportActivity(context, {
+                operationId: "yandex:gateway-progress",
+                stage: "discovery",
+                status: completedSitemaps === sitemapUrls.length ? "complete" : "active",
+                label: "Полный поиск карточек Yandex",
+                channels: ["gateway"],
+                detail: `Проверено карт индекса: ${completedSitemaps} из ${sitemapUrls.length}`
+              });
+            }
+          } catch (error) {
+            if (callerAborted || batchAbort.signal.aborted) return;
+            failed.push({ ...item, error });
           }
-        } catch (error) {
-          if (batchAbort.signal.aborted && failure !== undefined) return;
-          await reportActivity(context, {
-            operationId: `yandex:gateway-failure:${index}`,
-            stage: "discovery",
-            status: "warning",
-            label: "Полный поиск карточек Yandex",
-            channels: ["gateway"],
-            detail: `Пакет ${index + 1} не подтверждён: ${errorMessage(error)}`
-          });
-          failure ??= error;
-          // A complete scan cannot succeed after one package exhausted its
-          // bounded retries. Interrupt the sibling worker immediately instead
-          // of waiting for another long gateway recovery chain to finish.
-          batchAbort.abort(failure);
-          return;
         }
-      }
+      };
+      await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, worker));
+      return failed.sort((left, right) => left.index - right.index);
     };
 
     try {
-      await Promise.all(Array.from({ length: Math.min(YANDEX_BATCH_CONCURRENCY, chunks.length) }, worker));
+      let pending: PendingGatewayChunk[] = chunks.map((sitemaps, index) => ({ index, sitemaps }));
+      for (let round = 1; round <= YANDEX_BATCH_RECOVERY_ROUNDS; round += 1) {
+        const failed = await executeRound(pending, round === 1 ? YANDEX_BATCH_CONCURRENCY : 1);
+        if (callerAborted) throw context.signal?.reason ?? new DOMException("aborted", "AbortError");
+        if (failed.length === 0) {
+          failure = undefined;
+          if (round > 1) {
+            await reportActivity(context, {
+              operationId: "yandex:gateway-recovery",
+              stage: "discovery",
+              status: "complete",
+              label: "Yandex: повтор проблемных карт индекса",
+              channels: ["gateway"],
+              detail: "Все ранее не подтверждённые карты доказаны"
+            });
+          }
+          break;
+        }
+        failure = failed[0]!.error;
+        if (round < YANDEX_BATCH_RECOVERY_ROUNDS) {
+          await reportActivity(context, {
+            operationId: "yandex:gateway-recovery",
+            stage: "discovery",
+            status: "active",
+            label: "Yandex: повтор проблемных карт индекса",
+            channels: ["gateway"],
+            detail: `Повторяем только не подтверждённые карты: ${failed.length}`
+          });
+          const delayMs = Math.min(YANDEX_BATCH_RECOVERY_DELAY_MS, this.sitemapRetryBaseMs * 20);
+          if (delayMs > 0) await this.sleep(delayMs);
+          context.signal?.throwIfAborted();
+          pending = failed.map(({ index, sitemaps }) => ({ index, sitemaps }));
+          continue;
+        }
+        const first = failed[0]!;
+        await reportActivity(context, {
+          operationId: `yandex:gateway-failure:${first.index}`,
+          stage: "discovery",
+          status: "warning",
+          label: "Полный поиск карточек Yandex",
+          channels: ["gateway"],
+          detail: `Пакет ${first.index + 1} не подтверждён после отдельного повтора: ${errorMessage(first.error)}`
+        });
+      }
       if (failure !== undefined) throw failure;
       if (callerAborted) throw context.signal?.reason ?? new DOMException("aborted", "AbortError");
       if (tombstonedSitemaps.size > 0) {
