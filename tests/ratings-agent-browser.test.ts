@@ -569,7 +569,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it.each([502, 504])("splits a Yandex batch after HTTP %i and recombines complete proofs", async (failureStatus) => {
+  it.each([500, 502, 503, 504])("splits a Yandex batch after HTTP %i and recombines complete proofs", async (failureStatus) => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       const forwarded = JSON.parse(String(init?.body)) as {

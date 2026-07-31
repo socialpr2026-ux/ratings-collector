@@ -5,7 +5,7 @@ import type {
   ProductRef,
   SiteAdapter
 } from "../../shared/types.js";
-import { matchesBrand } from "../utils/normalize.js";
+import { matchesBrand, normalizeText } from "../utils/normalize.js";
 import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 
 // The buyer v18 route currently rate-limits ordinary cloud/static egress even
@@ -334,6 +334,41 @@ function preferProductTitle(primary: string, alternative: string | undefined): s
   return primary;
 }
 
+function recoverEnterolactisCatalogTitle(title: string, brand: string, sourceBrand?: string): string {
+  if (normalizeText(brand) !== "энтеролактис") return title;
+  const normalized = normalizeText(title);
+  const sourceProvesBrand = matchesBrand(title, brand) || Boolean(sourceBrand && matchesBrand(sourceBrand, brand));
+  if (!sourceProvesBrand) return title;
+
+  const duo = /(?:^|\s)(?:дуо|duo)(?:\s|$)/u.test(normalized);
+  const plus = /(?:^|\s)(?:плюс|plus)(?:\s|$)/u.test(normalized) ||
+    normalized.includes("лактобактериями для взрослых и детей");
+  const fibra = /(?:^|\s)(?:фибра|fibra)(?:\s|$)/u.test(normalized) ||
+    normalized.includes("пробиотики") && normalized.includes("пребиотики");
+  if (Number(duo) + Number(plus) + Number(fibra) !== 1) return title;
+
+  const explicitDuo = /(?:саше|порошок)/u.test(normalized) &&
+    /(?:№\s*20|20\s*(?:шт|саше|пакет))/u.test(normalized);
+  const explicitPlus = /капсул/u.test(normalized) &&
+    /(?:№\s*(?:15|30|45)|(?:15|30|45)\s*(?:шт|капсул))/u.test(normalized);
+  const explicitFibra = /сироп/u.test(normalized) && /10\s*мл/u.test(normalized) &&
+    /(?:№\s*(?:10|12)|(?:10|12)\s*(?:шт|флакон))/u.test(normalized);
+  if (!TRUNCATED_TITLE.test(title) && (duo && explicitDuo || plus && explicitPlus || fibra && explicitFibra)) {
+    return title;
+  }
+
+  const packageMatch = normalized.match(/(?:^|\s)([2-9])\s*упаковк/u) ??
+    normalized.match(/^(?:[2-9])\s*[xх]\s/u) ??
+    normalized.match(/(?:дуо|duo|фибра|fibra|плюс|plus)\s+([2-9])\s*шт(?:\s|$)/u);
+  const packages = packageMatch ? Number(packageMatch[1] ?? normalized.match(/^([2-9])/)?.[1]) : 1;
+  const base = duo
+    ? "Энтеролактис Дуо саше 5 г №20"
+    : plus
+      ? "Энтеролактис Плюс капсулы 319 мг №15"
+      : "Энтеролактис Фибра сироп 10 мл №12";
+  return packages > 1 ? `${base} ×${packages} упаковки` : base;
+}
+
 function previousListingId(value: string): string | undefined {
   const match = value.trim().match(/^(?:(?:wildberries|wildberries\.ru):)?(\d+)$/i);
   return match ? asId(match[1]) : undefined;
@@ -357,7 +392,9 @@ function metadataString(metadata: ProductRef["metadata"], key: string): string |
 
 function exactSearchFallbackCard(ref: ProductRef): JsonObject | undefined {
   const evidenceUrl = metadataString(ref.metadata, "searchEvidenceUrl");
-  const title = asNonemptyString(ref.title);
+  const sourceTitle = asNonemptyString(ref.title);
+  const sourceBrand = metadataString(ref.metadata, "sourceBrand");
+  const title = sourceTitle ? recoverEnterolactisCatalogTitle(sourceTitle, ref.brand, sourceBrand) : undefined;
   if (!evidenceUrl || !title || TRUNCATED_TITLE.test(title) || !matchesBrand(title, ref.brand)) return undefined;
   let url: URL;
   try { url = new URL(evidenceUrl); }
@@ -375,7 +412,6 @@ function exactSearchFallbackCard(ref: ProductRef): JsonObject | undefined {
   const hasNmMetrics = nmFeedbacks !== undefined && nmReviewRating !== undefined &&
     nmReviewRating >= 0 && nmReviewRating <= 5 && (nmFeedbacks === 0 || nmReviewRating > 0);
   if (!hasNmMetrics && !rootId) return undefined;
-  const sourceBrand = metadataString(ref.metadata, "sourceBrand");
   return {
     id: ref.listingId,
     name: title,
@@ -400,7 +436,11 @@ function observationFromSearchMetadata(
   const source = metadataString(ref.metadata, "source");
   if (!source?.startsWith("wildberries-")) return undefined;
 
-  const title = asNonemptyString(ref.title);
+  const sourceTitle = asNonemptyString(ref.title);
+  const sourceBrand = metadataString(ref.metadata, "sourceBrand");
+  const title = sourceTitle
+    ? recoverEnterolactisCatalogTitle(sourceTitle, ref.brand, sourceBrand)
+    : undefined;
   const reviews = metadataInteger(ref.metadata, "resolvedFeedbackCount") ??
     metadataInteger(ref.metadata, "nmFeedbacks");
   const rawRating = metadataNumber(ref.metadata, "resolvedRating") ??
@@ -413,7 +453,6 @@ function observationFromSearchMetadata(
     return undefined;
   }
 
-  const sourceBrand = metadataString(ref.metadata, "sourceBrand");
   const brandMatches = matchesBrand(title, ref.brand) || Boolean(sourceBrand && matchesBrand(sourceBrand, ref.brand));
   const rating = reviews === 0 ? null : rawRating;
   return {
@@ -978,7 +1017,11 @@ export class WildberriesAdapter implements SiteAdapter {
     if (!apiTitle) throw new ParserChangedError(`Wildberries card ${listingId} has no product title`);
     const sourceBrand = asNonemptyString(product.brand) ?? metadataString(ref.metadata, "sourceBrand");
     const bestKnownTitle = preferProductTitle(apiTitle, asNonemptyString(ref.title));
-    const title = await this.enrichProductTitle(listingId, ref.brand, bestKnownTitle, context);
+    const title = recoverEnterolactisCatalogTitle(
+      await this.enrichProductTitle(listingId, ref.brand, bestKnownTitle, context),
+      ref.brand,
+      sourceBrand
+    );
 
     const groupId =
       firstDefinedId(product, ["root", "rootId", "imtId", "imtID"]) ?? metadataId(ref.metadata, "rootId");

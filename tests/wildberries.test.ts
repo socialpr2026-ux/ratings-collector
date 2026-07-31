@@ -791,6 +791,43 @@ describe("WildberriesAdapter.discover", () => {
 });
 
 describe("WildberriesAdapter.collect", () => {
+  it("recovers exact Enterolactis variants and seller bundles from truncated buyer titles", async () => {
+    const adapter = createAdapter(vi.fn(async () => {
+      throw new Error("no fallback request is needed for source-bound search metrics");
+    }) as unknown as typeof globalThis.fetch);
+    const examples = [
+      ["Энтеролактис Дуо 2 шт", "Энтеролактис Дуо саше 5 г №20 ×2 упаковки", undefined],
+      ["Энтеролактис дуо симбиотик 20 шт. 3 упаковки", "Энтеролактис Дуо саше 5 г №20 ×3 упаковки", undefined],
+      ["Энтеролактис ПЛЮС Enterolactis PLUS капсулы массой 319 мг 15…", "Энтеролактис Плюс капсулы 319 мг №15", undefined],
+      ["Энтеролактис Фибра 4 шт", "Энтеролактис Фибра сироп 10 мл №12 ×4 упаковки", undefined],
+      ["Пробиотики + пребиотики для кишечника №12", "Энтеролактис Фибра сироп 10 мл №12", "ЭНТЕРОЛАКТИС"],
+      ["Пробиотик с лактобактериями для взрослых и детей", "Энтеролактис Плюс капсулы 319 мг №15", "ЭНТЕРОЛАКТИС"]
+    ] as const;
+
+    const observations = await Promise.all(examples.map(([title, expected, sourceBrand], index) =>
+      adapter.collect(productRef({
+        listingId: String(900_000 + index),
+        brand: "Энтеролактис",
+        title,
+        metadata: {
+          source: "wildberries-search-v18",
+          ...(sourceBrand ? { sourceBrand } : {}),
+          nmReviewRating: 5,
+          nmFeedbacks: 1
+        }
+      }), context()).then((observation) => ({ observation, expected }))
+    ));
+
+    for (const { observation, expected } of observations) {
+      expect(observation).toMatchObject({ product: expected, reviews: 1, rating: 5, status: "ok" });
+      expect(analyzeProductIdentity({
+        brand: observation.brand,
+        product: observation.product,
+        url: observation.canonicalUrl
+      }).granularity).toBe("variant");
+    }
+  });
+
   it("restores the exact package count from the same-nm product card when the buyer API title is truncated", async () => {
     const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
       const url = new URL(String(input));

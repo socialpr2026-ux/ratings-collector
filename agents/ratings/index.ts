@@ -310,7 +310,7 @@ export function browserFetch(
       // explicit 504 deadline: the fixed function could not prove this whole
       // bounded group. Reduce the payload recursively instead of repeating the
       // same expensive four-shard request.
-      if (![502, 504].includes(response.status) || payload.sitemaps.length <= 1) return response;
+      if (![500, 502, 503, 504].includes(response.status) || payload.sitemaps.length <= 1) return response;
       await response.body?.cancel().catch(() => undefined);
       request.signal.throwIfAborted();
 

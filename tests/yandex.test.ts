@@ -432,7 +432,7 @@ describe("YandexAdapter discovery", () => {
       .toEqual([fetchMock.mock.calls[1]![1]?.body, fetchMock.mock.calls[1]![1]?.body]);
   });
 
-  it("retries only the transient HTTP 502 batch without restarting proven sitemap chunks", async () => {
+  it.each([500, 502, 503, 504])("retries only the transient HTTP %i batch without restarting proven sitemap chunks", async (failureStatus) => {
     const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
     const maps = [MAP_A, MAP_B];
     let batchAttempts = 0;
@@ -443,7 +443,7 @@ describe("YandexAdapter discovery", () => {
       batchAttempts += 1;
       if (batchAttempts === 1) {
         return new Response(JSON.stringify({ error: "transient exact shard timeout" }), {
-          status: 502,
+          status: failureStatus,
           headers: { "content-type": "application/json" }
         });
       }

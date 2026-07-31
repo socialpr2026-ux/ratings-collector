@@ -602,7 +602,7 @@ export class YandexAdapter implements SiteAdapter {
               brands: brands.map((brand) => ({ brand, tokens: yandexBrandTokens(brand) }))
             })
           }, this.batchRequestTimeoutMs, "Yandex batch proof request");
-          if (!response.ok && [502, 504].includes(response.status) && attempt < this.sitemapRetryAttempts) {
+          if (!response.ok && [500, 502, 503, 504].includes(response.status) && attempt < this.sitemapRetryAttempts) {
             const status = response.status;
             await response.body?.cancel().catch(() => undefined);
             response = undefined;

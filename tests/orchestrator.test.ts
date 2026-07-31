@@ -105,6 +105,45 @@ describe("run orchestration and fail-closed QA", () => {
     expect(retried.payloadHash).not.toBe(firstHash);
   });
 
+  it("retries a technically complete partition whose observations still need review", async () => {
+    const repository = new MemoryRepository();
+    let attempts = 0;
+    const service = new RatingsService(repository, async () => ({
+      id: "review-recovery",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        attempts += 1;
+        return [{
+          domain: "example.com", platform: "review-recovery", listingId: "1", brand,
+          url: "https://example.com/p/1", metadata: {}
+        }];
+      },
+      async collect(ref) {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId,
+          brand: ref.brand, canonicalUrl: ref.url,
+          product: attempts === 1 ? ref.brand : `${ref.brand} таблетки 100 мг №10`,
+          reviews: 5, rating: 4.5, status: attempts === 1 ? "needs_review" as const : "ok" as const,
+          capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+    const id = (await service.createRun(request)).id;
+
+    const first = await service.executeRun(id);
+    expect(first.partitions).toMatchObject([{ status: "complete" }]);
+    expect(first.observations).toMatchObject([{ status: "needs_review" }]);
+    expect(first.qa?.ok).toBe(false);
+
+    const retried = await service.executeRun(id);
+
+    expect(attempts).toBe(2);
+    expect(retried.partitions).toMatchObject([{ status: "complete" }]);
+    expect(retried.observations).toMatchObject([{ status: "ok" }]);
+    expect(retried.qa).toMatchObject({ ok: true, blockers: [] });
+  });
+
   it("keeps successful partitions intact when a selective retry fails again", async () => {
     const repository = new MemoryRepository();
     const calls = new Map<string, number>();
@@ -120,7 +159,7 @@ describe("run orchestration and fail-closed QA", () => {
       async collect(ref) {
         return {
           domain: ref.domain, platform: ref.platform, listingId: ref.listingId,
-          brand: ref.brand, canonicalUrl: ref.url, product: ref.brand,
+          brand: ref.brand, canonicalUrl: ref.url, product: `${ref.brand} таблетки 100 мг №10`,
           reviews: 1, rating: 5, status: "ok", capturedAt: new Date().toISOString()
         };
       }

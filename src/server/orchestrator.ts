@@ -276,8 +276,13 @@ export class RatingsService {
     ]));
     const isRetry = run.status !== "queued" && run.partitions.length > 0;
     if (isRetry) run.publicationExclusions = undefined;
+    const reviewPartitions = new Set(run.observations
+      .filter((observation) => observation.status === "needs_review")
+      .map((observation) => partitionKey(observation.domain, observation.brand)));
     const retryTargets = isRetry
-      ? expectedPartitions.filter(({ key }) => !SUCCESSFUL_PARTITION_STATUSES.has(previousPartitions.get(key)?.status ?? ""))
+      ? expectedPartitions.filter(({ key }) =>
+        !SUCCESSFUL_PARTITION_STATUSES.has(previousPartitions.get(key)?.status ?? "") || reviewPartitions.has(key)
+      )
       : expectedPartitions;
 
     // A repeated Agent request after every partition succeeded is a true
@@ -310,10 +315,11 @@ export class RatingsService {
     }
 
     const retryErrorPartitions = new Set(retryTargets.map(({ domain, brand }) => `${domain}/${brand}`));
+    const retryTargetKeys = new Set(retryTargets.map(({ key }) => key));
     const preservedPartitions = isRetry
       ? expectedPartitions.flatMap(({ key }) => {
         const previous = previousPartitions.get(key);
-        return previous && SUCCESSFUL_PARTITION_STATUSES.has(previous.status) ? [previous] : [];
+        return previous && SUCCESSFUL_PARTITION_STATUSES.has(previous.status) && !retryTargetKeys.has(key) ? [previous] : [];
       })
       : [];
     run.status = "running";
