@@ -986,12 +986,68 @@ export class AptekaAprilAdapter extends AdditionalPharmacyAdapter {
 const OZERKI_DOMAIN = "ozerki.ru";
 const OZERKI_FAMILY = /^\/alphabet\/([a-z0-9-]+)\/([a-z0-9-]+)\/?$/i;
 const OZERKI_PRODUCT = /^\/catalog\/product\/([a-z0-9-]+)\/?$/i;
-const OZERKI_BOUNDED_PRODUCTS = [{
-  brand: "Бивиарт",
-  id: "370912",
-  title: "Бивиарт Ультра",
-  url: "https://ozerki.ru/catalog/product/biviart-ultra-rastvor-oftalmologicheskiy-uvlazhnyayushchiy-fl-kap-10ml-1-370912/"
-}] as const;
+const OZERKI_BOUNDED_PRODUCTS = [
+  {
+    brand: "Бивиарт",
+    id: "370912",
+    title: "Бивиарт Ультра",
+    url: "https://ozerki.ru/catalog/product/biviart-ultra-rastvor-oftalmologicheskiy-uvlazhnyayushchiy-fl-kap-10ml-1-370912/"
+  },
+  {
+    brand: "Энтеролактис",
+    id: "339183",
+    title: "Энтеролактис Фибра сироп 10 мл 12 шт",
+    url: "https://ozerki.ru/catalog/product/enterolaktis-fibra-sirop-fl-10ml-12/"
+  },
+  {
+    brand: "Энтеролактис",
+    id: "346830",
+    title: "Энтеролактис Плюс капсулы 15 шт",
+    url: "https://ozerki.ru/catalog/product/enterolaktis-plyus-n15-kaps-po-316mg-346830/"
+  },
+  {
+    brand: "Энтеролактис",
+    id: "362968",
+    title: "Энтеролактис Дуо порошок для приготовления раствора 5 г 20 шт",
+    url: "https://ozerki.ru/catalog/product/enterolaktis-duo-n20-sashe-po-5g-362968/"
+  }
+] as const;
+
+function ozerkiProductEmptyReviewProof(page: HtmlPage): boolean {
+  const feedback = page.$("#feedbackAnchor");
+  const emptyBlocks = page.$("[class*='Reviews_noReviewsBlock__']");
+  if (feedback.length !== 1 || emptyBlocks.length !== 1 ||
+      page.$("[itemprop='aggregateRating'], [itemprop='review']").length !== 0) return false;
+
+  const text = normalizeText(emptyBlocks.first().text());
+  const hasVisibleEmptyState = text.includes("вы использовали этот товар") &&
+    text.includes("поделитесь своим мнением о нем");
+  const hasFailureMarker = /\b(?:loading|error)\b|\u043e\u0448\u0438\u0431\u043a|\u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c|\u043f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435/iu.test(feedback.text());
+  if (!hasVisibleEmptyState || hasFailureMarker) return false;
+
+  const stateScripts = page.$("script#__NEXT_DATA__[type='application/json']");
+  if (stateScripts.length !== 1) return false;
+  try {
+    const payload = JSON.parse(stateScripts.first().html() ?? "") as unknown;
+    const record = (value: unknown): Record<string, unknown> | undefined =>
+      value !== null && typeof value === "object" && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : undefined;
+    const props = record(payload)?.props;
+    const pageProps = record(props)?.pageProps;
+    const data = record(pageProps)?.data;
+    const componentData = record(data)?.componentData;
+    const reviews = record(componentData)?.initialReviews;
+    const meta = record(record(reviews)?.meta);
+    const rates = record(record(reviews)?.rates);
+    const distribution = record(rates?.filterByValue);
+    return Array.isArray(record(reviews)?.data) && (record(reviews)?.data as unknown[]).length === 0 &&
+      exactInteger(meta?.total) === 0 && rates?.average === null && exactInteger(rates?.total) === 0 &&
+      ["1", "2", "3", "4", "5"].every((score) => exactInteger(distribution?.[score]) === 0);
+  } catch {
+    return false;
+  }
+}
 
 function ozerkiFamilyRef(value: string, expectedId?: string): { id: string; url: string } | undefined {
   try {
@@ -1017,7 +1073,12 @@ function ozerkiProductRef(value: string, expectedId?: string): { id: string; url
     const match = url.pathname.match(OZERKI_PRODUCT);
     if (!match) return undefined;
     const embeddedId = match[1].match(/-(\d+)$/)?.[1];
-    if (embeddedId && expectedId && embeddedId !== expectedId) return undefined;
+    const exactBoundedProduct = expectedId
+      ? OZERKI_BOUNDED_PRODUCTS.find((product) =>
+        product.id === expectedId && new URL(product.url).pathname === url.pathname
+      )
+      : undefined;
+    if (embeddedId && expectedId && embeddedId !== expectedId && !exactBoundedProduct) return undefined;
     const id = expectedId ?? embeddedId;
     if (!id) return undefined;
     return { id, url: `https://${OZERKI_DOMAIN}/catalog/product/${match[1]}/` };
@@ -1144,7 +1205,23 @@ export class OzerkiAdapter extends AdditionalPharmacyAdapter {
 
       const aggregate = product.aggregateRating;
       if (!aggregate || typeof aggregate !== "object") {
-        throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: source-bound product aggregate is missing`);
+        if (!ozerkiProductEmptyReviewProof(page)) {
+          throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: source-bound product aggregate is missing`);
+        }
+        return observation(this.evidence, ref, page, {
+          domain: OZERKI_DOMAIN,
+          title,
+          canonicalUrl: productRef.url,
+          reviews: 0,
+          rating: null,
+          ratingCount: 0,
+          source: "ozerki-visible-product-empty-state",
+          productEvidence: titleProductEvidence(
+            title,
+            { type: "product_id", value: productRef.id },
+            productRef.url
+          )
+        });
       }
       const record = aggregate as Record<string, unknown>;
       const reviews = exactInteger(record.reviewCount);

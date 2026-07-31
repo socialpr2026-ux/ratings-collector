@@ -22,7 +22,7 @@ const EMPTY_REVIEW_TEXT = "\u0432\u0430\u0448 \u043e\u0442\u0437\u044b\u0432 \u0
 
 type ExactProduct = {
   id: string;
-  brand: "\u0411\u0438\u0432\u0438\u0430\u0440\u0442" | "\u041e\u043a\u0443\u0441\u0430\u043b\u0438\u043d" | "\u041e\u0444\u0442\u0430\u0440\u0438\u043d\u0442" | "\u0422\u0430\u0443\u0441\u0442\u0438\u043d" | "Бактоблис";
+  brand: "\u0411\u0438\u0432\u0438\u0430\u0440\u0442" | "\u041e\u043a\u0443\u0441\u0430\u043b\u0438\u043d" | "\u041e\u0444\u0442\u0430\u0440\u0438\u043d\u0442" | "\u0422\u0430\u0443\u0441\u0442\u0438\u043d" | "Бактоблис" | "Энтеролактис";
   url: string;
   requiredPhrases: readonly string[];
 };
@@ -127,6 +127,24 @@ const EXACT_PRODUCTS: readonly ExactProduct[] = [
     brand: "Бактоблис",
     url: `${ORIGIN}/product/baktoblis_tabletki_bad_30/`,
     requiredPhrases: ["бактоблис плюс", "таблетки для рассасывания", "no30"]
+  },
+  {
+    id: "196245",
+    brand: "Энтеролактис",
+    url: `${ORIGIN}/product/enterolaktis_plyus_kaps___15_bad/`,
+    requiredPhrases: ["энтеролактис плюс", "капсулы", "no15"]
+  },
+  {
+    id: "196246",
+    brand: "Энтеролактис",
+    url: `${ORIGIN}/product/enterolaktis_duo_por__5g__20_sashe_bad/`,
+    requiredPhrases: ["энтеролактис дуо", "порошок", "no20"]
+  },
+  {
+    id: "196244",
+    brand: "Энтеролактис",
+    url: `${ORIGIN}/product/enterolaktis_fibra_10ml__12fl__sirop_kaps_s_por_v_kr_fl__bad/`,
+    requiredPhrases: ["энтеролактис фибра", "сироп", "10мл", "no12"]
   }
 ] as const;
 

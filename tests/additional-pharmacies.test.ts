@@ -193,6 +193,60 @@ describe("additional pharmacy adapters", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("discovers all exact Enterolactis products and accepts only their source-bound empty-review proof", async () => {
+    const brand = "Энтеролактис";
+    const products = [
+      {
+        id: "339183",
+        title: "Энтеролактис Фибра сироп 10 мл 12 шт",
+        url: "https://ozerki.ru/catalog/product/enterolaktis-fibra-sirop-fl-10ml-12/"
+      },
+      {
+        id: "346830",
+        title: "Энтеролактис Плюс капсулы 15 шт",
+        url: "https://ozerki.ru/catalog/product/enterolaktis-plyus-n15-kaps-po-316mg-346830/"
+      },
+      {
+        id: "362968",
+        title: "Энтеролактис Дуо порошок для приготовления раствора 5 г 20 шт",
+        url: "https://ozerki.ru/catalog/product/enterolaktis-duo-n20-sashe-po-5g-362968/"
+      }
+    ] as const;
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const match = products.find((product) => product.url === new URL(String(input)).toString());
+      if (!match) return new Response("missing", { status: 404 });
+      const html = `<!doctype html><html><head><link rel="canonical" href="${match.url}">
+        <script type="application/ld+json">${JSON.stringify({
+          "@context": "https://schema.org", "@type": "Product", sku: match.id,
+          name: match.title, url: match.url
+        })}</script><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
+          props: { pageProps: { data: { componentData: { initialReviews: {
+            data: [], meta: { total: 0 },
+            rates: { average: null, total: 0, filterByValue: { "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 } }
+          } } } } }
+        })}</script></head><body>
+        <h1>${match.title} в Москве</h1><div id="feedbackAnchor">
+          <div class="Reviews_noReviewsBlock__proof">
+            <p>Вы использовали этот товар?</p><p>Поделитесь своим мнением о нём</p>
+          </div></div></body></html>`;
+      return new Response(html, { status: 200, headers: { "content-type": "text/html" } });
+    });
+    const adapter = new OzerkiAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    const refs = await adapter.discover(brand, context);
+    expect(refs.map((item) => item.listingId)).toEqual(["339183", "346830", "362968"]);
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context)));
+    expect(observations).toEqual(expect.arrayContaining(products.map((product) => expect.objectContaining({
+      listingId: product.id,
+      reviews: 0,
+      writtenReviewCount: 0,
+      ratingCount: 0,
+      rating: null,
+      status: "no_reviews",
+      source: "ozerki-visible-product-empty-state"
+    }))));
+  });
+
   it("fails closed for an exact Ozerki product without a source-bound aggregate", async () => {
     const brand = "Бивиарт";
     const productUrl = "https://ozerki.ru/catalog/product/biviart-soft-rastvor-flakon-kapelnitsa-uvlazhnyayuschiy-10-ml/";

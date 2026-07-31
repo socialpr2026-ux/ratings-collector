@@ -50,6 +50,18 @@ const PRODUCTS = [
   {
     id: "175303", brand: "Бактоблис", title: "Бактоблис плюс таблетки для рассасывания, №30",
     path: "/product/baktoblis_tabletki_bad_30/"
+  },
+  {
+    id: "196245", brand: "Энтеролактис", title: "Энтеролактис Плюс капсулы, №15",
+    path: "/product/enterolaktis_plyus_kaps___15_bad/"
+  },
+  {
+    id: "196246", brand: "Энтеролактис", title: "Энтеролактис Дуо порошок д/пригот. р-ра д/приема внутрь, 5г №20",
+    path: "/product/enterolaktis_duo_por__5g__20_sashe_bad/"
+  },
+  {
+    id: "196244", brand: "Энтеролактис", title: "Энтеролактис Фибра сироп, 10мл №12",
+    path: "/product/enterolaktis_fibra_10ml__12fl__sirop_kaps_s_por_v_kr_fl__bad/"
   }
 ] as const;
 
@@ -227,6 +239,25 @@ describe("VitaExpressAdapter", () => {
     const refs = await adapter.discover("Бактоблис", { ...CONTEXT, runId: "discover-baktoblis" });
 
     expect(refs.map((item) => item.listingId)).toEqual(["203657", "197583", "190233", "193661", "175303"]);
+  });
+
+  it("discovers and collects all three exact Enterolactis cards with proven empty reviews", async () => {
+    const evidence = new MemoryEvidenceStore();
+    const adapter = new VitaExpressAdapter(evidence, fetchProducts());
+
+    const refs = await adapter.discover("Энтеролактис", { ...CONTEXT, runId: "enterolactis" });
+    expect(refs.map((item) => item.listingId)).toEqual(["196245", "196246", "196244"]);
+
+    const observations = await Promise.all(refs.map((item) =>
+      adapter.collect(item, { ...CONTEXT, runId: "enterolactis" })
+    ));
+    expect(observations).toHaveLength(3);
+    expect(observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ listingId: "196245", reviews: 0, rating: null, ratingCount: 0, status: "no_reviews" }),
+      expect.objectContaining({ listingId: "196246", reviews: 0, rating: null, ratingCount: 0, status: "no_reviews" }),
+      expect.objectContaining({ listingId: "196244", reviews: 0, rating: null, ratingCount: 0, status: "no_reviews" })
+    ]));
+    expect(evidence.items.size).toBe(3);
   });
 
   it("accepts Vita's longer source-bound component name for the same exact Baktoblis card", async () => {
