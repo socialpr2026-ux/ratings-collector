@@ -54,6 +54,8 @@ type ProductPage = {
   total?: number;
 };
 
+type SearchProductPage = ProductPage & { evidenceUrl: string };
+
 type DiscoveryBatchPlan = {
   refs: ProductRef[];
   promise?: Promise<void>;
@@ -292,6 +294,43 @@ function metadataString(metadata: ProductRef["metadata"], key: string): string |
   return asNonemptyString(metadata[key]);
 }
 
+function exactSearchFallbackCard(ref: ProductRef): JsonObject | undefined {
+  const evidenceUrl = metadataString(ref.metadata, "searchEvidenceUrl");
+  const title = asNonemptyString(ref.title);
+  if (!evidenceUrl || !title || TRUNCATED_TITLE.test(title) || !matchesBrand(title, ref.brand)) return undefined;
+  let url: URL;
+  try { url = new URL(evidenceUrl); }
+  catch { return undefined; }
+  const normalizedQuery = url.searchParams.get("query")?.normalize("NFKC").trim().toLocaleLowerCase("ru-RU");
+  if (url.protocol !== "https:" || url.hostname !== "search.wb.ru" || ![
+    "/exactmatch/ru/common/v14/search",
+    "/exactmatch/ru/common/v18/search"
+  ].includes(url.pathname) || normalizedQuery !== ref.brand.normalize("NFKC").trim().toLocaleLowerCase("ru-RU")) {
+    return undefined;
+  }
+  const rootId = metadataId(ref.metadata, "rootId");
+  const nmFeedbacks = metadataInteger(ref.metadata, "nmFeedbacks");
+  const nmReviewRating = metadataNumber(ref.metadata, "nmReviewRating");
+  const hasNmMetrics = nmFeedbacks !== undefined && nmReviewRating !== undefined &&
+    nmReviewRating >= 0 && nmReviewRating <= 5 && (nmFeedbacks === 0 || nmReviewRating > 0);
+  if (!hasNmMetrics && !rootId) return undefined;
+  const sourceBrand = metadataString(ref.metadata, "sourceBrand");
+  return {
+    id: ref.listingId,
+    name: title,
+    ...(sourceBrand ? { brand: sourceBrand } : {}),
+    ...(rootId ? { root: rootId } : {}),
+    ...(hasNmMetrics ? { nmFeedbacks, nmReviewRating } : {}),
+    ...(metadataInteger(ref.metadata, "groupFeedbacks") !== undefined
+      ? { feedbacks: metadataInteger(ref.metadata, "groupFeedbacks") }
+      : {}),
+    ...(metadataNumber(ref.metadata, "groupReviewRating") !== undefined
+      ? { reviewRating: metadataNumber(ref.metadata, "groupReviewRating") }
+      : {}),
+    searchFallback: true
+  };
+}
+
 function observationFromSearchMetadata(
   ref: ProductRef,
   listingId: string,
@@ -525,7 +564,8 @@ export class WildberriesAdapter implements SiteAdapter {
             ...(nmReviewRating !== undefined ? { nmReviewRating } : {}),
             ...(nmFeedbacks !== undefined ? { nmFeedbacks } : {}),
             ...(groupReviewRating !== undefined ? { groupReviewRating } : {}),
-            ...(groupFeedbacks !== undefined ? { groupFeedbacks } : {})
+            ...(groupFeedbacks !== undefined ? { groupFeedbacks } : {}),
+            searchEvidenceUrl: result.evidenceUrl
           }
         });
       }
@@ -627,9 +667,19 @@ export class WildberriesAdapter implements SiteAdapter {
         }
       }
       const stillMissing = missing.filter((listingId) => !cards.has(listingId));
-      if (stillMissing.length > 0) {
+      for (const listingId of stillMissing) {
+        const ref = chunk.find((candidate) => candidate.listingId === listingId);
+        const fallback = ref ? exactSearchFallbackCard(ref) : undefined;
+        if (!fallback) continue;
+        cards.set(listingId, {
+          product: fallback,
+          evidenceRef: metadataString(ref!.metadata, "searchEvidenceUrl")!
+        });
+      }
+      const unproven = stillMissing.filter((listingId) => !cards.has(listingId));
+      if (unproven.length > 0) {
         throw new AdapterBlockedError(
-          `Wildberries card batch and singleton retry omitted ${stillMissing.length} requested nmIds: ${stillMissing.join(",")}`
+          `Wildberries card batch, singleton retry and exact search fallback omitted ${unproven.length} requested nmIds: ${unproven.join(",")}`
         );
       }
     }
@@ -659,7 +709,9 @@ export class WildberriesAdapter implements SiteAdapter {
       ref.title = title;
       ref.metadata = {
         ...ref.metadata,
-        source: "wildberries-card-v4-batch",
+        source: card.product.searchFallback === true
+          ? "wildberries-search-exact-fallback"
+          : "wildberries-card-v4-batch",
         ...(identity.sourceBrand ? { sourceBrand: identity.sourceBrand } : {}),
         ...(rootId ? { rootId } : {}),
         evidenceRef: card.evidenceRef
@@ -974,7 +1026,7 @@ export class WildberriesAdapter implements SiteAdapter {
     brand: string,
     page: number,
     context: AdapterContext
-  ): Promise<ProductPage> {
+  ): Promise<SearchProductPage> {
     const url = new URL(this.searchEndpoints[0]);
     url.searchParams.set("ab_testing", "false");
     url.searchParams.set("appType", "1");
@@ -988,7 +1040,10 @@ export class WildberriesAdapter implements SiteAdapter {
     url.searchParams.set("sort", "popular");
     url.searchParams.set("spp", "30");
     url.searchParams.set("suppressSpellcheck", "false");
-    return parseProductPage(await this.requestJson(url, context));
+    return {
+      ...parseProductPage(await this.requestJson(url, context)),
+      evidenceUrl: url.toString()
+    };
   }
 
   private async fetchCard(

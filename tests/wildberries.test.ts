@@ -445,6 +445,31 @@ describe("WildberriesAdapter.discover", () => {
       .map(([input]) => new URL(String(input)).searchParams.get("nm"))).toEqual(["701;702", "702"]);
   });
 
+  it("keeps an exact source-bound search card when card batch and singleton both omit it", async () => {
+    const searchProducts = [
+      { id: 701, root: 9001, brand: "BrandX", name: "BrandX capsules one", nmReviewRating: 4.8, nmFeedbacks: 12 },
+      { id: 702, root: 9002, brand: "BrandX", name: "BrandX capsules two", nmReviewRating: 5, nmFeedbacks: 3 }
+    ];
+    const fetchSpy = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 2, products: searchProducts });
+      if (url.hostname === "card.wb.ru") {
+        return jsonResponse({ products: url.searchParams.get("nm") === "702" ? [] : [searchProducts[0]] });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    });
+    const adapter = createAdapter(fetchSpy as unknown as typeof globalThis.fetch);
+    const refs = await adapter.discover("BrandX", context({ runId: "search-card-fallback" }));
+
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context())));
+
+    expect(observations).toMatchObject([
+      { listingId: "701", reviews: 12, rating: 4.8, source: "wildberries-card-v4-batch" },
+      { listingId: "702", reviews: 3, rating: 5, source: "wildberries-search-exact-fallback" }
+    ]);
+    expect(refs.every((ref) => ref.metadata.cardBatchVerified === true)).toBe(true);
+  });
+
   it("fails closed when batch and singleton verification both omit an nmId", async () => {
     const searchProducts = [
       { id: 701, root: 9001, brand: "BrandX", name: "capsules one", nmReviewRating: 0, nmFeedbacks: 0 },

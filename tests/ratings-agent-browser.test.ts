@@ -3,6 +3,7 @@ import {
   browserFetch,
   createLazySandboxAcquire,
   hasExplicitWildberriesNoResults,
+  hasExplicitYandexMarketNoResults,
   shouldAutoRetryInitialCollection,
   transientRecoveryDelayMs,
   YANDEX_BATCH_GATEWAY_TIMEOUT_MS
@@ -880,6 +881,35 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
     await Promise.all([acquire(), acquire()]);
     expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("exposes only the fixed Yandex Market browser-search capability", async () => {
+    const run = vi.fn(async () => undefined);
+    const routedFetch = browserFetch(sandbox(run)) as typeof fetch & { yandexMarketBrowserEndpoint?: string };
+
+    expect(routedFetch.yandexMarketBrowserEndpoint).toBe("https://market.yandex.ru/search");
+    await expect(routedFetch(
+      "https://market.yandex.ru/profile/orders",
+      {
+        headers: {
+          "x-ratings-browser": "1",
+          "x-ratings-browser-mode": "yandex-market-proof"
+        }
+      }
+    )).rejects.toThrow(/restricted to bounded search or exact reviews routes/);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("accepts only an explicit Yandex Market no-results statement for the requested query", () => {
+    expect(hasExplicitYandexMarketNoResults(
+      "По запросу «Энтеролактис» ничего не нашли",
+      "Энтеролактис"
+    )).toBe(true);
+    expect(hasExplicitYandexMarketNoResults(
+      "По запросу «Другой бренд» ничего не нашли",
+      "Энтеролактис"
+    )).toBe(false);
+    expect(hasExplicitYandexMarketNoResults("Товары временно недоступны", "Энтеролактис")).toBe(false);
   });
 
   it("classifies an exhausted EdgeOne monthly GB-s allowance as quota", async () => {

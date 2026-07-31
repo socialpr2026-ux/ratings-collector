@@ -15,11 +15,13 @@ import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 
 const DEFAULT_SITEMAP_INDEX = "https://reviews.yandex.ru/ugcpub/sitemap.xml";
 const REVIEWS_ORIGIN = "https://reviews.yandex.ru";
+const MARKET_ORIGIN = "https://market.yandex.ru";
 const TRANSLATE_ORIGIN = "https://reviews-yandex-ru.translate.goog";
 const MARKET_TRANSLATE_ORIGIN = "https://market-yandex-ru.translate.goog";
 const DIRECT_SOURCE = "yandex_reviews_json_ld";
 const TRANSLATE_SOURCE = "yandex_reviews_json_ld_google_translate";
 const MARKET_TRANSLATE_SOURCE = "yandex_market_json_ld_google_translate";
+const MARKET_BROWSER_SOURCE = "yandex_market_json_ld_browser";
 const MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_\d+-\d+-\d+\.xml$/i;
 const SHOP_SITEMAP_PATH = /^\/ugcpub\/sitemap_shop_((?:[0-9a-z]|%[0-9a-f]{2})-(?:[0-9a-z]|%[0-9a-f]{2}))-\d+\.xml$/i;
 const SHOP_SITEMAP_RANGES = new Set([
@@ -40,7 +42,10 @@ const YANDEX_BATCH_CHUNK_SIZE = 2;
 const YANDEX_BATCH_CONCURRENCY = 2;
 const YANDEX_PROGRESS_SITEMAP_INTERVAL = 32;
 
-type YandexBatchCapableFetch = typeof globalThis.fetch & { yandexBatchEndpoint?: string };
+type YandexCapableFetch = typeof globalThis.fetch & {
+  yandexBatchEndpoint?: string;
+  yandexMarketBrowserEndpoint?: string;
+};
 
 type JsonObject = Record<string, unknown>;
 
@@ -70,6 +75,13 @@ type YandexBatchProof = {
   verifiedSitemaps: string[];
   tombstonedSitemaps?: string[];
   matches: Array<{ brand: string; url: string; sitemap: string }>;
+};
+
+type YandexMarketSearchProof = {
+  query: string;
+  page: number;
+  hasNext: boolean;
+  products: Array<{ id: string; name: string; url: string }>;
 };
 
 type ProductPage =
@@ -135,6 +147,8 @@ export type YandexAdapterOptions = {
   sitemapReadTimeoutMs?: number;
   batchRequestTimeoutMs?: number;
   productRequestTimeoutMs?: number;
+  /** Maximum number of rendered Yandex Market search pages inspected. */
+  maxMarketPages?: number;
   now?: () => Date;
   sleep?: (milliseconds: number) => Promise<void>;
 };
@@ -195,6 +209,7 @@ export class YandexAdapter implements SiteAdapter {
   private readonly sitemapReadTimeoutMs: number;
   private readonly batchRequestTimeoutMs: number;
   private readonly productRequestTimeoutMs: number;
+  private readonly maxMarketPages: number;
   private readonly now: () => Date;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private indexCache?: Cached<string[]>;
@@ -234,6 +249,7 @@ export class YandexAdapter implements SiteAdapter {
     // traffic. Bound every direct/translated page request independently so a
     // lost upstream response cannot pin the collection stage forever.
     this.productRequestTimeoutMs = boundedInteger(options.productRequestTimeoutMs, 45_000, 1, 120_000);
+    this.maxMarketPages = boundedInteger(options.maxMarketPages, 50, 1, 50);
     this.now = options.now ?? (() => new Date());
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
@@ -288,6 +304,26 @@ export class YandexAdapter implements SiteAdapter {
       return [...refs.values()].sort((a, b) => compareIds(a.listingId, b.listingId));
     }
 
+    const fetcher = (context.fetch ?? this.fallbackFetch) as YandexCapableFetch;
+    if (fetcher.yandexMarketBrowserEndpoint) {
+      for (const ref of await this.discoverMarketCards(
+        fetcher.yandexMarketBrowserEndpoint,
+        brand,
+        context
+      )) {
+        refs.set(ref.listingId, ref);
+      }
+      if (refs.size > this.maxCandidates) {
+        throw new AdapterBlockedError(
+          `Yandex Market discovery for ${brand} found more than ${this.maxCandidates} distinct cards`
+        );
+      }
+      return [...refs.values()].sort((a, b) =>
+        Number(knownSet.has(b.listingId)) - Number(knownSet.has(a.listingId)) ||
+        (a.title ?? "").localeCompare(b.title ?? "", "ru") || compareIds(a.listingId, b.listingId)
+      );
+    }
+
     const brands = uniqueDiscoveryBrands(brand, context.brands ?? []);
     const batchKey = discoveryBatchKey(context.runId, brands);
     const discoveredByBrand = batchKey
@@ -308,6 +344,97 @@ export class YandexAdapter implements SiteAdapter {
     return [...refs.values()]
       .sort((a, b) => Number(knownSet.has(b.listingId)) - Number(knownSet.has(a.listingId)) ||
         (a.title ?? "").localeCompare(b.title ?? "", "ru") || compareIds(a.listingId, b.listingId));
+  }
+
+  private async discoverMarketCards(
+    endpoint: string,
+    brand: string,
+    context: AdapterContext
+  ): Promise<ProductRef[]> {
+    const base = new URL(endpoint);
+    if (base.protocol !== "https:" || base.origin !== MARKET_ORIGIN || base.pathname !== "/search" ||
+      base.search || base.hash || base.username || base.password) {
+      throw new ParserChangedError("Yandex Market browser endpoint is not the fixed search route");
+    }
+    const fetcher = context.fetch ?? this.fallbackFetch;
+    const brands = context.brands?.length ? context.brands : [brand];
+    const refs = new Map<string, ProductRef>();
+    let exhaustionProven = false;
+
+    for (let page = 1; page <= this.maxMarketPages; page += 1) {
+      const url = new URL(base);
+      url.searchParams.set("text", brand);
+      if (page > 1) url.searchParams.set("page", String(page));
+      let response: Response;
+      try {
+        response = await fetchWithDeadline(fetcher, url.toString(), {
+          method: "GET",
+          redirect: "error",
+          signal: context.signal,
+          headers: {
+            accept: "application/json",
+            "accept-language": "ru-RU,ru;q=0.9",
+            "x-ratings-browser": "1",
+            "x-ratings-browser-mode": "yandex-market-proof"
+          }
+        }, this.productRequestTimeoutMs, `Yandex Market search request for page ${page}`);
+      } catch (error) {
+        if (error instanceof AdapterBlockedError || error instanceof ParserChangedError) throw error;
+        if (context.signal?.aborted) throw error;
+        throw new AdapterBlockedError(`Yandex Market search page ${page} is unavailable: ${errorMessage(error)}`);
+      }
+      assertUsableResponse(response, url.toString());
+      let proof: YandexMarketSearchProof;
+      try {
+        proof = JSON.parse(await readBoundedBody(response, 1_000_000, url.toString(), 30_000)) as YandexMarketSearchProof;
+      } catch (error) {
+        throw new ParserChangedError(`Yandex Market search page ${page} proof is unreadable: ${errorMessage(error)}`);
+      }
+      if (!validYandexMarketSearchProof(proof, brand, page)) {
+        throw new ParserChangedError(`Yandex Market search page ${page} proof is incomplete or source-unbound`);
+      }
+      for (const product of proof.products) {
+        const matchedBrands = bestMatchingTextBrandKeys(product.name, brands);
+        if (!matchedBrands.has(brandKey(brand))) continue;
+        const reviewsUrl = marketCardReviewsUrl(product.url, product.id);
+        if (!reviewsUrl) continue;
+        refs.set(product.id, {
+          domain: "market.yandex.ru",
+          platform: this.id,
+          listingId: product.id,
+          brand,
+          url: reviewsUrl,
+          title: product.name,
+          metadata: {
+            discovery: "yandex-market-rendered-search",
+            sourceSearch: url.toString()
+          }
+        });
+        if (refs.size > this.maxCandidates) {
+          throw new AdapterBlockedError(
+            `Yandex Market discovery for ${brand} found more than ${this.maxCandidates} distinct cards`
+          );
+        }
+      }
+      await reportActivity(context, {
+        operationId: `yandex:market-search:${page}`,
+        stage: "discovery",
+        status: proof.hasNext ? "active" : "complete",
+        label: "Полный поиск карточек Yandex Market",
+        channels: ["browser"],
+        detail: `Проверена страница ${page}; точных карточек: ${refs.size}`
+      });
+      if (!proof.hasNext) {
+        exhaustionProven = true;
+        break;
+      }
+    }
+    if (!exhaustionProven) {
+      throw new AdapterBlockedError(
+        `Yandex Market search for ${brand} reached the ${this.maxMarketPages}-page safety limit without proving exhaustion`
+      );
+    }
+    return [...refs.values()];
   }
 
   private async loadDiscoveryBatch(
@@ -358,7 +485,7 @@ export class YandexAdapter implements SiteAdapter {
       );
     }
     const selected = prioritizeSitemaps(sitemapUrls, context.previousIds ?? []);
-    const batchEndpoint = ((context.fetch ?? this.fallbackFetch) as YandexBatchCapableFetch).yandexBatchEndpoint;
+    const batchEndpoint = ((context.fetch ?? this.fallbackFetch) as YandexCapableFetch).yandexBatchEndpoint;
     if (batchEndpoint) return this.scanDiscoveryBatchViaGateway(batchEndpoint, selected, brands, context);
     const discoveries = new Map<string, BrandDiscovery>(brands.map((candidate) => [
       brandKey(candidate),
@@ -796,7 +923,9 @@ export class YandexAdapter implements SiteAdapter {
         imageUrls: [],
         instructionUrls: []
       },
-      source: MARKET_TRANSLATE_SOURCE
+      source: response.headers.get("x-ratings-proof-route") === "yandex-market-browser"
+        ? MARKET_BROWSER_SOURCE
+        : MARKET_TRANSLATE_SOURCE
     };
   }
 
@@ -1043,6 +1172,26 @@ export class YandexAdapter implements SiteAdapter {
     const fetcher = context.fetch ?? this.fallbackFetch;
     if (typeof fetcher !== "function") throw new AdapterBlockedError("No fetch implementation is available");
     const source = new URL(url);
+    if ((fetcher as YandexCapableFetch).yandexMarketBrowserEndpoint) {
+      try {
+        return await fetchWithDeadline(fetcher, source.toString(), {
+          method: "GET",
+          redirect: "error",
+          signal: context.signal,
+          headers: {
+            accept: "text/html,application/xhtml+xml",
+            "accept-language": "ru-RU,ru;q=0.9",
+            "user-agent": "RatingsCollector/1.0 (+public aggregate metrics)",
+            "x-ratings-browser": "1",
+            "x-ratings-browser-mode": "yandex-market-proof"
+          }
+        }, this.productRequestTimeoutMs, `Yandex Market browser product request for ${url}`);
+      } catch (error) {
+        if (error instanceof AdapterBlockedError || error instanceof ParserChangedError) throw error;
+        if (context.signal?.aborted) throw error;
+        throw new AdapterBlockedError(`Yandex Market browser request failed for ${url}: ${errorMessage(error)}`);
+      }
+    }
     const translated = new URL(source.pathname, MARKET_TRANSLATE_ORIGIN);
     translated.searchParams.set("_x_tr_sl", "ru");
     translated.searchParams.set("_x_tr_tl", "en");
@@ -1223,6 +1372,24 @@ function isAllowedMarketCardReviewsUrl(input: string, listingId: string): boolea
   }
 }
 
+function isAllowedMarketSearchCardUrl(input: string, listingId: string): boolean {
+  try {
+    const url = new URL(input);
+    return url.protocol === "https:" && url.hostname === "market.yandex.ru" && !url.port &&
+      !url.username && !url.password && !url.search && !url.hash &&
+      url.pathname.match(/^\/card\/[a-z0-9][a-z0-9-]*\/(\d+)\/?$/i)?.[1] === listingId;
+  } catch {
+    return false;
+  }
+}
+
+function marketCardReviewsUrl(input: string, listingId: string): string | undefined {
+  if (!isAllowedMarketSearchCardUrl(input, listingId)) return undefined;
+  const url = new URL(input);
+  url.pathname = `${url.pathname.replace(/\/$/, "")}/reviews`;
+  return canonicalizeUrl(url.toString());
+}
+
 function normalizeListingId(input: string): string | undefined {
   return input.match(/^(?:yandex:)?(\d+)$/i)?.[1];
 }
@@ -1391,6 +1558,27 @@ function validYandexBatchProof(proof: unknown, sitemaps: string[], brands: strin
     typeof match.url === "string" && isAllowedProductUrl(match.url) &&
     bestMatchingBrandKeys(match.url, brands).has(brandKey(match.brand)) &&
     typeof match.sitemap === "string" && sitemapSet.has(match.sitemap));
+}
+
+function validYandexMarketSearchProof(
+  proof: unknown,
+  brand: string,
+  page: number
+): proof is YandexMarketSearchProof {
+  if (!proof || typeof proof !== "object" || Array.isArray(proof)) return false;
+  const value = proof as Partial<YandexMarketSearchProof>;
+  if (typeof value.query !== "string" || brandKey(value.query) !== brandKey(brand) ||
+    value.page !== page || typeof value.hasNext !== "boolean" || !Array.isArray(value.products)) return false;
+  if (value.products.length === 0 && (page !== 1 || value.hasNext)) return false;
+  const ids = new Set<string>();
+  for (const product of value.products) {
+    if (!product || typeof product !== "object" || Array.isArray(product)) return false;
+    if (typeof product.id !== "string" || !/^\d+$/.test(product.id) || ids.has(product.id) ||
+      typeof product.name !== "string" || !product.name.trim() ||
+      typeof product.url !== "string" || !isAllowedMarketSearchCardUrl(product.url, product.id)) return false;
+    ids.add(product.id);
+  }
+  return true;
 }
 
 function chunked<T>(values: T[], size: number): T[][] {

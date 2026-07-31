@@ -62,6 +62,7 @@ const YANDEX_BATCH_ENDPOINT = "https://reviews.yandex.ru/ugcpub/__ratings_batch_
 // the original invocation can still be consuming the same Yandex shards.
 export const YANDEX_BATCH_GATEWAY_TIMEOUT_MS = 125_000;
 type YandexBatchCapableFetch = typeof fetch & { yandexBatchEndpoint?: string };
+type YandexMarketCapableFetch = YandexBatchCapableFetch & { yandexMarketBrowserEndpoint?: string };
 
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
@@ -119,6 +120,14 @@ export function createLazySandboxAcquire(sandbox: Pick<SandboxApi, "commands">):
       }
       throw new AdapterBlockedError(`EdgeOne Sandbox is unavailable: ${message}`);
     });
+}
+
+export function hasExplicitYandexMarketNoResults(bodyText: string, query: string): boolean {
+  const normalizedQuery = normalizedVisibleText(query);
+  if (!normalizedQuery) return false;
+  const body = normalizedVisibleText(bodyText);
+  return body.includes(`по запросу ${normalizedQuery} ничего не нашли`) ||
+    body.includes(`по запросу ${normalizedQuery} ничего не нашлось`);
 }
 
 export function browserFetch(
@@ -283,7 +292,7 @@ export function browserFetch(
       headers: { "X-Access-Token": sandbox.envdAccessToken },
       timeout: 60_000
     }));
-  const getContext = (key: "trusted-yandex" | "trusted-irecommend" | "trusted-ozon" | "trusted-wildberries" | "untrusted-static") => {
+  const getContext = (key: "trusted-yandex" | "trusted-yandex-market" | "trusted-irecommend" | "trusted-ozon" | "trusted-wildberries" | "untrusted-static") => {
     const trustedDynamic = key !== "untrusted-static";
     let context = hardenedContexts.get(key);
     if (!context) {
@@ -577,6 +586,135 @@ export function browserFetch(
       await queue;
       return response;
     }
+    if (browserMode === "yandex-market-proof") {
+      const query = url.searchParams.get("text")?.normalize("NFKC").trim() ?? "";
+      const pageText = url.searchParams.get("page") ?? "1";
+      const isSearch = url.protocol === "https:" && url.hostname === "market.yandex.ru" &&
+        url.pathname === "/search" && !url.hash && query.length >= 2 && query.length <= 160 &&
+        /^\d+$/.test(pageText) && Number(pageText) >= 1 && Number(pageText) <= 50 &&
+        url.searchParams.getAll("text").length === 1 && url.searchParams.getAll("page").length <= 1 &&
+        [...url.searchParams.keys()].every((key) => key === "text" || key === "page");
+      const card = url.pathname.match(/^\/card\/([a-z0-9][a-z0-9-]*)\/(\d+)\/reviews\/?$/i);
+      const isCard = url.protocol === "https:" && url.hostname === "market.yandex.ru" && !url.search &&
+        !url.hash && Boolean(card);
+      if (!isSearch && !isCard) {
+        throw new Error("Yandex Market browser proof is restricted to bounded search or exact reviews routes");
+      }
+      let response!: Response;
+      queue = queue.catch(() => undefined).then(async () => {
+        request.signal.throwIfAborted();
+        const initial = await assertSafePublicDestination(url.toString());
+        const context = await getContext("trusted-yandex-market");
+        const page = await context.newPage();
+        try {
+          const responseChecks: Promise<void>[] = [];
+          let networkViolation: Error | undefined;
+          page.on("response", (pageResponse) => {
+            responseChecks.push(assertActualServer(pageResponse).catch((error) => {
+              networkViolation ??= error as Error;
+            }));
+          });
+          await page.route("**/*", async (route) => {
+            const targetText = route.request().url();
+            if (/^(?:data|blob):/i.test(targetText)) return route.continue();
+            try {
+              await assertSafePublicDestination(targetText);
+              return route.continue();
+            } catch {
+              return route.abort("blockedbyclient");
+            }
+          });
+          const navigation = await page.goto(initial.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
+          if (!navigation) throw new Error("Yandex Market browser proof returned no network response");
+          await assertActualServer(navigation);
+          const final = await assertSafePublicDestination(page.url() || initial.toString());
+          if (!sameDomain("market.yandex.ru", final.hostname) || final.pathname !== initial.pathname) {
+            throw new Error(`Yandex Market browser proof redirected to ${final.hostname}${final.pathname}`);
+          }
+
+          if (isSearch) {
+            let explicitNoResults = false;
+            let visibleProducts = 0;
+            for (let attempt = 0; attempt < 30; attempt += 1) {
+              request.signal.throwIfAborted();
+              await page.waitForTimeout(1_000);
+              const bodyText = await page.locator("body").innerText({ timeout: 5_000 });
+              explicitNoResults = hasExplicitYandexMarketNoResults(bodyText, query);
+              visibleProducts = await page.locator('article a[href*="/card/"]').count();
+              if (explicitNoResults || visibleProducts > 0) break;
+            }
+            if (!explicitNoResults && visibleProducts === 0) {
+              throw new Error("Yandex Market search rendered neither product cards nor explicit no-results proof");
+            }
+            const pageNumber = Number(pageText);
+            const proof = await page.evaluate(({ query, pageNumber, explicitNoResults }) => {
+              const products = new Map<string, { id: string; name: string; url: string }>();
+              for (const article of document.querySelectorAll("article")) {
+                const link = article.querySelector<HTMLAnchorElement>('a[href*="/card/"]');
+                if (!link) continue;
+                let target: URL;
+                try { target = new URL(link.href, window.location.origin); }
+                catch { continue; }
+                const match = target.pathname.match(/^\/card\/[a-z0-9][a-z0-9-]*\/(\d+)\/?$/i);
+                if (target.origin !== "https://market.yandex.ru" || !match) continue;
+                target.search = "";
+                target.hash = "";
+                const imageTitle = article.querySelector<HTMLImageElement>("img[alt]")?.alt?.trim();
+                const name = imageTitle || link.textContent?.replace(/\s+/g, " ").trim() || "";
+                if (!name) continue;
+                products.set(match[1]!, { id: match[1]!, name, url: target.toString() });
+              }
+              let hasNext = false;
+              for (const anchor of document.querySelectorAll<HTMLAnchorElement>("a[href]")) {
+                try {
+                  const target = new URL(anchor.href, window.location.origin);
+                  if (target.origin === "https://market.yandex.ru" && target.pathname === "/search" &&
+                    target.searchParams.get("text") === query && Number(target.searchParams.get("page")) === pageNumber + 1) {
+                    hasNext = true;
+                    break;
+                  }
+                } catch { /* ignore malformed page links */ }
+              }
+              return { query, page: pageNumber, hasNext, products: [...products.values()], explicitNoResults };
+            }, { query, pageNumber, explicitNoResults });
+            if (proof.products.length === 0 && !proof.explicitNoResults) {
+              throw new Error("Yandex Market search product proof disappeared before extraction");
+            }
+            response = json({
+              query: proof.query,
+              page: proof.page,
+              hasNext: proof.hasNext,
+              products: proof.products
+            });
+          } else {
+            let productProof = false;
+            for (let attempt = 0; attempt < 30; attempt += 1) {
+              request.signal.throwIfAborted();
+              await page.waitForTimeout(1_000);
+              productProof = await page.locator('script[type="application/ld+json"]').evaluateAll((nodes) =>
+                nodes.some((node) => /"@type"\s*:\s*"Product"/i.test(node.textContent ?? ""))
+              );
+              if (productProof) break;
+            }
+            if (!productProof) throw new Error(`Yandex Market card ${card![2]} has no rendered Product JSON-LD`);
+            response = new Response(await page.content(), {
+              status: navigation.status() >= 200 && navigation.status() <= 599 ? navigation.status() : 200,
+              headers: {
+                "content-type": "text/html; charset=utf-8",
+                "x-ratings-final-url": final.toString(),
+                "x-ratings-proof-route": "yandex-market-browser"
+              }
+            });
+          }
+          await Promise.all(responseChecks);
+          if (networkViolation) throw networkViolation;
+        } finally {
+          await page.close();
+        }
+      });
+      await queue;
+      return response;
+    }
     if (browserMode === "wildberries-api") {
       const fixedSearch = url.hostname === "search.wb.ru" && [
         "/exactmatch/ru/common/v14/search",
@@ -794,8 +932,9 @@ export function browserFetch(
     });
     await queue;
     return response;
-  }) as YandexBatchCapableFetch;
+  }) as YandexMarketCapableFetch;
   if (staticProxy) routedFetch.yandexBatchEndpoint = YANDEX_BATCH_ENDPOINT;
+  routedFetch.yandexMarketBrowserEndpoint = "https://market.yandex.ru/search";
   return routedFetch;
 }
 

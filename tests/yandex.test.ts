@@ -38,6 +38,96 @@ const SHOP_MAP_LETTERS = "https://reviews.yandex.ru/ugcpub/sitemap_shop_a-b-0.xm
 const SHOP_MAP_LETTERS_END = "https://reviews.yandex.ru/ugcpub/sitemap_shop_z-%7B-0.xml";
 
 describe("YandexAdapter discovery", () => {
+  it("uses the rendered Market search proof and exhausts every advertised page before returning exact cards", async () => {
+    const endpoint = "https://market.yandex.ru/search";
+    const pageOne = `${endpoint}?text=${encodeURIComponent("Энтеролактис")}`;
+    const pageTwo = `${pageOne}&page=2`;
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      expect(new Headers(init?.headers).get("x-ratings-browser-mode")).toBe("yandex-market-proof");
+      if (url === pageOne) {
+        return new Response(JSON.stringify({
+          query: "Энтеролактис",
+          page: 1,
+          hasNext: true,
+          products: [
+            {
+              id: "103552838402",
+              name: "Энтеролактис Плюс капсулы 319мг 15шт",
+              url: "https://market.yandex.ru/card/enterolaktis-plyus-kaps/103552838402"
+            },
+            {
+              id: "103543425097",
+              name: "Энтерол капсулы 250 мг",
+              url: "https://market.yandex.ru/card/enterol-kaps-fl/103543425097"
+            }
+          ]
+        }), { headers: { "content-type": "application/json" } });
+      }
+      if (url === pageTwo) {
+        return new Response(JSON.stringify({
+          query: "Энтеролактис",
+          page: 2,
+          hasNext: false,
+          products: [{
+            id: "103552838702",
+            name: "Энтеролактис Дуо саше 5г 20шт",
+            url: "https://market.yandex.ru/card/enterolaktis-duo-por-sashe/103552838702"
+          }]
+        }), { headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexMarketBrowserEndpoint?: string };
+    fetch.yandexMarketBrowserEndpoint = endpoint;
+    const adapter = new YandexAdapter({ fetch });
+
+    const refs = await adapter.discover("Энтеролактис", context({ brands: ["Энтеролактис"] }));
+
+    expect(refs.map(({ listingId }) => listingId).sort()).toEqual(["103552838402", "103552838702"]);
+    expect(refs.every(({ url }) => url.endsWith("/reviews"))).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("sitemap"))).toBe(false);
+  });
+
+  it("collects a rendered exact Market card with source-bound JSON-LD metrics", async () => {
+    const listingId = "103552838402";
+    const marketUrl = `https://market.yandex.ru/card/enterolaktis-plyus-kaps/${listingId}/reviews`;
+    const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("x-ratings-browser-mode")).toBe("yandex-market-proof");
+      return new Response(marketJsonLdHtml({
+        url: marketUrl,
+        title: "Энтеролактис Плюс капсулы 319мг 15шт",
+        rating: 4.9,
+        ratingCount: 55,
+        reviewCount: 12
+      }), {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "x-ratings-final-url": marketUrl,
+          "x-ratings-proof-route": "yandex-market-browser"
+        }
+      });
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexMarketBrowserEndpoint?: string };
+    fetch.yandexMarketBrowserEndpoint = "https://market.yandex.ru/search";
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.collect(ref({
+      listingId,
+      brand: "Энтеролактис",
+      url: marketUrl,
+      title: "Энтеролактис Плюс капсулы 319мг 15шт"
+    }), context({ brands: ["Энтеролактис"] }))).resolves.toMatchObject({
+      listingId,
+      reviews: 55,
+      writtenReviewCount: 12,
+      rating: 4.9,
+      status: "ok",
+      source: "yandex_market_json_ld_browser"
+    });
+  });
+
   it("discovers model cards by Cyrillic brand transliteration and deduplicates modelId", async () => {
     const fetch = routeFetch({
       [INDEX]: xmlResponse(sitemapIndex([MAP_A, MAP_B])),
