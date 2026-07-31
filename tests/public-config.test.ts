@@ -1536,6 +1536,51 @@ describe("fixed first-party collection egress", () => {
     expect(await incomplete.text()).not.toContain('"processed":2');
   });
 
+  it("proves a Yandex batch shard when exact XML tags and locations cross stream chunks", async () => {
+    const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_1030000000-1039999999-0.xml";
+    const chunks = [
+      "<?xml version=\"1.0\"?><urlset><url><lo",
+      "c>https://reviews.yandex.ru/product/ingavirin--1031000000</loc></url><url><loc>https://reviews.yandex.ru/product/entero",
+      "laktis-duo--1032000000</loc></url></url",
+      "set>"
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      const encoder = new TextEncoder();
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+          controller.close();
+        }
+      }), { headers: { "content-type": "application/xml" } });
+    }));
+
+    const response = await staticReviewFetch(new Request(
+      "https://ratings.example/api/internal/static-review-fetch",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          url: "https://reviews.yandex.ru/ugcpub/__ratings_batch__",
+          yandexBatch: {
+            sitemaps: [sitemap],
+            brands: [{ brand: "Энтеролактис", tokens: ["enterolaktis"] }]
+          }
+        })
+      }
+    ), { INTERNAL_AGENT_TOKEN: token });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      processed: 1,
+      verifiedSitemaps: [sitemap],
+      matches: [{
+        brand: "Энтеролактис",
+        url: "https://reviews.yandex.ru/product/enterolaktis-duo--1032000000",
+        sitemap
+      }]
+    });
+  });
+
   it("assigns an overlapping Yandex URL to the longest requested brand token", async () => {
     const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_0-9999999-0.xml";
     vi.stubGlobal("fetch", vi.fn(async () => new Response(

@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { load } from "cheerio";
+import { Parser } from "htmlparser2";
 import { COMPANY_BRANDS, INITIAL_BRANDS, INITIAL_DOMAINS } from "../../src/shared/constants.js";
 import type { RunState } from "../../src/shared/types.js";
 import { isKnownYandexIndexTombstoneSitemap } from "../../src/shared/yandex-sitemaps.js";
@@ -2095,6 +2096,137 @@ function yandexProductMatchScore(slug: string, tokens: PreparedYandexBrand["toke
   return best;
 }
 
+type StreamedYandexMatch = { brand: string; url: string };
+
+/**
+ * Proves a complete model sitemap while it is being read. The former batch
+ * path retained the response chunks, a second combined byte array, the full
+ * UTF-16 XML string, a Cheerio DOM, and every model URL at the same time. A
+ * few concurrent multi-megabyte shards could therefore exhaust the fixed
+ * Function before an otherwise healthy response finished. This parser keeps
+ * only its small element stack, one <loc>, and exact requested-brand matches.
+ */
+async function readStreamedYandexBatchShard(
+  response: Response,
+  requested: URL,
+  preparedBrands: PreparedYandexBrand[]
+): Promise<StreamedYandexMatch[] | undefined> {
+  const range = requested.pathname.match(YANDEX_MODEL_SITEMAP_PATH);
+  if (!range || !response.body) return undefined;
+  const minimumId = BigInt(range[1]);
+  const maximumId = BigInt(range[2]);
+  const matches: StreamedYandexMatch[] = [];
+  const stack: string[] = [];
+  let invalid = false;
+  let rootSeen = false;
+  let rootClosed = false;
+  let allUrlElements = 0;
+  let directUrlElements = 0;
+  let currentUrlLocs = 0;
+  let currentLocText: string | undefined;
+
+  const acceptLocation = (raw: string): void => {
+    let product: URL;
+    try { product = new URL(raw.trim()); }
+    catch { invalid = true; return; }
+    const modelId = product.pathname.match(/^\/product\/(?:[a-z0-9][a-z0-9_-]*)?--(\d+)$/i)?.[1];
+    if (product.protocol !== "https:" || product.hostname !== "reviews.yandex.ru" || product.port ||
+      product.username || product.password || product.search || product.hash || !modelId) {
+      invalid = true;
+      return;
+    }
+    const numericId = BigInt(modelId);
+    if (numericId < minimumId || numericId > maximumId) {
+      invalid = true;
+      return;
+    }
+    const productUrl = product.toString();
+    const slug = yandexProductSlug(productUrl);
+    if (slug === undefined) {
+      invalid = true;
+      return;
+    }
+    let bestScore = -1;
+    const matchedBrands: string[] = [];
+    for (const brand of preparedBrands) {
+      const score = yandexProductMatchScore(slug, brand.tokens);
+      if (score < bestScore || score < 0) continue;
+      if (score > bestScore) {
+        bestScore = score;
+        matchedBrands.length = 0;
+      }
+      matchedBrands.push(brand.brand);
+    }
+    for (const brand of matchedBrands) matches.push({ brand, url: productUrl });
+  };
+
+  const parser = new Parser({
+    onopentag(name) {
+      const parent = stack.at(-1);
+      if (stack.length === 0) {
+        if (rootSeen || name !== "urlset") invalid = true;
+        rootSeen = true;
+      }
+      if (name === "url") {
+        allUrlElements += 1;
+        if (stack.length === 1 && parent === "urlset") {
+          directUrlElements += 1;
+          currentUrlLocs = 0;
+        }
+      }
+      if (name === "loc" && stack.length === 2 && parent === "url" && stack[0] === "urlset") {
+        currentUrlLocs += 1;
+        currentLocText = "";
+      }
+      stack.push(name);
+    },
+    ontext(value) {
+      if (stack.length === 0 && value.trim()) invalid = true;
+      if (currentLocText !== undefined && stack.length === 3 && stack.at(-1) === "loc") {
+        currentLocText += value;
+      }
+    },
+    onclosetag(name, isImplied) {
+      if (isImplied) invalid = true;
+      if (stack.at(-1) !== name) invalid = true;
+      if (name === "loc" && stack.length === 3 && stack[1] === "url") {
+        if (currentLocText === undefined) invalid = true;
+        else acceptLocation(currentLocText);
+        currentLocText = undefined;
+      }
+      if (name === "url" && stack.length === 2 && stack[0] === "urlset" && currentUrlLocs !== 1) {
+        invalid = true;
+      }
+      if (name === "urlset" && stack.length === 1) rootClosed = true;
+      stack.pop();
+    },
+    onerror() { invalid = true; }
+  }, { xmlMode: true, decodeEntities: true, lowerCaseTags: false });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let totalBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > 12_000_000) throw new Error("Yandex batch shard exceeds the exact XML safety limit");
+      parser.write(decoder.decode(value, { stream: true }));
+    }
+    parser.end(decoder.decode());
+  } catch (error) {
+    await reader.cancel(error).catch(() => undefined);
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+  if (invalid || !rootSeen || !rootClosed || stack.length !== 0 || allUrlElements !== directUrlElements) {
+    return undefined;
+  }
+  return matches;
+}
+
 class NonRetryableYandexBatchShardError extends Error {}
 
 // A complete live model shard can take just over 30 seconds to cross the
@@ -2107,8 +2239,8 @@ const YANDEX_BATCH_SHARD_TOTAL_MS = 100_000;
 const YANDEX_BATCH_SHARD_MIN_ATTEMPT_MS = 8_000;
 const YANDEX_BATCH_SHARD_ATTEMPTS = 3;
 
-async function fetchCompleteYandexBatchShard(sitemap: string): Promise<{
-  locations: string[];
+async function fetchCompleteYandexBatchShard(sitemap: string, preparedBrands: PreparedYandexBrand[]): Promise<{
+  matches: StreamedYandexMatch[];
   tombstoned: boolean;
 }> {
   const target = new URL(sitemap);
@@ -2133,7 +2265,7 @@ async function fetchCompleteYandexBatchShard(sitemap: string): Promise<{
       if (!upstream.ok) {
         await upstream.body?.cancel().catch(() => undefined);
         if (upstream.status === 404 && isKnownYandexIndexTombstoneSitemap(target)) {
-          return { locations: [], tombstoned: true };
+          return { matches: [], tombstoned: true };
         }
         const message = `Yandex batch shard returned HTTP ${upstream.status}`;
         if (![408, 425, 429].includes(upstream.status) && upstream.status < 500) {
@@ -2141,11 +2273,9 @@ async function fetchCompleteYandexBatchShard(sitemap: string): Promise<{
         }
         throw new Error(message);
       }
-      const remainingMs = Math.max(1, attemptBudgetMs - (Date.now() - startedAt));
-      const xml = await readTextBounded(upstream, 12_000_000, remainingMs);
-      const locations = extractCompleteYandexModelLocations(xml, target);
-      if (!locations) throw new Error("Yandex batch shard did not prove complete exact XML");
-      return { locations, tombstoned: false };
+      const shardMatches = await readStreamedYandexBatchShard(upstream, target, preparedBrands);
+      if (!shardMatches) throw new Error("Yandex batch shard did not prove complete exact XML");
+      return { matches: shardMatches, tombstoned: false };
     } catch (error) {
       lastError = error;
       if (error instanceof NonRetryableYandexBatchShardError || attempt === YANDEX_BATCH_SHARD_ATTEMPTS) break;
@@ -2187,28 +2317,10 @@ async function collectYandexBatch(batch: YandexBatchRequest): Promise<{
       if (index >= batch.sitemaps.length) return;
       const sitemap = batch.sitemaps[index]!;
       try {
-        const shard = await fetchCompleteYandexBatchShard(sitemap);
+        const shard = await fetchCompleteYandexBatchShard(sitemap, preparedBrands);
         if (shard.tombstoned) tombstonedSitemaps.push(sitemap);
-        const productUrls = shard.locations;
-        for (const productUrl of productUrls) {
-          const slug = yandexProductSlug(productUrl);
-          // fetchCompleteYandexBatchShard has already proven this exact route;
-          // keep the guard fail-closed if the two parsers ever drift apart.
-          if (slug === undefined) throw new Error(`Yandex batch matcher rejected a proven product route: ${productUrl}`);
-          let bestScore = -1;
-          const matchedBrands: string[] = [];
-          for (const brand of preparedBrands) {
-            const score = yandexProductMatchScore(slug, brand.tokens);
-            if (score < bestScore || score < 0) continue;
-            if (score > bestScore) {
-              bestScore = score;
-              matchedBrands.length = 0;
-            }
-            matchedBrands.push(brand.brand);
-          }
-          for (const brand of matchedBrands) {
-            matches.push({ brand, url: productUrl, sitemap });
-          }
+        for (const match of shard.matches) {
+          matches.push({ ...match, sitemap });
         }
       } catch (error) {
         failure ??= error;
