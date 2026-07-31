@@ -4,6 +4,11 @@ import { assertSafePublicUrl } from "./urls.js";
 
 const DEFAULT_OUTBOUND_TIMEOUT_MS = 20_000;
 
+export type SafeFetchOptions = {
+  /** Return the redirect response only when its destination fails the HTTPS/public-address guard. */
+  returnUnsafeRedirectResponse?: boolean;
+};
+
 export function isPrivateNetworkAddress(address: string): boolean {
   const normalized = address.toLocaleLowerCase("en-US").split("%")[0];
   const mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
@@ -43,7 +48,8 @@ export async function safeFetch(
   init: RequestInit = {},
   fetchImpl: typeof fetch = fetch,
   maxRedirects = 4,
-  timeoutMs = DEFAULT_OUTBOUND_TIMEOUT_MS
+  timeoutMs = DEFAULT_OUTBOUND_TIMEOUT_MS,
+  options: SafeFetchOptions = {}
 ): Promise<Response> {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) {
     throw new Error("Некорректный таймаут внешнего запроса");
@@ -76,7 +82,12 @@ export async function safeFetch(
       }
       const location = response.headers.get("location");
       if (!location) return response;
-      url = await assertSafePublicDestination(new URL(location, url).toString());
+      try {
+        url = await assertSafePublicDestination(new URL(location, url).toString());
+      } catch (error) {
+        if (options.returnUnsafeRedirectResponse) return response;
+        throw error;
+      }
     }
     throw new Error("Слишком много перенаправлений");
   } finally {

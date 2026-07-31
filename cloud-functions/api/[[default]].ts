@@ -2099,12 +2099,12 @@ class NonRetryableYandexBatchShardError extends Error {}
 
 // A complete live model shard can take just over 30 seconds to cross the
 // EdgeOne fixed-function boundary even when the same first-party response is
-// locally available in a few seconds. Keep two bounded attempts below the
-// 120-second function ceiling while allowing that proven healthy transfer to
-// finish instead of misclassifying a complete XML document as truncated.
+// locally available in a few seconds. Keep the whole shard recovery inside a
+// 100-second budget, leaving twenty seconds for sibling settlement, parsing,
+// and a controlled JSON response before the 120-second Function ceiling.
 const YANDEX_BATCH_SHARD_ATTEMPT_MS = 50_000;
-const YANDEX_BATCH_SHARD_TOTAL_MS = 110_000;
-const YANDEX_BATCH_SHARD_MIN_ATTEMPT_MS = 10_000;
+const YANDEX_BATCH_SHARD_TOTAL_MS = 100_000;
+const YANDEX_BATCH_SHARD_MIN_ATTEMPT_MS = 8_000;
 const YANDEX_BATCH_SHARD_ATTEMPTS = 3;
 
 async function fetchCompleteYandexBatchShard(sitemap: string): Promise<{
@@ -2151,8 +2151,8 @@ async function fetchCompleteYandexBatchShard(sitemap: string): Promise<{
       if (error instanceof NonRetryableYandexBatchShardError || attempt === YANDEX_BATCH_SHARD_ATTEMPTS) break;
       // A fast HTTP 200 with incomplete XML can be a transient in-progress
       // sitemap object. Give that object time to settle, but start another
-      // attempt only when at least ten useful seconds remain inside the fixed
-      // Function's 120-second ceiling. Two slow 50-second attempts therefore
+      // attempt only when at least eight useful seconds remain inside the fixed
+      // Function's 120-second ceiling. Two slow attempts therefore
       // stay the maximum; only fast failures can use the third attempt.
       const retryDelayMs = attempt * 1_000;
       const budgetAfterDelay = YANDEX_BATCH_SHARD_TOTAL_MS - (Date.now() - shardStartedAt) - retryDelayMs;

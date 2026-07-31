@@ -612,16 +612,34 @@ async function readHtml(
   url: string,
   context: AdapterContext,
   fallbackFetch: typeof fetch | undefined,
-  dynamicBrowser = false
-): Promise<{ html: string; status: number }> {
+  dynamicBrowser = false,
+  captureUnsafeRedirect = false
+): Promise<{ html: string; status: number; redirectLocation?: string }> {
   const response = await safeFetch(url, {
     signal: context.signal,
     headers: dynamicBrowser
       ? { "x-ratings-browser": "1", "x-ratings-scroll": "1" }
       : undefined
-  }, context.fetch ?? fallbackFetch, 4, dynamicBrowser ? 90_000 : 45_000);
+  }, context.fetch ?? fallbackFetch, 4, dynamicBrowser ? 90_000 : 45_000, {
+    returnUnsafeRedirectResponse: captureUnsafeRedirect
+  });
   const html = await readTextBounded(response, 12_000_000, 60_000);
-  return { html, status: response.status };
+  return {
+    html,
+    status: response.status,
+    redirectLocation: response.headers.get("location") ?? undefined
+  };
+}
+
+function isRetiredVseotzyvyRedirect(requestedUrl: string, location: string | undefined): boolean {
+  if (!location) return false;
+  try {
+    const target = new URL(location, requestedUrl);
+    return target.protocol === "http:" && sameSite(target, "vseotzyvy.ru") &&
+      target.pathname === "/" && !target.search && !target.hash;
+  } catch {
+    return false;
+  }
 }
 
 export class ReviewSiteAdapter implements SiteAdapter {
@@ -647,9 +665,9 @@ export class ReviewSiteAdapter implements SiteAdapter {
     this.nextRequestAt = Date.now() + this.rateLimitMs;
   }
 
-  private async request(url: string, context: AdapterContext) {
+  private async request(url: string, context: AdapterContext, captureUnsafeRedirect = false) {
     await this.throttle();
-    return readHtml(url, context, this.fallbackFetch, this.definition.dynamicBrowser);
+    return readHtml(url, context, this.fallbackFetch, this.definition.dynamicBrowser, captureUnsafeRedirect);
   }
 
   private async requestJson(url: string, context: AdapterContext): Promise<{ payload: unknown; status: number }> {
@@ -1259,7 +1277,30 @@ export class ReviewSiteAdapter implements SiteAdapter {
         source: "irecommend-search"
       };
     }
-    const { html, status } = await this.request(ref.url, context);
+    const { html, status, redirectLocation } = await this.request(
+      ref.url,
+      context,
+      this.definition.domain === "vseotzyvy.ru"
+    );
+    if (
+      this.definition.domain === "vseotzyvy.ru" &&
+      [301, 302, 303, 307, 308].includes(status) &&
+      isRetiredVseotzyvyRedirect(ref.url, redirectLocation)
+    ) {
+      return {
+        domain: this.definition.domain,
+        platform: this.definition.domain,
+        listingId: ref.listingId,
+        brand: ref.brand,
+        canonicalUrl: canonicalizeUrl(ref.url),
+        product: ref.title ?? ref.brand,
+        reviews: null,
+        rating: null,
+        status: "not_found",
+        capturedAt,
+        source: "review_site_missing_candidate"
+      };
+    }
     if (status === 404 || status === 410) {
       return {
         domain: this.definition.domain,

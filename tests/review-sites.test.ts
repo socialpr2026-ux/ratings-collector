@@ -853,6 +853,27 @@ describe("first-party review-site adapters", () => {
     });
   });
 
+  it("treats the exact Vseotzyvy downgrade-to-home redirect as a retired search candidate", async () => {
+    const adapter = adapterFor("vseotzyvy.ru", (async () => new Response(null, {
+      status: 301,
+      headers: { location: "http://vseotzyvy.ru/" }
+    })) as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "vseotzyvy.ru",
+      platform: "vseotzyvy.ru",
+      listingId: "29728",
+      brand: "Здравсити",
+      url: "https://vseotzyvy.ru/item/29728/reviews-internet-apteka-zdravsiti/",
+      metadata: { source: "site-search" }
+    }, context)).resolves.toMatchObject({
+      status: "not_found",
+      reviews: null,
+      rating: null,
+      source: "review_site_missing_candidate"
+    });
+  });
+
   it("health-checks Otzovik on a proven aggregate card instead of the protected homepage", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = urlOf(input);

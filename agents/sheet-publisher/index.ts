@@ -317,6 +317,9 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     snapshots[run.request.month] = Object.fromEntries(
       observationsForPublication(run).map((item) => [productKey(item.domain, item.listingId), item])
     );
+    const modelOptions = {
+      preserveCurrentMonthFor: intent.run.publicationExclusions ?? []
+    };
     const publicationRepository = repository;
 
     if (appsScriptUrl) {
@@ -331,7 +334,8 @@ export async function onRequest(context: AgentContext): Promise<Response> {
           run.request,
           run.request.brands[index]!,
           registry,
-          snapshots
+          snapshots,
+          modelOptions
         )
       }));
       const evidence = new RemoteEvidenceStore(publicationRepository);
@@ -388,7 +392,8 @@ export async function onRequest(context: AgentContext): Promise<Response> {
           run.request,
           run.request.brands[index]!,
           registry,
-          snapshots
+          snapshots,
+          modelOptions
         );
         publications.push({ sheetUrl: run.request.sheetUrl, document, tabName, preimage: current });
       }

@@ -318,7 +318,7 @@ describe("YandexAdapter discovery", () => {
     expect(fetch).toHaveBeenCalledTimes(1 + Math.ceil(maps.length / 2));
   });
 
-  it("keeps two bounded gateway workers and checkpoints verified full-scan milestones", async () => {
+  it("keeps four bounded gateway workers and checkpoints verified full-scan milestones", async () => {
     const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
     const maps = Array.from({ length: 36 }, (_value, index) =>
       `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
@@ -354,7 +354,7 @@ describe("YandexAdapter discovery", () => {
     }))).resolves.toEqual([]);
 
     expect(processed.sort()).toEqual([...maps].sort());
-    expect(peak).toBe(2);
+    expect(peak).toBe(4);
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(18);
     expect(activity.map((event) => ({ operationId: event.operationId, status: event.status, detail: event.detail }))).toEqual([
       {
@@ -421,6 +421,7 @@ describe("YandexAdapter discovery", () => {
       fetch,
       maxSitemaps: maps.length,
       sitemapRetryAttempts: 3,
+      batchRetryAttempts: 2,
       sitemapRetryBaseMs: 0
     });
 
@@ -465,6 +466,7 @@ describe("YandexAdapter discovery", () => {
       fetch,
       maxSitemaps: maps.length,
       sitemapRetryAttempts: 2,
+      batchRetryAttempts: 2,
       sitemapRetryBaseMs: 0
     });
 
@@ -474,6 +476,29 @@ describe("YandexAdapter discovery", () => {
     expect(batchAttempts).toBe(2);
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST").map(([, init]) => init?.body))
       .toEqual([fetchMock.mock.calls[1]![1]?.body, fetchMock.mock.calls[1]![1]?.body]);
+  });
+
+  it("does not repeat a failed Agent recovery chain at the adapter layer by default", async () => {
+    const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const maps = [MAP_A, MAP_B];
+    let batchAttempts = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      if (url !== batchEndpoint) throw new Error(`Unexpected request: ${url}`);
+      batchAttempts += 1;
+      return new Response(JSON.stringify({
+        error: `Yandex batch shard remained unproven: ${maps[0]}: terminated`
+      }), { status: 502, headers: { "content-type": "application/json" } });
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexBatchEndpoint?: string };
+    fetch.yandexBatchEndpoint = batchEndpoint;
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: maps.length, sitemapRetryBaseMs: 0 });
+
+    await expect(adapter.discover("Энтеролактис", context())).rejects.toMatchObject({
+      message: expect.stringContaining("terminated")
+    });
+    expect(batchAttempts).toBe(1);
   });
 
   it("bounds a gateway request that never returns and fails closed", async () => {

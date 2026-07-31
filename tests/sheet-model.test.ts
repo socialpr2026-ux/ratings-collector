@@ -307,6 +307,68 @@ describe("Google Sheets model", () => {
     expect(row.slice(4, 6)).toEqual([null, null]);
   });
 
+  it("preserves prior current-month metrics for a failed partition during partial publication", () => {
+    const brand = "Здравсити";
+    const partialRequest: RunRequest = {
+      ...request,
+      domains: ["irecommend.ru", "ru.otzyv.com"],
+      brands: [brand]
+    };
+    const prior: Observation = {
+      domain: "ru.otzyv.com",
+      platform: "ru.otzyv.com",
+      listingId: "apteka-zdravsiti",
+      brand,
+      canonicalUrl: "https://ru.otzyv.com/apteka-zdravsiti",
+      product: "Аптека ЗдравСити",
+      reviews: 25,
+      rating: 3.7,
+      status: "ok",
+      capturedAt: "2026-07-01T00:00:00.000Z"
+    };
+    const previousDocument = buildBrandSheetDocument(
+      { values: [] },
+      partialRequest,
+      brand,
+      [],
+      { "2026-07": { "ru.otzyv.com:apteka-zdravsiti": prior } }
+    );
+    const priorRecord: ProductRecord = {
+      key: "ru.otzyv.com:apteka-zdravsiti",
+      domain: prior.domain,
+      listingId: prior.listingId,
+      brand,
+      platform: prior.platform,
+      canonicalUrl: prior.canonicalUrl,
+      product: prior.product,
+      firstSeenMonth: "2026-07",
+      lastSeenMonth: "2026-07"
+    };
+    const current: Observation = {
+      ...prior,
+      domain: "irecommend.ru",
+      platform: "irecommend.ru",
+      listingId: "zdravcity",
+      canonicalUrl: "https://irecommend.ru/content/zdravcity",
+      reviews: 8,
+      rating: 4.5
+    };
+
+    const document = buildBrandSheetDocument(
+      { values: previousDocument.values },
+      partialRequest,
+      brand,
+      [priorRecord],
+      { "2026-07": { "irecommend.ru:zdravcity": current } },
+      { preserveCurrentMonthFor: [{ domain: "ru.otzyv.com", brand }] }
+    );
+    const rows = document.values.filter((_row, index) => document.rowKinds[index] === "product");
+    const preserved = rows.find((row) => row[1] === prior.canonicalUrl);
+
+    expect(preserved?.slice(4, 6)).toEqual([25, 3.7]);
+    expect(rows.find((row) => row[1] === current.canonicalUrl)?.slice(4, 6)).toEqual([8, 4.5]);
+  });
+
   it("keeps an out-of-scope brand out of a dedicated brand sheet", () => {
     const existing = { values: [
       [null, null, null, "Июль 2026"], [null, null, null, "Отзывы", "Рейтинг"],

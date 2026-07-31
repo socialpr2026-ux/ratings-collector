@@ -6,6 +6,10 @@ import { productKey } from "../repository.js";
 
 export type SheetScalar = string | number | null;
 export type ExistingSheet = { values: SheetScalar[][] };
+export type SheetBuildOptions = {
+  /** Failed domain/brand partitions whose current-month cells must remain untouched. */
+  preserveCurrentMonthFor?: ReadonlyArray<{ domain: string; brand: string }>;
+};
 export type SheetRowKind = "brand" | "title" | "subheader" | "section" | "product" | "blank" | "summaryHeader" | "summary" | "footnote";
 export type SheetDocument = {
   values: SheetScalar[][];
@@ -318,7 +322,8 @@ export function buildSheetDocument(
   request: RunRequest,
   registry: ProductRecord[],
   snapshots: Record<string, Record<string, Observation>>,
-  brandScope?: string
+  brandScope?: string,
+  options: SheetBuildOptions = {}
 ): SheetDocument {
   const legacy = parseLegacy(existing, request);
   const months = [...new Set([...legacy.months, ...Object.keys(snapshots), request.month])].sort();
@@ -331,8 +336,16 @@ export function buildSheetDocument(
     const previous = productMap.get(item.key);
     productMap.set(item.key, { ...item, metrics: previous?.metrics ?? {} });
   }
+  const preservedCurrentMonthPartitions = new Set((options.preserveCurrentMonthFor ?? []).map((item) =>
+    `${item.domain.toLocaleLowerCase("ru")}\u0000${normalizeText(item.brand)}`
+  ));
   for (const item of productMap.values()) {
-    if (request.domains.includes(item.domain) && request.brands.includes(item.brand)) {
+    const partition = `${item.domain.toLocaleLowerCase("ru")}\u0000${normalizeText(item.brand)}`;
+    if (
+      request.domains.includes(item.domain) &&
+      request.brands.includes(item.brand) &&
+      !preservedCurrentMonthPartitions.has(partition)
+    ) {
       item.metrics[request.month] = { reviews: null, rating: null };
     }
   }
@@ -482,7 +495,8 @@ export function buildBrandSheetDocument(
   request: RunRequest,
   brand: string,
   registry: ProductRecord[],
-  snapshots: Record<string, Record<string, Observation>>
+  snapshots: Record<string, Record<string, Observation>>,
+  options: SheetBuildOptions = {}
 ): SheetDocument {
   const normalizedBrand = normalizeText(brand);
   const scopedRegistry = registry.filter((item) => normalizeText(item.brand) === normalizedBrand);
@@ -495,7 +509,8 @@ export function buildBrandSheetDocument(
     { ...request, brands: [brand] },
     scopedRegistry,
     scopedSnapshots,
-    brand
+    brand,
+    options
   );
 }
 

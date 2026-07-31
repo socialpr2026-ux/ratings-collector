@@ -623,6 +623,7 @@ export class RatingsService {
                 } else if ([
                   "yandex_reviews_missing_candidate",
                   "otzovik_missing_candidate",
+                  "review_site_missing_candidate",
                   "review_site_non_product_candidate"
                 ].includes(observation.source ?? "")) {
                   // A first-party search may retain an explicitly removed

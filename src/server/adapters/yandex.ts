@@ -36,11 +36,11 @@ const SHOP_SITEMAP_RANGES = new Set([
 ]);
 const MODEL_ID_AT_END = /--(\d+)(?:[/?#]|$)/;
 // The gateway has two shard workers and a 120-second platform ceiling. A
-// two-shard package is one wave and stays below the Agent's transport deadline
-// even when both exact 50-second shard attempts are needed. Two gateway calls
-// still keep the proven production peak at four upstream shards.
+// two-shard package is one wave and stays below the Agent's transport deadline.
+// Four gateway calls keep the full 330-shard pass bounded at eight upstream
+// shards without changing the exact per-shard proof contract.
 const YANDEX_BATCH_CHUNK_SIZE = 2;
-const YANDEX_BATCH_CONCURRENCY = 2;
+const YANDEX_BATCH_CONCURRENCY = 4;
 const YANDEX_PROGRESS_SITEMAP_INTERVAL = 32;
 
 type YandexCapableFetch = typeof globalThis.fetch & {
@@ -151,6 +151,7 @@ export type YandexAdapterOptions = {
   sitemapConcurrency?: number;
   cacheTtlMs?: number;
   sitemapRetryAttempts?: number;
+  batchRetryAttempts?: number;
   sitemapRetryBaseMs?: number;
   sitemapReadTimeoutMs?: number;
   batchRequestTimeoutMs?: number;
@@ -213,6 +214,7 @@ export class YandexAdapter implements SiteAdapter {
   private readonly sitemapConcurrency: number;
   private readonly cacheTtlMs: number;
   private readonly sitemapRetryAttempts: number;
+  private readonly batchRetryAttempts: number;
   private readonly sitemapRetryBaseMs: number;
   private readonly sitemapReadTimeoutMs: number;
   private readonly batchRequestTimeoutMs: number;
@@ -242,6 +244,12 @@ export class YandexAdapter implements SiteAdapter {
     this.sitemapConcurrency = boundedInteger(options.sitemapConcurrency, 4, 1, 12);
     this.cacheTtlMs = boundedInteger(options.cacheTtlMs, 30 * 60_000, 0, 24 * 60 * 60_000);
     this.sitemapRetryAttempts = boundedInteger(options.sitemapRetryAttempts, 3, 1, 5);
+    // One Agent request already retries each exact shard inside the fixed
+    // Function and recursively splits a failed two-shard group into parallel
+    // singletons. Repeating that entire chain here multiplied one persistent
+    // upstream termination into a nine-minute wait. Keep the production
+    // default single-pass while retaining an explicit test/diagnostic override.
+    this.batchRetryAttempts = boundedInteger(options.batchRetryAttempts, 1, 1, 2);
     this.sitemapRetryBaseMs = boundedInteger(options.sitemapRetryBaseMs, 250, 0, 10_000);
     // The fixed EdgeOne route validates and compacts complete multi-megabyte
     // shards before handing them to the adapter. On a cold function the
@@ -590,7 +598,7 @@ export class YandexAdapter implements SiteAdapter {
     const processChunk = async (sitemaps: string[]): Promise<void> => {
       let response: Response | undefined;
       let lastRequestError: unknown;
-      for (let attempt = 1; attempt <= this.sitemapRetryAttempts; attempt += 1) {
+      for (let attempt = 1; attempt <= this.batchRetryAttempts; attempt += 1) {
         try {
           response = await fetchWithDeadline(fetcher, endpoint, {
             method: "POST",
@@ -602,7 +610,7 @@ export class YandexAdapter implements SiteAdapter {
               brands: brands.map((brand) => ({ brand, tokens: yandexBrandTokens(brand) }))
             })
           }, this.batchRequestTimeoutMs, "Yandex batch proof request");
-          if (!response.ok && [500, 502, 503, 504].includes(response.status) && attempt < this.sitemapRetryAttempts) {
+          if (!response.ok && [500, 502, 503, 504].includes(response.status) && attempt < this.batchRetryAttempts) {
             const status = response.status;
             await response.body?.cancel().catch(() => undefined);
             response = undefined;
@@ -614,7 +622,7 @@ export class YandexAdapter implements SiteAdapter {
         } catch (error) {
           if (callerAborted || batchAbort.signal.aborted) throw error;
           lastRequestError = error;
-          if (attempt < this.sitemapRetryAttempts) {
+          if (attempt < this.batchRetryAttempts) {
             await this.waitBeforeSitemapRetry(attempt, context);
           }
         }
