@@ -18,14 +18,14 @@
   },
   "dependencies": {
     "@edgeone/pages-blob": "^0.0.14",
-    "@fastify/static": "^9.1.1",
+    "@fastify/static": "^10.1.2",
     "cheerio": "^1.2.0",
-    "chromium-bidi": "0.7.1",
+    "chromium-bidi": "17.0.2",
     "dotenv": "^17.2.3",
     "fastify": "^5.10.0",
-    "playwright-core": "1.51.0",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
+    "playwright-core": "1.62.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "zod": "^4.4.3"
   },
   "devDependencies": {
