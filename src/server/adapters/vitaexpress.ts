@@ -30,7 +30,7 @@ type ExactProduct = {
 type ExactFamily = {
   id: string;
   tagId: string;
-  brand: "Кагоцел";
+  brand: "Кагоцел" | "Трекрезан" | "Гриппферон" | "Ингавирин" | "Арбидол";
   url: string;
   variants: readonly { name: string; url: string }[];
 };
@@ -154,11 +154,64 @@ const KAGOCEL_FAMILY: ExactFamily = {
   brand: "Кагоцел",
   url: `${ORIGIN}/tag/kagotsel/`,
   variants: [
-    { name: "Кагоцел таблетки 12мг, №10", url: `${ORIGIN}/product/kagotsel_tab_12mg_10/` },
     { name: "Кагоцел таблетки 12мг, №30", url: `${ORIGIN}/product/kagotsel_tab__12mg__30/` },
-    { name: "Кагоцел таблетки 12мг, №20", url: `${ORIGIN}/product/kagotsel_tab__12mg__20/` }
+    { name: "Кагоцел таблетки 12мг, №10", url: `${ORIGIN}/product/kagotsel_tab_12mg_10/` },
+    { name: "Кагоцел таблетки 12мг, №20", url: `${ORIGIN}/product/kagotsel_tab__12mg__20/` },
+    { name: "Кагоцел таблетки 12мг, №20,Ниармедик Фарма", url: `${ORIGIN}/product/kagotsel_tab_12mg_20/` }
   ]
 };
+
+const ANTIVIRAL_FAMILIES: readonly ExactFamily[] = [
+  KAGOCEL_FAMILY,
+  {
+    id: "tag-6039",
+    tagId: "6039",
+    brand: "Трекрезан",
+    url: `${ORIGIN}/tag/trekrezan/`,
+    variants: [
+      { name: "Трекрезан таблетки 200мг, №10 Канонфарма", url: `${ORIGIN}/product/trekrezan_tabletki_200mg_10_148246/` },
+      { name: "Трекрезан таблетки 200мг, №10", url: `${ORIGIN}/product/trekrezan_tabletki_200mg_10/` },
+      { name: "Трекрезан сироп 20мг/мл, 100мл", url: `${ORIGIN}/product/trekrezan_sirop_20mgml_100ml__1_fl_/` }
+    ]
+  },
+  {
+    id: "tag-754",
+    tagId: "754",
+    brand: "Гриппферон",
+    url: `${ORIGIN}/tag/grippferon/`,
+    variants: [
+      { name: "Гриппферон капли назальные 10 000МЕ/мл, 10мл", url: `${ORIGIN}/product/grippferon_kapli_v_nos_10ml/` },
+      { name: "Гриппферон спрей назальный дозированный 500МЕ/доза, 10мл", url: `${ORIGIN}/product/grippferon_sprey_nazal_10ml/` },
+      { name: "Гриппферон мазь назальная с лоратадином 10 000МЕ/г+2мг/г, 5г", url: `${ORIGIN}/product/grippferon_s_loratadinom_maz_nazalnaya_5g/` }
+    ]
+  },
+  {
+    id: "tag-3282",
+    tagId: "3282",
+    brand: "Ингавирин",
+    url: `${ORIGIN}/tag/ingavirin/`,
+    variants: [
+      { name: "Ингавирин капсулы 60мг, №10", url: `${ORIGIN}/product/ingavirin_kapsuly_60mg_10_175448/` },
+      { name: "Ингавирин сироп 30мг/5мл, 90мл", url: `${ORIGIN}/product/ingavirin_sirop_30mg_5ml_90ml/` },
+      { name: "Ингавирин капсулы 90мг, №10", url: `${ORIGIN}/product/ingavirin_kaps_90_mg_10/` },
+      { name: "Ингавирин сироп 30мг/5мл, 50мл", url: `${ORIGIN}/product/ingavirin_sirop_30mg5ml_50ml/` }
+    ]
+  },
+  {
+    id: "tag-2382",
+    tagId: "2382",
+    brand: "Арбидол",
+    url: `${ORIGIN}/tag/arbidol/`,
+    variants: [
+      { name: "Арбидол Максимум капсулы 200мг, №20", url: `${ORIGIN}/product/arbidol_maksimum_kaps__200mg__2/` },
+      { name: "Арбидол таблетки покрыт. п/о 50мг, №20", url: `${ORIGIN}/product/arbidol_tab__po_50mg__20/` },
+      { name: "Арбидол таблетки покрыт. п/о 50мг, №20 Фармстандарт", url: `${ORIGIN}/product/arbidol_tab_p_o_0_05g_20/` },
+      { name: "Арбидол Максимум капсулы 200мг, №10 Фармстандарт", url: `${ORIGIN}/product/arbidol_maksimum_kaps_0_2g_10/` },
+      { name: "Арбидол капсулы 100мг, №10", url: `${ORIGIN}/product/arbidol_kaps_0_1g_10/` },
+      { name: "Арбидол капсулы 100мг, №20 Фармстандарт", url: `${ORIGIN}/product/arbidol_kaps_0_1g_20/` }
+    ]
+  }
+];
 
 const PRODUCTS_BY_ID = new Map(EXACT_PRODUCTS.map((product) => [product.id, product]));
 const PRODUCTS_BY_BRAND = new Map<string, ExactProduct[]>();
@@ -166,8 +219,8 @@ for (const product of EXACT_PRODUCTS) {
   const key = normalizeText(product.brand);
   PRODUCTS_BY_BRAND.set(key, [...(PRODUCTS_BY_BRAND.get(key) ?? []), product]);
 }
-const FAMILIES_BY_ID = new Map([[KAGOCEL_FAMILY.id, KAGOCEL_FAMILY]]);
-const FAMILIES_BY_BRAND = new Map([[normalizeText(KAGOCEL_FAMILY.brand), KAGOCEL_FAMILY]]);
+const FAMILIES_BY_ID = new Map(ANTIVIRAL_FAMILIES.map((family) => [family.id, family]));
+const FAMILIES_BY_BRAND = new Map(ANTIVIRAL_FAMILIES.map((family) => [normalizeText(family.brand), family]));
 const HEALTH_PRODUCT = PRODUCTS_BY_ID.get("178185")!;
 
 function compactText(value: string): string {
@@ -269,8 +322,10 @@ function parseExactFamilyPage(body: string, family: ExactFamily): ParsedFamilyPa
   const collection = collections[0];
   const about = collection.about;
   const mainEntity = collection.mainEntity;
-  if (collection.name !== family.brand || !isRecord(about) || !hasJsonLdType(about, "Brand") ||
-      about.name !== family.brand || !isRecord(mainEntity) || mainEntity["@id"] !== itemListId) {
+  const aboutMatches = about === undefined ||
+    isRecord(about) && hasJsonLdType(about, "Brand") && about.name === family.brand;
+  if (collection.name !== family.brand || !aboutMatches ||
+      !isRecord(mainEntity) || mainEntity["@id"] !== itemListId) {
     throw new ParserChangedError(`${DOMAIN}:${family.id}: CollectionPage is not bound to the exact brand family`);
   }
 
@@ -309,9 +364,14 @@ function parseExactFamilyPage(body: string, family: ExactFamily): ParsedFamilyPa
   for (const variant of family.variants) {
     const item = provenVariants.get(variant.url);
     const brand = item?.brand;
+    const structuredBrand = isRecord(brand) && typeof brand.name === "string" && brand.name.trim()
+      ? brand.name
+      : undefined;
+    const brandMatches = structuredBrand
+      ? hasJsonLdType(brand as Record<string, unknown>, "Brand") && structuredBrand === family.brand
+      : matchesBrand(String(item?.name ?? ""), family.brand);
     if (!item || item.name !== variant.name || item["@id"] !== `${variant.url}#product` ||
-        !exactUrl(item.url, variant.url) || !isRecord(brand) || !hasJsonLdType(brand, "Brand") ||
-        brand.name !== family.brand) {
+        !exactUrl(item.url, variant.url) || !brandMatches) {
       throw new ParserChangedError(`${DOMAIN}:${family.id}: exact family variant identity changed`);
     }
   }
@@ -346,16 +406,22 @@ function parseExactFamilyPage(body: string, family: ExactFamily): ParsedFamilyPa
       throw new ParserChangedError(`${DOMAIN}:${family.id}: family review item is incomplete`);
     }
     const stars = starBlocks.first().children();
-    if (stars.length < 1 || stars.length > 5 || starBlocks.first().find(".product__star").length !== stars.length) {
+    if (stars.length !== 5 || starBlocks.first().find(".product__star").length !== stars.length) {
       throw new ParserChangedError(`${DOMAIN}:${family.id}: family review star score is incomplete`);
     }
+    let filledStars = 0;
     for (const star of stars.toArray()) {
       const classes = compactText($(star).attr("class") ?? "").split(" ").filter(Boolean).sort();
-      if (star.tagName !== "span" || classes.join(" ") !== "product__star star-old") {
+      const signature = classes.join(" ");
+      if (star.tagName !== "span" || !["product__star", "product__star star-old"].includes(signature)) {
         throw new ParserChangedError(`${DOMAIN}:${family.id}: unknown family review star markup`);
       }
+      if (signature === "product__star star-old") filledStars += 1;
     }
-    starScores.push(stars.length);
+    if (filledStars < 1 || filledStars > 5) {
+      throw new ParserChangedError(`${DOMAIN}:${family.id}: family review star score is incomplete`);
+    }
+    starScores.push(filledStars);
   }
 
   const starTotal = starScores.reduce((sum, score) => sum + score, 0);
@@ -703,7 +769,9 @@ export class VitaExpressAdapter implements SiteAdapter {
           "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
         },
         signal: context.signal
-      }, context.fetch ?? this.fetchImpl);
+      }, context.fetch ?? this.fetchImpl, 4, 20_000, {
+        forwardSameDomainCookies: ["ngx_s_id", "PHPSESSID", "ChoosenCityForCart", "ChoosenCityForCartNewCity", "user_city_info", "user_city"]
+      });
     } catch (error) {
       throw new AdapterBlockedError(`${DOMAIN}:${family.id}: request failed: ${error instanceof Error ? error.message : String(error)}`);
     }

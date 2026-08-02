@@ -962,7 +962,7 @@ describe("additional pharmacy adapters", () => {
     expect([...found.values()].flat()).not.toContain("116393");
   });
 
-  it("fails closed instead of returning a partial Bud Zdorov form result when the alphabet index is blocked", async () => {
+  it("keeps exact Bud Zdorov form results when the auxiliary alphabet index is blocked", async () => {
     const formSource = "https://www.budzdorov.ru/forms/taustin";
     const productPath = "/product/taustin-kapli-gl-4-10ml-no1-4990756";
     const form = translated(formSource,
@@ -975,7 +975,11 @@ describe("additional pharmacy adapters", () => {
     });
 
     await expect(new BudZdorovAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch)
-      .discover("Таустин", context)).rejects.toBeInstanceOf(AdapterBlockedError);
+      .discover("Таустин", context)).resolves.toMatchObject([{
+        listingId: "4990756",
+        url: `https://www.budzdorov.ru${productPath}`,
+        metadata: { discovery: "translated-first-party-form-page" }
+      }]);
   });
 
   it("unions partial live Bud Zdorov discovery with bounded exact refs and reuses the full set", async () => {

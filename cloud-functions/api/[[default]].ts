@@ -560,7 +560,9 @@ function compactZdravcityTranslateHtml(html: string, requested: URL): string | u
       reviews.push({ ID: reviewId, rate });
     }
     const rating = Number(attributes?.rating);
-    if (reviews.length > 0 && (!Number.isFinite(rating) || rating <= 0 || rating > 5)) return undefined;
+    const ratingAvailable = Number.isFinite(rating) && rating > 0 && rating <= 5;
+    const allWrittenReviewsUnrated = reviews.length > 0 && reviews.every((review) => review.rate === 0);
+    if (reviews.length > 0 && !ratingAvailable && !allWrittenReviewsUnrated) return undefined;
     const structuredCounts: number[] = [];
     const currentSku = typeof attributes?.sku === "string" || typeof attributes?.sku === "number"
       ? String(attributes.sku).trim()
@@ -609,7 +611,7 @@ function compactZdravcityTranslateHtml(html: string, requested: URL): string | u
         attributes: {
           name,
           url: requested.pathname,
-          ...(reviews.length > 0 ? { rating } : {}),
+          ...(reviews.length > 0 && ratingAvailable ? { rating } : {}),
           ...(typeof attributes?.sku === "string" || typeof attributes?.sku === "number" ? { sku: attributes.sku } : {})
         },
         reviews
@@ -775,8 +777,10 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
     const pageText = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();
     const empty = pageText.match(/(?:ничего не найдено|товары не найдены|нет препаратов)/i)?.[0];
     if (!products.size && !empty) return undefined;
-    return `<html><head>${base}</head><body><main>${[...products.values()].map(({ pathname, title }) =>
-      `<a href="https://www.budzdorov.ru${escapeHtml(pathname)}" title="${escapeHtml(title)}">${escapeHtml(title)}</a>`
+    const letterClass = requested.kind === "budzdorov-letter" ? ` class="alphabet-forms"` : "";
+    const linkClass = requested.kind === "budzdorov-letter" ? ` class="alphabet-forms__item-link"` : "";
+    return `<html><head>${base}</head><body><main${letterClass}>${[...products.values()].map(({ pathname, title }) =>
+      `<a${linkClass} href="https://www.budzdorov.ru${escapeHtml(pathname)}" title="${escapeHtml(title)}">${escapeHtml(title)}</a>`
     ).join("")}${empty ? `<p>${escapeHtml(empty)}</p>` : ""}</main></body></html>`;
   }
 
@@ -3306,12 +3310,19 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     const baseTag = html.match(/<base\b[^>]*>/i)?.[0];
     const canonicalTag = [...html.matchAll(/<link\b[^>]*>/gi)]
       .find((match) => /\brel=["'][^"']*\bcanonical\b[^"']*["']/i.test(match[0]))?.[0];
-    const productAggregate = /itemtype=["']https?:\/\/schema\.org\/Product["']/i.test(html) &&
-      /itemprop=["']aggregateRating["']/i.test(html) &&
-      /itemprop=["']ratingValue["'][^>]*content=["'][\d.,]+["']/i.test(html) &&
-      /itemprop=["']reviewCount["'][^>]*content=["'][\d\s\u00a0]+["']/i.test(html);
+    const canonicalMatches = Boolean(canonicalTag && sourceMatches(attribute(canonicalTag, "href")));
+    const $ = load(html);
+    const productAggregate = $("[itemscope][itemtype$='/Product']").toArray().some((node) => {
+      const product = $(node);
+      const productUrl = product.find("link[itemprop='url'][href], a[itemprop='url'][href]").first().attr("href");
+      const aggregate = product.find("[itemprop='aggregateRating']").first();
+      const rating = aggregate.find("[itemprop='ratingValue']").first().attr("content");
+      const reviews = aggregate.find("[itemprop='reviewCount']").first().attr("content");
+      return (sourceMatches(productUrl) || !productUrl && canonicalMatches) && /^\d(?:[.,]\d+)?$/.test(rating ?? "") &&
+        /^\d[\d\s\u00a0]*$/.test(reviews ?? "");
+    });
     if (!sourceMatches(baseTag ? attribute(baseTag, "href") : undefined) ||
-      !sourceMatches(canonicalTag ? attribute(canonicalTag, "href") : undefined) || !productAggregate) {
+      (canonicalTag && !canonicalMatches) || !productAggregate) {
       return json({ error: "Otzovik translated page did not prove the requested product aggregate" }, 502);
     }
     return new Response(html, {

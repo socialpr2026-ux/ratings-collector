@@ -534,6 +534,23 @@ describe("static Otzovik product gateway", () => {
     expect(upstream).toHaveBeenCalledOnce();
   });
 
+  it("accepts an exact Otzovik Product URL when the translated page omits canonical", async () => {
+    const source = "https://otzovik.com/reviews/tabletki_arbidol_otc_pharm/";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`
+      <html><head><base href="${source}"></head><body>
+      <main itemscope itemtype="https://schema.org/Product">
+        <link itemprop="url" href="${source}"><h1 itemprop="name">Таблетки Арбидол</h1>
+        <div itemprop="aggregateRating"><meta itemprop="ratingValue" content="4.8">
+        <meta itemprop="reviewCount" content="34"></div>
+      </main></body></html>
+    `)));
+
+    const response = await callGateway(source);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('itemprop="reviewCount" content="34"');
+  });
+
   it("rejects a translated page whose canonical source or aggregate is incomplete", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`
       <base href="https://otzovik.com/reviews/another_product/">
@@ -1253,7 +1270,10 @@ describe("static pharmacy Translate gateway", () => {
 
     const response = await callGateway(translated("www-budzdorov-ru.translate.goog", "/letter/%D0%A2").toString());
     expect(response.status).toBe(200);
-    expect(await response.text()).toContain(`href="https://www.budzdorov.ru${productPath}"`);
+    const proof = await response.text();
+    expect(proof).toContain('class="alphabet-forms"');
+    expect(proof).toContain('class="alphabet-forms__item-link"');
+    expect(proof).toContain(`href="https://www.budzdorov.ru${productPath}"`);
     expect((await callGateway(translated("www-budzdorov-ru.translate.goog", "/letter/%D0%A2%D0%B8%D0%BA").toString())).status).toBe(400);
   });
 
@@ -1889,6 +1909,25 @@ describe("fixed first-party collection egress", () => {
     expect((await callGateway("https://zdravcity.ru/g_kagocel/?redirect=https://evil.example")).status).toBe(400);
     expect((await callGateway("https://reviews.yandex.ru/ugcpub/private.xml")).status).toBe(400);
     expect(upstream).toHaveBeenCalledTimes(3);
+  });
+
+  it("compacts Zdravcity written reviews without inventing a missing star rating", async () => {
+    const source = "https://zdravcity.ru/p_grippferon-kapli-10000me-ml-10ml-12345.html";
+    const product = {
+      id: "D875DF4F-3A76-4BEB-89A1-DF358BD5538A",
+      attributes: { name: "Гриппферон капли 10000 МЕ/мл 10 мл", url: new URL(source).pathname, rating: null, sku: "33978" },
+      reviews: [{ ID: "6548", rate: 0 }, { ID: "6549", rate: 0 }]
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"></head><body>
+      <script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { productV2: product } } })}</script>
+      </body></html>`, { headers: { "content-type": "text/html; charset=utf-8" } })));
+
+    const response = await callGateway(source);
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(proof).toContain('"reviews":[{"ID":"6548","rate":0},{"ID":"6549","rate":0}]');
+    expect(proof).not.toContain('"rating":0');
   });
 
   it("fails closed when translated Zdravcity HTML is not bound to the exact source", async () => {

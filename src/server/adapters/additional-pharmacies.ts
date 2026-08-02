@@ -968,7 +968,10 @@ export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
       letterError = error;
     }
 
-    const discoveryError = formError ?? letterError;
+    // The exact /forms/<brand> page is the first-party family index. Once it
+    // has yielded exact product links, the alphabet page is only an auxiliary
+    // completeness cross-check and cannot discard already proven cards.
+    const discoveryError = liveRefs.size ? undefined : formError ?? letterError;
     const bounded = boundedBudRefs(brand);
     if (discoveryError) {
       if (!bounded.length) throw discoveryError;

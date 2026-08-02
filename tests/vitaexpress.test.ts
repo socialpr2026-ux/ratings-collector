@@ -71,9 +71,23 @@ const KAGOCEL_FAMILY = {
   brand: "Кагоцел",
   url: `${ORIGIN}/tag/kagotsel/`,
   variants: [
-    { name: "Кагоцел таблетки 12мг, №10", url: `${ORIGIN}/product/kagotsel_tab_12mg_10/` },
     { name: "Кагоцел таблетки 12мг, №30", url: `${ORIGIN}/product/kagotsel_tab__12mg__30/` },
-    { name: "Кагоцел таблетки 12мг, №20", url: `${ORIGIN}/product/kagotsel_tab__12mg__20/` }
+    { name: "Кагоцел таблетки 12мг, №10", url: `${ORIGIN}/product/kagotsel_tab_12mg_10/` },
+    { name: "Кагоцел таблетки 12мг, №20", url: `${ORIGIN}/product/kagotsel_tab__12mg__20/` },
+    { name: "Кагоцел таблетки 12мг, №20,Ниармедик Фарма", url: `${ORIGIN}/product/kagotsel_tab_12mg_20/` }
+  ]
+} as const;
+
+const INGAVIRIN_FAMILY = {
+  id: "tag-3282",
+  tagId: "3282",
+  brand: "Ингавирин",
+  url: `${ORIGIN}/tag/ingavirin/`,
+  variants: [
+    { name: "Ингавирин капсулы 60мг, №10", url: `${ORIGIN}/product/ingavirin_kapsuly_60mg_10_175448/` },
+    { name: "Ингавирин сироп 30мг/5мл, 90мл", url: `${ORIGIN}/product/ingavirin_sirop_30mg_5ml_90ml/` },
+    { name: "Ингавирин капсулы 90мг, №10", url: `${ORIGIN}/product/ingavirin_kaps_90_mg_10/` },
+    { name: "Ингавирин сироп 30мг/5мл, 50мл", url: `${ORIGIN}/product/ingavirin_sirop_30mg5ml_50ml/` }
   ]
 } as const;
 
@@ -179,8 +193,8 @@ function familyPage(options: {
   ];
   const reviews = scores.map((score, index) => {
     const stars = score === "unknown"
-      ? '<span class="product__star half-star-old"></span>'
-      : Array.from({ length: score }, () => '<span class="product__star star-old"></span>').join("");
+      ? '<span class="product__star half-star-old"></span>' + Array.from({ length: 4 }, () => '<span class="product__star"></span>').join("")
+      : Array.from({ length: 5 }, (_, star) => `<span class="product__star${star < score ? " star-old" : ""}"></span>`).join("");
     return `<div class="tag-review">
       <div class="review-name">Покупатель ${index + 1}</div>
       <div class="product__stars">${stars}</div>
@@ -209,6 +223,29 @@ function fetchFamilyPage(html: string): typeof fetch {
     expect(new URL(String(input)).toString()).toBe(KAGOCEL_FAMILY.url);
     return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
   }) as unknown as typeof fetch;
+}
+
+function exactFamilyPage(family: typeof INGAVIRIN_FAMILY, scores: readonly number[]): string {
+  const graph = [{
+    "@type": "CollectionPage", "@id": `${family.url}#collectionpage`, url: family.url,
+    name: family.brand, mainEntity: { "@id": `${family.url}#itemlist` },
+    about: { "@type": "Brand", name: family.brand }
+  }, {
+    "@type": "ItemList", "@id": `${family.url}#itemlist`, url: family.url,
+    name: `Список товаров ${family.brand}`, numberOfItems: family.variants.length,
+    itemListElement: family.variants.map((variant, index) => ({
+      "@type": "ListItem", position: index + 1,
+      item: { "@type": "Product", "@id": `${variant.url}#product`, ...variant, brand: { "@type": "Brand", name: family.brand } }
+    }))
+  }];
+  return `<!doctype html><html><head><link rel="canonical" href="${family.url}">
+    <script type="application/ld+json">${JSON.stringify({ "@context": "https://schema.org/", "@graph": graph })}</script>
+    </head><body><h1>${family.brand}</h1><div id="tag-reviews"><h2>Отзывы (${scores.length})</h2>
+    <input type="hidden" name="tagId" value="${family.tagId}"><div class="tag-reviews">${scores.map((score, index) =>
+      `<div class="tag-review"><div class="review-name">Покупатель ${index}</div><div class="product__stars">${
+        Array.from({ length: 5 }, (_, star) => `<span class="product__star${star < score ? " star-old" : ""}"></span>`).join("")
+      }</div><div class="review-date">01 августа 2026</div><div class="review-text">Отзыв</div></div>`
+    ).join("")}</div></div></body></html>`;
 }
 
 describe("VitaExpressAdapter", () => {
@@ -273,7 +310,7 @@ describe("VitaExpressAdapter", () => {
       .resolves.toHaveLength(5);
   });
 
-  it("publishes one Kagocel family row from six exact stars instead of duplicating its three variants", async () => {
+  it("publishes one Kagocel family row from six exact stars instead of duplicating its variants", async () => {
     const evidence = new MemoryEvidenceStore();
     const fetchMock = fetchFamilyPage(familyPage());
     const adapter = new VitaExpressAdapter(evidence, fetchMock);
@@ -303,6 +340,47 @@ describe("VitaExpressAdapter", () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(evidence.items.size).toBe(1);
+  });
+
+  it("collects the live-proven Ingavirin family registry as one aggregate row", async () => {
+    const html = exactFamilyPage(INGAVIRIN_FAMILY, [5, 5, 5]);
+    const adapter = new VitaExpressAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } })
+    ) as unknown as typeof fetch);
+    const context = { ...CONTEXT, runId: "ingavirin-family" };
+
+    const refs = await adapter.discover(INGAVIRIN_FAMILY.brand, context);
+
+    expect(refs).toMatchObject([{ listingId: "tag-3282", metadata: { variantCount: 4 } }]);
+    await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({
+      reviews: 3, rating: 5, ratingCount: 3, aggregateGroupId: "vitaexpress:family:tag-3282",
+      productEvidence: { scope: "product_family", variants: INGAVIRIN_FAMILY.variants.map((variant) => variant.name) }
+    });
+  });
+
+  it("carries only Vita geo cookies across its exact same-domain family redirect", async () => {
+    const html = familyPage();
+    let calls = 0;
+    const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      calls += 1;
+      if (calls === 1) {
+        const headers = new Headers({ location: `${KAGOCEL_FAMILY.url}/?select_geo_city=251` });
+        headers.append("set-cookie", "PHPSESSID=exact-session; Path=/; Domain=vitaexpress.ru");
+        headers.append("set-cookie", "ChoosenCityForCart=251; Path=/");
+        headers.append("set-cookie", "unrelated_secret=must-not-forward; Path=/");
+        return new Response("redirect", { status: 301, headers });
+      }
+      const cookie = new Headers(init?.headers).get("cookie") ?? "";
+      expect(cookie).toContain("PHPSESSID=exact-session");
+      expect(cookie).toContain("ChoosenCityForCart=251");
+      expect(cookie).not.toContain("unrelated_secret");
+      return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+    }) as unknown as typeof fetch;
+    const adapter = new VitaExpressAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    await expect(adapter.discover(KAGOCEL_FAMILY.brand, { ...CONTEXT, runId: "vita-cookie" }))
+      .resolves.toMatchObject([{ listingId: KAGOCEL_FAMILY.id }]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it.each([

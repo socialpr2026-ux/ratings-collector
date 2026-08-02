@@ -581,6 +581,7 @@ export class RatingsService {
           let discoveredCount = 0;
           let viableDiscovered = 0;
           let collected = 0;
+          const collectionFailures: Array<{ listingId: string; kind: ReturnType<typeof errorStatus>; message: string }> = [];
           const refreshedKeys = new Set<string>();
           const previousObservationKeys = new Set([...seen.entries()]
             .filter(([, observation]) =>
@@ -633,6 +634,7 @@ export class RatingsService {
                 listingId: ref.listingId
               });
               await saveActivityProgress();
+              try {
               const observation = validateCollectedObservation(await adapter.collect(ref, {
                 runId: run.id,
                 brands: retryBrands,
@@ -752,14 +754,39 @@ export class RatingsService {
                 detail: observation.productIdentity?.label ?? observation.product
               });
               activeNormalization = undefined;
+              } catch (error) {
+                if (deadline.signal.aborted) throw error;
+                const kind = errorStatus(error);
+                const message = safeErrorMessage(error);
+                collectionFailures.push({ listingId: ref.listingId, kind, message });
+                adapterReporter.warnActive(message);
+                if (activeCollection) activity.warn(activeCollection, { ...runtimeSignals(message), detail: message });
+                if (activeNormalization) activity.warn(activeNormalization, { detail: message });
+                activeCollection = undefined;
+                activeNormalization = undefined;
+              }
             }
-            if (partialFailure) {
-              const message = `${partialFailure.status}: ${partialFailure.message}`;
+            if (partialFailure || collectionFailures.length > 0) {
+              const failureDetails = [
+                ...(partialFailure ? [`${partialFailure.status}: ${partialFailure.message}`] : []),
+                ...collectionFailures.map((failure) =>
+                  `${failure.listingId}: ${failure.kind}: ${failure.message}`
+                )
+              ];
+              const message = failureDetails.join("; ");
               run.errors.push({ partition: `${domain}/${brand}`, message });
               const retainedCount = [...seen.values()].filter((observation) =>
                 observation.domain === domain && normalizeText(observation.brand) === normalizeText(brand)
               ).length;
-              this.addPartition(run, domain, brand, "blocked", partialFailure.total, retainedCount, message);
+              this.addPartition(
+                run,
+                domain,
+                brand,
+                collectionFailures.some((failure) => failure.kind === "error") ? "error" : "blocked",
+                partialFailure?.total ?? discoveredCount,
+                retainedCount,
+                message
+              );
             } else {
               for (const key of previousObservationKeys) {
                 if (!refreshedKeys.has(key)) seen.delete(key);

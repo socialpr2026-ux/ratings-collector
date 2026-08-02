@@ -704,14 +704,21 @@ export class ZdravcityAdapter extends PharmacyAdapter {
     const reviewItems = product?.reviews;
     if (!product || !canonical || !title || !Array.isArray(reviewItems)) throw new ParserChangedError(`${ZDRAV_DOMAIN}:${ref.listingId}: карточка неполна`);
     const reviewIds = new Set<string>();
+    let ratedReviews = 0;
     for (const item of reviewItems) {
       const reviewId = String(item.ID ?? "").trim();
-      if (!reviewId || reviewIds.has(reviewId)) throw new ParserChangedError(`${ZDRAV_DOMAIN}:${ref.listingId}: дублирован или отсутствует ID отзыва`);
+      const score = integer(item.rate);
+      if (!reviewId || reviewIds.has(reviewId) || score === undefined || score < 0 || score > 5) {
+        throw new ParserChangedError(`${ZDRAV_DOMAIN}:${ref.listingId}: дублирован ID или некорректная оценка отзыва`);
+      }
       reviewIds.add(reviewId);
+      if (score > 0) ratedReviews += 1;
     }
     const reviews = reviewItems.length;
     const rawRating = rating(product.attributes?.rating);
-    if (reviews > 0 && rawRating === undefined) throw new ParserChangedError(`${ZDRAV_DOMAIN}:${ref.listingId}: отзывы есть, но общий рейтинг отсутствует`);
+    if (reviews > 0 && rawRating === undefined && ratedReviews > 0) {
+      throw new ParserChangedError(`${ZDRAV_DOMAIN}:${ref.listingId}: у оценённых отзывов отсутствует общий рейтинг`);
+    }
     const structuredCount = zdravStructuredFeedback(result.html, {
       canonicalUrl: canonical.url,
       title,
@@ -719,7 +726,7 @@ export class ZdravcityAdapter extends PharmacyAdapter {
         ? String(product.attributes.sku).trim()
         : undefined
     });
-    return evidenceObservation(this.evidence, {
+    const observation = await evidenceObservation(this.evidence, {
       domain: ZDRAV_DOMAIN,
       listingId: ref.listingId,
       brand: ref.brand,
@@ -727,6 +734,7 @@ export class ZdravcityAdapter extends PharmacyAdapter {
       title,
       reviews,
       rating: rawRating ?? null,
+      ratingUnavailable: reviews > 0 && ratedReviews === 0,
       // The storefront labels this structured counter reviewCount, while its
       // visible written-review array can differ. Preserve it only technically.
       ratingCount: structuredCount,
@@ -736,6 +744,7 @@ export class ZdravcityAdapter extends PharmacyAdapter {
       requestedUrl: result.requestedUrl,
       source: "zdravcity-next-data-written-reviews"
     });
+    return observation;
   }
 }
 

@@ -287,6 +287,22 @@ describe("ZdravcityAdapter", () => {
     const observation = await adapter.collect(refs[0], context);
     expect(observation).toMatchObject({ reviews: 2, rating: 5, ratingCount: 21, status: "ok" });
   });
+
+  it("keeps written Zdravcity reviews with no star scores and leaves rating empty", async () => {
+    const unrated = fixtures.zdravProduct
+      .replace('"rating":5,"sku":"228330"', '"rating":null,"sku":"228330"')
+      .replaceAll('"rate":5', '"rate":0');
+    const adapter = new ZdravcityAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(unrated, { status: 200 })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "zdravcity.ru", platform: "zdravcity.ru",
+      listingId: "6CE96B93-3DAD-39C8-EE05-3E30A030A486", brand: "Кагоцел",
+      url: "https://zdravcity.ru/p_kagocel-tab-12mg-n20-0093573.html", metadata: {}
+    }, context)).resolves.toMatchObject({
+      reviews: 2, rating: null, ratingUnavailable: true, status: "ok"
+    });
+  });
 });
 
 describe("FarmlendAdapter", () => {

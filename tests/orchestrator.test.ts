@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AdapterContext, Observation, ProductRef, SiteAdapter } from "../src/shared/types.js";
-import { AdapterQuotaError } from "../src/server/adapters/errors.js";
+import { AdapterBlockedError, AdapterQuotaError } from "../src/server/adapters/errors.js";
 import { RatingsService } from "../src/server/orchestrator.js";
 import { MemoryRepository } from "../src/server/repository.js";
 import { hasDeterministicAggregateProof, isKnownReviewAggregateDomain } from "../src/shared/review-aggregates.js";
@@ -179,6 +179,50 @@ describe("run orchestration and fail-closed QA", () => {
     expect(second.progress.completedPartitions).toBe(2);
     expect(second.errors).toHaveLength(1);
     expect(second.qa?.ok).toBe(false);
+  });
+
+  it("checkpoints good cards when one product fails and retries only the blocked partition", async () => {
+    const repository = new MemoryRepository();
+    let collectionAttempt = 0;
+    const service = new RatingsService(repository, async () => ({
+      id: "per-card-recovery",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        collectionAttempt += 1;
+        return ["1", "2", "3"].map((listingId) => ({
+          domain: "example.com", platform: "example.com", listingId, brand,
+          url: `https://example.com/p/${listingId}`, metadata: {}
+        }));
+      },
+      async collect(ref) {
+        if (collectionAttempt === 1 && ref.listingId === "2") {
+          throw new AdapterBlockedError("точная карточка временно вернула HTTP 502");
+        }
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId,
+          brand: ref.brand, canonicalUrl: ref.url,
+          product: `${ref.brand} таблетки 100 мг №10 SKU ${ref.listingId}`,
+          reviews: Number(ref.listingId), rating: 5, status: "ok" as const,
+          capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+    const id = (await service.createRun(request)).id;
+
+    const first = await service.executeRun(id);
+
+    expect(first.observations.map((item) => item.listingId)).toEqual(["1", "3"]);
+    expect(first.partitions).toMatchObject([{
+      status: "blocked", discovered: 3, collected: 2,
+      message: expect.stringContaining("2: blocked: точная карточка временно вернула HTTP 502")
+    }]);
+
+    const recovered = await service.executeRun(id);
+
+    expect(recovered.partitions).toMatchObject([{ status: "complete", discovered: 3, collected: 3 }]);
+    expect(recovered.observations.map((item) => item.listingId)).toEqual(["1", "2", "3"]);
+    expect(new Set(recovered.observations.map((item) => item.listingId)).size).toBe(3);
   });
 
   it("checkpoints proven cards from a partial discovery and merges a failed-only retry", async () => {

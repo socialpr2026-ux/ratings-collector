@@ -7,7 +7,22 @@ const DEFAULT_OUTBOUND_TIMEOUT_MS = 20_000;
 export type SafeFetchOptions = {
   /** Return the redirect response only when its destination fails the HTTPS/public-address guard. */
   returnUnsafeRedirectResponse?: boolean;
+  /** Forward only these response cookies across same-domain redirects. */
+  forwardSameDomainCookies?: readonly string[];
 };
+
+function responseCookies(headers: Headers): string[] {
+  const extended = headers as Headers & { getSetCookie?: () => string[] };
+  const separate = extended.getSetCookie?.();
+  if (separate?.length) return separate;
+  const combined = headers.get("set-cookie");
+  if (!combined) return [];
+  const starts = [...combined.matchAll(/(?:^|,\s*)([A-Za-z0-9_]+)=/g)];
+  return starts.map((match, index) => combined.slice(
+    (match.index ?? 0) + (match[0].startsWith(",") ? match[0].indexOf(match[1]!) : 0),
+    index + 1 < starts.length ? starts[index + 1]!.index : combined.length
+  ).replace(/^,\s*/, "").trim());
+}
 
 export function isPrivateNetworkAddress(address: string): boolean {
   const normalized = address.toLocaleLowerCase("en-US").split("%")[0];
@@ -57,18 +72,25 @@ export async function safeFetch(
   const timeout = new AbortController();
   const timer = setTimeout(() => timeout.abort(new Error("Таймаут внешнего запроса")), timeoutMs);
   const signal = init.signal ? AbortSignal.any([init.signal, timeout.signal]) : timeout.signal;
+  const allowedCookies = new Set(options.forwardSameDomainCookies ?? []);
+  if ([...allowedCookies].some((name) => !/^[A-Za-z0-9_]+$/.test(name))) {
+    throw new Error("Некорректное имя cookie для перенаправления");
+  }
+  const cookies = new Map<string, string>();
   try {
     let url = await assertSafePublicDestination(input);
     for (let redirect = 0; redirect <= maxRedirects; redirect += 1) {
+      const requestHeaders = new Headers({
+        "user-agent": "RatingsCollector/1.0 (+public aggregate metrics; contact site owner)",
+        "accept-language": "ru-RU,ru;q=0.9"
+      });
+      new Headers(init.headers).forEach((value, key) => requestHeaders.set(key, value));
+      if (cookies.size) requestHeaders.set("cookie", [...cookies].map(([name, value]) => `${name}=${value}`).join("; "));
       const response = await fetchImpl(url, {
         ...init,
         signal,
         redirect: "manual",
-        headers: {
-          "user-agent": "RatingsCollector/1.0 (+public aggregate metrics; contact site owner)",
-          "accept-language": "ru-RU,ru;q=0.9",
-          ...init.headers
-        }
+        headers: requestHeaders
       });
       if (![301, 302, 303, 307, 308].includes(response.status)) {
         const browserFinal = response.headers.get("x-ratings-final-url");
@@ -82,8 +104,19 @@ export async function safeFetch(
       }
       const location = response.headers.get("location");
       if (!location) return response;
+      for (const cookie of responseCookies(response.headers)) {
+        const pair = cookie.match(/^([A-Za-z0-9_]+)=([^;]*)/);
+        if (!pair || !allowedCookies.has(pair[1]!)) continue;
+        if (/;\s*max-age=0(?:;|$)/i.test(cookie) || /;\s*expires=Thu,\s*01\s+Jan\s+1970/i.test(cookie)) {
+          cookies.delete(pair[1]!);
+        } else {
+          cookies.set(pair[1]!, pair[2]!);
+        }
+      }
       try {
-        url = await assertSafePublicDestination(new URL(location, url).toString());
+        const next = await assertSafePublicDestination(new URL(location, url).toString());
+        if (!sameDomain(url.hostname, next.hostname) || url.port !== next.port) cookies.clear();
+        url = next;
       } catch (error) {
         if (options.returnUnsafeRedirectResponse) return response;
         throw error;
