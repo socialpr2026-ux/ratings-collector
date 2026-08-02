@@ -64,7 +64,10 @@ const YANDEX_BATCH_ENDPOINT = "https://reviews.yandex.ru/ugcpub/__ratings_batch_
 // recovery round can continue; the old 125-second two-shard split budget only
 // doubled every stalled singleton pause.
 export const YANDEX_BATCH_GATEWAY_TIMEOUT_MS = 70_000;
-type YandexBatchCapableFetch = typeof fetch & { yandexBatchEndpoint?: string };
+type YandexBatchCapableFetch = typeof fetch & {
+  yandexBatchEndpoint?: string;
+  yandexDirectRecovery?: boolean;
+};
 type YandexMarketCapableFetch = YandexBatchCapableFetch & { yandexMarketBrowserEndpoint?: string };
 
 function json(value: unknown, status = 200) {
@@ -623,7 +626,7 @@ export function browserFetch(
         throw error;
       }
     }
-    if (staticProxy && fixedYandexTarget) {
+    if (staticProxy && fixedYandexTarget && request.headers.get("x-ratings-yandex-direct-recovery") !== "1") {
       // EdgeOne's direct egress can leave an exact Yandex sitemap or product
       // request pending until the adapter's 90-second discovery deadline.
       // The fixed Function route is the proven collector path for these
@@ -1155,6 +1158,7 @@ export function browserFetch(
     return response;
   }) as YandexMarketCapableFetch;
   if (staticProxy) routedFetch.yandexBatchEndpoint = YANDEX_BATCH_ENDPOINT;
+  if (staticProxy) routedFetch.yandexDirectRecovery = true;
   routedFetch.yandexMarketBrowserEndpoint = "https://market.yandex.ru/search";
   return routedFetch;
 }

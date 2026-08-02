@@ -636,6 +636,64 @@ describe("YandexAdapter discovery", () => {
     expect(activity.filter((event) => event.status === "warning")).toHaveLength(1);
   });
 
+  it("recovers only failed gateway singletons through complete browser XML proof", async () => {
+    const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const maps = Array.from({ length: 4 }, (_value, index) =>
+      `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
+    );
+    const activity: AdapterActivityEvent[] = [];
+    let directRecoveryRequests = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      if (url === maps[0] && new Headers(init?.headers).get("x-ratings-yandex-direct-recovery") === "1") {
+        directRecoveryRequests += 1;
+        return xmlResponse(modelSitemap([
+          "https://reviews.yandex.ru/product/kagotsel-tabletki--111"
+        ]));
+      }
+      if (url !== batchEndpoint) throw new Error(`Unexpected request: ${url}`);
+      const request = JSON.parse(String(init?.body)) as { sitemaps: string[] };
+      if (request.sitemaps[0] === maps[0]) {
+        return new Response(JSON.stringify({
+          error: `Yandex batch shard remained unproven: ${maps[0]}`
+        }), { status: 502, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({
+        processed: 1,
+        firstSitemap: request.sitemaps[0],
+        lastSitemap: request.sitemaps[0],
+        verifiedSitemaps: request.sitemaps,
+        matches: []
+      }), { headers: { "content-type": "application/json" } });
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & {
+      yandexBatchEndpoint?: string;
+      yandexDirectRecovery?: boolean;
+    };
+    fetch.yandexBatchEndpoint = batchEndpoint;
+    fetch.yandexDirectRecovery = true;
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: maps.length, sitemapRetryBaseMs: 0 });
+
+    const refs = await adapter.discover("Кагоцел", context({
+      activity: async (event) => { activity.push(event); }
+    }));
+
+    expect(refs).toEqual([
+      expect.objectContaining({ listingId: "111", brand: "Кагоцел" })
+    ]);
+    expect(directRecoveryRequests).toBe(1);
+    const postedSitemaps = fetchMock.mock.calls
+      .filter(([, init]) => init?.method === "POST")
+      .map(([, init]) => (JSON.parse(String(init?.body)) as { sitemaps: string[] }).sitemaps[0]);
+    expect(postedSitemaps.filter((sitemap) => sitemap === maps[0])).toHaveLength(1);
+    expect(activity).toContainEqual(expect.objectContaining({
+      operationId: "yandex:gateway-recovery",
+      status: "complete",
+      channels: ["browser"]
+    }));
+  });
+
   it("propagates the caller deadline instead of returning partial sitemap matches", async () => {
     const deadline = new AbortController();
     const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {

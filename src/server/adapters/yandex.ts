@@ -52,6 +52,7 @@ const YANDEX_PROGRESS_SITEMAP_INTERVAL = 32;
 type YandexCapableFetch = typeof globalThis.fetch & {
   yandexBatchEndpoint?: string;
   yandexMarketBrowserEndpoint?: string;
+  yandexDirectRecovery?: boolean;
 };
 
 type JsonObject = Record<string, unknown>;
@@ -577,6 +578,7 @@ export class YandexAdapter implements SiteAdapter {
     context: AdapterContext
   ): Promise<DiscoveryBatch> {
     const fetcher = context.fetch ?? this.fallbackFetch;
+    const directRecoverySupported = (fetcher as YandexCapableFetch).yandexDirectRecovery === true;
     const chunks = chunked(sitemapUrls, YANDEX_BATCH_CHUNK_SIZE);
     const discoveries = new Map<string, BrandDiscovery>(brands.map((brand) => [
       brandKey(brand),
@@ -664,6 +666,29 @@ export class YandexAdapter implements SiteAdapter {
       }
     };
 
+    const processDirectRecovery = async (sitemapUrl: string): Promise<void> => {
+      const xml = await this.fetchModelSitemap(sitemapUrl, context, true);
+      for (const url of parseXmlLocs(xml)) {
+        if (!isAllowedProductUrl(url)) continue;
+        const listingId = extractModelId(url);
+        if (!listingId) continue;
+        const matched = [...discoveries.values()]
+          .map((discovery) => ({ discovery, score: yandexBrandMatchScore(url, discovery.brand) }))
+          .filter(({ score }) => score >= 0);
+        const bestScore = Math.max(-1, ...matched.map(({ score }) => score));
+        for (const { discovery, score } of matched) {
+          if (score !== bestScore || discovery.error) continue;
+          discovery.refs.set(listingId, productRefFromSitemap(listingId, url, discovery.brand, sitemapUrl));
+          if (discovery.refs.size > this.maxCandidates) {
+            discovery.error = new AdapterBlockedError(
+              `Yandex discovery for ${discovery.brand} found more than ${this.maxCandidates} distinct models`
+            );
+            discovery.refs.clear();
+          }
+        }
+      }
+    };
+
     type PendingGatewayChunk = { index: number; sitemaps: string[]; error?: unknown };
     const executeRound = async (
       pending: PendingGatewayChunk[],
@@ -729,12 +754,65 @@ export class YandexAdapter implements SiteAdapter {
             stage: "discovery",
             status: "active",
             label: "Yandex: повтор проблемных карт индекса",
-            channels: ["gateway"],
-            detail: `Повторяем только не подтверждённые карты: ${failed.length}`
+            channels: directRecoverySupported ? ["browser"] : ["gateway"],
+            detail: directRecoverySupported
+              ? `Проверяем через резервный браузер только не подтверждённые карты: ${failed.length}`
+              : `Повторяем только не подтверждённые карты: ${failed.length}`
           });
           const delayMs = Math.min(YANDEX_BATCH_RECOVERY_DELAY_MS, this.sitemapRetryBaseMs * 20);
           if (delayMs > 0) await this.sleep(delayMs);
           context.signal?.throwIfAborted();
+          if (directRecoverySupported) {
+            const directFailures: PendingGatewayChunk[] = [];
+            for (const item of failed) {
+              try {
+                await processDirectRecovery(item.sitemaps[0]!);
+                completedSitemaps += 1;
+                if (
+                  completedSitemaps === sitemapUrls.length ||
+                  completedSitemaps - reportedSitemaps >= YANDEX_PROGRESS_SITEMAP_INTERVAL
+                ) {
+                  reportedSitemaps = completedSitemaps;
+                  await reportActivity(context, {
+                    operationId: "yandex:gateway-progress",
+                    stage: "discovery",
+                    status: completedSitemaps === sitemapUrls.length ? "complete" : "active",
+                    label: "Полный поиск карточек Yandex",
+                    channels: ["browser"],
+                    detail: `Проверено карт индекса: ${completedSitemaps} из ${sitemapUrls.length}`
+                  });
+                }
+              } catch (error) {
+                if (callerAborted || batchAbort.signal.aborted) {
+                  throw context.signal?.reason ?? error;
+                }
+                directFailures.push({ ...item, error });
+              }
+            }
+            if (directFailures.length === 0) {
+              failure = undefined;
+              await reportActivity(context, {
+                operationId: "yandex:gateway-recovery",
+                stage: "discovery",
+                status: "complete",
+                label: "Yandex: повтор проблемных карт индекса",
+                channels: ["browser"],
+                detail: "Все ранее не подтверждённые карты доказаны через резервный браузер"
+              });
+              break;
+            }
+            const first = directFailures[0]!;
+            failure = first.error;
+            await reportActivity(context, {
+              operationId: `yandex:gateway-failure:${first.index}`,
+              stage: "discovery",
+              status: "warning",
+              label: "Полный поиск карточек Yandex",
+              channels: ["browser"],
+              detail: `Пакет ${first.index + 1} не подтверждён через оба маршрута: ${errorMessage(first.error)}`
+            });
+            break;
+          }
           pending = failed.map(({ index, sitemaps }) => ({ index, sitemaps }));
           continue;
         }
@@ -1201,9 +1279,13 @@ export class YandexAdapter implements SiteAdapter {
     return modelLocations;
   }
 
-  private async fetchModelSitemap(url: string, context: AdapterContext): Promise<string> {
+  private async fetchModelSitemap(
+    url: string,
+    context: AdapterContext,
+    directRecovery = false
+  ): Promise<string> {
     if (!isAllowedModelSitemap(url)) throw new ParserChangedError("Unsafe model sitemap URL in Yandex index");
-    const xml = await this.fetchSitemapDocument(url, context, "model");
+    const xml = await this.fetchSitemapDocument(url, context, "model", directRecovery);
     if (looksBlocked(xml)) throw new AdapterBlockedError(`Yandex blocked model sitemap ${url}`);
     if (!/<urlset\b/i.test(xml)) throw new ParserChangedError(`Yandex model sitemap XML shape changed: ${url}`);
     assertCompleteModelSitemap(xml, url);
@@ -1213,13 +1295,19 @@ export class YandexAdapter implements SiteAdapter {
   private async fetchSitemapDocument(
     url: string,
     context: AdapterContext,
-    kind: "index" | "model"
+    kind: "index" | "model",
+    directRecovery = false
   ): Promise<string> {
     let lastTransient: unknown;
     for (let attempt = 1; attempt <= this.sitemapRetryAttempts; attempt += 1) {
       let response: Response;
       try {
-        response = await this.request(url, context, "application/xml,text/xml");
+        response = await this.request(
+          url,
+          context,
+          "application/xml,text/xml",
+          directRecovery ? { "x-ratings-yandex-direct-recovery": "1" } : undefined
+        );
       } catch (error) {
         if (context.signal?.aborted) throw error;
         lastTransient = error;
@@ -1291,7 +1379,12 @@ export class YandexAdapter implements SiteAdapter {
     context.signal?.throwIfAborted();
   }
 
-  private async request(url: string, context: AdapterContext, accept: string): Promise<Response> {
+  private async request(
+    url: string,
+    context: AdapterContext,
+    accept: string,
+    extraHeaders?: Record<string, string>
+  ): Promise<Response> {
     const fetcher = context.fetch ?? this.fallbackFetch;
     if (typeof fetcher !== "function") throw new AdapterBlockedError("No fetch implementation is available");
     try {
@@ -1302,7 +1395,8 @@ export class YandexAdapter implements SiteAdapter {
         headers: {
           accept,
           "accept-language": "ru-RU,ru;q=0.9",
-          "user-agent": "RatingsCollector/1.0 (+https://reviews.yandex.ru/robots.txt)"
+          "user-agent": "RatingsCollector/1.0 (+https://reviews.yandex.ru/robots.txt)",
+          ...extraHeaders
         }
       }, this.productRequestTimeoutMs, `Yandex product request for ${url}`);
     } catch (error) {
