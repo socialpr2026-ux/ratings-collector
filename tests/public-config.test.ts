@@ -19,6 +19,24 @@ describe("public configuration", () => {
     expect(new Set(config.companyBrands as string[]).size).toBe(68);
   });
 
+  it("buffers an employee review decision before any repository request", async () => {
+    const upstream = vi.fn(async () => { throw new Error("repository must not run before the request body is parsed"); });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await onRequest({
+      request: new Request("https://ratings.example/api/runs/run-1/review", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{"
+      }),
+      env: { RATINGS_ALLOW_UNAUTHENTICATED: "true" }
+    });
+
+    expect(response.status).toBe(400);
+    expect(upstream).not.toHaveBeenCalled();
+    expect(await response.json()).toMatchObject({ error: expect.stringMatching(/JSON|Unexpected/i) });
+  });
+
 });
 
 describe("new static collector gateways", () => {

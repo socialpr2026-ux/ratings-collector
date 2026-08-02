@@ -740,6 +740,22 @@ describe("WildberriesAdapter.discover", () => {
     expect(observations.every((item) => item.source === "wildberries-root-family-aggregate")).toBe(true);
   });
 
+  it("excludes a foreign first-party brand even when the product title contains the requested brand name", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      total: 2,
+      products: [
+        { id: 9101, brand: "Андромакс", name: "Андромакс порошок 10 г №30", nmReviewRating: 4.8, nmFeedbacks: 12 },
+        { id: 9102, brand: "Персональный подарок", name: "Кружка Андромакс с именем", nmReviewRating: 5, nmFeedbacks: 1 }
+      ]
+    })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+
+    const refs = await adapter.discover("Андромакс", context({ runId: "andromax-brand-authority" }));
+
+    expect(refs.map((ref) => ref.listingId)).toEqual(["9101"]);
+    expect(refs[0]?.metadata.sourceBrand).toBe("Андромакс");
+  });
+
   it("fails closed at the configured maximum when every page remains non-empty", async () => {
     const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
       const page = Number(new URL(String(input)).searchParams.get("page"));

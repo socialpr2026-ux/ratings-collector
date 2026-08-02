@@ -53,11 +53,12 @@ export async function registerApi(server: FastifyInstance, runtime: Runtime) {
     // selective executeRun path so retry semantics match production exactly.
     return runtime.service.executeRun(run.id);
   });
-  server.post<{ Params: { runId: string }; Body: { acceptedKeys?: string[]; productLabels?: Record<string, string> } }>("/api/runs/:runId/review", async (request) =>
+  server.post<{ Params: { runId: string }; Body: { acceptedKeys?: string[]; rejectedKeys?: string[]; productLabels?: Record<string, string> } }>("/api/runs/:runId/review", async (request) =>
     runtime.service.approveObservations(
       request.params.runId,
       request.body?.acceptedKeys ?? [],
-      request.body?.productLabels ?? {}
+      request.body?.productLabels ?? {},
+      request.body?.rejectedKeys ?? []
     )
   );
   server.post<{ Params: { runId: string } }>("/api/runs/:runId/companion/ozon/session", async (request) => {

@@ -46,6 +46,7 @@ const BASKET_VOLUME_LIMITS = [
 
 const EXPLICIT_PACKAGE_COUNT = /(?:№|#|\bN(?:o)?\.?)\s*(\d{1,4})(?!\d)|(?<!\d)(\d{1,4})\s*(?:шт(?:\.|ук[аи]?)?|таблет(?:ок|ки|ка)?|капсул(?:а|ы)?|ампул(?:а|ы)?|флакон(?:а|ов|ы)?|саше|пакет(?:а|ов|ы)?|доз(?:а|ы)?)(?![\p{L}\p{N}])/iu;
 const TRUNCATED_TITLE = /(?:…|\.\.\.)\s*$/u;
+const PERSONALIZED_MERCHANDISE = /(?:кружк|жетон|ручк[аи]\b|футляр|брелок|гравиров|именн|прозвищ|индивидуальн)/u;
 
 type JsonObject = Record<string, unknown>;
 
@@ -147,9 +148,19 @@ function exactFirstPartyIdentity(product: JsonObject, title: string, brand: stri
 } {
   const sourceBrand = asNonemptyString(product.brand);
   return {
-    matches: matchesBrand(title, brand) || Boolean(sourceBrand && matchesBrand(sourceBrand, brand)),
+    matches: matchesProductBrand(title, brand, sourceBrand),
     ...(sourceBrand ? { sourceBrand } : {})
   };
+}
+
+function matchesProductBrand(title: string, brand: string, sourceBrand?: string): boolean {
+  const titleMatches = matchesBrand(title, brand);
+  const sourceMatches = Boolean(sourceBrand && matchesBrand(sourceBrand, brand));
+  if (!titleMatches && !sourceMatches) return false;
+  // Wildberries may use a manufacturer as `brand`, so a foreign sourceBrand
+  // cannot reject a genuine medicine by itself. It is decisive only for the
+  // personalized merchandise collisions seen in broad exact-match searches.
+  return !(sourceBrand && !sourceMatches && PERSONALIZED_MERCHANDISE.test(normalizeText(title)));
 }
 
 function distributionMetrics(value: unknown): DistributionMetrics | undefined {
@@ -337,7 +348,7 @@ function preferProductTitle(primary: string, alternative: string | undefined): s
 function recoverEnterolactisCatalogTitle(title: string, brand: string, sourceBrand?: string): string {
   if (normalizeText(brand) !== "энтеролактис") return title;
   const normalized = normalizeText(title);
-  const sourceProvesBrand = matchesBrand(title, brand) || Boolean(sourceBrand && matchesBrand(sourceBrand, brand));
+  const sourceProvesBrand = matchesProductBrand(title, brand, sourceBrand);
   if (!sourceProvesBrand) return title;
 
   const duo = /(?:^|\s)(?:дуо|duo)(?:\s|$)/u.test(normalized);
@@ -395,7 +406,8 @@ function exactSearchFallbackCard(ref: ProductRef): JsonObject | undefined {
   const sourceTitle = asNonemptyString(ref.title);
   const sourceBrand = metadataString(ref.metadata, "sourceBrand");
   const title = sourceTitle ? recoverEnterolactisCatalogTitle(sourceTitle, ref.brand, sourceBrand) : undefined;
-  if (!evidenceUrl || !title || TRUNCATED_TITLE.test(title) || !matchesBrand(title, ref.brand)) return undefined;
+  const sourceMatchesBrand = matchesProductBrand(title ?? "", ref.brand, sourceBrand);
+  if (!evidenceUrl || !title || TRUNCATED_TITLE.test(title) || !sourceMatchesBrand) return undefined;
   let url: URL;
   try { url = new URL(evidenceUrl); }
   catch { return undefined; }
@@ -453,7 +465,7 @@ function observationFromSearchMetadata(
     return undefined;
   }
 
-  const brandMatches = matchesBrand(title, ref.brand) || Boolean(sourceBrand && matchesBrand(sourceBrand, ref.brand));
+  const brandMatches = matchesProductBrand(title, ref.brand, sourceBrand);
   const rating = reviews === 0 ? null : rawRating;
   return {
     domain: PLATFORM_DOMAIN,
@@ -1042,8 +1054,7 @@ export class WildberriesAdapter implements SiteAdapter {
     }
 
     const ratingIsValid = rawRating !== undefined && rawRating >= 0 && rawRating <= 5;
-    const hasStrictBrandMatch = matchesBrand(title, ref.brand) ||
-      Boolean(sourceBrand && matchesBrand(sourceBrand, ref.brand));
+    const hasStrictBrandMatch = matchesProductBrand(title, ref.brand, sourceBrand);
     let status: Observation["status"];
     let rating: number | null;
 

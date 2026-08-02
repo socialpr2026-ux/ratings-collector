@@ -472,8 +472,11 @@ export function buildSheetDocument(
       const ratingCells = productRows.map(({ row: productRow }) => `${ratingColumn}${productRow}`);
       const reviewArray = `{${reviewCells.join(";")}}`;
       const ratingArray = `{${ratingCells.join(";")}}`;
+      const reviewSumArgument = productStartRow === productEndRow
+        ? `${reviewsColumn}${productStartRow}`
+        : `${reviewsColumn}${productStartRow}:${reviewsColumn}${productEndRow}`;
       const formulasForMetric = [
-        reviewCells.length ? `=SUM(${reviewsColumn}${productStartRow}:${reviewsColumn}${productEndRow})` : "=0",
+        reviewCells.length ? `=SUM(${reviewSumArgument})` : "=0",
         ratingCells.length ? `=COUNTIFS(${ratingArray};">="&9/2;${reviewArray};">0")` : "=0",
         ratingCells.length ? `=COUNTIFS(${ratingArray};"<"&9/2;${ratingArray};"<>";${reviewArray};">0")` : "=0",
         ratingCells.length ? `=COUNTIFS(${ratingArray};"";${reviewArray};"<>")` : "=0"

@@ -43,6 +43,7 @@ export function shouldAutoRetryInitialCollection(
 }
 
 export const MAX_INITIAL_TRANSIENT_RECOVERY_PASSES = 3;
+export const STATIC_PROXY_REQUEST_TIMEOUT_MS = 55_000;
 
 export function transientRecoveryDelayMs(
   partitions: Array<{ domain?: string; status: string; message?: string }>,
@@ -232,17 +233,45 @@ export function browserFetch(
   const wildberriesResponseChecks: Promise<void>[] = [];
   let wildberriesNetworkViolation: Error | undefined;
   const hardenedContexts = new Map<string, Promise<BrowserContext>>();
-  const fetchViaStaticProxy = (url: URL, signal: AbortSignal) => {
+  const fetchViaStaticProxy = async (url: URL, signal: AbortSignal) => {
     if (!staticProxy) throw new Error("Static proxy is not configured");
-    return fetch(staticProxy.endpoint, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${staticProxy.token}`,
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({ url: url.toString() }),
-      signal
-    });
+    const attemptAbort = new AbortController();
+    const combinedSignal = AbortSignal.any([signal, attemptAbort.signal]);
+    try {
+      const response = await withDeadline(fetch(staticProxy.endpoint, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${staticProxy.token}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ url: url.toString() }),
+        signal: combinedSignal
+      }), STATIC_PROXY_REQUEST_TIMEOUT_MS, `Static proxy request exceeded ${STATIC_PROXY_REQUEST_TIMEOUT_MS} ms`);
+      // A fetch promise resolves as soon as response headers arrive. Buffer the
+      // bounded proxy response before disposing the per-attempt signal; aborting
+      // it while the caller still reads the stream produces a misleading
+      // `This operation was aborted` health-check failure on selective retry.
+      const body = await withDeadline(
+        response.arrayBuffer(),
+        STATIC_PROXY_REQUEST_TIMEOUT_MS,
+        `Static proxy response exceeded ${STATIC_PROXY_REQUEST_TIMEOUT_MS} ms`
+      );
+      return new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers
+      });
+    } catch (error) {
+      // A failed fixed-egress request is an access-path failure, never evidence
+      // that the marketplace markup changed. Preserve an explicit blocked
+      // classification so Ozon can offer the employee its local Chrome route.
+      if (signal.aborted) throw error;
+      throw new AdapterBlockedError(
+        error instanceof Error ? error.message : `Static proxy request failed: ${String(error)}`
+      );
+    } finally {
+      attemptAbort.abort();
+    }
   };
   const fetchVaptekeViaStaticProxy = async (request: Request) => {
     const url = new URL(request.url);

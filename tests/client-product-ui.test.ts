@@ -86,10 +86,11 @@ describe("Interfox Ratings product shell", () => {
     expect(appSource).toContain('cleanReviewReady ? "Снимок готов к публикации"');
   });
 
-  it("separates selecting a card from saving its confirmation and repeats the action after the table", () => {
+  it("resolves review by saving selected cards and explicitly excluding the rest", () => {
     expect(appSource).toContain('aria-label={`Выбрать карточку ${item.product}`}');
-    expect(appSource).toContain("Нажмите кнопку, чтобы сохранить подтверждение.");
-    expect(appSource).toContain("Подтвердить и сохранить выбранные");
+    expect(appSource).toContain("rejectedKeys: run.observations");
+    expect(appSource).toContain("Выбранные карточки будут сохранены, остальные — исключены.");
+    expect(appSource).toContain("Исключить неподходящие карточки");
     expect(appSource).toContain('className="review-footer-action"');
     expect(stylesSource).toMatch(/\.review-footer-action\s*\{[^}]*justify-content:\s*flex-end;/);
     expect(appSource).not.toContain('aria-label={`Подтвердить карточку ${item.product}`}');

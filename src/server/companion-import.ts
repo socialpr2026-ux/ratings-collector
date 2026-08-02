@@ -176,6 +176,12 @@ function validatePayload(
     if (item.status === "no_reviews" && (item.reviews !== 0 || item.rating !== null)) {
       throw new Error(`ozon.ru:${item.listingId}: карточка без отзывов должна иметь 0 и пустой рейтинг`);
     }
+    if (item.aggregateGroupId) {
+      const members = item.aggregateGroupId.slice("ozon:variants:".length).split(",");
+      if (!members.includes(item.listingId)) {
+        throw new Error(`ozon.ru:${item.listingId}: семейный рейтинг не содержит текущий SKU`);
+      }
+    }
     const productEvidence = titleProductEvidence(
       item.product,
       { type: "sku", value: item.listingId },
@@ -200,6 +206,7 @@ function validatePayload(
       reviews: item.reviews,
       rating: item.rating,
       ...(item.rating === null ? {} : { rawRating: item.rating, rawRatingScale: 5 }),
+      ...(item.aggregateGroupId ? { aggregateGroupId: item.aggregateGroupId } : {}),
       status,
       capturedAt: item.capturedAt,
       source: "ozon:composer-api:local-companion",
@@ -222,6 +229,16 @@ function validatePayload(
     )) {
       throw new Error(`Ozon / ${brand}: число карточек не совпадает с итогом локального сбора`);
     }
+  }
+  const aggregateMetrics = new Map<string, string>();
+  for (const item of input.observations) {
+    if (!item.aggregateGroupId) continue;
+    const fingerprint = `${item.reviews ?? "null"}:${item.rating ?? "null"}`;
+    const previous = aggregateMetrics.get(item.aggregateGroupId);
+    if (previous && previous !== fingerprint) {
+      throw new Error(`${item.aggregateGroupId}: варианты семейного рейтинга имеют разные метрики`);
+    }
+    aggregateMetrics.set(item.aggregateGroupId, fingerprint);
   }
   return observationsByBrand;
 }

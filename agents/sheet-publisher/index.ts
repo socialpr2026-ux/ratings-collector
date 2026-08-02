@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { BrowserContext, Page, Route } from "playwright-core";
+import type { RunState } from "../../src/shared/types.js";
 import { RatingsService } from "../../src/server/orchestrator.js";
 import { RemoteEvidenceStore, RemoteRepository } from "../../src/server/remote-repository.js";
 import {
@@ -10,11 +11,14 @@ import {
 import { PlaywrightSheetsUiDriver, type PlaywrightPageLike } from "../../src/server/sheets/browser-ui-driver.js";
 import type { BrowserSheetReadback } from "../../src/server/sheets/browser-ui-driver.js";
 import {
+  AppsScriptPublisherError,
   AppsScriptSheetRollbackError,
   AppsScriptSheetsPublisher,
+  parseAppsScriptReadback,
+  verifyAppsScriptReadback,
   type AppsScriptSheetReadback
 } from "../../src/server/sheets/apps-script-publisher.js";
-import { buildBrandSheetDocument } from "../../src/server/sheets/model.js";
+import { buildBrandSheetDocument, columnLetter, type SheetDocument } from "../../src/server/sheets/model.js";
 import {
   ratingsTabNameForBrand,
   type RatingsTabName
@@ -49,6 +53,7 @@ type AgentContext = {
 };
 
 const OPEN_ACCESS_OWNER = "local@ratings";
+const SHEET_PUBLICATION_LEASE_MS = 5 * 60 * 1000;
 const GOOGLE_RESOURCE_DOMAINS = [
   "google.com",
   "gstatic.com",
@@ -180,6 +185,53 @@ export function brandTabNames(brands: string[]): RatingsTabName[] {
   return tabNames;
 }
 
+export function rememberAppsScriptPreflight(
+  run: RunState,
+  spreadsheetId: string,
+  readbacks: AppsScriptSheetReadback[],
+  capturedAt = new Date().toISOString()
+): void {
+  run.sheetPreflight = {
+    spreadsheetId,
+    capturedAt,
+    tabs: structuredClone(readbacks)
+  };
+}
+
+export function cachedAppsScriptPreflight(
+  run: RunState,
+  spreadsheetId: string,
+  tabNames: RatingsTabName[]
+): AppsScriptSheetReadback[] | undefined {
+  const cached = run.sheetPreflight;
+  if (!cached || cached.spreadsheetId !== spreadsheetId || cached.tabs.length !== tabNames.length) return undefined;
+  const byName = new Map(cached.tabs.map((tab) => [tab.tabName, tab]));
+  try {
+    return tabNames.map((tabName) => {
+      const tab = byName.get(tabName);
+      if (!tab) throw new Error("missing cached tab");
+      return parseAppsScriptReadback(tab);
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+export function appsScriptReadbacksMatchDocuments(
+  readbacks: AppsScriptSheetReadback[],
+  sheets: Array<{ tabName: RatingsTabName; document: SheetDocument }>
+): boolean {
+  if (readbacks.length !== sheets.length) return false;
+  return readbacks.every((readback, index) => (
+    readback.tabName === sheets[index]?.tabName &&
+    verifyAppsScriptReadback(readback, sheets[index]!.document).length === 0
+  ));
+}
+
+function appsScriptReadbackRange(readback: AppsScriptSheetReadback): string {
+  return `A1:${columnLetter(readback.columns)}${readback.rows}`;
+}
+
 export async function rollbackBrowserTabs(
   publisher: BrowserSheetsPublisher,
   publications: BrowserSheetPublication[],
@@ -229,7 +281,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     ownerVerified = true;
     const spreadsheetId = extractSpreadsheetId(initial.request.sheetUrl);
     try {
-      runLease = await repository.acquireLease(`publish-run:${runId}`, 3_700_000);
+      runLease = await repository.acquireLease(`publish-run:${runId}`, SHEET_PUBLICATION_LEASE_MS);
     } catch (error) {
       const active = await repository.getRun(runId);
       if (active?.status === "publishing") {
@@ -242,21 +294,25 @@ export async function onRequest(context: AgentContext): Promise<Response> {
       }
       throw error;
     }
-    sheetLease = await repository.acquireLease(`sheet-publish:${spreadsheetId}`, 3_700_000);
+    sheetLease = await repository.acquireLease(`sheet-publish:${spreadsheetId}`, SHEET_PUBLICATION_LEASE_MS);
 
     const run = await repository.getRun(runId);
     if (!run) throw new Error("Запуск не найден");
     if (run.ownerEmail && run.ownerEmail !== user.email) throw new Error("Владелец запуска изменился");
     if (operation === "preflight") {
       const tabNames = brandTabNames(run.request.brands);
+      let appsScriptReadbacks: AppsScriptSheetReadback[] | undefined;
       const result = appsScriptUrl
-        ? await new AppsScriptSheetsPublisher(appsScriptUrl).readMany(run.request.sheetUrl, tabNames).then((current) => ({
+        ? await new AppsScriptSheetsPublisher(appsScriptUrl).readMany(run.request.sheetUrl, tabNames).then((current) => {
+            appsScriptReadbacks = current;
+            return {
             rows: current.reduce((sum, sheet) => sum + sheet.rows, 0),
             columns: Math.max(0, ...current.map((sheet) => sheet.columns)),
             tabName: current[0]!.tabName,
             tabNames: current.map((sheet) => sheet.tabName),
             publisher: "apps-script" as const
-          }))
+            };
+          })
         : await withSheetBrowser(context, run.request.sheetUrl, async (driver) => {
             let rows = 0;
             let columns = 0;
@@ -276,6 +332,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
       if (refreshed && refreshed.status !== "published") {
         const previousErrorCount = refreshed.errors.length;
         const tabChanged = refreshed.sheetTabName !== result.tabName;
+        if (appsScriptReadbacks) rememberAppsScriptPreflight(refreshed, spreadsheetId, appsScriptReadbacks);
         refreshed.sheetTabName = result.tabName;
         refreshed.errors = refreshed.errors.filter((item) => item.partition !== "sheet-preflight");
         if (
@@ -285,7 +342,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         ) {
           refreshed.status = "queued";
         }
-        if (tabChanged || refreshed.errors.length !== previousErrorCount || refreshed.status !== run.status) {
+        if (appsScriptReadbacks || tabChanged || refreshed.errors.length !== previousErrorCount || refreshed.status !== run.status) {
           refreshed.updatedAt = new Date().toISOString();
           await repository.saveRun(refreshed);
         }
@@ -325,7 +382,14 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     if (appsScriptUrl) {
       const publisher = new AppsScriptSheetsPublisher(appsScriptUrl);
       const tabNames = brandTabNames(run.request.brands);
-      const current = await publisher.readMany(run.request.sheetUrl, tabNames);
+      const cached = cachedAppsScriptPreflight(intent.run, spreadsheetId, tabNames);
+      const current = cached ?? await publisher.readMany(run.request.sheetUrl, tabNames);
+      if (!cached) {
+        // Older runs have no stored preflight. Save the expensive read before
+        // writing so a terminated Agent can resume without paying it again.
+        rememberAppsScriptPreflight(intent.run, spreadsheetId, current);
+        await repository.saveRun(intent.run);
+      }
       const sheets = current.map((readback, index) => ({
         tabName: tabNames[index]!,
         expectedRevision: readback.revision,
@@ -339,6 +403,42 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         )
       }));
       const evidence = new RemoteEvidenceStore(publicationRepository);
+      if (cached && appsScriptReadbacksMatchDocuments(current, sheets)) {
+        // The previous Agent may have completed the atomic Apps Script write
+        // and exact post-write readback, then been terminated before the
+        // publication marker was committed. The cached readback is already an
+        // exact proof of the desired document, so finish the state transition
+        // without rewriting rows or duplicating the monthly data.
+        const verifiedAt = intent.run.sheetPreflight?.capturedAt ?? new Date().toISOString();
+        const tabs = current.map((readback) => ({
+          tabName: readback.tabName,
+          range: appsScriptReadbackRange(readback)
+        }));
+        const evidenceRef = await evidence.put({
+          kind: "apps-script-google-sheets-publication-resume",
+          runId: run.id,
+          spreadsheetId,
+          month: run.request.month,
+          verifiedAt,
+          postimages: current.map(appsScriptReadbackEvidence)
+        });
+        const completed = await completeBrowserPublication(publicationRepository, service, intent, {
+          range: tabs[0]!.range,
+          attempts: 0,
+          verifiedAt,
+          limitations: ["Запись уже была подтверждена точным Apps Script readback; повторная запись не выполнялась."],
+          tabs,
+          evidenceRef,
+          verificationMethod: "apps-script-readback"
+        });
+        return json({
+          id: completed.id,
+          status: completed.status,
+          publicationStatus: "published",
+          publication: completed.publication,
+          resumedFromVerifiedPostimage: true
+        });
+      }
       const preimageEvidenceRef = await evidence.put({
         kind: "apps-script-google-sheets-preimage",
         runId: run.id,
@@ -351,6 +451,17 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         sheetUrl: run.request.sheetUrl,
         sheets
       });
+      rememberAppsScriptPreflight(
+        intent.run,
+        spreadsheetId,
+        published.sheets.map((sheet) => sheet.readback),
+        published.verifiedAt
+      );
+      // Persist the exact postimage before any subsequent evidence or commit
+      // call. If the Agent is terminated after the external write, the next
+      // employee click can prove and finish that write without repeating it.
+      intent.run.updatedAt = published.verifiedAt;
+      await repository.saveRun(intent.run);
       const evidenceRef = await evidence.put({
         kind: "apps-script-google-sheets-publication",
         runId: run.id,
@@ -487,6 +598,13 @@ export async function onRequest(context: AgentContext): Promise<Response> {
           await repository.saveRun(failed).catch(() => undefined);
         }
       } else {
+        if (error instanceof AppsScriptPublisherError && error.code === "revision_mismatch") {
+          const stale = await repository.getRun(runId).catch(() => undefined);
+          if (stale) {
+            delete stale.sheetPreflight;
+            await repository.saveRun(stale).catch(() => undefined);
+          }
+        }
         const uncertain = error instanceof BrowserSheetRollbackError ||
           error instanceof AppsScriptSheetRollbackError ||
           error instanceof PublicationCommitUncertainError;

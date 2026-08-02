@@ -4,15 +4,16 @@ import { canApproveSiteProfile, completeRunPage, retainValidSelection, shouldSho
 
 describe("review selection controls", () => {
   it("keeps the confirmation action visible after selecting a card in the full list", () => {
-    expect(shouldShowReviewSelectionBar(1, 0)).toBe(true);
+    expect(shouldShowReviewSelectionBar(1, 1, 0)).toBe(true);
 
     // The user changes the filter or remains in the full-list view. The selected
     // card is no longer among the visible rows, but its confirmation action stays.
-    expect(shouldShowReviewSelectionBar(0, 1)).toBe(true);
+    expect(shouldShowReviewSelectionBar(1, 0, 1)).toBe(true);
   });
 
-  it("hides the action only when no confirmable card is visible or selected", () => {
-    expect(shouldShowReviewSelectionBar(0, 0)).toBe(false);
+  it("keeps a rejection action for unconfirmable review cards and hides it only when review is empty", () => {
+    expect(shouldShowReviewSelectionBar(1, 0, 0)).toBe(true);
+    expect(shouldShowReviewSelectionBar(0, 0, 0)).toBe(false);
   });
 
   it("drops stale selections after refreshed observations remove a review card", () => {

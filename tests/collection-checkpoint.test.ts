@@ -3,6 +3,9 @@ import type { Observation, ProductRef, RunState, SiteAdapter } from "../src/shar
 import {
   STALE_COLLECTION_CHECKPOINT_ERROR,
   STALE_COLLECTION_CHECKPOINT_MS,
+  STALE_PUBLICATION_CHECKPOINT_ERROR,
+  STALE_PUBLICATION_CHECKPOINT_MS,
+  reconcileStalePublicationCheckpoint,
   reconcileStaleCollectionCheckpoint
 } from "../src/server/collection-checkpoint.js";
 import { RatingsService } from "../src/server/orchestrator.js";
@@ -113,5 +116,27 @@ describe("stale collection checkpoint reconciliation", () => {
       collected: 1
     }]);
     expect(retried.errors).toEqual([]);
+  });
+});
+
+describe("stale publication checkpoint reconciliation", () => {
+  it("returns an abandoned publication to review only after its short lease has expired", () => {
+    const current = runningCheckpoint("2026-08-02T00:00:00.000Z");
+    current.status = "publishing";
+    const startedAt = Date.parse(current.updatedAt);
+
+    expect(reconcileStalePublicationCheckpoint(
+      current,
+      new Date(startedAt + STALE_PUBLICATION_CHECKPOINT_MS - 1)
+    )).toBe(false);
+    expect(reconcileStalePublicationCheckpoint(
+      current,
+      new Date(startedAt + STALE_PUBLICATION_CHECKPOINT_MS)
+    )).toBe(true);
+    expect(current.status).toBe("review");
+    expect(current.errors.at(-1)).toMatchObject({
+      partition: "google-sheets-apps-script",
+      message: expect.stringContaining(STALE_PUBLICATION_CHECKPOINT_ERROR)
+    });
   });
 });

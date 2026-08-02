@@ -333,6 +333,21 @@ export type RunState = {
   publication?: PublicationRecord;
   /** Ratings sheet resolved during preflight; legacy Russian tabs remain supported. */
   sheetTabName?: string;
+  /** Exact Apps Script preimage captured by the separate preflight Agent call. */
+  sheetPreflight?: {
+    spreadsheetId: string;
+    capturedAt: string;
+    tabs: Array<{
+      spreadsheetId: string;
+      tabName: string;
+      values: Array<Array<string | number | null>>;
+      formulas: Array<Array<string | null>>;
+      merges: Array<{ startRow: number; endRow: number; startColumn: number; endColumn: number }>;
+      revision: string;
+      rows: number;
+      columns: number;
+    }>;
+  };
   /** Recent runtime work for the live process map. Backward-compatible. */
   activity?: RunActivityTrace;
   /** One-time browser-companion sessions. Existing stored runs omit this field. */

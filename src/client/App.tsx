@@ -212,8 +212,8 @@ export function retainValidSelection(selected: Set<string>, validKeys: ReadonlyS
   return next;
 }
 
-export function shouldShowReviewSelectionBar(visibleConfirmableCount: number, selectedCount: number) {
-  return visibleConfirmableCount > 0 || selectedCount > 0;
+export function shouldShowReviewSelectionBar(reviewCount: number, visibleConfirmableCount: number, selectedCount: number) {
+  return reviewCount > 0 || visibleConfirmableCount > 0 || selectedCount > 0;
 }
 
 type ReviewCountMeaning = SiteProfile["reviewCountMeaning"];
@@ -587,14 +587,18 @@ export function App() {
   }
 
   async function acceptSelected() {
-    if (!run || validSelectedKeys.length === 0) return;
+    if (!run) return;
     setBusyAction("review");
     setError("");
     try {
+      const acceptedKeySet = new Set(validSelectedKeys);
       const reviewed = await api(`/api/runs/${run.id}/review`, {
         method: "POST",
         body: JSON.stringify({
           acceptedKeys: validSelectedKeys,
+          rejectedKeys: run.observations
+            .filter((item) => item.status === "needs_review" && !acceptedKeySet.has(productKey(item)))
+            .map(productKey),
           productLabels: Object.fromEntries(validSelectedKeys
             .map((key) => [key, normalizeProductOverride(productEdits[key] ?? "")] as const)
             .filter(([, value]) => Boolean(value)))
@@ -802,6 +806,7 @@ export function App() {
   );
   const validSelectedKeys = [...selected].filter((key) => confirmableReviewKeys.has(key));
   const selectedCount = validSelectedKeys.length;
+  const hasInvalidSelectedReview = selected.size !== selectedCount;
   const validSelectedKeySet = new Set(validSelectedKeys);
   const selectedProfileDomains = [...new Set(confirmableReviewItems
     .filter((item) => item.profileVersion !== undefined && validSelectedKeySet.has(productKey(item)))
@@ -1253,12 +1258,12 @@ export function App() {
           <span>Показано {visibleItems.length} из {unfilteredItems.length}</span>
         </div>}
 
-        {shouldShowReviewSelectionBar(visibleConfirmableReviewItems.length, selectedCount) && <div className={`selection-bar ${selectedUnapprovedProfileDomains.length > 0 ? "selection-bar-profile" : ""}`} role="region" aria-label="Подтверждение выбранных карточек">
+        {shouldShowReviewSelectionBar(reviewItems.length, visibleConfirmableReviewItems.length, selectedCount) && <div className={`selection-bar ${selectedUnapprovedProfileDomains.length > 0 ? "selection-bar-profile" : ""}`} role="region" aria-label="Подтверждение выбранных карточек">
           <div className="selection-bar-top">
             <label><input type="checkbox" checked={allReviewSelected} onChange={toggleAllReview} disabled={visibleConfirmableReviewItems.length === 0} /> <span>Выбрать все показанные</span></label>
             <div className="selection-actions">
-              <span aria-live="polite">Выбрано: {selectedCount}. Нажмите кнопку, чтобы сохранить подтверждение.</span>
-              {selectedUnapprovedProfileDomains.length === 0 && <button className="button button-primary button-compact" type="button" onClick={acceptSelected} disabled={selectedCount === 0 || busy}>{busyAction === "review" ? "Сохраняем…" : `Подтвердить и сохранить · ${selectedCount}`}</button>}
+              <span aria-live="polite">Выбрано: {selectedCount}. Выбранные карточки будут сохранены, остальные — исключены.</span>
+              {selectedUnapprovedProfileDomains.length === 0 && <button className="button button-primary button-compact" type="button" onClick={acceptSelected} disabled={hasInvalidSelectedReview || busy}>{busyAction === "review" ? "Сохраняем…" : selectedCount > 0 ? `Сохранить решение · ${selectedCount} из ${reviewItems.length}` : `Исключить неподходящие · ${reviewItems.length}`}</button>}
             </div>
           </div>
 
@@ -1324,9 +1329,9 @@ export function App() {
           </table>
         </div>
 
-        {selectedCount > 0 && selectedUnapprovedProfileDomains.length === 0 && <div className="review-footer-action">
-          <button className="button button-primary" type="button" onClick={acceptSelected} disabled={busy}>
-            {busyAction === "review" ? "Сохраняем подтверждение…" : `Подтвердить и сохранить выбранные · ${selectedCount}`}
+        {reviewItems.length > 0 && selectedUnapprovedProfileDomains.length === 0 && <div className="review-footer-action">
+          <button className="button button-primary" type="button" onClick={acceptSelected} disabled={hasInvalidSelectedReview || busy}>
+            {busyAction === "review" ? "Сохраняем решение…" : selectedCount > 0 ? `Сохранить выбранные и исключить остальные · ${selectedCount} из ${reviewItems.length}` : `Исключить неподходящие карточки · ${reviewItems.length}`}
           </button>
         </div>}
 

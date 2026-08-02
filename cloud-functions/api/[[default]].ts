@@ -6,7 +6,10 @@ import type { RunState } from "../../src/shared/types.js";
 import { isKnownYandexIndexTombstoneSitemap } from "../../src/shared/yandex-sitemaps.js";
 import { authenticate, authConfig, type AuthUser } from "../../src/server/auth.js";
 import { BlobEvidenceStore, BlobRepository } from "../../src/server/blob-repository.js";
-import { reconcileStaleCollectionCheckpoint } from "../../src/server/collection-checkpoint.js";
+import {
+  reconcileStaleCollectionCheckpoint,
+  reconcileStalePublicationCheckpoint
+} from "../../src/server/collection-checkpoint.js";
 import { RatingsService } from "../../src/server/orchestrator.js";
 import type { RepositoryRpc } from "../../src/server/remote-repository.js";
 import { prepareBrowserPublication, reconcileBrowserPublication } from "../../src/server/sheets/publication-state.js";
@@ -2375,10 +2378,18 @@ function assertOwner(run: RunState, user: AuthUser): void {
   if (run.ownerEmail && run.ownerEmail !== user.email) throw new Error("Этот запуск принадлежит другому сотруднику");
 }
 
-function pagedRun(run: RunState, url: URL): RunState & { observationPage: { offset: number; limit: number; total: number } } {
+function pagedRun(
+  run: RunState,
+  url: URL
+): Omit<RunState, "sheetPreflight"> & { observationPage: { offset: number; limit: number; total: number } } {
   const offset = Math.max(0, Math.trunc(Number(url.searchParams.get("offset") ?? 0)) || 0);
   const limit = Math.max(1, Math.min(250, Math.trunc(Number(url.searchParams.get("limit") ?? 200)) || 200));
-  return { ...run, observations: run.observations.slice(offset, offset + limit), observationPage: { offset, limit, total: run.observations.length } };
+  const { sheetPreflight: _privateSheetPreflight, ...publicRun } = run;
+  return {
+    ...publicRun,
+    observations: run.observations.slice(offset, offset + limit),
+    observationPage: { offset, limit, total: run.observations.length }
+  };
 }
 
 async function repositoryRpc(request: Request, env: Record<string, string | undefined>, repository: BlobRepository): Promise<Response> {
@@ -3412,8 +3423,8 @@ export default async function onRequest(context: Context): Promise<Response> {
     authRequired: context.env.RATINGS_ALLOW_UNAUTHENTICATED !== "true", agentMode: true
   });
   if (url.pathname === "/api/health") return json({ ok: true, service: "ratings-collector", runtime: "edgeone" });
-  const repository = new BlobRepository();
   if (url.pathname === "/api/internal/repository" && context.request.method === "POST") {
+    const repository = new BlobRepository();
     try { return await repositoryRpc(context.request, context.env, repository); }
     catch (error) { return json({ error: safeErrorMessage(error) }, 400); }
   }
@@ -3424,6 +3435,29 @@ export default async function onRequest(context: Context): Promise<Response> {
   let user: AuthUser;
   try { user = await authenticate(context.request.headers, authConfig(context.env)); }
   catch (error) { return json({ error: safeErrorMessage(error) }, 401); }
+  const runMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
+  const publishMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/publish$/);
+  const reviewMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/review$/);
+  const companionSessionMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/companion\/ozon\/session$/);
+  const companionImportMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/companion\/ozon$/);
+  const profileGetMatch = url.pathname.match(/^\/api\/site-profiles\/([^/]+)$/);
+  const profileMatch = url.pathname.match(/^\/api\/site-profiles\/([^/]+)\/approve$/);
+  let reviewBody: {
+    acceptedKeys?: string[];
+    rejectedKeys?: string[];
+    productLabels?: Record<string, string>;
+  } | undefined;
+  try {
+    // Edge runtimes may release or reuse the incoming request stream after an
+    // awaited storage operation. Buffer review decisions before getRun() so a
+    // valid employee action is parsed exactly once while the body is usable.
+    reviewBody = context.request.method === "POST" && reviewMatch
+      ? await context.request.json() as typeof reviewBody
+      : undefined;
+  } catch (error) {
+    return json({ error: safeErrorMessage(error) }, 400);
+  }
+  const repository = new BlobRepository();
   const service = new RatingsService(repository, async () => { throw new Error("Адаптеры выполняются только в изолированном Agent"); });
   try {
     if (context.request.method === "POST" && url.pathname === "/api/runs") {
@@ -3438,18 +3472,12 @@ export default async function onRequest(context: Context): Promise<Response> {
       const limit = Math.max(1, Math.min(20, Math.trunc(Number(url.searchParams.get("limit") ?? 8)) || 8));
       return json(await service.listRecentRuns(user.email, limit));
     }
-    const runMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
-    const publishMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/publish$/);
-    const reviewMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/review$/);
-    const companionSessionMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/companion\/ozon\/session$/);
-    const companionImportMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/companion\/ozon$/);
-    const profileGetMatch = url.pathname.match(/^\/api\/site-profiles\/([^/]+)$/);
-    const profileMatch = url.pathname.match(/^\/api\/site-profiles\/([^/]+)\/approve$/);
     if (context.request.method === "GET" && runMatch) {
       let run = await service.getRun(decodeURIComponent(runMatch[1]));
       if (!run) return json({ error: "Запуск не найден" }, 404);
       assertOwner(run, user);
       if (reconcileStaleCollectionCheckpoint(run)) await repository.saveRun(run);
+      if (reconcileStalePublicationCheckpoint(run)) await repository.saveRun(run);
       run = await service.reconcileInterruptedRun(run);
       // Older deployments marked a successful partial write as fully
       // published. Reconcile those stored runs too so failed-only retry becomes
@@ -3475,11 +3503,11 @@ export default async function onRequest(context: Context): Promise<Response> {
       const run = await service.getRun(decodeURIComponent(reviewMatch[1]));
       if (!run) return json({ error: "Запуск не найден" }, 404);
       assertOwner(run, user);
-      const body = await context.request.json() as { acceptedKeys?: string[]; productLabels?: Record<string, string> };
       return json(pagedRun(await service.approveObservations(
         run.id,
-        body.acceptedKeys ?? [],
-        body.productLabels ?? {}
+        reviewBody?.acceptedKeys ?? [],
+        reviewBody?.productLabels ?? {},
+        reviewBody?.rejectedKeys ?? []
       ), url));
     }
     if (context.request.method === "POST" && companionSessionMatch) {

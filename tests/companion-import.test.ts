@@ -97,6 +97,40 @@ describe("Ozon companion import", () => {
     expect(imported.companionSessions?.ozon).toMatchObject({ usedAt: now.toISOString() });
   });
 
+  it("preserves only source-proven shared variant groups and rejects diverging group metrics", async () => {
+    const repository = new MemoryRepository({ runs: { "run-companion": blockedRun() } });
+    const session = await issueOzonCompanionSession(repository, "run-companion", owner, { now: () => now });
+    const groupId = "ozon:variants:123456789,123456790";
+    const observations = [
+      {
+        listingId: "123456789", brand: "Тестбренд",
+        canonicalUrl: "https://www.ozon.ru/product/testbrand-tabletki-123456789/",
+        product: "Тестбренд таблетки 10 мг №20", reviews: 7, rating: 4.9,
+        aggregateGroupId: groupId, status: "ok", capturedAt: now.toISOString()
+      },
+      {
+        listingId: "123456790", brand: "Тестбренд",
+        canonicalUrl: "https://www.ozon.ru/product/testbrand-tabletki-123456790/",
+        product: "Тестбренд таблетки 10 мг №30", reviews: 7, rating: 4.9,
+        aggregateGroupId: groupId, status: "ok", capturedAt: now.toISOString()
+      }
+    ] as const;
+    const payload = {
+      version: 1 as const, nonce: session.nonce, observations,
+      partitions: [{ brand: "Тестбренд", status: "complete" as const, discovered: 2, collected: 2 }]
+    };
+    const imported = await importOzonCompanionResult(repository, "run-companion", owner, payload, { now: () => now });
+    expect(imported.observations.map((item) => item.aggregateGroupId)).toEqual([groupId, groupId]);
+
+    const secondRepository = new MemoryRepository({ runs: { "run-companion": blockedRun() } });
+    const secondSession = await issueOzonCompanionSession(secondRepository, "run-companion", owner, { now: () => now });
+    await expect(importOzonCompanionResult(secondRepository, "run-companion", owner, {
+      ...payload,
+      nonce: secondSession.nonce,
+      observations: observations.map((item, index) => ({ ...item, rating: index === 0 ? 4.9 : 4.8 }))
+    }, { now: () => now })).rejects.toThrow("разные метрики");
+  });
+
   it("allows an idempotent replay of the same payload but rejects a changed replay", async () => {
     const repository = new MemoryRepository({ runs: { "run-companion": blockedRun() } });
     const session = await issueOzonCompanionSession(repository, "run-companion", owner, { now: () => now });

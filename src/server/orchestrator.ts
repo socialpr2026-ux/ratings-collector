@@ -833,15 +833,28 @@ export class RatingsService {
     }
   }
 
-  async approveObservations(id: string, keys: string[], productLabels: Record<string, string> = {}): Promise<RunState> {
+  async approveObservations(
+    id: string,
+    keys: string[],
+    productLabels: Record<string, string> = {},
+    rejectedKeys: string[] = []
+  ): Promise<RunState> {
     const run = await this.requireRun(id);
     if (run.status !== "review") {
       throw new Error(`Нельзя подтверждать карточки из статуса ${run.status}`);
     }
     const accepted = new Set(keys);
+    const rejected = new Set(rejectedKeys);
     const reviewKeys = new Set(run.observations
       .filter((item) => item.status === "needs_review")
       .map((item) => productKey(item.domain, item.listingId)));
+    for (const key of accepted) {
+      if (!reviewKeys.has(key)) throw new Error(`Карточка для подтверждения не найдена: ${key}`);
+      if (rejected.has(key)) throw new Error(`Карточка одновременно подтверждена и исключена: ${key}`);
+    }
+    for (const key of rejected) {
+      if (!reviewKeys.has(key)) throw new Error(`Карточка для исключения не найдена: ${key}`);
+    }
     for (const [key, value] of Object.entries(productLabels)) {
       if (!accepted.has(key)) throw new Error(`Уточнение продукта передано для невыбранной карточки ${key}`);
       if (!reviewKeys.has(key)) throw new Error(`Карточка для уточнения не найдена: ${key}`);
@@ -850,6 +863,7 @@ export class RatingsService {
       }
     }
     const profiles = new Map<string, SiteProfile | undefined>();
+    const resolved = new Map<string, Observation>();
     for (const item of run.observations) {
       if (item.status !== "needs_review" || !accepted.has(productKey(item.domain, item.listingId))) continue;
       // Dedicated adapters do not carry a generated profile version. A stale
@@ -871,10 +885,10 @@ export class RatingsService {
         if (!manualIdentity) {
           throw new Error(`Уточните форму, дозировку или упаковку товара для карточки ${key}`);
         }
-        item.productOverride = manualIdentity.label;
-        item.productIdentity = manualIdentity;
+        resolved.set(key, { ...item, productOverride: manualIdentity.label, productIdentity: manualIdentity });
       }
-      const identity = item.productIdentity;
+      const candidate = resolved.get(key) ?? item;
+      const identity = candidate.productIdentity;
       const exactVariant = identity?.granularity === "variant" && identity.confidence === "exact";
       const knownReviewAggregate = Boolean(identity && isKnownReviewAggregateDomain(item.domain) &&
         identity.granularity !== "not_product" && identity.confidence !== "ambiguous");
@@ -884,7 +898,26 @@ export class RatingsService {
       if (!exactVariant && !provenAggregate && !knownReviewAggregate) {
         throw new Error(`Карточка ${item.domain}:${item.listingId} не содержит доказанного товарного варианта`);
       }
-      item.status = item.reviews === 0 ? "no_reviews" : "ok";
+      resolved.set(key, { ...candidate, status: candidate.reviews === 0 ? "no_reviews" : "ok" });
+    }
+    const rejectedByPartition = new Map<string, number>();
+    for (const item of run.observations) {
+      if (item.status !== "needs_review" || !rejected.has(productKey(item.domain, item.listingId))) continue;
+      const partitionKey = `${item.domain}\u0000${item.brand}`;
+      rejectedByPartition.set(partitionKey, (rejectedByPartition.get(partitionKey) ?? 0) + 1);
+    }
+    run.observations = run.observations.flatMap((item) => {
+      const key = productKey(item.domain, item.listingId);
+      const acceptedItem = resolved.get(key);
+      if (acceptedItem) return [acceptedItem];
+      if (item.status === "needs_review" && rejected.has(key)) return [];
+      return [item];
+    });
+    for (const partition of run.partitions) {
+      const rejectedCount = rejectedByPartition.get(`${partition.domain}\u0000${partition.brand}`) ?? 0;
+      if (rejectedCount === 0) continue;
+      partition.discovered = Math.max(0, partition.discovered - rejectedCount);
+      partition.collected = Math.max(0, partition.collected - rejectedCount);
     }
     run.qa = validateRun(run);
     run.payloadHash = stableHash({ request: run.request, observations: run.observations });

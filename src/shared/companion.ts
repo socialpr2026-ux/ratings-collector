@@ -12,6 +12,7 @@ export const ozonCompanionObservationSchema = z.object({
   product: z.string().trim().min(2).max(2000),
   reviews: z.number().int().nonnegative().nullable(),
   rating: z.number().min(0).max(5).nullable(),
+  aggregateGroupId: z.string().regex(/^ozon:variants:\d+(?:,\d+)+$/).optional(),
   status: z.enum(["ok", "no_reviews", "needs_review"]),
   capturedAt: z.string().datetime()
 }).strict();

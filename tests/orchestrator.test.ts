@@ -567,6 +567,44 @@ describe("run orchestration and fail-closed QA", () => {
       .rejects.toThrow("Нельзя подтверждать карточки из статуса publishing");
   });
 
+  it("accepts selected review cards and explicitly discards rejected findings without writing zeros", async () => {
+    const repository = new MemoryRepository();
+    const service = new RatingsService(repository, async () => ({
+      id: "review-resolution",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand: string) {
+        return ["1", "2", "3"].map((listingId) => ({
+          domain: "example.com", platform: "review-resolution", listingId, brand,
+          url: `https://example.com/product/${listingId}`, metadata: {}
+        }));
+      },
+      async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: `${ref.brand} таблетки 100 мг №${ref.listingId}0`,
+          reviews: Number(ref.listingId), rating: 4.8, status: "needs_review",
+          capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    const resolved = await service.approveObservations(
+      run.id,
+      ["example.com:1"],
+      {},
+      ["example.com:2", "example.com:3"]
+    );
+
+    expect(resolved.observations).toMatchObject([{
+      listingId: "1", reviews: 1, rating: 4.8, status: "ok"
+    }]);
+    expect(resolved.observations).toHaveLength(1);
+    expect(resolved.qa).toEqual({ ok: true, blockers: [], warnings: [] });
+    expect(resolved.observations.some((item) => item.reviews === 0)).toBe(false);
+  });
+
   it("ignores a stale draft profile for a known adapter but guards versioned generic observations", async () => {
     const makeService = async (versioned: boolean) => {
       const repository = new MemoryRepository();

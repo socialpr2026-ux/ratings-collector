@@ -6,6 +6,7 @@ import {
   hasExplicitWildberriesNoResults,
   hasExplicitYandexMarketNoResults,
   shouldAutoRetryInitialCollection,
+  STATIC_PROXY_REQUEST_TIMEOUT_MS,
   transientRecoveryDelayMs,
   YANDEX_BATCH_GATEWAY_TIMEOUT_MS
 } from "../agents/ratings/index.js";
@@ -30,7 +31,34 @@ function sandbox(run: (command: string) => Promise<unknown>) {
 }
 
 describe("ratings Agent lazy Sandbox routing", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("bounds a stalled Ozon translated static-proxy request before the Agent loses the partition checkpoint", async () => {
+    vi.useFakeTimers();
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(() => new Promise<Response>(() => undefined));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const request = routedFetch(
+      "https://www-ozon-ru.translate.goog/search/?text=%D0%92%D0%B8%D0%B0%D1%80%D0%B4%D0%BE+%D0%A4%D0%BE%D1%80%D1%82%D0%B5&page=7&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
+    );
+    const rejection = expect(request).rejects.toSatisfy((error: unknown) =>
+      error instanceof AdapterBlockedError &&
+      error.message === `Static proxy request exceeded ${STATIC_PROXY_REQUEST_TIMEOUT_MS} ms`
+    );
+
+    await vi.advanceTimersByTimeAsync(STATIC_PROXY_REQUEST_TIMEOUT_MS + 1);
+
+    await rejection;
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(run).not.toHaveBeenCalled();
+  });
 
   it("does not acquire Sandbox for an external Apify request", async () => {
     const run = vi.fn(async () => undefined);
@@ -898,6 +926,37 @@ describe("ratings Agent lazy Sandbox routing", () => {
         }
       }
     )).rejects.toThrow(/restricted to bounded search or exact reviews routes/);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("buffers a streamed Wildberries function response before releasing its attempt signal", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const signal = init?.signal!;
+      return new Response(new ReadableStream({
+        start(controller) {
+          const timer = setTimeout(() => {
+            controller.enqueue(new TextEncoder().encode('{"total":1,"products":[{"id":1}]}'));
+            controller.close();
+          }, 10);
+          signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            controller.error(signal.reason);
+          }, { once: true });
+        }
+      }));
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(
+      "https://search.wb.ru/exactmatch/ru/common/v14/search?appType=1&query=Андродоз"
+    );
+
+    await expect(response.text()).resolves.toContain('"total":1');
     expect(run).not.toHaveBeenCalled();
   });
 
