@@ -346,6 +346,38 @@ function parseOtzovik(html: string, pageUrl: string, brand: string): ParsedMetri
   return { ...parsed, listingId: listingId && /^\d+$/.test(listingId) ? listingId : parsed.listingId };
 }
 
+function parseVseotzyvy(html: string, pageUrl: string, brand: string): ParsedMetrics {
+  const definition = REVIEW_SITE_DEFINITIONS.find((item) => item.domain === "vseotzyvy.ru")!;
+  const base = microdataMetrics(html, pageUrl, brand, definition);
+  if (base.reviews !== undefined && (base.reviews === 0 || base.rating !== undefined)) return base;
+
+  const $ = load(html);
+  const text = $.root().text().replace(/\s+/g, " ").trim();
+  const title = firstText($, ["h1"]);
+  const reviews = integerFrom(
+    text.match(/Отзывы\s+покупателей\s+о\s+.+?\(([\d\s\u00a0]+)\s+отзыв/iu)?.[1] ??
+    text.match(/(?:^|\s)([\d\s\u00a0]+)\s+отзыв(?:а|ов)?(?:\s|$)/iu)?.[1]
+  );
+  const rawRating = numberFrom(
+    $("img[alt*='Оценка'][alt*='из 5']").first().attr("alt")
+      ?.match(/Оценка\s+([\d.,]+)\s+из\s+5/iu)?.[1] ??
+    text.match(/(?:^|\s)([\d.,]+)\s*[·•]\s*[\d\s\u00a0]+\s+оцен/iu)?.[1]
+  );
+  const canonicalUrl = canonicalFromPage($, pageUrl, definition) ?? canonicalizeUrl(pageUrl);
+  const listingId = definition.idFromUrl(new URL(canonicalUrl));
+  return {
+    title,
+    canonicalUrl,
+    listingId,
+    reviews,
+    rating: reviews === 0 ? undefined : rawRating,
+    ratingCount: reviews,
+    rawRating,
+    rawRatingScale: 5,
+    source: "vseotzyvy-visible-aggregate"
+  };
+}
+
 function otzyvruOrganizationMetrics(html: string, pageUrl: string, brand: string): ParsedMetrics | undefined {
   const $ = load(html);
   const page = canonicalizeUrl(pageUrl);
@@ -478,10 +510,11 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
     domain: "vseotzyvy.ru",
     origin: "https://vseotzyvy.ru/",
     rateLimitMs: 700,
-    searchUrl: (brand) => `https://vseotzyvy.ru/category/?search=${encodeURIComponent(brand)}`,
-    isProductUrl: (url) => /^\/item\/\d+\/reviews-[^/]+\/?$/i.test(url.pathname),
-    idFromUrl: (url) => pageId(/^\/item\/(\d+)\//i, url),
-    parse: (html, pageUrl, brand) => microdataMetrics(html, pageUrl, brand, REVIEW_SITE_DEFINITIONS[2])
+    searchUrl: (brand) => `https://vseotzyvy.ru/search?q=${encodeURIComponent(brand)}`,
+    isProductUrl: (url) => /^\/item\/\d+\/reviews-[^/]+\/?$/i.test(url.pathname) ||
+      /^\/otzyvy\/[a-z0-9-]+-\d+\/?$/i.test(url.pathname),
+    idFromUrl: (url) => pageId(/^\/item\/(\d+)\//i, url) ?? pageId(/-(\d+)\/?$/i, url),
+    parse: parseVseotzyvy
   },
   {
     domain: "otzyvru.com",
@@ -592,8 +625,9 @@ function hasExplicitSearchNoResults($: CheerioAPI, brand: string, domain: string
   const text = $.root().text().replace(/\s+/g, " ").trim();
   if (domain === "otzyv.pro") return /Ничего не найдено!/iu.test(text);
   if (domain === "vseotzyvy.ru") {
-    return matchesBrand(text, brand) &&
-      /(?:Ничего не найдено|По вашему запросу ничего не найдено|Подходящих объектов не найдено)/iu.test(text);
+    const query = $("input[name='q'], input[type='search']").first().attr("value")?.replace(/\s+/g, " ").trim();
+    return matchesBrand(query || text, brand) &&
+      /(?:Ничего не найдено|По вашему запросу ничего не найдено|Подходящих объектов не найдено|Найдено\s+0\s+результат)/iu.test(text);
   }
   if (domain === "irecommend.ru") {
     const heading = $("h1").first().text().replace(/\s+/g, " ").trim();
@@ -958,40 +992,95 @@ export class ReviewSiteAdapter implements SiteAdapter {
 
   private async discoverPravogolosa(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const searchUrl = canonicalizeUrl(this.definition.searchUrl(brand, context));
-    const { html, status } = await this.request(searchUrl, context);
-    if (status < 200 || status >= 300 || isBlockPage(html)) {
-      throw new AdapterBlockedError(`Поиск pravogolosa.net недоступен: HTTP ${status}`);
-    }
-    const $ = load(html);
-    const text = $.root().text().replace(/\s+/g, " ");
-    const count = integerFrom(text.match(/По вашему запросу\s*[«"]?[^»"]+[»"]?\s*всего найдено отзывов\s*:\s*([\d\s\u00a0]+)/iu)?.[1]);
-    if (count === 0) return [];
-    // The live site uses this second, equally conclusive empty-result copy for
-    // some queries. It is a proved no_results, not an access block.
-    if (/По запросу\s*[«"]?[^»"]+[»"]?\s*ничего не нашлось/iu.test(text)) return [];
-    if (count !== undefined) {
-      const refs = new Map<string, ProductRef>();
-      const candidates = new Map<string, { listingId: string; reviewCount: number }>();
+    const normalizeQuery = (value: string) => value.normalize("NFKC").replace(/\s+/g, " ").trim().toLocaleLowerCase("ru-RU");
+    const queue = [searchUrl];
+    const queued = new Set(queue);
+    const visited = new Set<string>();
+    const individualIds = new Set<string>();
+    const candidates = new Map<string, { listingId: string; reviewCount: number }>();
+    let advertisedCount: number | undefined;
+
+    while (queue.length && visited.size < MAX_SEARCH_PAGES) {
+      const pageUrl = queue.shift()!;
+      if (visited.has(pageUrl)) continue;
+      visited.add(pageUrl);
+      const { html, status } = await this.request(pageUrl, context);
+      if (status < 200 || status >= 300 || isBlockPage(html)) {
+        throw new AdapterBlockedError(`Поиск pravogolosa.net недоступен: HTTP ${status}`);
+      }
+      const $ = load(html);
+      const text = $.root().text().replace(/\s+/g, " ");
+      const result = text.match(/По вашему запросу\s*[«"]?\s*([^»"]+?)\s*[»"]?\s*всего найдено отзывов\s*:\s*([\d\s\u00a0]+)/iu);
+      const resultBrand = result?.[1];
+      const count = integerFrom(result?.[2]);
+      const empty = text.match(/По запросу\s*[«"]?\s*([^»"]+?)\s*[»"]?\s*ничего не нашлось/iu);
+      if (empty && normalizeQuery(empty[1]) === normalizeQuery(brand) && visited.size === 1) return [];
+      if (count === undefined || !resultBrand || normalizeQuery(resultBrand) !== normalizeQuery(brand)) {
+        throw new ParserChangedError("pravogolosa.net не связал результаты с точным поисковым запросом");
+      }
+      if (count === 0 && visited.size === 1) return [];
+      if (advertisedCount === undefined) advertisedCount = count;
+      if (count !== advertisedCount) {
+        throw new ParserChangedError("pravogolosa.net изменил число результатов между страницами поиска");
+      }
+
+      let conflictingCategoryCount = false;
       $("a[href]").each((_index, node) => {
         const href = $(node).attr("href");
         if (!href) return;
         try {
           const target = new URL(href, searchUrl);
-          if (!sameSite(target, "pravogolosa.net") || !this.definition.isProductUrl(target)) return;
-          const categoryReviews = integerFrom($(node).text().match(/(?:все|читать\s+все)\s+отзывы\s*\(?([\d\s\u00a0]+)\)?/iu)?.[1]);
-          if (categoryReviews === undefined || categoryReviews <= 0 || categoryReviews !== count) return;
-          target.protocol = "https:";
-          target.search = "";
-          target.searchParams.set("page", "show_category");
-          target.searchParams.set("catid", new URL(href, searchUrl).searchParams.get("catid")!);
-          target.searchParams.set("order", "0");
-          target.searchParams.set("expand", "0");
-          const canonical = canonicalizeUrl(target.toString());
-          const listingId = this.definition.idFromUrl(new URL(canonical));
-          if (listingId) candidates.set(canonical, { listingId, reviewCount: categoryReviews });
+          if (!sameSite(target, "pravogolosa.net") || target.pathname !== "/otzyvcategory") return;
+          if (target.searchParams.get("page") === "show_ad" && /^\d+$/.test(target.searchParams.get("adid") ?? "")) {
+            individualIds.add(target.searchParams.get("adid")!);
+          }
+          if (this.definition.isProductUrl(target)) {
+            const categoryReviews = integerFrom($(node).text().match(/(?:все|читать\s+все)\s+отзывы\s*\(?([\d\s\u00a0]+)\)?/iu)?.[1]);
+            // Search totals count every matching review body and may mix the
+            // requested medicine with analogues. The linked category has its
+            // own aggregate, verified below against the category H1 and count.
+            if (categoryReviews === undefined || categoryReviews <= 0) return;
+            target.protocol = "https:";
+            target.search = "";
+            target.searchParams.set("page", "show_category");
+            target.searchParams.set("catid", new URL(href, pageUrl).searchParams.get("catid")!);
+            target.searchParams.set("order", "0");
+            target.searchParams.set("expand", "0");
+            const canonical = canonicalizeUrl(target.toString());
+            const listingId = this.definition.idFromUrl(new URL(canonical));
+            const previous = candidates.get(canonical);
+            if (previous && previous.reviewCount !== categoryReviews) {
+              conflictingCategoryCount = true;
+              return;
+            }
+            if (listingId) candidates.set(canonical, { listingId, reviewCount: categoryReviews });
+          }
+          if (target.searchParams.get("page") === "search" && /^\d+$/.test(target.searchParams.get("start") ?? "")) {
+            const query = target.searchParams.get("text_search");
+            if (query && normalizeQuery(query) !== normalizeQuery(brand)) return;
+            target.protocol = "https:";
+            const next = canonicalizeUrl(target.toString());
+            if (!visited.has(next) && !queued.has(next)) {
+              queued.add(next);
+              queue.push(next);
+            }
+          }
         } catch { /* malformed category link */ }
       });
+      if (conflictingCategoryCount) {
+        throw new ParserChangedError("pravogolosa.net показал противоречивые итоги категории");
+      }
+    }
 
+    if (queue.length) {
+      throw new AdapterBlockedError(`Поиск pravogolosa.net достиг лимита ${MAX_SEARCH_PAGES} страниц без доказанного окончания`);
+    }
+    if (advertisedCount === undefined || individualIds.size !== advertisedCount) {
+      throw new ParserChangedError("pravogolosa.net не отдал полный набор заявленных результатов поиска");
+    }
+
+    if (advertisedCount > 0) {
+      const refs = new Map<string, ProductRef>();
       let provedNonMatchingCategories = 0;
       for (const [canonical, candidate] of candidates) {
         const category = await this.request(canonical, context);
