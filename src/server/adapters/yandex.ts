@@ -48,6 +48,7 @@ const YANDEX_BATCH_CONCURRENCY = 2;
 const YANDEX_BATCH_RECOVERY_ROUNDS = 2;
 const YANDEX_BATCH_RECOVERY_DELAY_MS = 5_000;
 const YANDEX_PROGRESS_SITEMAP_INTERVAL = 32;
+const YANDEX_GATEWAY_CIRCUIT_FAILURES = 4;
 
 type YandexCapableFetch = typeof globalThis.fetch & {
   yandexBatchEndpoint?: string;
@@ -696,8 +697,10 @@ export class YandexAdapter implements SiteAdapter {
     ): Promise<PendingGatewayChunk[]> => {
       let roundCursor = 0;
       const failed: PendingGatewayChunk[] = [];
+      let gatewayFailures = 0;
+      let circuitOpen = false;
       const worker = async (): Promise<void> => {
-        while (!batchAbort.signal.aborted) {
+        while (!batchAbort.signal.aborted && !circuitOpen) {
           const item = pending[roundCursor];
           roundCursor += 1;
           if (!item) return;
@@ -721,10 +724,17 @@ export class YandexAdapter implements SiteAdapter {
           } catch (error) {
             if (callerAborted || batchAbort.signal.aborted) return;
             failed.push({ ...item, error });
+            gatewayFailures += 1;
+            if (directRecoverySupported && gatewayFailures >= YANDEX_GATEWAY_CIRCUIT_FAILURES) {
+              circuitOpen = true;
+            }
           }
         }
       };
       await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, worker));
+      if (circuitOpen && roundCursor < pending.length) {
+        failed.push(...pending.slice(roundCursor));
+      }
       return failed.sort((left, right) => left.index - right.index);
     };
 

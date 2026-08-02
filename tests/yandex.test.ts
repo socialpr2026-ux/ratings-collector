@@ -694,6 +694,41 @@ describe("YandexAdapter discovery", () => {
     }));
   });
 
+  it("opens the gateway circuit and proves the untouched tail through browser XML", async () => {
+    const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const maps = Array.from({ length: 12 }, (_value, index) =>
+      `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
+    );
+    const directSitemaps: string[] = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      if (maps.includes(url) && new Headers(init?.headers).get("x-ratings-yandex-direct-recovery") === "1") {
+        directSitemaps.push(url);
+        return xmlResponse(modelSitemap([]));
+      }
+      if (url !== batchEndpoint) throw new Error(`Unexpected request: ${url}`);
+      return new Response(JSON.stringify({ error: "fixed gateway quota is unavailable" }), {
+        status: 502,
+        headers: { "content-type": "application/json" }
+      });
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & {
+      yandexBatchEndpoint?: string;
+      yandexDirectRecovery?: boolean;
+    };
+    fetch.yandexBatchEndpoint = batchEndpoint;
+    fetch.yandexDirectRecovery = true;
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: maps.length, sitemapRetryBaseMs: 0 });
+
+    await expect(adapter.discover("Кагоцел", context())).resolves.toEqual([]);
+
+    const gatewayCalls = fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(gatewayCalls.length).toBeGreaterThanOrEqual(4);
+    expect(gatewayCalls.length).toBeLessThan(maps.length);
+    expect(new Set(directSitemaps)).toEqual(new Set(maps));
+  });
+
   it("propagates the caller deadline instead of returning partial sitemap matches", async () => {
     const deadline = new AbortController();
     const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
