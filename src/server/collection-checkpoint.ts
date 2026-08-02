@@ -1,9 +1,10 @@
 import type { RunState } from "../shared/types.js";
 import { RunActivityTracker } from "./runtime-activity.js";
 
-// The Agent lease is 3,700,000 ms. Reconcile only after it has certainly
-// expired, so a slow but live worker can never be mistaken for a dead one.
-export const STALE_COLLECTION_CHECKPOINT_MS = 65 * 60 * 1000;
+// Collection owns a 26-minute soft deadline and persists progress throughout
+// long scans. Four extra minutes let the abort/final checkpoint settle while
+// keeping an interrupted employee retry from being locked for an hour.
+export const STALE_COLLECTION_CHECKPOINT_MS = 30 * 60 * 1000;
 export const STALE_COLLECTION_CHECKPOINT_ERROR = "collection_checkpoint_stale";
 // Sheet publication uses a five-minute lease. Reconcile only after that lease
 // has certainly expired so an active writer is never mistaken for a dead one.
