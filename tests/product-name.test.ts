@@ -427,6 +427,41 @@ describe("canonical product descriptors", () => {
     });
   });
 
+  it.each([
+    [
+      "БактоБЛИС+ с вит.Д3, 2 упаковки по 950 мг. No30 Комплект из 2х штук",
+      "Плюс таблетки для рассасывания 950 мг №30 ×2 упаковки"
+    ],
+    [
+      "БактоБЛИС+ с вит.Д3, 3 упаковки по 950 мг. No30 Комплект из 3х штук",
+      "Плюс таблетки для рассасывания 950 мг №30 ×3 упаковки"
+    ],
+    [
+      "БактоБЛИС+ таблетки массой 950 мг №90",
+      "Плюс таблетки для рассасывания 950 мг №90"
+    ]
+  ])("resolves the source-explicit Baktoblis Plus 950 mg pack %s", (product, label) => {
+    expect(analyzeProductIdentity({ brand: "Бактоблис", product })).toEqual({
+      label,
+      granularity: "variant",
+      confidence: "exact",
+      missing: [],
+      reasons: []
+    });
+  });
+
+  it("does not generalize the Baktoblis Plus equivalence to another strength, brand or missing pack", () => {
+    const otherStrength = analyzeProductIdentity({ brand: "Бактоблис", product: "БактоБЛИС+ таблетки 810 мг №30" });
+    const otherBrand = analyzeProductIdentity({ brand: "Другой бренд", product: "Другой бренд+ таблетки 950 мг №30" });
+    const missingPack = analyzeProductIdentity({ brand: "Бактоблис", product: "БактоБЛИС+ таблетки 950 мг" });
+
+    expect(otherStrength).toMatchObject({ granularity: "variant", confidence: "exact" });
+    expect(otherStrength.label).not.toContain("для рассасывания");
+    expect(otherBrand).toMatchObject({ granularity: "variant", confidence: "exact" });
+    expect(otherBrand.label).not.toContain("для рассасывания");
+    expect(missingPack).toMatchObject({ granularity: "unresolved", confidence: "partial" });
+  });
+
   it("prefers a compatible richer proof and uses image or instruction metadata only as fallback", () => {
     expect(analyzeProductIdentity({
       brand: "Кагоцел",

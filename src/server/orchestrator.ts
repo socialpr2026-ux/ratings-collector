@@ -187,6 +187,8 @@ function brandConcurrency(domain: string): number {
 }
 
 const SUCCESSFUL_PARTITION_STATUSES = new Set(["complete", "no_results"]);
+const PUBLISHED_IDENTITY_REUSE_REASON =
+  "Точное определение переиспользовано из опубликованной карточки с теми же ID, URL, брендом и названием";
 const GENERIC_AGGREGATE_TITLE_TOKENS = new Set([
   "отзыв", "отзывы", "рейтинг", "оценка", "оценки", "препарат", "лекарство", "средство", "продукт", "бренд"
 ]);
@@ -226,6 +228,28 @@ function canAutoAcceptDedicatedReviewAggregate(observation: Observation): boolea
   // result is never enough for automatic publication.
   return observation.domain === "market.yandex.ru" || observation.domain === "reviews.yandex.ru" ||
     observation.productEvidence?.scope === "product_family";
+}
+
+function reusablePublishedProductIdentity(
+  observation: Observation,
+  analyzed: NonNullable<Observation["productIdentity"]>,
+  previous: ProductRecord | undefined
+): NonNullable<Observation["productIdentity"]> | undefined {
+  const identity = previous?.productIdentity;
+  if (!previous || !identity) return undefined;
+  // A published decision may fill in details omitted by the same stable card,
+  // but it must never overrule fresh contradictory or incomplete collection.
+  if (!(["ok", "no_reviews"] as Observation["status"][]).includes(observation.status)) return undefined;
+  if (analyzed.granularity !== "unresolved" || analyzed.confidence !== "partial") return undefined;
+  if (identity.granularity !== "variant" || identity.confidence !== "exact") return undefined;
+  if (previous.domain !== observation.domain || previous.listingId !== observation.listingId) return undefined;
+  if (normalizeText(previous.brand) !== normalizeText(observation.brand)) return undefined;
+  if (previous.canonicalUrl !== observation.canonicalUrl) return undefined;
+  if (normalizeText(previous.product) !== normalizeText(observation.product)) return undefined;
+  return {
+    ...structuredClone(identity),
+    reasons: [...new Set([...identity.reasons, PUBLISHED_IDENTITY_REUSE_REASON])]
+  };
 }
 
 export class RatingsService {
@@ -404,6 +428,7 @@ export class RatingsService {
         this.repository.listProducts(spreadsheetId),
         this.repository.listSourceCards(spreadsheetId)
       ]);
+      const productsByKey = new Map(products.map((product) => [product.key, product]));
       const seen = new Map(run.observations.map((observation) => [
         productKey(observation.domain, observation.listingId),
         observation
@@ -699,12 +724,17 @@ export class RatingsService {
                   },
                   observation.canonicalUrl
                 );
-                observation.productIdentity = analyzeProductIdentity({
+                const analyzedIdentity = analyzeProductIdentity({
                   brand: observation.brand,
                   product: observation.product,
                   url: observation.canonicalUrl,
                   evidence: observation.productEvidence
                 });
+                observation.productIdentity = reusablePublishedProductIdentity(
+                  observation,
+                  analyzedIdentity,
+                  productsByKey.get(productKey(observation.domain, observation.listingId))
+                ) ?? analyzedIdentity;
                 const collapsedDistinctProducts = collapsesDistinctProductPages(
                   observation.productIdentity,
                   observation.productEvidence,

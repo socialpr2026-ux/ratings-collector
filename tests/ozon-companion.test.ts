@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { applyOzonBrandFilter, assertAllowedOzonComposerUrl } from "../companion/ozon-residential.js";
+import type { BrowserContext, Page } from "playwright-core";
+import {
+  applyOzonBrandFilter,
+  assertAllowedOzonComposerUrl,
+  createResidentialOzonAdapter,
+  ResidentialOzonCollector
+} from "../companion/ozon-residential.js";
 import { createCompanionServer, type CompanionCollector } from "../companion/server.js";
 import { AdapterBlockedError } from "../src/server/adapters/errors.js";
 
@@ -18,6 +24,66 @@ function collector(): CompanionCollector {
       capturedAt: "2026-07-14T12:00:00.000Z"
     })))
   };
+}
+
+function localOzonPage(status = 200) {
+  let currentUrl = "https://www.ozon.ru/";
+  const composerRequests: string[] = [];
+  const page = {
+    url: vi.fn(() => currentUrl),
+    goto: vi.fn(async (target: string) => {
+      currentUrl = target;
+      return undefined;
+    }),
+    locator: vi.fn(() => ({
+      first: () => ({ waitFor: vi.fn(async () => undefined) }),
+      count: vi.fn(async () => 0)
+    })),
+    evaluate: vi.fn(async (_callback: unknown, target: string) => {
+      composerRequests.push(target);
+      const endpoint = new URL(target);
+      const source = new URL(endpoint.searchParams.get("url")!, "https://www.ozon.ru");
+      if (status !== 200) {
+        return { status, statusText: "blocked", headers: [["content-type", "text/plain"]], body: "challenge" };
+      }
+      const payload = {
+        widgetStates: {
+          "tileGridDesktop-1-default-1": JSON.stringify({
+            items: [{
+              sku: 930001,
+              action: { link: "/product/baktoblis-930001/?from=search" },
+              mainState: [
+                { id: "name", textDS: { text: "Бактоблис таблетки №30" } },
+                {
+                  id: "rating",
+                  labelListV2: {
+                    icon: "ic_s_star",
+                    items: [
+                      { type: "text", text: { text: "4,9" } },
+                      { type: "text", text: { text: "25" } }
+                    ]
+                  }
+                }
+              ]
+            }]
+          })
+        },
+        shared: JSON.stringify({ catalog: { totalPages: 1 } })
+      };
+      expect(source.pathname).toBe("/search/");
+      return {
+        status: 200,
+        statusText: "OK",
+        headers: [["content-type", "application/json"]],
+        body: JSON.stringify(payload)
+      };
+    })
+  } as unknown as Page;
+  const context = {
+    pages: vi.fn(() => [page]),
+    close: vi.fn(async () => undefined)
+  } as unknown as BrowserContext;
+  return { page, context, composerRequests };
 }
 
 describe("local Ozon companion", () => {
@@ -49,6 +115,81 @@ describe("local Ozon companion", () => {
     expect(() => assertAllowedOzonComposerUrl(
       "https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=%2Fcategory%2Fbady-6183%2Fviardo-forte-140464399%2F%3Ftext%3D%D0%92%D0%B8%D0%B0%D1%80%D0%B4%D0%BE"
     )).toThrow("incomplete exact-brand proof");
+  });
+
+  it("configures the residential adapter to skip cloud translation", async () => {
+    const requested: URL[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const endpoint = new URL(input instanceof Request ? input.url : input.toString());
+      requested.push(endpoint);
+      return new Response(JSON.stringify({
+        widgetStates: {
+          "tileGridDesktop-1-default-1": JSON.stringify({
+            items: [{
+              sku: 930001,
+              action: { link: "/product/baktoblis-930001/?from=search" },
+              mainState: [
+                { id: "name", textDS: { text: "Бактоблис таблетки №30" } },
+                {
+                  id: "rating",
+                  labelListV2: {
+                    icon: "ic_s_star",
+                    items: [
+                      { type: "text", text: { text: "4,9" } },
+                      { type: "text", text: { text: "25" } }
+                    ]
+                  }
+                }
+              ]
+            }]
+          })
+        },
+        shared: JSON.stringify({ catalog: { totalPages: 1 } })
+      }), { headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+    const adapter = createResidentialOzonAdapter(fetchMock, () => new Date("2026-08-03T10:00:00Z"));
+
+    await expect(adapter.healthCheck({ brands: ["Бактоблис"], region: "Москва" }))
+      .resolves.toMatchObject({ ok: true });
+
+    expect(requested).toHaveLength(1);
+    expect(requested[0]?.origin).toBe("https://www.ozon.ru");
+    expect(requested[0]?.pathname).toBe("/api/composer-api.bx/page/json/v2");
+  });
+
+  it("uses the supported first-party composer directly in local Chrome", async () => {
+    const fake = localOzonPage();
+    const residential = new ResidentialOzonCollector({
+      profileDirectory: process.cwd(),
+      launchPersistentContext: vi.fn(async () => fake.context)
+    });
+
+    const observations = await residential.collect(["Бактоблис"], "Москва");
+    await residential.close();
+
+    expect(fake.composerRequests).toHaveLength(1);
+    expect(new URL(fake.composerRequests[0]!).origin).toBe("https://www.ozon.ru");
+    expect(new URL(fake.composerRequests[0]!).pathname).toBe("/api/composer-api.bx/page/json/v2");
+    expect(observations).toMatchObject([{
+      listingId: "930001",
+      brand: "Бактоблис",
+      reviews: 25,
+      rating: 4.9,
+      status: "ok"
+    }]);
+  });
+
+  it("keeps a direct-composer challenge explicit instead of returning no results", async () => {
+    const fake = localOzonPage(403);
+    const residential = new ResidentialOzonCollector({
+      profileDirectory: process.cwd(),
+      launchPersistentContext: vi.fn(async () => fake.context)
+    });
+
+    await expect(residential.collect(["Бактоблис"], "Москва"))
+      .rejects.toBeInstanceOf(AdapterBlockedError);
+    expect(fake.composerRequests).toHaveLength(1);
+    await residential.close();
   });
 
   it("supports the production-origin private-network preflight", async () => {

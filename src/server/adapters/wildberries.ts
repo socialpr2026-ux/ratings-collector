@@ -324,10 +324,25 @@ function strictOptionPackageCount(payload: JsonObject): number | undefined {
   return undefined;
 }
 
+function strictOptionProductTitle(payload: JsonObject, brand: string): string | undefined {
+  if (!Array.isArray(payload.options)) return undefined;
+  for (const item of payload.options) {
+    if (!isObject(item)) continue;
+    const name = asNonemptyString(item.name);
+    const value = asNonemptyString(item.value);
+    if (!name || !value || !/(?:торговое\s+наименование|наименование\s+товара|бренд)/iu.test(name)) continue;
+    if (matchesBrand(value, brand)) return value;
+  }
+  return undefined;
+}
+
 function exactCardInfoTitle(payload: unknown, listingId: string, brand: string): string | undefined {
   if (!isObject(payload) || firstDefinedId(payload, ["nm_id", "nmId", "id"]) !== listingId) return undefined;
-  let title = asNonemptyString(payload.imt_name) ?? asNonemptyString(payload.name);
-  if (!title || TRUNCATED_TITLE.test(title) || !matchesBrand(title, brand)) return undefined;
+  const catalogTitle = asNonemptyString(payload.imt_name) ?? asNonemptyString(payload.name);
+  let title = catalogTitle && !TRUNCATED_TITLE.test(catalogTitle) && matchesBrand(catalogTitle, brand)
+    ? catalogTitle
+    : strictOptionProductTitle(payload, brand);
+  if (!title || TRUNCATED_TITLE.test(title)) return undefined;
   if (!hasExplicitPackageCount(title)) {
     const count = strictOptionPackageCount(payload);
     if (count !== undefined) title = `${title} №${count}`;
@@ -1094,7 +1109,7 @@ export class WildberriesAdapter implements SiteAdapter {
     context: AdapterContext
   ): Promise<string> {
     if ((!TRUNCATED_TITLE.test(currentTitle) && hasExplicitPackageCount(currentTitle)) ||
-      !matchesBrand(currentTitle, brand) || this.productInfoFetchOverride === false) return currentTitle;
+      this.productInfoFetchOverride === false) return currentTitle;
     const fetchImplementation = this.productInfoFetchOverride ?? context.fetch ?? this.injectedFetch ?? globalThis.fetch;
     if (typeof fetchImplementation !== "function") return currentTitle;
 

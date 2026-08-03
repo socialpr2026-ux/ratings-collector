@@ -58,6 +58,7 @@ export function transientRecoveryDelayMs(
 
 const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);
 const YANDEX_BATCH_ENDPOINT = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+const YANDEX_MARKET_STATIC_RETRY_DELAY_MS = 200;
 // The singleton fixed Function owns a 55-second exact-shard budget and the
 // public boundary closes around sixty seconds. Give that response a small
 // delivery margin, then release the Agent lane so the adapter's failed-shard
@@ -112,6 +113,22 @@ async function withDeadline<T>(promise: Promise<T>, milliseconds: number, messag
   } finally {
     if (timeout) clearTimeout(timeout);
   }
+}
+
+async function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  await new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = () => {
+      if (timer) clearTimeout(timer);
+      reject(signal.reason ?? new DOMException("aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+  });
 }
 
 export function createLazySandboxAcquire(sandbox: Pick<SandboxApi, "commands">): () => Promise<void> {
@@ -742,23 +759,36 @@ export function browserFetch(
         throw new Error("Yandex Market browser proof is restricted to bounded search or exact reviews routes");
       }
       if (isSearch && staticProxy) {
-        try {
-          const proxied = await fetchViaStaticProxy(url, request.signal);
-          const contentType = proxied.headers.get("content-type") ?? "";
-          const contentLength = Number(proxied.headers.get("content-length"));
-          if (proxied.ok && /html/i.test(contentType) &&
-            (!Number.isFinite(contentLength) || contentLength <= 10_000_000)) {
-            const html = await proxied.text();
-            if (html.length <= 10_000_000) {
-              const proof = extractYandexMarketSearchHtmlProof(html, query, Number(pageText));
-              if (proof) return json(proof);
+        // Yandex intermittently serves an unhydrated 200 shell from one fixed
+        // egress request and the complete source-bound ItemList immediately
+        // afterwards. Retry that exact bounded URL once before entering the
+        // shared Sandbox queue. Both attempts use the same strict proof; two
+        // misses still fall through and can never become an empty result.
+        for (let attempt = 1; attempt <= 2; attempt += 1) {
+          try {
+            const proxied = await fetchViaStaticProxy(url, request.signal);
+            const contentType = proxied.headers.get("content-type") ?? "";
+            const contentLength = Number(proxied.headers.get("content-length"));
+            if (proxied.ok && /html/i.test(contentType) &&
+              (!Number.isFinite(contentLength) || contentLength <= 10_000_000)) {
+              const html = await proxied.text();
+              if (html.length <= 10_000_000) {
+                const proof = extractYandexMarketSearchHtmlProof(html, query, Number(pageText));
+                if (proof) return json(proof);
+              }
             }
+          } catch (error) {
+            request.signal.throwIfAborted();
+            if (attempt === 2) break;
           }
-        } catch {
-          // The strict first-party JSON-LD proof was unavailable through fixed
-          // egress. Continue to the rendered browser route without changing a
-          // challenge, timeout or unknown response into an empty result.
+          request.signal.throwIfAborted();
+          if (attempt === 1) {
+            await abortableDelay(YANDEX_MARKET_STATIC_RETRY_DELAY_MS, request.signal);
+          }
         }
+        // The strict first-party JSON-LD proof was unavailable twice through
+        // fixed egress. Continue to the rendered browser route without changing
+        // a challenge, timeout or unknown response into an empty result.
       }
       let response!: Response;
       queue = queue.catch(() => undefined).then(async () => {

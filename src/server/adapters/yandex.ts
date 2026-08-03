@@ -7,10 +7,11 @@ import type {
   SiteAdapter
 } from "../../shared/types.js";
 import { isKnownYandexIndexTombstoneSitemap } from "../../shared/yandex-sitemaps.js";
-import { aliasesForBrand, matchesBrand, normalizeRating } from "../utils/normalize.js";
+import { aliasesForBrand, matchesBrand, normalizeRating, normalizeText } from "../utils/normalize.js";
 import { readTextBounded } from "../utils/safe-fetch.js";
 import { canonicalizeUrl } from "../utils/urls.js";
 import { extractPageProductEvidence, titleProvesProductVariant } from "../utils/product-evidence.js";
+import { analyzeProductIdentity } from "../utils/product-name.js";
 import { AdapterBlockedError, AdapterQuotaError, ParserChangedError } from "./errors.js";
 
 const DEFAULT_SITEMAP_INDEX = "https://reviews.yandex.ru/ugcpub/sitemap.xml";
@@ -933,7 +934,7 @@ export class YandexAdapter implements SiteAdapter {
 
     const description = nonEmptyString(product.description);
     const reviewedProductTitles = extractReviewedProductTitles(html, ref.brand)
-      .filter((reviewedTitle) => reviewedVariantMatchesModelForm(title, reviewedTitle));
+      .filter((reviewedTitle) => reviewedVariantMatchesModel(title, reviewedTitle, ref.brand));
     // When no individual review exposes its bought variant, the canonical
     // JSON-LD Product name is still first-party evidence for the model-level
     // aggregate. If that name does not prove a complete sellable variant,
@@ -2124,14 +2125,25 @@ function extractReviewedProductTitles(html: string, brand: string): string[] {
   return [...result].slice(0, 30);
 }
 
-function reviewedVariantMatchesModelForm(modelTitle: string, reviewedTitle: string): boolean {
+function reviewedVariantMatchesModel(modelTitle: string, reviewedTitle: string, brand: string): boolean {
   const modelIsSachet = /(?:^|[^\p{L}])(?:саше|порошок)(?:$|[^\p{L}])/iu.test(modelTitle);
   const reviewedIsTablet = /(?:^|[^\p{L}])(?:таб(?:л(?:етки?)?)?\.?|таблетки?)(?:$|[^\p{L}])/iu.test(reviewedTitle);
   if (modelIsSachet && reviewedIsTablet) return false;
 
   const modelIsTablet = /(?:^|[^\p{L}])(?:таб(?:л(?:етки?)?)?\.?|таблетки?)(?:$|[^\p{L}])/iu.test(modelTitle);
   const reviewedIsSachet = /(?:^|[^\p{L}])(?:саше|порошок)(?:$|[^\p{L}])/iu.test(reviewedTitle);
-  return !(modelIsTablet && reviewedIsSachet);
+  if (modelIsTablet && reviewedIsSachet) return false;
+
+  // A complete model title is the stable listing identity. A review attached
+  // to that page can contain a stale `reasonToTrust` from another product in
+  // the same dosage form; do not let a different line, strength or pack turn
+  // the exact model into a synthetic multi-product aggregate. Generic model
+  // titles still retain their genuine reviewed variants below.
+  const modelIdentity = analyzeProductIdentity({ brand, product: modelTitle });
+  if (modelIdentity.granularity !== "variant" || modelIdentity.confidence !== "exact") return true;
+  const reviewedIdentity = analyzeProductIdentity({ brand, product: reviewedTitle });
+  if (reviewedIdentity.granularity !== "variant" || reviewedIdentity.confidence !== "exact") return true;
+  return normalizeText(modelIdentity.label) === normalizeText(reviewedIdentity.label);
 }
 
 function extractBrandNames(product: JsonObject): string[] {

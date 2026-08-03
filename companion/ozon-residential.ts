@@ -130,6 +130,20 @@ export function applyOzonBrandFilter(
   return endpoint.toString();
 }
 
+export function createResidentialOzonAdapter(
+  fetchImpl: typeof globalThis.fetch,
+  now: () => Date
+): OzonBrowserAdapter {
+  return new OzonBrowserAdapter({
+    fetch: fetchImpl,
+    now,
+    // The local allowlist accepts only Ozon's first-party composer. Skipping
+    // the cloud translation route avoids a guaranteed rejected probe before
+    // every supported local request.
+    translateEnabled: false
+  });
+}
+
 function requestUrl(input: URL | RequestInfo): string {
   if (input instanceof URL) return input.toString();
   if (typeof input === "string") return input;
@@ -272,10 +286,10 @@ export class ResidentialOzonCollector {
       await page.goto(`${OZON_ORIGIN}/`, { waitUntil: "domcontentloaded", timeout: 60_000 });
     }
     const filteredSearches = new Map<string, string>();
-    const adapter = new OzonBrowserAdapter({
-      fetch: ((input, init) => pageFetch(page, input, init, filteredSearches)) as typeof globalThis.fetch,
-      now: this.now
-    });
+    const adapter = createResidentialOzonAdapter(
+      ((input, init) => pageFetch(page, input, init, filteredSearches)) as typeof globalThis.fetch,
+      this.now
+    );
     const results: CompanionOzonResult[] = [];
     for (const brand of brands) {
       const filtered = await discoverExactBrandFilter(page, brand).catch(() => undefined);

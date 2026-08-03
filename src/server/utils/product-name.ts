@@ -274,9 +274,22 @@ function extractDoses(brand: string, value: string, form: string | undefined, co
 function normalizeKnownProductEquivalence(
   brand: string,
   value: string,
-  parts: Pick<ProductParts, "form" | "doses" | "count">
+  parts: Pick<ProductParts, "form" | "doses" | "count">,
+  sourceValue = value
 ): Pick<ProductParts, "form" | "doses"> {
   const normalizedBrand = normalizeText(brand);
+
+  const explicitBaktoblisPlus950 = normalizedBrand === "бактоблис"
+    && (parts.count === 30 || parts.count === 90)
+    && /(?:бактоблис|бакто\s*блис|bactoblis)\s*\+/iu.test(sourceValue)
+    && /(?<!\d)950\s*мг(?![\p{L}\p{N}])/iu.test(sourceValue)
+    && (!parts.form || ["таблетки", "таблетки для рассасывания"].includes(parts.form));
+  if (explicitBaktoblisPlus950) {
+    return {
+      form: "таблетки для рассасывания",
+      doses: ["950 мг", ...parts.doses.filter((dose) => normalizeText(dose) !== "950 мг")]
+    };
+  }
 
   // Oscillococcinum's sellable tube dose is consistently catalogued as either
   // "1 dose", "1 g" or "1000 mg".  Normalize only when one of those values is
@@ -412,7 +425,7 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
     form: extractedForm,
     doses: extractedDoses,
     count
-  });
+  }, sourceWithoutVendor);
   const form = equivalence.form;
   const doses = equivalence.doses;
   const multipackMatch = withoutBrand.match(/(?:[xх×]\s*|(?<![\p{L}\p{N}]))(\d+)\s*(?:уп(?:аковк)?\.?|упаков(?:ки|ок|ка))(?![\p{L}\p{N}])/iu);
