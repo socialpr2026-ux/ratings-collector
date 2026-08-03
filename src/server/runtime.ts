@@ -9,7 +9,11 @@ import type { YandexApifyAdapter } from "./adapters/yandex-apify.js";
 import { BudgetedAdapter, createSerialExecutor, type AsyncExclusive } from "./adapters/budgeted.js";
 import { ResilientAdapter } from "./adapters/resilient.js";
 import { createReviewSiteAdapters } from "./adapters/review-sites.js";
-import { AsnaAdapter } from "./adapters/pharmacy-recovery.js";
+import { EaptekaAdapter } from "./adapters/eapteka.js";
+import { VaptekeAdapter } from "./adapters/vapteke.js";
+import { MaksavitAdapter } from "./adapters/maksavit.js";
+import { VitaExpressAdapter } from "./adapters/vitaexpress.js";
+import { AsnaAdapter, PolzaAdapter } from "./adapters/pharmacy-recovery.js";
 import { createPharmacyAdapters } from "./adapters/pharmacies.js";
 import { createAdditionalPharmacyAdapters } from "./adapters/additional-pharmacies.js";
 import { MedOtzyvAdapter } from "./adapters/med-otzyv.js";
@@ -170,6 +174,11 @@ export async function createCollectorRuntime(options: {
     yandex,
     new MegamarketAdapter(evidence, options.fetch),
     new MedOtzyvAdapter(evidence, options.fetch),
+    new EaptekaAdapter(evidence, options.fetch),
+    new VaptekeAdapter(evidence, options.fetch),
+    new MaksavitAdapter(evidence, options.fetch),
+    new VitaExpressAdapter(evidence, options.fetch),
+    new PolzaAdapter(evidence, options.fetch),
     new AsnaAdapter(evidence, options.fetch),
     ...createPharmacyAdapters(evidence, options.fetch),
     ...createAdditionalPharmacyAdapters(evidence, options.fetch),

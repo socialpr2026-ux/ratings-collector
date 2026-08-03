@@ -85,4 +85,14 @@ describe("Interfox Ratings product shell", () => {
     expect(appSource).toContain("Точный вариант готов к подтверждению");
     expect(appSource).toContain('cleanReviewReady ? "Снимок готов к публикации"');
   });
+
+  it("resolves review by saving selected cards and explicitly excluding the rest", () => {
+    expect(appSource).toContain('aria-label={`Выбрать карточку ${item.product}`}');
+    expect(appSource).toContain("rejectedKeys: run.observations");
+    expect(appSource).toContain("Выбранные карточки будут сохранены, остальные — исключены.");
+    expect(appSource).toContain("Исключить неподходящие карточки");
+    expect(appSource).toContain('className="review-footer-action"');
+    expect(stylesSource).toMatch(/\.review-footer-action\s*\{[^}]*justify-content:\s*flex-end;/);
+    expect(appSource).not.toContain('aria-label={`Подтвердить карточку ${item.product}`}');
+  });
 });

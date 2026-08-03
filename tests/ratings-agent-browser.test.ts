@@ -2,11 +2,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   browserFetch,
   createLazySandboxAcquire,
+  extractYandexMarketSearchHtmlProof,
   hasExplicitWildberriesNoResults,
+  hasExplicitYandexMarketNoResults,
   shouldAutoRetryInitialCollection,
-  transientRecoveryDelayMs
+  STATIC_PROXY_REQUEST_TIMEOUT_MS,
+  transientRecoveryDelayMs,
+  YANDEX_BATCH_GATEWAY_TIMEOUT_MS
 } from "../agents/ratings/index.js";
-import { AdapterBlockedError } from "../src/server/adapters/errors.js";
+import { AdapterBlockedError, AdapterQuotaError } from "../src/server/adapters/errors.js";
+import { VaptekeAdapter } from "../src/server/adapters/vapteke.js";
+import { MemoryEvidenceStore } from "../src/server/evidence.js";
 
 vi.mock("../src/server/utils/safe-fetch.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/server/utils/safe-fetch.js")>();
@@ -25,7 +31,34 @@ function sandbox(run: (command: string) => Promise<unknown>) {
 }
 
 describe("ratings Agent lazy Sandbox routing", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("bounds a stalled Ozon translated static-proxy request before the Agent loses the partition checkpoint", async () => {
+    vi.useFakeTimers();
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(() => new Promise<Response>(() => undefined));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const request = routedFetch(
+      "https://www-ozon-ru.translate.goog/search/?text=%D0%92%D0%B8%D0%B0%D1%80%D0%B4%D0%BE+%D0%A4%D0%BE%D1%80%D1%82%D0%B5&page=7&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
+    );
+    const rejection = expect(request).rejects.toSatisfy((error: unknown) =>
+      error instanceof AdapterBlockedError &&
+      error.message === `Static proxy request exceeded ${STATIC_PROXY_REQUEST_TIMEOUT_MS} ms`
+    );
+
+    await vi.advanceTimersByTimeAsync(STATIC_PROXY_REQUEST_TIMEOUT_MS + 1);
+
+    await rejection;
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(run).not.toHaveBeenCalled();
+  });
 
   it("does not acquire Sandbox for an external Apify request", async () => {
     const run = vi.fn(async () => undefined);
@@ -58,6 +91,29 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(await response.text()).toBe("reader html");
     expect(directFetch).toHaveBeenCalledOnce();
     expect(directFetch.mock.calls[0]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("routes Vseotzyvy search and product proof through fixed egress without Sandbox", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("compact Vseotzyvy proof"));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const targets = [
+      "https://vseotzyvy.ru/search?q=Кагоцел",
+      "https://vseotzyvy.ru/otzyvy/kagotsel-49555"
+    ];
+
+    for (const target of targets) {
+      const response = await routedFetch(target);
+      expect(await response.text()).toBe("compact Vseotzyvy proof");
+      const call = directFetch.mock.calls.at(-1)!;
+      expect(call[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+      expect(JSON.parse(String((call[1] as RequestInit).body))).toEqual({ url: new URL(target).toString() });
+    }
     expect(run).not.toHaveBeenCalled();
   });
 
@@ -97,6 +153,24 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(directFetch.mock.calls[0]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
     expect(JSON.parse(String((directFetch.mock.calls[0]?.[1] as RequestInit).body)))
       .toEqual({ url: "https://ru.otzyv.com/kagotsel" });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("routes a bounded ru.otzyv.com search through fixed function egress without Sandbox", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response("compact search proof"));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const url = "https://ru.otzyv.com/search/?q=%D0%A2%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0";
+
+    const response = await routedFetch(url);
+
+    expect(await response.text()).toBe("compact search proof");
+    expect(JSON.parse(String((directFetch.mock.calls[0]?.[1] as RequestInit).body))).toEqual({ url });
     expect(run).not.toHaveBeenCalled();
   });
 
@@ -217,7 +291,182 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("routes the exact pharmacy Translate hosts through fixed function egress without Sandbox", async () => {
+  it("routes exact Vapteke autocomplete and product requests through fixed function egress", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response('{"success":true}', { headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    await routedFetch("https://vapteke.ru/ajax/autocomplete", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded; charset=UTF-8" },
+      body: new URLSearchParams({ query: "Бивиарт" })
+    });
+    await routedFetch("https://vapteke.ru/product/biviart-komfort-018-10-ml-682542");
+
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(directFetch.mock.calls.map(([input]) => input)).toEqual([
+      "https://ratings.example/api/internal/static-review-fetch",
+      "https://ratings.example/api/internal/static-review-fetch"
+    ]);
+    expect(JSON.parse(String((directFetch.mock.calls[0]?.[1] as RequestInit).body))).toEqual({
+      url: "https://vapteke.ru/ajax/autocomplete",
+      vaptekeAutocomplete: { query: "Бивиарт" }
+    });
+    expect(JSON.parse(String((directFetch.mock.calls[1]?.[1] as RequestInit).body))).toEqual({
+      url: "https://vapteke.ru/product/biviart-komfort-018-10-ml-682542"
+    });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("keeps the complete Vapteke adapter path off Sandbox when fixed egress succeeds", async () => {
+    const run = vi.fn(async () => {
+      throw new Error("Sandbox quota exceeded");
+    });
+    const brand = "\u0411\u0430\u043a\u0442\u043e\u0431\u043b\u0438\u0441";
+    const productId = "659414";
+    const productSlug = `baktoblis-poroshok-1500-mg-15-sht-${productId}`;
+    const productTitle = `${brand} \u043f\u043e\u0440\u043e\u0448\u043e\u043a 1500 \u043c\u0433 \u211615`;
+    let productAttempts = 0;
+    const productPage = (input: {
+      id: string;
+      brand: string;
+      title: string;
+      slug: string;
+      rating: number;
+      votes: number;
+    }) => `<!doctype html><html><head>
+      <link rel="canonical" href="https://vapteke.ru/product/${input.slug}">
+      <script type="application/ld+json">{
+        "@context":"https://schema.org","@type":"Product","name":"${input.brand}",
+        "description":"${input.title}","aggregateRating":{
+          "@type":"AggregateRating","bestRating":"5.0","worstRating":"1.0",
+          "ratingValue":"${input.rating}","reviewCount":"${input.votes}"
+        }
+      }</script>
+    </head><body>
+      <h1 class="q-product__header-title">${input.title}</h1>
+      <div><span>${input.brand}</span><div id="active_rating" class="item-rating">
+        <div class="item-rating-stars" data-id="${input.id}"></div>
+        <span class="rating-value">${input.rating}</span>
+        <span class="rating-count">(<span>${input.votes}</span> \u0433\u043e\u043b\u043e\u0441\u043e\u0432)</span>
+      </div></div>
+    </body></html>`;
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const payload = JSON.parse(String(init?.body)) as {
+        url: string;
+        vaptekeAutocomplete?: { query: string };
+      };
+      if (payload.vaptekeAutocomplete) {
+        expect(payload.vaptekeAutocomplete.query).toBe(brand);
+        return Response.json({
+          success: true,
+          data: {
+            total: { value: 1, relation: "eq" },
+            hits: [{
+              product_id: Number(productId),
+              name: productTitle,
+              slug: productSlug,
+              is_active: true
+            }]
+          },
+          error: "200"
+        });
+      }
+      if (payload.url.includes("-365917")) {
+        return new Response(productPage({
+          id: "365917",
+          brand: "\u0410\u043a\u0432\u0430\u041e\u043f\u0442\u0438\u043a",
+          title: "\u0410\u043a\u0432\u0430\u041e\u043f\u0442\u0438\u043a \u0440\u0430\u0441\u0442\u0432\u043e\u0440 60 \u043c\u043b",
+          slug: "rastvor-dlya-uhoda-za-kontaktnymi-linzami-akvaoptik-mnogofunktsionalnyy-60-ml-365917",
+          rating: 5,
+          votes: 1
+        }), { headers: { "content-type": "text/html; charset=utf-8" } });
+      }
+      expect(payload.url).toBe(`https://vapteke.ru/product/${productSlug}`);
+      productAttempts += 1;
+      if (productAttempts === 1) {
+        return new Response("transient upstream failure", { status: 502 });
+      }
+      return new Response(productPage({
+        id: productId,
+        brand,
+        title: productTitle,
+        slug: productSlug,
+        rating: 5,
+        votes: 15
+      }), { headers: { "content-type": "text/html; charset=utf-8" } });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const adapter = new VaptekeAdapter(new MemoryEvidenceStore(), routedFetch);
+    const context = { region: "\u041c\u043e\u0441\u043a\u0432\u0430" };
+
+    await expect(adapter.healthCheck(context)).resolves.toMatchObject({ ok: true });
+    const refs = await adapter.discover(brand, context);
+    expect(refs).toHaveLength(1);
+    await expect(adapter.collect(refs[0]!, context)).resolves.toMatchObject({
+      listingId: productId,
+      brand,
+      reviews: 15,
+      rating: 5,
+      ratingCount: 15,
+      status: "ok"
+    });
+    expect(directFetch).toHaveBeenCalledTimes(4);
+    expect(directFetch.mock.calls.every(([input]) =>
+      input === "https://ratings.example/api/internal/static-review-fetch"
+    )).toBe(true);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("uses the hardened browser for a marked Vapteke product instead of the blocked fixed egress", async () => {
+    const run = vi.fn(async () => { throw new Error("Sandbox quota exceeded"); });
+    const directFetch = vi.fn(async () => new Response("unexpected"));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    await expect(routedFetch(
+      "https://vapteke.ru/product/biviart-komfort-018-10-ml-682542",
+      { headers: { "x-ratings-browser": "1" } }
+    )).rejects.toBeInstanceOf(AdapterQuotaError);
+    expect(run).toHaveBeenCalledOnce();
+    expect(directFetch).not.toHaveBeenCalled();
+  });
+
+  it("recovers a Megamarket product after two transient translated-route failures", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => directFetch.mock.calls.length <= 2
+      ? new Response("transient translated product failure", { status: 502 })
+      : new Response("compact Megamarket product proof", {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const target = "https://megamarket-ru.translate.goog/catalog/details/cereton-rastvor-250-mg-ml-4-ml-5-sht-100024500895/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+
+    const response = await routedFetch(target);
+
+    expect(await response.text()).toBe("compact Megamarket product proof");
+    expect(directFetch).toHaveBeenCalledTimes(3);
+    expect(directFetch.mock.calls.every(([input]) => input === "https://ratings.example/api/internal/static-review-fetch")).toBe(true);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("routes exact pharmacy and Yandex Market Translate hosts through fixed function egress without Sandbox", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("compact pharmacy proof", {
       headers: { "content-type": "text/html; charset=utf-8" }
@@ -235,7 +484,8 @@ describe("ratings Agent lazy Sandbox routing", () => {
       "https://polza-ru.translate.goog/product/otsillokoktsinum/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
       "https://apteka-ru.translate.goog/preparation/otsillokoktsinum/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
       "https://nfapteka-ru.translate.goog/catalog/?q=Оциллококцинум&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
-      "https://www-budzdorov-ru.translate.goog/forms/ocillokokcinum?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
+      "https://www-budzdorov-ru.translate.goog/forms/ocillokokcinum?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
+      "https://market-yandex-ru.translate.goog/card/mikroginon-tab-po/103544271955/reviews?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
     ]) {
       const response = await routedFetch(target);
       expect(await response.text()).toBe("compact pharmacy proof");
@@ -264,6 +514,25 @@ describe("ratings Agent lazy Sandbox routing", () => {
     }
     expect(run).not.toHaveBeenCalled();
     expect(directFetch.mock.calls.every(([input]) => input === "https://ratings.example/api/internal/static-review-fetch")).toBe(true);
+  });
+
+  it("routes only bounded ASNA card sitemaps through fixed function egress", async () => {
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response("<urlset></urlset>", { headers: { "content-type": "application/xml" } })
+    );
+    vi.stubGlobal("fetch", directFetch);
+    const run = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "t".repeat(32)
+    });
+
+    const target = "https://www.asna.ru/sitemap/sitemap_cards1.xml?slugs=cereton%2Ctsereton";
+    expect(await (await routedFetch(target)).text()).toBe("<urlset></urlset>");
+    expect(run).not.toHaveBeenCalled();
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(directFetch.mock.calls[0]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+    expect(JSON.parse(String((directFetch.mock.calls[0]?.[1] as RequestInit).body))).toEqual({ url: target });
   });
 
   it("retries one transient ASNA function failure and remains fail-closed without Sandbox", async () => {
@@ -319,6 +588,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
       processed: 2,
       firstSitemap: "a",
       lastSitemap: "b",
+      verifiedSitemaps: ["a", "b"],
       matches: []
     }), { headers: { "content-type": "application/json" } }));
     vi.stubGlobal("fetch", directFetch);
@@ -348,6 +618,176 @@ describe("ratings Agent lazy Sandbox routing", () => {
       yandexBatch: payload
     });
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it.each([500, 502, 503, 504])("splits a Yandex batch after HTTP %i and recombines complete proofs", async (failureStatus) => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const forwarded = JSON.parse(String(init?.body)) as {
+        yandexBatch: { sitemaps: string[]; brands: Array<{ brand: string }> };
+      };
+      const sitemaps = forwarded.yandexBatch.sitemaps;
+      if (sitemaps.length === 4) return new Response("function could not prove the full group", { status: failureStatus });
+      return new Response(JSON.stringify({
+        processed: sitemaps.length,
+        firstSitemap: sitemaps[0],
+        lastSitemap: sitemaps.at(-1),
+        verifiedSitemaps: sitemaps,
+        tombstonedSitemaps: sitemaps[0] === "a" ? ["b"] : ["c"],
+        matches: sitemaps[0] === "a" ? [{
+          brand: forwarded.yandexBatch.brands[0]!.brand,
+          url: "https://reviews.yandex.ru/product/cereton--123",
+          sitemap: "a"
+        }] : []
+      }), { headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    }) as typeof fetch & { yandexBatchEndpoint?: string };
+    const payload = {
+      sitemaps: ["a", "b", "c", "d"],
+      brands: [{ brand: "Церетон", tokens: ["cereton"] }]
+    };
+
+    const response = await routedFetch(routedFetch.yandexBatchEndpoint!, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const proof = await response.json() as {
+      processed: number;
+      firstSitemap: string;
+      lastSitemap: string;
+      verifiedSitemaps: string[];
+      tombstonedSitemaps?: string[];
+      matches: Array<{ brand: string; url: string; sitemap: string }>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(proof).toEqual({
+      processed: 4,
+      firstSitemap: "a",
+      lastSitemap: "d",
+      verifiedSitemaps: ["a", "b", "c", "d"],
+      tombstonedSitemaps: ["b", "c"],
+      matches: [{ brand: "Церетон", url: "https://reviews.yandex.ru/product/cereton--123", sitemap: "a" }]
+    });
+    expect(directFetch).toHaveBeenCalledTimes(3);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("starts both Yandex split halves before waiting for either proof", async () => {
+    const run = vi.fn(async () => undefined);
+    const releases = new Map<string, (response: Response) => void>();
+    const singletonCalls: string[] = [];
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const forwarded = JSON.parse(String(init?.body)) as {
+        yandexBatch: { sitemaps: string[]; brands: Array<{ brand: string }> };
+      };
+      const sitemaps = forwarded.yandexBatch.sitemaps;
+      if (sitemaps.length === 2) return new Response("split this group", { status: 504 });
+      const sitemap = sitemaps[0]!;
+      singletonCalls.push(sitemap);
+      return await new Promise<Response>((resolve) => releases.set(sitemap, resolve));
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    }) as typeof fetch & { yandexBatchEndpoint?: string };
+
+    const pending = routedFetch(routedFetch.yandexBatchEndpoint!, {
+      method: "POST",
+      body: JSON.stringify({
+        sitemaps: ["left", "right"],
+        brands: [{ brand: "Кагоцел", tokens: ["kagotsel"] }]
+      })
+    });
+
+    await vi.waitFor(() => expect(singletonCalls).toEqual(["left", "right"]));
+    for (const sitemap of singletonCalls) {
+      releases.get(sitemap)!(new Response(JSON.stringify({
+        processed: 1,
+        firstSitemap: sitemap,
+        lastSitemap: sitemap,
+        verifiedSitemaps: [sitemap],
+        matches: []
+      }), { headers: { "content-type": "application/json" } }));
+    }
+
+    const response = await pending;
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      processed: 2,
+      firstSitemap: "left",
+      lastSitemap: "right",
+      verifiedSitemaps: ["left", "right"]
+    });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("returns a persistent singleton Yandex failure without retrying the same payload", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async () =>
+      new Response(JSON.stringify({ error: "one shard remained unproven" }), { status: 502 })
+    );
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    }) as typeof fetch & { yandexBatchEndpoint?: string };
+
+    const response = await routedFetch(routedFetch.yandexBatchEndpoint!, {
+      method: "POST",
+      body: JSON.stringify({
+        sitemaps: ["first"],
+        brands: [{ brand: "Церетон", tokens: ["cereton"] }]
+      })
+    });
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: "one shard remained unproven" });
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("turns a hanging Yandex gateway transport into a splittable 504", async () => {
+    vi.useFakeTimers();
+    try {
+      const run = vi.fn(async () => undefined);
+      let transportAborted = false;
+      const directFetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          transportAborted = true;
+          reject(init.signal?.reason);
+        }, { once: true });
+      }));
+      vi.stubGlobal("fetch", directFetch);
+      const routedFetch = browserFetch(sandbox(run), {
+        endpoint: "https://ratings.example/api/internal/static-review-fetch",
+        token: "internal-token"
+      }) as typeof fetch & { yandexBatchEndpoint?: string };
+
+      const pending = routedFetch(routedFetch.yandexBatchEndpoint!, {
+        method: "POST",
+        body: JSON.stringify({
+          sitemaps: ["first"],
+          brands: [{ brand: "Бактоблис", tokens: ["baktoblis"] }]
+        })
+      });
+      await vi.advanceTimersByTimeAsync(YANDEX_BATCH_GATEWAY_TIMEOUT_MS);
+      const response = await pending;
+
+      expect(response.status).toBe(504);
+      expect(await response.json()).toEqual({ error: "Yandex batch gateway transport timed out" });
+      expect(directFetch).toHaveBeenCalledOnce();
+      expect(transportAborted).toBe(true);
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("uses fixed function egress before a hanging direct Yandex request", async () => {
@@ -403,7 +843,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("maps a lazy Sandbox quota failure to AdapterBlockedError", async () => {
+  it("maps a lazy Sandbox quota failure to AdapterQuotaError", async () => {
     const run = vi.fn(async () => {
       throw new Error("Sandbox quota exceeded");
     });
@@ -417,7 +857,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
           "x-ratings-browser-mode": "ozon-composer"
         }
       }
-    )).rejects.toBeInstanceOf(AdapterBlockedError);
+    )).rejects.toBeInstanceOf(AdapterQuotaError);
     expect(run).toHaveBeenCalledOnce();
   });
 
@@ -451,7 +891,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
           "x-ratings-browser-mode": "wildberries-api"
         }
       }
-    )).rejects.toBeInstanceOf(AdapterBlockedError);
+    )).rejects.toBeInstanceOf(AdapterQuotaError);
     expect(run).toHaveBeenCalledOnce();
   });
 
@@ -493,6 +933,182 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
     await Promise.all([acquire(), acquire()]);
     expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("exposes only the fixed Yandex Market browser-search capability", async () => {
+    const run = vi.fn(async () => undefined);
+    const routedFetch = browserFetch(sandbox(run)) as typeof fetch & { yandexMarketBrowserEndpoint?: string };
+
+    expect(routedFetch.yandexMarketBrowserEndpoint).toBe("https://market.yandex.ru/search");
+    await expect(routedFetch(
+      "https://market.yandex.ru/profile/orders",
+      {
+        headers: {
+          "x-ratings-browser": "1",
+          "x-ratings-browser-mode": "yandex-market-proof"
+        }
+      }
+    )).rejects.toThrow(/restricted to bounded search or exact reviews routes/);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("buffers a streamed Wildberries function response before releasing its attempt signal", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const signal = init?.signal!;
+      return new Response(new ReadableStream({
+        start(controller) {
+          const timer = setTimeout(() => {
+            controller.enqueue(new TextEncoder().encode('{"total":1,"products":[{"id":1}]}'));
+            controller.close();
+          }, 10);
+          signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            controller.error(signal.reason);
+          }, { once: true });
+        }
+      }));
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(
+      "https://search.wb.ru/exactmatch/ru/common/v14/search?appType=1&query=Андродоз"
+    );
+
+    await expect(response.text()).resolves.toContain('"total":1');
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://apteka-ru.translate.goog/product/enterolaktis-duo-20-sht-sashe-po-5-g-6267ea3630197ea53c0caa2c/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
+    "https://www-budzdorov-ru.translate.goog/product/enterolaktis-duo-sashe-5g-no20-bad-5005750?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
+    "https://www-asna-ru.translate.goog/cards/enterolaktis_plyus_kaps_n15_sofar_spa.html?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
+  ])("recovers an exact pharmacy Translate page through free Agent egress after fixed egress fails: %s", async (target) => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (input: RequestInfo | URL) =>
+      typeof input === "string"
+        ? new Response("transient fixed egress failure", { status: 502 })
+        : new Response("exact pharmacy page", { headers: { "content-type": "text/html; charset=utf-8" } })
+    );
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(target);
+
+    expect(await response.text()).toBe("exact pharmacy page");
+    expect(directFetch).toHaveBeenCalledTimes(3);
+    expect(directFetch.mock.calls.slice(0, 2).every(([input]) => input === "https://ratings.example/api/internal/static-review-fetch")).toBe(true);
+    expect(directFetch.mock.calls[2]![0]).toBeInstanceOf(Request);
+    expect((directFetch.mock.calls[2]![0] as Request).url).toBe(new URL(target).toString());
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("accepts only an explicit Yandex Market no-results statement for the requested query", () => {
+    expect(hasExplicitYandexMarketNoResults(
+      "По запросу «Энтеролактис» ничего не нашли",
+      "Энтеролактис"
+    )).toBe(true);
+    expect(hasExplicitYandexMarketNoResults(
+      "По запросу «Другой бренд» ничего не нашли",
+      "Энтеролактис"
+    )).toBe(false);
+    expect(hasExplicitYandexMarketNoResults("Товары временно недоступны", "Энтеролактис")).toBe(false);
+  });
+
+  it("extracts exact search metrics and shared SKU proof from first-party Yandex JSON-LD", () => {
+    const html = `<html><body>
+      <script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        name: "Энтеролактис — купить по низкой цене на Яндекс Маркете",
+        itemListElement: [{
+          "@type": "ListItem",
+          position: 1,
+          item: {
+            "@type": "Product",
+            name: "Энтеролактис Плюс капсулы 319мг 15шт",
+            url: "https://market.yandex.ru/card/enterolaktis-plyus-kaps/103552838402",
+            sku: "101596320306",
+            aggregateRating: { "@type": "AggregateRating", ratingValue: 4.9, ratingCount: 55 }
+          }
+        }]
+      })}</script>
+      <a href="/search?text=${encodeURIComponent("Энтеролактис")}&amp;page=2">Вперёд</a>
+    </body></html>`;
+
+    expect(extractYandexMarketSearchHtmlProof(html, "Энтеролактис", 1)).toEqual({
+      query: "Энтеролактис",
+      page: 1,
+      hasNext: true,
+      products: [{
+        id: "103552838402",
+        name: "Энтеролактис Плюс капсулы 319мг 15шт",
+        url: "https://market.yandex.ru/card/enterolaktis-plyus-kaps/103552838402",
+        ratingCount: 55,
+        rating: 4.9,
+        familyId: "101596320306"
+      }]
+    });
+    expect(extractYandexMarketSearchHtmlProof(html.replace("ratingCount\":55", "ratingCount\":null"),
+      "Энтеролактис", 1)?.products[0]).not.toHaveProperty("ratingCount");
+  });
+
+  it("uses fixed Yandex search JSON-LD proof without acquiring Sandbox", async () => {
+    const run = vi.fn(async () => undefined);
+    const html = `<script type="application/ld+json">${JSON.stringify({
+      "@type": "ItemList",
+      name: "Энтеролактис — купить на Яндекс Маркете",
+      itemListElement: [{
+        item: {
+          "@type": "Product",
+          name: "Энтеролактис Дуо саше 5г 20шт",
+          url: "https://market.yandex.ru/card/enterolaktis-duo-por-sashe/103552838702",
+          sku: "101758091850",
+          aggregateRating: { ratingValue: 4.8, ratingCount: 24 }
+        }
+      }]
+    })}</script>`;
+    const directFetch = vi.fn(async () => new Response(html, {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const url = `https://market.yandex.ru/search?text=${encodeURIComponent("Энтеролактис")}`;
+
+    const response = await routedFetch(url, {
+      headers: { "x-ratings-browser": "1", "x-ratings-browser-mode": "yandex-market-proof" }
+    });
+
+    await expect(response.json()).resolves.toMatchObject({
+      query: "Энтеролактис",
+      page: 1,
+      hasNext: false,
+      products: [{ id: "103552838702", ratingCount: 24, rating: 4.8, familyId: "101758091850" }]
+    });
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("classifies an exhausted EdgeOne monthly GB-s allowance as quota", async () => {
+    const run = vi.fn(async () => {
+      throw new Error("EdgeOne Sandbox monthly GB-s quota exceeded; requestId=test-request");
+    });
+    const acquire = createLazySandboxAcquire(sandbox(run));
+
+    await expect(acquire()).rejects.toMatchObject({
+      code: "quota_exceeded",
+      message: expect.stringMatching(/monthly GB-s quota exceeded/)
+    });
   });
 });
 

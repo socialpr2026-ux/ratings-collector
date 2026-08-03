@@ -12,6 +12,9 @@ const OZON_ORIGIN = "https://www.ozon.ru";
 const COMPOSER_PATH = "/api/composer-api.bx/page/json/v2";
 const SEARCH_PATH = "/search/";
 const ALLOWED_SEARCH_PARAMETERS = new Set(["text", "from_global", "page"]);
+const ALLOWED_FILTERED_SEARCH_PARAMETERS = new Set([
+  "__rr", "category_was_predicted", "deny_category_prediction", "from_global", "page", "text"
+]);
 const DEFAULT_PROFILE = join(
   process.env.LOCALAPPDATA?.trim() || join(homedir(), "AppData", "Local"),
   "RatingsCollector",
@@ -28,7 +31,7 @@ type BrowserFetchResult = {
 
 export type CompanionOzonResult = Pick<
   Observation,
-  "listingId" | "brand" | "canonicalUrl" | "product" | "reviews" | "rating" | "capturedAt"
+  "listingId" | "brand" | "canonicalUrl" | "product" | "reviews" | "rating" | "capturedAt" | "aggregateGroupId"
 > & { status: "ok" | "no_reviews" | "needs_review" };
 
 export type ResidentialOzonCollectorOptions = {
@@ -61,19 +64,70 @@ export function assertAllowedOzonComposerUrl(input: string): URL {
   }
   const exactProduct = /^\/product\/[a-z0-9-]*\d{5,}\/$/i.test(search.pathname) && !search.search;
   if (exactProduct) return endpoint;
-  if (search.pathname !== SEARCH_PATH) {
+  const filteredCategory = /^\/category\/[a-z0-9-]+-\d+\/[a-z0-9-]+-\d+\/$/i.test(search.pathname);
+  if (search.pathname !== SEARCH_PATH && !filteredCategory) {
     throw new TypeError("Local companion only permits Ozon product search or an exact product card");
   }
-  if ([...search.searchParams.keys()].some((key) => !ALLOWED_SEARCH_PARAMETERS.has(key))) {
+  const allowedParameters = filteredCategory ? ALLOWED_FILTERED_SEARCH_PARAMETERS : ALLOWED_SEARCH_PARAMETERS;
+  if ([...search.searchParams.keys()].some((key) => !allowedParameters.has(key))) {
     throw new TypeError("Unexpected Ozon search parameter");
   }
   const text = search.searchParams.get("text")?.normalize("NFKC").trim();
   if (!text || text.length > 160) throw new TypeError("Ozon search brand is invalid");
+  if (filteredCategory && (
+    search.searchParams.get("category_was_predicted") !== "true" ||
+    search.searchParams.get("deny_category_prediction") !== "true" ||
+    search.searchParams.get("from_global") !== "true" ||
+    search.searchParams.get("__rr") !== "1"
+  )) {
+    throw new TypeError("Ozon filtered search has incomplete exact-brand proof");
+  }
   const page = search.searchParams.get("page");
   if (page !== null && (!/^\d+$/.test(page) || Number(page) < 2 || Number(page) > 100)) {
     throw new TypeError("Ozon search page is outside the safe range");
   }
   return endpoint;
+}
+
+function normalizedBrandFilter(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase("ru-RU").replace(/ё/g, "е")
+    .replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
+}
+
+function validateFilteredBrandTarget(input: string, brand: string): string | undefined {
+  const target = new URL(input, OZON_ORIGIN);
+  if (
+    target.origin !== OZON_ORIGIN || target.hash ||
+    !/^\/category\/[a-z0-9-]+-\d+\/[a-z0-9-]+-\d+\/$/i.test(target.pathname) ||
+    [...target.searchParams.keys()].some((key) => !ALLOWED_FILTERED_SEARCH_PARAMETERS.has(key)) ||
+    target.searchParams.get("category_was_predicted") !== "true" ||
+    target.searchParams.get("deny_category_prediction") !== "true" ||
+    target.searchParams.get("from_global") !== "true" ||
+    target.searchParams.get("__rr") !== "1" ||
+    normalizedBrandFilter(target.searchParams.get("text") ?? "") !== normalizedBrandFilter(brand)
+  ) return undefined;
+  target.searchParams.delete("page");
+  return `${target.pathname}${target.search}`;
+}
+
+export function applyOzonBrandFilter(
+  input: string,
+  filteredSearches: ReadonlyMap<string, string>
+): string {
+  const endpoint = new URL(input);
+  if (endpoint.origin !== OZON_ORIGIN || endpoint.pathname !== COMPOSER_PATH) return input;
+  const nestedValue = endpoint.searchParams.get("url");
+  if (!nestedValue) return input;
+  const nested = new URL(nestedValue, OZON_ORIGIN);
+  if (nested.pathname !== SEARCH_PATH) return input;
+  const brand = nested.searchParams.get("text") ?? "";
+  const filtered = filteredSearches.get(normalizedBrandFilter(brand));
+  if (!filtered) return input;
+  const target = new URL(filtered, OZON_ORIGIN);
+  const page = nested.searchParams.get("page");
+  if (page) target.searchParams.set("page", page);
+  endpoint.searchParams.set("url", `${target.pathname}${target.search}`);
+  return endpoint.toString();
 }
 
 function requestUrl(input: URL | RequestInfo): string {
@@ -82,9 +136,16 @@ function requestUrl(input: URL | RequestInfo): string {
   return input.url;
 }
 
-async function pageFetch(page: Page, input: URL | RequestInfo, init?: RequestInit): Promise<Response> {
+async function pageFetch(
+  page: Page,
+  input: URL | RequestInfo,
+  init?: RequestInit,
+  filteredSearches: ReadonlyMap<string, string> = new Map()
+): Promise<Response> {
   if (init?.method && init.method !== "GET") throw new TypeError("Local Ozon browser only permits GET");
-  const url = assertAllowedOzonComposerUrl(requestUrl(input)).toString();
+  const url = assertAllowedOzonComposerUrl(
+    applyOzonBrandFilter(requestUrl(input), filteredSearches)
+  ).toString();
   const result = await page.evaluate(async (target): Promise<BrowserFetchResult> => {
     const response = await fetch(target, {
       method: "GET",
@@ -106,6 +167,34 @@ async function pageFetch(page: Page, input: URL | RequestInfo, init?: RequestIni
     statusText: result.statusText,
     headers: result.headers
   });
+}
+
+async function discoverExactBrandFilter(page: Page, brand: string): Promise<string | undefined> {
+  const search = new URL(SEARCH_PATH, OZON_ORIGIN);
+  search.searchParams.set("text", brand);
+  search.searchParams.set("from_global", "true");
+  await page.goto(search.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
+  const checkboxes = page.locator('input[type="checkbox"]');
+  await checkboxes.first().waitFor({ state: "attached", timeout: 20_000 }).catch(() => undefined);
+  const count = Math.min(await checkboxes.count(), 100);
+  const expected = normalizedBrandFilter(brand);
+  for (let index = 0; index < count; index += 1) {
+    const checkbox = checkboxes.nth(index);
+    const label = await checkbox.evaluate((element) => {
+      let current: Element | null = element;
+      for (let depth = 0; current && depth < 6; depth += 1, current = current.parentElement) {
+        const text = (current.textContent ?? "").normalize("NFKC").trim();
+        if (text) return text;
+      }
+      return "";
+    }).catch(() => "");
+    if (normalizedBrandFilter(label) !== expected) continue;
+    const previousUrl = page.url();
+    await checkbox.click({ timeout: 20_000 });
+    await page.waitForURL((url) => url.toString() !== previousUrl, { timeout: 20_000 }).catch(() => undefined);
+    return validateFilteredBrandTarget(page.url(), brand);
+  }
+  return undefined;
 }
 
 export class ResidentialOzonCollector {
@@ -182,12 +271,15 @@ export class ResidentialOzonCollector {
     if (!page.url().startsWith(OZON_ORIGIN)) {
       await page.goto(`${OZON_ORIGIN}/`, { waitUntil: "domcontentloaded", timeout: 60_000 });
     }
+    const filteredSearches = new Map<string, string>();
     const adapter = new OzonBrowserAdapter({
-      fetch: ((input, init) => pageFetch(page, input, init)) as typeof globalThis.fetch,
+      fetch: ((input, init) => pageFetch(page, input, init, filteredSearches)) as typeof globalThis.fetch,
       now: this.now
     });
     const results: CompanionOzonResult[] = [];
     for (const brand of brands) {
+      const filtered = await discoverExactBrandFilter(page, brand).catch(() => undefined);
+      if (filtered) filteredSearches.set(normalizedBrandFilter(brand), filtered);
       const context = { region, brands, signal: undefined };
       const refs = await adapter.discover(brand, context);
       for (const ref of refs) {
@@ -202,6 +294,7 @@ export class ResidentialOzonCollector {
           product: observation.product,
           reviews: observation.reviews,
           rating: observation.rating,
+          ...(observation.aggregateGroupId ? { aggregateGroupId: observation.aggregateGroupId } : {}),
           status: observation.status as CompanionOzonResult["status"],
           capturedAt: observation.capturedAt
         });

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { AdapterContext, Observation, ProductRef, SiteAdapter } from "../src/shared/types.js";
-import { AdapterQuotaError } from "../src/server/adapters/errors.js";
+import { AdapterBlockedError, AdapterQuotaError } from "../src/server/adapters/errors.js";
 import { RatingsService } from "../src/server/orchestrator.js";
 import { MemoryRepository } from "../src/server/repository.js";
+import { hasDeterministicAggregateProof, isKnownReviewAggregateDomain } from "../src/shared/review-aggregates.js";
 
 const request = { sheetUrl: "https://docs.google.com/spreadsheets/d/test_sheet/edit", month: "2026-07", region: "Москва", domains: ["example.com"], brands: ["Бренд"] };
 class FakeAdapter implements SiteAdapter {
@@ -14,6 +15,19 @@ class FakeAdapter implements SiteAdapter {
 }
 
 describe("run orchestration and fail-closed QA", () => {
+  it("accepts Ozerki as a deterministic source-bound family aggregate", () => {
+    const observation: Observation = {
+      domain: "ozerki.ru", platform: "ozerki.ru", listingId: "family-akvaoptik", brand: "АкваОптик",
+      canonicalUrl: "https://ozerki.ru/alphabet/a/akvaoptik/", product: "АкваОптик — раствор для линз",
+      reviews: 2, rating: 5, status: "ok", capturedAt: new Date().toISOString(),
+      evidenceRef: "blob:ratings-state:ozerki-proof", source: "ozerki-family-aggregate-microdata",
+      productEvidence: { scope: "product_family", signals: [{ source: "url", text: "https://ozerki.ru/alphabet/a/akvaoptik/" }], variants: [], identifiers: [], imageUrls: [], instructionUrls: [] },
+      productIdentity: { label: "АкваОптик — раствор для линз", granularity: "family", confidence: "exact", missing: [], reasons: [] }
+    };
+    expect(isKnownReviewAggregateDomain("ozerki.ru")).toBe(true);
+    expect(hasDeterministicAggregateProof(observation)).toBe(true);
+  });
+
   it("keeps an explicit transient health-check access failure blocked instead of parser_changed", async () => {
     const service = new RatingsService(new MemoryRepository(), async () => ({
       id: "transient-health",
@@ -91,6 +105,45 @@ describe("run orchestration and fail-closed QA", () => {
     expect(retried.payloadHash).not.toBe(firstHash);
   });
 
+  it("retries a technically complete partition whose observations still need review", async () => {
+    const repository = new MemoryRepository();
+    let attempts = 0;
+    const service = new RatingsService(repository, async () => ({
+      id: "review-recovery",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        attempts += 1;
+        return [{
+          domain: "example.com", platform: "review-recovery", listingId: "1", brand,
+          url: "https://example.com/p/1", metadata: {}
+        }];
+      },
+      async collect(ref) {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId,
+          brand: ref.brand, canonicalUrl: ref.url,
+          product: attempts === 1 ? ref.brand : `${ref.brand} таблетки 100 мг №10`,
+          reviews: 5, rating: 4.5, status: attempts === 1 ? "needs_review" as const : "ok" as const,
+          capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+    const id = (await service.createRun(request)).id;
+
+    const first = await service.executeRun(id);
+    expect(first.partitions).toMatchObject([{ status: "complete" }]);
+    expect(first.observations).toMatchObject([{ status: "needs_review" }]);
+    expect(first.qa?.ok).toBe(false);
+
+    const retried = await service.executeRun(id);
+
+    expect(attempts).toBe(2);
+    expect(retried.partitions).toMatchObject([{ status: "complete" }]);
+    expect(retried.observations).toMatchObject([{ status: "ok" }]);
+    expect(retried.qa).toMatchObject({ ok: true, blockers: [] });
+  });
+
   it("keeps successful partitions intact when a selective retry fails again", async () => {
     const repository = new MemoryRepository();
     const calls = new Map<string, number>();
@@ -106,7 +159,7 @@ describe("run orchestration and fail-closed QA", () => {
       async collect(ref) {
         return {
           domain: ref.domain, platform: ref.platform, listingId: ref.listingId,
-          brand: ref.brand, canonicalUrl: ref.url, product: ref.brand,
+          brand: ref.brand, canonicalUrl: ref.url, product: `${ref.brand} таблетки 100 мг №10`,
           reviews: 1, rating: 5, status: "ok", capturedAt: new Date().toISOString()
         };
       }
@@ -126,6 +179,112 @@ describe("run orchestration and fail-closed QA", () => {
     expect(second.progress.completedPartitions).toBe(2);
     expect(second.errors).toHaveLength(1);
     expect(second.qa?.ok).toBe(false);
+  });
+
+  it("checkpoints good cards when one product fails and retries only the blocked partition", async () => {
+    const repository = new MemoryRepository();
+    let collectionAttempt = 0;
+    const service = new RatingsService(repository, async () => ({
+      id: "per-card-recovery",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        collectionAttempt += 1;
+        return ["1", "2", "3"].map((listingId) => ({
+          domain: "example.com", platform: "example.com", listingId, brand,
+          url: `https://example.com/p/${listingId}`, metadata: {}
+        }));
+      },
+      async collect(ref) {
+        if (collectionAttempt === 1 && ref.listingId === "2") {
+          throw new AdapterBlockedError("точная карточка временно вернула HTTP 502");
+        }
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId,
+          brand: ref.brand, canonicalUrl: ref.url,
+          product: `${ref.brand} таблетки 100 мг №10 SKU ${ref.listingId}`,
+          reviews: Number(ref.listingId), rating: 5, status: "ok" as const,
+          capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+    const id = (await service.createRun(request)).id;
+
+    const first = await service.executeRun(id);
+
+    expect(first.observations.map((item) => item.listingId)).toEqual(["1", "3"]);
+    expect(first.partitions).toMatchObject([{
+      status: "blocked", discovered: 3, collected: 2,
+      message: expect.stringContaining("2: blocked: точная карточка временно вернула HTTP 502")
+    }]);
+
+    const recovered = await service.executeRun(id);
+
+    expect(recovered.partitions).toMatchObject([{ status: "complete", discovered: 3, collected: 3 }]);
+    expect(recovered.observations.map((item) => item.listingId)).toEqual(["1", "2", "3"]);
+    expect(new Set(recovered.observations.map((item) => item.listingId)).size).toBe(3);
+  });
+
+  it("checkpoints proven cards from a partial discovery and merges a failed-only retry", async () => {
+    const repository = new MemoryRepository();
+    let attempt = 0;
+    const service = new RatingsService(repository, async () => ({
+      id: "partial",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand): Promise<ProductRef[]> {
+        attempt += 1;
+        if (attempt === 2) throw new AdapterQuotaError("quota still unavailable");
+        const refs = ["1", ...(attempt >= 3 ? ["2"] : [])].map((listingId) => ({
+          domain: "example.com",
+          platform: "partial",
+          listingId,
+          brand,
+          url: `https://example.com/p/${listingId}`,
+          metadata: attempt === 1 ? {
+            partialDiscoveryStatus: "quota_exceeded",
+            partialDiscoveryMessage: "quota interrupted exact proof",
+            partialDiscoveryTotal: 2
+          } : {}
+        }));
+        return refs;
+      },
+      async collect(ref): Promise<Observation> {
+        return {
+          domain: ref.domain,
+          platform: ref.platform,
+          listingId: ref.listingId,
+          brand: ref.brand,
+          canonicalUrl: ref.url,
+          product: `${ref.brand} таблетки 100 мг №10 SKU ${ref.listingId}`,
+          reviews: attempt,
+          rating: 5,
+          status: "ok",
+          capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+    const id = (await service.createRun(request)).id;
+
+    const partial = await service.executeRun(id);
+    expect(partial.partitions).toMatchObject([{
+      status: "blocked", discovered: 2, collected: 1,
+      message: expect.stringContaining("quota_exceeded")
+    }]);
+    expect(partial.observations).toHaveLength(1);
+    const checkpoint = partial.observations[0];
+
+    const failedAgain = await service.executeRun(id);
+    expect(failedAgain.partitions).toMatchObject([{ status: "blocked", discovered: 1, collected: 1 }]);
+    expect(failedAgain.observations).toEqual([checkpoint]);
+
+    const recovered = await service.executeRun(id);
+    expect(recovered.partitions).toMatchObject([{ status: "complete", discovered: 2, collected: 2 }]);
+    expect(recovered.observations.map(({ listingId, reviews }) => ({ listingId, reviews }))).toEqual([
+      { listingId: "1", reviews: 3 },
+      { listingId: "2", reviews: 3 }
+    ]);
+    expect(recovered.qa).toMatchObject({ ok: true, blockers: [] });
   });
 
   it("treats a repeated execution after all partitions succeeded as an idempotent no-op", async () => {
@@ -224,7 +383,7 @@ describe("run orchestration and fail-closed QA", () => {
     expect(run.observations).toEqual([]);
     expect(run.partitions).toMatchObject([{
       status: "blocked",
-      discovered: 0,
+      discovered: 1,
       collected: 0,
       message: expect.stringContaining("parser_changed")
     }]);
@@ -299,6 +458,62 @@ describe("run orchestration and fail-closed QA", () => {
     expect(recovered.payloadHash).toMatch(/^[a-f0-9]{64}$/);
     expect(recovered.errors).toEqual([]);
     expect(recovered.qa).toMatchObject({ ok: true, blockers: [] });
+  });
+
+  it("restores partial publication and failed-only retry after a checkpoint RPC interruption", async () => {
+    const repository = new MemoryRepository();
+    const service = new RatingsService(repository, async () => new FakeAdapter());
+    const created = await service.createRun({
+      ...request,
+      domains: ["ozon.ru", "market.yandex.ru"],
+      brands: ["Brand"]
+    });
+    created.status = "failed";
+    created.progress = {
+      totalPartitions: 2,
+      completedPartitions: 1,
+      current: "market.yandex.ru / Brand"
+    };
+    created.partitions = [{
+      domain: "ozon.ru", brand: "Brand", status: "complete", discovered: 1, collected: 1
+    }];
+    created.observations = [{
+      domain: "ozon.ru", platform: "ozon", listingId: "1", brand: "Brand",
+      canonicalUrl: "https://ozon.ru/product/1", product: "Brand tablets 100 mg 10",
+      reviews: 12, rating: 4.8, status: "ok", capturedAt: "2026-07-31T14:53:04.804Z"
+    }];
+    created.errors = [{ partition: "orchestrator", message: "Repository RPC HTTP 500: non-JSON response" }];
+    await repository.saveRun(created);
+
+    const recovered = await service.reconcileInterruptedRun(created);
+
+    expect(recovered).toMatchObject({
+      status: "review",
+      progress: { totalPartitions: 2, completedPartitions: 2 },
+      partitions: [
+        { domain: "ozon.ru", status: "complete" },
+        {
+          domain: "market.yandex.ru",
+          status: "blocked",
+          message: expect.stringContaining("Repository RPC HTTP 500")
+        }
+      ]
+    });
+    expect(recovered.progress.current).toBeUndefined();
+    expect(recovered.payloadHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(recovered.qa?.blockers).toEqual([
+      expect.stringContaining("market.yandex.ru / Brand")
+    ]);
+    expect(recovered.errors).toEqual([{
+      partition: "market.yandex.ru/Brand",
+      message: expect.stringContaining("Repository RPC HTTP 500")
+    }]);
+
+    const partial = await service.excludeFailedPartitionsFromPublication(recovered.id);
+    expect(partial.qa).toMatchObject({ ok: true, blockers: [] });
+    expect(partial.publicationExclusions).toMatchObject([{
+      domain: "market.yandex.ru", brand: "Brand"
+    }]);
   });
 
   it("collects all partitions and only commits history after explicit publication step", async () => {
@@ -394,6 +609,44 @@ describe("run orchestration and fail-closed QA", () => {
 
     await expect(service.approveObservations(run.id, ["example.com:1"]))
       .rejects.toThrow("Нельзя подтверждать карточки из статуса publishing");
+  });
+
+  it("accepts selected review cards and explicitly discards rejected findings without writing zeros", async () => {
+    const repository = new MemoryRepository();
+    const service = new RatingsService(repository, async () => ({
+      id: "review-resolution",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand: string) {
+        return ["1", "2", "3"].map((listingId) => ({
+          domain: "example.com", platform: "review-resolution", listingId, brand,
+          url: `https://example.com/product/${listingId}`, metadata: {}
+        }));
+      },
+      async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: `${ref.brand} таблетки 100 мг №${ref.listingId}0`,
+          reviews: Number(ref.listingId), rating: 4.8, status: "needs_review",
+          capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    const resolved = await service.approveObservations(
+      run.id,
+      ["example.com:1"],
+      {},
+      ["example.com:2", "example.com:3"]
+    );
+
+    expect(resolved.observations).toMatchObject([{
+      listingId: "1", reviews: 1, rating: 4.8, status: "ok"
+    }]);
+    expect(resolved.observations).toHaveLength(1);
+    expect(resolved.qa).toEqual({ ok: true, blockers: [], warnings: [] });
+    expect(resolved.observations.some((item) => item.reviews === 0)).toBe(false);
   });
 
   it("ignores a stale draft profile for a known adapter but guards versioned generic observations", async () => {
@@ -1146,5 +1399,57 @@ describe("run orchestration and fail-closed QA", () => {
     })).id);
 
     expect(maximumActive).toBe(1);
+  });
+
+  it("retains collected Yandex model IDs before publication and reuses them on the next brand run", async () => {
+    const repository = new MemoryRepository();
+    const discoveryContexts: AdapterContext[] = [];
+    const healthContexts: AdapterContext[] = [];
+    const adapter: SiteAdapter = {
+      id: "market.yandex.ru:saved-models",
+      supportedDomains: ["market.yandex.ru"],
+      async healthCheck(context) {
+        healthContexts.push(context);
+        return { ok: true, checkedAt: new Date().toISOString() };
+      },
+      async discover(brand, context) {
+        discoveryContexts.push(context);
+        return [{
+          domain: "market.yandex.ru", platform: "yandex", listingId: "1746647533", brand,
+          url: "https://reviews.yandex.ru/product/baktoblis--1746647533", metadata: {}
+        }];
+      },
+      async collect(ref) {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: `${ref.brand} таблетки 100 мг №10`, reviews: 12, rating: 4.8,
+          status: "ok", capturedAt: new Date().toISOString(), source: "yandex_reviews_direct"
+        };
+      }
+    };
+    const service = new RatingsService(repository, async () => adapter);
+    const yandexRequest = { ...request, domains: ["market.yandex.ru"], brands: ["Бактоблис"] };
+
+    const first = await service.executeRun((await service.createRun(yandexRequest)).id);
+    expect(first.collectionStartedAt).toBeTruthy();
+    expect(first.collectionFinishedAt).toBeTruthy();
+    expect(await repository.listSourceCards("test_sheet")).toMatchObject([{
+      listingId: "1746647533",
+      brand: "Бактоблис",
+      canonicalUrl: "https://reviews.yandex.ru/product/baktoblis--1746647533"
+    }]);
+
+    await service.executeRun((await service.createRun(yandexRequest)).id);
+    expect(healthContexts[1]?.previousIds).toEqual(["1746647533"]);
+    expect(discoveryContexts[1]?.previousIds).toEqual(["1746647533"]);
+    expect(discoveryContexts[1]?.refreshDiscovery).toBe(false);
+
+    await service.executeRun((await service.createRun({ ...yandexRequest, discoveryMode: "refresh" })).id);
+    expect(discoveryContexts[2]?.previousIds).toEqual(["1746647533"]);
+    expect(discoveryContexts[2]?.refreshDiscovery).toBe(true);
+    expect((await service.listRecentRuns())[0]).toMatchObject({
+      brands: ["Бактоблис"],
+      durationMs: expect.any(Number)
+    });
   });
 });

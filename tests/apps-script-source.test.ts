@@ -62,4 +62,13 @@ describe("Google Apps Script bridge source", () => {
     expect(source).toContain('.setBackground("#f0effa")');
     expect(source).toContain('.setBackground("#e7e5f7")');
   });
+
+  it("applies the client rating gradient only to product rating columns", () => {
+    expect(source).toContain("var ratingRanges = [];");
+    expect(source).toContain("for (var ratingColumn = 6; ratingColumn <= columns; ratingColumn += 2)");
+    expect(source).toContain('.setGradientMinpointWithValue("#ea4335", SpreadsheetApp.InterpolationType.NUMBER, "4")');
+    expect(source).toContain('.setGradientMidpointWithValue("#fbbc04", SpreadsheetApp.InterpolationType.NUMBER, "4.5")');
+    expect(source).toContain('.setGradientMaxpointWithValue("#34a853", SpreadsheetApp.InterpolationType.NUMBER, "5")');
+    expect(source).toContain("sheet.setConditionalFormatRules(conditionalRules);");
+  });
 });

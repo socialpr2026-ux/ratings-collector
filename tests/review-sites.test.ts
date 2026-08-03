@@ -38,8 +38,8 @@ describe("first-party review-site adapters", () => {
     },
     {
       domain: "vseotzyvy.ru",
-      searchPath: "/category/",
-      searchParam: ["search", "Анвифен"],
+      searchPath: "/search",
+      searchParam: ["q", "Анвифен"],
       productPath: "/item/51734/reviews-anvifen-anvifen/",
       productHtml: `<h1><span itemprop="name">Анвифен</span> отзывы</h1><div itemprop="ratingValue">4,5</div><span itemprop="reviewCount">12</span>`,
       listingId: "51734",
@@ -201,6 +201,56 @@ describe("first-party review-site adapters", () => {
     `)) as typeof fetch);
 
     await expect(adapter.discover("Хондрофен", context)).rejects.toMatchObject({ code: "blocked" });
+  });
+
+  it("discovers and collects the redesigned Vseotzyvy exact aggregate", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/search") return new Response(`
+        <main>
+          <h1>Поиск</h1>
+          <input type="search" name="q" value="Кагоцел">
+          <p>Найдено 3 результата</p>
+          <article><h2><a href="/otzyvy/kagotsel-49555">Кагоцел</a></h2><span>5.0</span><span>72 отзыва</span></article>
+          <article><h2><a href="/otzyvy/kagotsel-forte-59343">Кагоцел форте</a></h2></article>
+          <article><h2><a href="/otzyvy/kantselyarskie-skrepki-7576">Канцелярские скрепки</a></h2></article>
+        </main>
+      `);
+      if (url.pathname === "/otzyvy/kagotsel-49555") return new Response(`
+        <link rel="canonical" href="https://vseotzyvy.ru/otzyvy/kagotsel-49555">
+        <main>
+          <h1>Кагоцел отзывы</h1>
+          <img alt="Оценка 5.0 из 5">
+          <div>5.0 · 72 оценки</div>
+          <h2>Отзывы покупателей о Кагоцел (72 отзыва)</h2>
+        </main>
+      `);
+      throw new Error(`Unexpected URL ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("vseotzyvy.ru", fetchMock);
+
+    const refs = await adapter.discover("Кагоцел", context);
+    const exact = refs.find((ref) => ref.listingId === "49555")!;
+    const result = await adapter.collect(exact, context);
+
+    expect(refs.map((ref) => ref.listingId)).toEqual(["49555", "59343"]);
+    expect(result).toMatchObject({
+      listingId: "49555",
+      product: "Кагоцел отзывы",
+      reviews: 72,
+      rating: 5,
+      ratingCount: 72,
+      status: "ok",
+      source: "vseotzyvy-visible-aggregate"
+    });
+  });
+
+  it("accepts the redesigned Vseotzyvy zero only for the exact search query", async () => {
+    const adapter = adapterFor("vseotzyvy.ru", (async () => new Response(`
+      <main><h1>Поиск</h1><input type="search" name="q" value="Хондрофен"><p>Найдено 0 результатов</p></main>
+    `)) as typeof fetch);
+
+    await expect(adapter.discover("Хондрофен", context)).resolves.toEqual([]);
   });
 
   it.each([
@@ -853,6 +903,27 @@ describe("first-party review-site adapters", () => {
     });
   });
 
+  it("treats the exact Vseotzyvy downgrade-to-home redirect as a retired search candidate", async () => {
+    const adapter = adapterFor("vseotzyvy.ru", (async () => new Response(null, {
+      status: 301,
+      headers: { location: "http://vseotzyvy.ru/" }
+    })) as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "vseotzyvy.ru",
+      platform: "vseotzyvy.ru",
+      listingId: "29728",
+      brand: "Здравсити",
+      url: "https://vseotzyvy.ru/item/29728/reviews-internet-apteka-zdravsiti/",
+      metadata: { source: "site-search" }
+    }, context)).resolves.toMatchObject({
+      status: "not_found",
+      reviews: null,
+      rating: null,
+      source: "review_site_missing_candidate"
+    });
+  });
+
   it("health-checks Otzovik on a proven aggregate card instead of the protected homepage", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = urlOf(input);
@@ -864,6 +935,22 @@ describe("first-party review-site adapters", () => {
       );
     }) as unknown as typeof fetch;
     const adapter = adapterFor("otzovik.com", fetchMock);
+
+    await expect(adapter.healthCheck(context)).resolves.toMatchObject({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("health-checks Vseotzyvy on a source-bound aggregate card instead of the challenged homepage", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      expect(url.pathname).toBe("/otzyvy/kagotsel-49555");
+      return new Response(
+        `<link rel="canonical" href="https://vseotzyvy.ru/otzyvy/kagotsel-49555">` +
+        `<h1>Кагоцел отзывы</h1><img alt="Оценка 5 из 5">` +
+        `<div>5 · 72 оценки</div><h2>Отзывы покупателей о Кагоцел (72 отзыва)</h2>`
+      );
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("vseotzyvy.ru", fetchMock);
 
     await expect(adapter.healthCheck(context)).resolves.toMatchObject({ ok: true });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -889,6 +976,93 @@ describe("first-party review-site adapters", () => {
       expect(result).toMatchObject({ listingId: "tikalizis", reviews: 2, rating: 5, status: "ok" });
       expect(result.productEvidence?.scope).toBe("product_family");
     }
+  });
+
+  it("reads the exact Otzyvru organization aggregate without mistaking 350 reviews for zero", async () => {
+    const pageUrl = "https://www.otzyvru.com/velgiya-eko";
+    const productHtml = `<html><body><h1 data-id="114193">Велгия Эко отзывы</h1>` +
+      `<script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@graph": [{
+          "@type": "Organization", name: "Велгия Эко", url: pageUrl,
+          aggregateRating: { "@type": "AggregateRating", ratingValue: 4.5, reviewCount: 157, ratingCount: 157, bestRating: 5 }
+        }]
+      })}</script>` +
+      `<div class="item-card"><div id="descr"><b class="rtng_value">4.5</b><b class="rtng_best">5</b>` +
+      `<b class="reviews_count">157</b></div></div><aside>Похожая карточка: 350 отзывов</aside></body></html>`;
+    const adapter = adapterFor("otzyvru.com", (async (input: RequestInfo | URL) =>
+      new URL(input.toString()).pathname === "/velgiya-eko"
+        ? new Response(productHtml)
+        : new Response("missing", { status: 404 })) as typeof fetch);
+
+    const [ref] = await adapter.discover("Велгия Эко", context);
+    await expect(adapter.collect(ref, context)).resolves.toMatchObject({
+      listingId: "velgiya-eko", reviews: 157, rating: 4.5, status: "ok",
+      source: "otzyvru-json-ld-organization"
+    });
+  });
+
+  it("falls back from a missing short Otzyvru slug to the exact search result", async () => {
+    const pageUrl = "https://www.otzyvru.com/tirzetta-inyektsii-dlya-pohudeniya";
+    const requested: string[] = [];
+    const productHtml = `<html><body><h1 data-id="114555">Тирзетта инъекции для похудения</h1>` +
+      `<script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@graph": [{
+          "@type": "Organization", name: "Тирзетта инъекции для похудения", url: pageUrl,
+          aggregateRating: { "@type": "AggregateRating", ratingValue: 4.3, reviewCount: 269, ratingCount: 269, bestRating: 5 }
+        }]
+      })}</script>` +
+      `<div class="item-card"><div id="descr"><b class="rtng_value">4.3</b><b class="rtng_best">5</b>` +
+      `<b class="reviews_count">269</b></div></div></body></html>`;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      requested.push(`${url.pathname}${url.search}`);
+      if (url.pathname === "/tirzetta") return new Response("missing", { status: 404 });
+      if (url.pathname === "/search/") return new Response(
+        `<html><body><h1>Результаты поиска по запросу «Тирзетта»</h1>` +
+        `<p>По вашему запросу найдено результатов: 1</p>` +
+        `<a href="${pageUrl}">Тирзетта инъекции для похудения</a></body></html>`
+      );
+      if (url.pathname === "/tirzetta-inyektsii-dlya-pohudeniya") return new Response(productHtml);
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("otzyvru.com", fetchMock);
+
+    const refs = await adapter.discover("Тирзетта", context);
+    const result = await adapter.collect(refs[0], context);
+
+    expect(refs).toMatchObject([{ listingId: "tirzetta-inyektsii-dlya-pohudeniya", url: pageUrl }]);
+    expect(result).toMatchObject({ reviews: 269, rating: 4.3, status: "ok" });
+    expect(requested).toEqual([
+      "/tirzetta", "/search/?q=%D0%A2%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0",
+      "/tirzetta-inyektsii-dlya-pohudeniya"
+    ]);
+  });
+
+  it("uses the official ru.otzyv.com search to prove an exact no-results outcome", async () => {
+    const requested: string[] = [];
+    const adapter = adapterFor("ru.otzyv.com", (async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      requested.push(`${url.pathname}${url.search}`);
+      if (url.pathname === "/tirzetta") return new Response("missing", { status: 404 });
+      return new Response(`<html><body><input name="q" value="Тирзетта"><h1>Поиск отзывов для Тирзетта</h1>` +
+        `<p>По вашему запросу найдено: 0 результатов.</p></body></html>`);
+    }) as typeof fetch);
+
+    await expect(adapter.discover("Тирзетта", context)).resolves.toEqual([]);
+    expect(requested).toEqual([
+      "/tirzetta", "/search/?q=%D1%82%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0"
+    ]);
+  });
+
+  it("keeps an unknown Otzyv search shape fail-closed after the short slug is missing", async () => {
+    const adapter = adapterFor("otzyvru.com", (async (input: RequestInfo | URL) =>
+      new URL(input.toString()).pathname === "/tirzetta"
+        ? new Response("missing", { status: 404 })
+        : new Response("<html><body><h1>Результаты поиска Тирзетта</h1></body></html>")) as typeof fetch);
+
+    await expect(adapter.discover("Тирзетта", context)).rejects.toMatchObject({ code: "blocked" });
   });
 
   it("health-checks and discovers the live ru.otzyv.com ts slug without touching its protected homepage", async () => {
@@ -950,6 +1124,9 @@ describe("first-party review-site adapters", () => {
           <h2><a href="/otzyvcategory?page=show_ad&amp;adid=289924&amp;catid=76968">Противовирусный препарат Кагоцел отзывы</a></h2>
           <a href="/otzyvcategory?page=show_category&amp;catid=76968&amp;order=0&amp;expand=0">Читать все отзывы (23)</a>
         </div>
+        ${Array.from({ length: 22 }, (_, index) =>
+          `<a href="/otzyvcategory?page=show_ad&amp;adid=${300000 + index}&amp;catid=76968">Отзыв</a>`
+        ).join("")}
       `);
       if (url.searchParams.get("page") === "show_category") return new Response(`
         <h1 class="contentheading">Противовирусный препарат Кагоцел отзывы</h1>
@@ -980,6 +1157,91 @@ describe("first-party review-site adapters", () => {
     });
   });
 
+  it("keeps only an exact Pravogolosa category when search totals mix analogues", async () => {
+    const requestedCategories: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.searchParams.get("page") === "search") return new Response(`
+        <h3>По вашему запросу «Трекрезан» всего найдено отзывов: 11</h3>
+        <div class="module">
+          <h2><a href="/otzyvcategory?page=show_ad&amp;adid=1&amp;catid=81984">Трекресил отзывы</a></h2>
+          <p>Раньше принимала Трекрезан, теперь выбрала аналог.</p>
+          <a href="/otzyvcategory?page=show_category&amp;catid=81984&amp;order=0&amp;expand=0">Читать все отзывы (13)</a>
+        </div>
+        <div class="module">
+          <h2><a href="/otzyvcategory?page=show_ad&amp;adid=2&amp;catid=61812">Трекрезан отзывы</a></h2>
+          <a href="/otzyvcategory?page=show_category&amp;catid=61812&amp;order=0&amp;expand=0">Читать все отзывы (7)</a>
+        </div>
+        ${Array.from({ length: 9 }, (_, index) =>
+          `<a href="/otzyvcategory?page=show_ad&amp;adid=${index + 3}&amp;catid=61812">Отзыв</a>`
+        ).join("")}
+      `);
+      if (url.searchParams.get("page") === "show_category") {
+        const category = url.searchParams.get("catid")!;
+        requestedCategories.push(category);
+        const exact = category === "61812";
+        return new Response(`
+          <h1 class="contentheading">${exact ? "Трекрезан" : "Трекресил"} отзывы</h1>
+          <span title="Рейтинг::Оценка объекта отзыва ${exact ? "4.8" : "4.9"} из 5."></span>
+          <a href="/otzyvcategory?page=show_category&amp;catid=${category}&amp;order=0&amp;expand=0">все отзывы ${exact ? "7" : "13"}</a>
+        `);
+      }
+      throw new Error(`Unexpected URL ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("pravogolosa.net", fetchMock);
+
+    const refs = await adapter.discover("Трекрезан", context);
+    const result = await adapter.collect(refs[0], context);
+
+    expect(requestedCategories).toEqual(["81984", "61812", "61812"]);
+    expect(refs).toMatchObject([{
+      listingId: "61812",
+      title: "Трекрезан отзывы",
+      metadata: { source: "pravogolosa-search-category", reviewCount: 7 }
+    }]);
+    expect(result).toMatchObject({ listingId: "61812", reviews: 7, rating: 4.8, status: "ok" });
+  });
+
+  it("proves every paginated Pravogolosa search hit before collecting exact categories", async () => {
+    const requestedStarts: Array<string | null> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.searchParams.get("page") === "search") {
+        const start = url.searchParams.get("start");
+        requestedStarts.push(start);
+        if (start === "20") return new Response(`
+          <h3>По вашему запросу «Арбидол» всего найдено отзывов: 21</h3>
+          <a href="/otzyvcategory?page=show_ad&amp;adid=21&amp;catid=80789">Арбидол отзыв</a>
+          <a href="/otzyvcategory?page=show_category&amp;catid=80789&amp;order=0&amp;expand=0">Читать все отзывы (10)</a>
+        `);
+        return new Response(`
+          <h3>По вашему запросу «Арбидол» всего найдено отзывов: 21</h3>
+          ${Array.from({ length: 20 }, (_, index) =>
+            `<a href="/otzyvcategory?page=show_ad&amp;adid=${index + 1}&amp;catid=80944">Арбидол Максимум отзыв</a>`
+          ).join("")}
+          <a href="/otzyvcategory?page=show_category&amp;catid=80944&amp;order=0&amp;expand=0">Читать все отзывы (11)</a>
+          <a href="/otzyvcategory?catid=0&amp;page=search&amp;text_search=Арбидол&amp;start=20">2</a>
+        `);
+      }
+      if (url.searchParams.get("page") === "show_category") {
+        const id = url.searchParams.get("catid");
+        const reviews = id === "80944" ? 11 : 10;
+        return new Response(`
+          <h1 class="contentheading">${id === "80944" ? "Арбидол Максимум" : "Арбидол"} отзывы</h1>
+          <span title="Рейтинг::Оценка объекта отзыва 4.7 из 5."></span>
+          <a href="/otzyvcategory?page=show_category&amp;catid=${id}">все отзывы ${reviews}</a>
+        `);
+      }
+      throw new Error(`Unexpected URL ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("pravogolosa.net", fetchMock);
+
+    const refs = await adapter.discover("Арбидол", context);
+
+    expect(requestedStarts).toEqual([null, "20"]);
+    expect(refs.map((ref) => ref.listingId)).toEqual(["80944", "80789"]);
+  });
+
   it("treats a Pravogolosa manufacturer aggregate surfaced by a brand mention as no results", async () => {
     const requested: URL[] = [];
     const adapter = adapterFor("pravogolosa.net", (async (input: RequestInfo | URL) => {
@@ -992,6 +1254,9 @@ describe("first-party review-site adapters", () => {
           <p>Покупатель упоминает Оциллококцинум в отзыве о производителе.</p>
           <a href="/otzyvcategory?page=show_category&amp;catid=41247&amp;order=0&amp;expand=0">Читать все отзывы (4)</a>
         </div>
+        <a href="/otzyvcategory?page=show_ad&amp;adid=2&amp;catid=41247">Отзыв</a>
+        <a href="/otzyvcategory?page=show_ad&amp;adid=3&amp;catid=41247">Отзыв</a>
+        <a href="/otzyvcategory?page=show_ad&amp;adid=4&amp;catid=41247">Отзыв</a>
       `);
       if (url.searchParams.get("page") === "show_category") return new Response(`
         <h1 class="contentheading">ООО «Буарон» отзывы</h1>
@@ -1107,8 +1372,8 @@ describe("blocked free-mode review sites", () => {
       "pravogolosa.net",
       "ru.otzyv.com",
       "medum.ru",
-      "eapteka.ru",
-      "polza.ru"
+      "apteka.magnit.ru",
+      "etabl.ru"
     ]);
   });
 });

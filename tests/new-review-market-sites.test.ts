@@ -38,6 +38,22 @@ function megaProduct(source: string, sku = "100024501619", title = "Оцилло
 }
 
 describe("Megamarket translated SSR adapter", () => {
+  it("checks the requested brand through operative discovery instead of an unrelated fixed product", async () => {
+    const source = "https://megamarket.ru/catalog/?q=%D0%A6%D0%B5%D1%80%D0%B5%D1%82%D0%BE%D0%BD";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      expect(url.pathname).toBe("/catalog/");
+      expect(url.searchParams.get("q")).toBe("Церетон");
+      return new Response(megaSearch(source)
+        .replaceAll("Оциллококцинум", "Церетон")
+        .replaceAll("ocillokokcinum", "cereton"));
+    }) as unknown as typeof fetch;
+
+    await expect(new MegamarketAdapter(new MemoryEvidenceStore(), fetchMock).healthCheck({
+      ...context, brands: ["Церетон"]
+    })).resolves.toMatchObject({ ok: true, message: "megamarket.ru: operative discovery found 1 product card(s)" });
+  });
+
   it("deduplicates seller offers by goods id and collects the product review aggregate", async () => {
     const sourceSearch = "https://megamarket.ru/catalog/?q=%D0%9E%D1%86%D0%B8%D0%BB%D0%BB%D0%BE%D0%BA%D0%BE%D0%BA%D1%86%D0%B8%D0%BD%D1%83%D0%BC";
     const productSource = "https://megamarket.ru/catalog/details/ocillokokcinum-granuly-1-g-1-doz-12-sht-100024501619/";

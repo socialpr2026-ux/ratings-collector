@@ -30,6 +30,22 @@ describe("remote repository transient edge failures", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it("keeps an idempotent run checkpoint alive through a short gateway brownout", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("bad gateway", { status: 500 }))
+      .mockResolvedValueOnce(new Response("bad gateway", { status: 500 }))
+      .mockResolvedValueOnce(new Response("bad gateway", { status: 500 }))
+      .mockResolvedValueOnce(new Response("bad gateway", { status: 500 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ result: null }), { status: 200 }));
+    const wait = vi.fn(async (_milliseconds: number) => undefined);
+    const repository = new RemoteRepository(endpoint, token, fetchMock, wait);
+
+    await expect(repository.saveRun({ id: "run-1" } as never)).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(wait.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([200, 400, 800, 1_600]);
+  });
+
   it("does not retry non-idempotent quota reservations", async () => {
     const fetchMock = vi.fn(async () =>
       new Response("<!doctype html><title>Bad Gateway</title>", { status: 502 }));

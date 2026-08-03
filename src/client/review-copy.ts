@@ -145,8 +145,33 @@ export function summarizeIssues(values: readonly string[]): string[] {
 export function friendlyErrorMessage(error: unknown, action: UserAction) {
   const raw = (error instanceof Error ? error.message : String(error ?? "")).trim();
   if (!raw) return actionFallbacks[action];
-  if (/failed to fetch|network(?:error)?|fetch failed|timeout|timed out|econn|socket hang up/i.test(raw)) {
+  const networkFailure = /failed to fetch|network(?:error)?|fetch failed|timeout|timed out|econn|socket hang up/i.test(raw);
+  const ambiguousRetryAck = action === "retry" && (
+    networkFailure || /POST\s+\/ratings\b.*(?:status(?:\s+code)?\s+404|HTTP\s+404)|proxy.*(?:404|5\d\d)/i.test(raw)
+  );
+  if (ambiguousRetryAck) {
+    return "Сервис не подтвердил повторный запуск. Сохранённый результат не изменён — повторите позже.";
+  }
+  if (networkFailure) {
     return "Нет связи с сервисом. Проверьте интернет и повторите.";
+  }
+  // Publication errors can embed the run's collector blockers. An Ozon quota
+  // mentioned inside that payload is not evidence that the Sheets write itself
+  // exhausted a collection quota.
+  if (action === "publish") {
+    if (/freeze columns|frozen columns|merged cell|закреп\S* столбц|объедин[её]нн\S* яче/i.test(raw)) {
+      return "Не удалось применить оформление таблицы. Результат сбора сохранён — повторите запись.";
+    }
+    if (/revision[_\s-]*mismatch|таблиц\S* изменил|изменилась после чтения/i.test(raw)) {
+      return "Таблица изменилась во время записи. Результат сбора сохранён — повторите запись.";
+    }
+    if (/sheet[_\s-]*too[_\s-]*large|превышает лимит|лист слишком велик/i.test(raw)) {
+      return "Лист слишком велик для безопасной записи. Удалите лишние пустые строки или столбцы и повторите.";
+    }
+    if (/permission|forbidden|public[_\s-]*edit[_\s-]*required|доступ[^.]{0,80}(?:таблиц|редактор)|ролью\s+[«\"]?редактор/i.test(raw)) {
+      return actionFallbacks.publish;
+    }
+    return "Не удалось записать данные в Google Таблицу. Результат сбора сохранён — повторите запись.";
   }
   if (isQuotaIssue(raw)) {
     return "Доступный лимит сбора исчерпан. Повторите позже или временно уберите эту площадку.";
@@ -160,20 +185,8 @@ export function friendlyErrorMessage(error: unknown, action: UserAction) {
   if (action === "review" && /не содержит доказанного товарного варианта/i.test(raw)) {
     return "Карточке не хватает данных для точного определения товара. Обновите страницу; если сообщение останется, не подтверждайте эту карточку.";
   }
-  if (action === "publish" && /freeze columns|frozen columns|merged cell|закреп\S* столбц|объедин[её]нн\S* яче/i.test(raw)) {
-    return "Не удалось применить оформление таблицы. Результат сбора сохранён — повторите запись.";
-  }
-  if (action === "publish" && /revision[_\s-]*mismatch|таблиц\S* изменил|изменилась после чтения/i.test(raw)) {
-    return "Таблица изменилась во время записи. Результат сбора сохранён — повторите запись.";
-  }
-  if (action === "publish" && /sheet[_\s-]*too[_\s-]*large|превышает лимит|лист слишком велик/i.test(raw)) {
-    return "Лист слишком велик для безопасной записи. Удалите лишние пустые строки или столбцы и повторите.";
-  }
   if (/permission|forbidden|public[_\s-]*edit[_\s-]*required|доступ[^.]{0,80}(?:таблиц|редактор)|ролью\s+[«\"]?редактор/i.test(raw)) {
     return actionFallbacks.publish;
-  }
-  if (action === "publish") {
-    return "Не удалось записать данные в Google Таблицу. Результат сбора сохранён — повторите запись.";
   }
   if (/\/api\/|syntaxerror|unexpected token|internal server|service unavailable|status code|\bat\s+\w+\s*\(|\b[a-z]+_[a-z_]+\b|\b(?:typeerror|econn\w*|etimedout)\b/i.test(raw)) {
     return actionFallbacks[action];
@@ -261,6 +274,14 @@ export function canPublishSuccessfulPartitions(
   return status === "review" && successfulPartitionCount > 0 && failedPartitionCount > 0 && reviewCount === 0;
 }
 
+export function hasCurrentPartialPublication(
+  run: Pick<RunState, "status" | "payloadHash" | "publication" | "publicationExclusions">
+) {
+  return run.status === "review" &&
+    (run.publicationExclusions?.length ?? 0) > 0 &&
+    Boolean(run.payloadHash && run.publication?.payloadHash === run.payloadHash);
+}
+
 /** Local Chrome is a reserve route, never a first choice or a parser workaround. */
 export function ozonCompanionEligibleBrands(
   run: Pick<RunState, "status" | "request" | "partitions">
@@ -280,11 +301,11 @@ export function reviewIntroText(reviewCount: number, failedPartitionCount: numbe
       ? `Не завершено проверок: ${failedPartitionCount}. Готовые сочетания площадок и брендов можно записать отдельно.`
       : `Не завершено проверок: ${failedPartitionCount}. Запись отключена, чтобы в таблицу не попали частичные данные.`;
     return reviewCount > 0
-      ? `${reviewCount} ${plural(reviewCount, "карточка требует", "карточки требуют", "карточек требуют")} решения. Откройте карточку, сверьте товар и отметьте подходящие. ${blockerText}`
+      ? `${reviewCount} ${plural(reviewCount, "карточка требует", "карточки требуют", "карточек требуют")} решения. Откройте карточку, сверьте товар и отметьте подходящие: выбранные сохранятся, остальные будут исключены. ${blockerText}`
       : `Спорных карточек нет, но сбор завершён не полностью. ${blockerText}`;
   }
   return reviewCount > 0
-    ? `${reviewCount} ${plural(reviewCount, "карточка требует", "карточки требуют", "карточек требуют")} решения. Откройте карточку, сверьте товар и отметьте подходящие.`
+    ? `${reviewCount} ${plural(reviewCount, "карточка требует", "карточки требуют", "карточек требуют")} решения. Откройте карточку, сверьте товар и отметьте подходящие: выбранные сохранятся, остальные будут исключены.`
     : "Все карточки определены. Результат готов к записи в таблицу.";
 }
 

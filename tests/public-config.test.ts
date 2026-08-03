@@ -19,6 +19,24 @@ describe("public configuration", () => {
     expect(new Set(config.companyBrands as string[]).size).toBe(68);
   });
 
+  it("buffers an employee review decision before any repository request", async () => {
+    const upstream = vi.fn(async () => { throw new Error("repository must not run before the request body is parsed"); });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await onRequest({
+      request: new Request("https://ratings.example/api/runs/run-1/review", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{"
+      }),
+      env: { RATINGS_ALLOW_UNAUTHENTICATED: "true" }
+    });
+
+    expect(response.status).toBe(400);
+    expect(upstream).not.toHaveBeenCalled();
+    expect(await response.json()).toMatchObject({ error: expect.stringMatching(/JSON|Unexpected/i) });
+  });
+
 });
 
 describe("new static collector gateways", () => {
@@ -31,6 +49,80 @@ describe("new static collector gateways", () => {
     }),
     { INTERNAL_AGENT_TOKEN: token }
   );
+
+  it("proxies only bounded exact Vapteke autocomplete and product routes", async () => {
+    const upstream = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      expect(url.hostname).toBe("vapteke.ru");
+      if (url.pathname === "/ajax/autocomplete") {
+        expect(init?.method).toBe("POST");
+        expect(String(init?.body)).toBe(`query=${encodeURIComponent("Бивиарт")}`);
+        return new Response('{"success":true,"data":{"total":{"value":0,"relation":"eq"},"hits":[]},"error":"200"}', {
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return new Response("<html>product</html>", { headers: { "content-type": "text/html" } });
+    });
+    vi.stubGlobal("fetch", upstream);
+    const autocomplete = await staticReviewFetch(new Request(
+      "https://ratings.example/api/internal/static-review-fetch",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          url: "https://vapteke.ru/ajax/autocomplete",
+          vaptekeAutocomplete: { query: "Бивиарт" }
+        })
+      }
+    ), { INTERNAL_AGENT_TOKEN: token });
+    expect(autocomplete.status).toBe(200);
+    expect(autocomplete.headers.get("x-ratings-source")).toBe("vapteke-exact-autocomplete");
+
+    await expect(callGateway("https://vapteke.ru/product/biviart-komfort-018-10-ml-682542"))
+      .resolves.toMatchObject({ status: 200 });
+    await expect(callGateway("https://vapteke.ru/search?q=Бивиарт"))
+      .resolves.toMatchObject({ status: 400 });
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("compacts an exact translated Yandex Market card without Sandbox", async () => {
+    const source = "https://market.yandex.ru/card/mikroginon-tab-po/103544271955/reviews";
+    const target = new URL("https://market-yandex-ru.translate.goog/card/mikroginon-tab-po/103544271955/reviews");
+    target.searchParams.set("_x_tr_sl", "ru");
+    target.searchParams.set("_x_tr_tl", "en");
+    target.searchParams.set("_x_tr_hl", "en");
+    const noise = "x".repeat(500_000);
+    const upstream = vi.fn(async () => new Response(`<html><head><base href="${source}"><style>${noise}</style></head><body>` +
+      `<script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "Product",
+        name: "?????????? ???????? ?/? 150???+30??? 21??",
+        url: source,
+        aggregateRating: {
+          "@type": "AggregateRating",
+          bestRating: 5,
+          ratingValue: 5,
+          ratingCount: 15,
+          reviewCount: 1
+        }
+      })}</script></body></html>`, { headers: { "content-type": "text/html; charset=utf-8" } }));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target.toString());
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-yandex-market-compact");
+    expect(response.headers.get("x-ratings-final-url")).toBe(source);
+    expect(proof).toContain('"ratingCount":15');
+    expect(proof).toContain('"reviewCount":1');
+    expect(proof).not.toContain(noise.slice(0, 100));
+    expect(Number(response.headers.get("x-ratings-proof-bytes"))).toBeLessThan(2_000);
+
+    target.searchParams.set("redirect", "https://evil.example");
+    expect((await callGateway(target.toString())).status).toBe(400);
+    expect(upstream).toHaveBeenCalledOnce();
+  });
 
   it("proxies only exact Ozon composer search or product paths", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
@@ -406,6 +498,74 @@ describe("static iRecommend gateway", () => {
   });
 });
 
+describe("static Vseotzyvy reader gateway", () => {
+  const token = "x".repeat(32);
+  const callGateway = (url: string) => staticReviewFetch(
+    new Request("https://ratings.example/api/internal/static-review-fetch", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ url })
+    }),
+    { INTERNAL_AGENT_TOKEN: token }
+  );
+
+  it("compacts a complete exact search and product aggregate from the source-bound reader", async () => {
+    const search = "https://vseotzyvy.ru/search?q=%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB";
+    const product = "https://vseotzyvy.ru/otzyvy/kagotsel-49555";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+      if (url.includes("/search?")) return new Response(`Title: Поиск: Кагоцел
+
+URL Source: ${search}
+
+Markdown Content:
+# Поиск
+Найдено 2 результата
+[Image 1: Кагоцел](https://vseotzyvy.ru/otzyvy/kagotsel-49555)
+[Кагоцел](https://vseotzyvy.ru/otzyvy/kagotsel-49555)
+[Другой товар](https://vseotzyvy.ru/otzyvy/drugoy-tovar-70001)`);
+      return new Response(`Title: Отзывы на Кагоцел
+
+URL Source: ${product}
+
+Markdown Content:
+## Кагоцел отзывы
+5.0 · 72 оценки 72 отзыва 99% рекомендуют
+## Отзывы покупателей о Кагоцел (72 отзыва)`);
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const searchResponse = await callGateway(search);
+    const searchProof = await searchResponse.text();
+    const productResponse = await callGateway(product);
+    const productProof = await productResponse.text();
+
+    expect(searchResponse.status).toBe(200);
+    expect(searchResponse.headers.get("x-ratings-source")).toBe("vseotzyvy-reader-compact");
+    expect(searchProof).toContain('name="q" value="Кагоцел"');
+    expect(searchProof.match(/<article>/g)).toHaveLength(2);
+    expect(productResponse.status).toBe(200);
+    expect(productProof).toContain('<link rel="canonical" href="https://vseotzyvy.ru/otzyvy/kagotsel-49555">');
+    expect(productProof).toContain("Отзывы покупателей о Кагоцел (72 отзывов)");
+    expect(productProof).toContain("Оценка 5 из 5");
+  });
+
+  it("fails closed when the reader source or declared result set is incomplete", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`Title: Поиск: Кагоцел
+
+URL Source: https://vseotzyvy.ru/search?q=Другой
+
+Markdown Content:
+Найдено 2 результата
+[Кагоцел](https://vseotzyvy.ru/otzyvy/kagotsel-49555)`)));
+
+    const response = await callGateway("https://vseotzyvy.ru/search?q=%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB");
+
+    expect(response.status).toBe(502);
+    expect(await response.text()).toContain("did not prove the exact source");
+  });
+});
+
 describe("static Otzovik product gateway", () => {
   const token = "x".repeat(32);
   const callGateway = (url: string) => staticReviewFetch(
@@ -440,6 +600,69 @@ describe("static Otzovik product gateway", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("x-ratings-source")).toBe("google-translate-ssr");
     expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it("retries an incomplete translated product through the exact no-cache SSR variant", async () => {
+    const source = "https://otzovik.com/reviews/tabletki_arbidol_otc_pharm/";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(input.toString());
+      if (!url.searchParams.has("_x_tr_pto")) {
+        return new Response(`<html><head><base href="${source}"></head><body>temporary incomplete shell</body></html>`);
+      }
+      expect(url.searchParams.get("_x_tr_pto")).toBe("wapp");
+      return new Response(`<html><head><base href="${source}"></head><body>
+        <main itemscope itemtype="http://schema.org/Product"><link itemprop="url" href="${source}">
+        <div itemprop="aggregateRating"><meta itemprop="ratingValue" content="4.97">
+        <meta itemprop="reviewCount" content="34"></div></main></body></html>`);
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(source);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-ssr-fallback");
+    expect(await response.text()).toContain('itemprop="reviewCount" content="34"');
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers the exact translated aggregate from reader HTML after both regional SSR variants are incomplete", async () => {
+    const source = "https://otzovik.com/reviews/tabletki_arbidol_otc_pharm/";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(input.toString());
+      if (url.hostname !== "r.jina.ai") {
+        return new Response(`<html><head><base href="${source}"></head><body>regional shell</body></html>`);
+      }
+      expect(url.pathname).toContain("otzovik-com.translate.goog/reviews/tabletki_arbidol_otc_pharm/");
+      return new Response(`<html><head><base href="${source}"></head><body>
+        <main itemscope itemtype="http://schema.org/Product"><link itemprop="url" href="${source}">
+        <div itemprop="aggregateRating"><meta itemprop="ratingValue" content="4.97">
+        <meta itemprop="reviewCount" content="34"></div></main></body></html>`);
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(source);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("otzovik-translated-reader-html");
+    expect(await response.text()).toContain('itemprop="reviewCount" content="34"');
+    expect(upstream).toHaveBeenCalledTimes(3);
+  });
+
+  it("accepts an exact Otzovik Product URL when the translated page omits canonical", async () => {
+    const source = "https://otzovik.com/reviews/tabletki_arbidol_otc_pharm/";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`
+      <html><head><base href="${source}"></head><body>
+      <main itemscope itemtype="https://schema.org/Product">
+        <link itemprop="url" href="${source}"><h1 itemprop="name">Таблетки Арбидол</h1>
+        <div itemprop="aggregateRating"><meta itemprop="ratingValue" content="4.8">
+        <meta itemprop="reviewCount" content="34"></div>
+      </main></body></html>
+    `)));
+
+    const response = await callGateway(source);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('itemprop="reviewCount" content="34"');
   });
 
   it("rejects a translated page whose canonical source or aggregate is incomplete", async () => {
@@ -585,6 +808,46 @@ describe("static ru.otzyv.com product gateway", () => {
     expect(upstream).toHaveBeenCalledOnce();
   });
 
+  it("returns a compact explicit zero from the bounded ru.otzyv.com search route", async () => {
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      expect(input.toString()).toBe("https://ru.otzyv.com/search/?q=%D0%A2%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0");
+      return new Response(`<html><body><input name="q" value="Тирзетта">` +
+        `<h1>Поиск отзывов для Тирзетта</h1><p>По вашему запросу найдено: 0 результатов.</p></body></html>`, {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway("https://ru.otzyv.com/search/?q=%D0%A2%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0");
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("direct-ru-otzyv-search");
+    expect(proof).toContain("найдено: 0 результатов");
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to the source-bound translated ru.otzyv.com search after a direct access block", async () => {
+    const upstream = vi.fn()
+      .mockResolvedValueOnce(new Response("forbidden", { status: 403, headers: { "content-type": "text/html" } }))
+      .mockResolvedValueOnce(new Response(
+        `<html><head><base href="https://ru.otzyv.com/search/?q=%D0%A2%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0"></head>` +
+        `<body><input name="q" value="Тирзетта"><h1>Поиск отзывов для Тирзетта</h1>` +
+        `<p>По вашему запросу найдено: 0 результатов.</p></body></html>`,
+        { headers: { "content-type": "text/html; charset=utf-8" } }
+      ));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway("https://ru.otzyv.com/search/?q=%D0%A2%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0");
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-ru-otzyv-search");
+    expect(new URL(String(upstream.mock.calls[1]?.[0]))).toMatchObject({
+      hostname: "ru-otzyv-com.translate.goog", pathname: "/search/"
+    });
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects query parameters, source mismatches and protection pages fail-closed", async () => {
     const upstream = vi.fn()
       .mockResolvedValueOnce(new Response(translated("https://ru.otzyv.com/another-product"), {
@@ -600,6 +863,14 @@ describe("static ru.otzyv.com product gateway", () => {
     expect((await callGateway("https://ru.otzyv.com/kagotsel")).status).toBe(502);
     expect((await callGateway("https://ru.otzyv.com/kagotsel")).status).toBe(502);
     expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects unbounded ru.otzyv.com search parameters before egress", async () => {
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    expect((await callGateway("https://ru.otzyv.com/search/?q=%D0%A2%D0%B8%D1%80%D0%B7%D0%B5%D1%82%D1%82%D0%B0&next=x")).status).toBe(400);
+    expect(upstream).not.toHaveBeenCalled();
   });
 });
 
@@ -876,6 +1147,32 @@ describe("static pharmacy Translate gateway", () => {
     expect(upstream).toHaveBeenCalledOnce();
   });
 
+  it("accepts ASNA's apex canonical only for the exact requested www card path", async () => {
+    const requested = "https://www.asna.ru/cards/tsereton_400mg_n28_kaps_soteks.html";
+    const canonical = "https://asna.ru/cards/tsereton_400mg_n28_kaps_soteks.html";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${canonical}">
+      <link rel="canonical" href="${canonical}"></head><body>
+      <div class="productPage__content product__item" itemscope itemtype="http://schema.org/Product">
+        <meta itemprop="sku" content="36138"><div itemprop="aggregateRating" itemscope>
+          <meta itemprop="ratingValue" content="4.9"><meta itemprop="reviewCount" content="17">
+        </div><div class="product__ratingText">Отзывы (17)</div>
+        <div id="feedbackListContainer" class="product__feedbackList">
+          <article class="product__feedbackItem" itemscope itemtype="https://schema.org/Review"></article>
+        </div></div></body></html>`, { headers: { "content-type": "text/html; charset=utf-8" } })));
+
+    const response = await callGateway(translated("www-asna-ru.translate.goog", new URL(requested).pathname).toString());
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('itemprop="sku" content="36138"');
+
+    const other = canonical.replace("tsereton_400mg_n28_kaps_soteks", "tserakson_500mg_n28_tab_soteks");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${other}">
+      <link rel="canonical" href="${other}"></head><body></body></html>`, {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    })));
+    expect((await callGateway(translated("www-asna-ru.translate.goog", new URL(requested).pathname).toString())).status).toBe(502);
+  });
+
   it("rejects a positive ASNA aggregate without matching visible feedback proof", async () => {
     const source = "https://www.asna.ru/cards/kagotsel_12mg_n10_tab_niarmedik_plyus_ooo.html";
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head>
@@ -944,7 +1241,9 @@ describe("static pharmacy Translate gateway", () => {
           : `<main itemscope>${card}</main><aside><div itemscope itemtype="https://schema.org/Product">
               <link itemprop="url" href="/catalog/otsillokoktsinum-granuly-1-g-6-doz_20630/">
               <meta itemprop="sku" content="20630"><meta itemprop="name" content="duplicate recommendation without metrics">
-            </div></aside>`) + `</body></html>`, { headers: { "content-type": "text/html" } });
+            </div></aside><div id="review_block"><input class="js-product_id" name="product_id" value="20630">
+              <div class="reviews__amount">1</div><div class="reviews__item review-item">Проверенный отзыв</div>
+            </div>`) + `</body></html>`, { headers: { "content-type": "text/html" } });
     });
     vi.stubGlobal("fetch", upstream);
 
@@ -956,8 +1255,51 @@ describe("static pharmacy Translate gateway", () => {
 
     const product = await callGateway(translated("polza-ru.translate.goog", "/catalog/otsillokoktsinum-granuly-1-g-6-doz_20630/").toString());
     expect(product.status).toBe(200);
-    expect(await product.text()).toContain('itemprop="reviewCount" content="1"');
+    const productProof = await product.text();
+    expect(productProof).toContain('itemprop="reviewCount" content="1"');
+    expect(productProof).toContain('class="js-product_id" name="product_id" value="20630"');
+    expect(productProof).toContain('class="reviews__amount">1</div>');
+    expect(productProof).toContain('class="reviews__item review-item"');
     expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps exact Polza family cards without AggregateRating and compacts their public empty-review state", async () => {
+    const familySource = "https://polza.ru/product/akvaoptik/";
+    const productSource = "https://polza.ru/catalog/akvaoptik-rastvor-dlya-obrabotki-i-khraneniya-linz-120-ml_30712/";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      const source = url.pathname.startsWith("/product/") ? familySource : productSource;
+      const body = url.pathname.startsWith("/product/")
+        ? `<div class="catalog__block--cards"><div class="catalog-block__items"><div class="catalog-card" itemscope>
+            <link itemprop="url" href="/catalog/akvaoptik-rastvor-dlya-obrabotki-i-khraneniya-linz-120-ml_30712/">
+            <meta itemprop="sku" content="30712"><meta itemprop="name" content="АкваОптик, раствор для обработки и хранения линз, 120 мл">
+          </div></div></div>`
+        : `<section class="product-detail__block" itemscope itemtype="https://schema.org/Product">
+            <link itemprop="url" href="/catalog/akvaoptik-rastvor-dlya-obrabotki-i-khraneniya-linz-120-ml_30712/">
+            <meta itemprop="sku" content="30712"></section>
+          <div id="review_block"><input class="js-product_id" name="product_id" value="30712">
+            <p>Отзывов пока нет</p>
+          </div>`;
+      return new Response(`<html><head><base href="${source}"></head><body>${body}</body></html>`, {
+        headers: { "content-type": "text/html" }
+      });
+    }));
+
+    const family = await callGateway(translated("polza-ru.translate.goog", "/product/akvaoptik/").toString());
+    expect(family.status).toBe(200);
+    const familyProof = await family.text();
+    expect(familyProof).toContain('itemprop="sku" content="30712"');
+    expect(familyProof).not.toContain('itemprop="aggregateRating"');
+
+    const product = await callGateway(translated(
+      "polza-ru.translate.goog",
+      "/catalog/akvaoptik-rastvor-dlya-obrabotki-i-khraneniya-linz-120-ml_30712/"
+    ).toString());
+    expect(product.status).toBe(200);
+    const productProof = await product.text();
+    expect(productProof).toContain('class="reviews__empty" data-empty-reviews');
+    expect(productProof).toContain('name="product_id" value="30712"');
+    expect(productProof).not.toContain('itemprop="aggregateRating"');
   });
 
   it("compacts exact NFapteka search and product microdata", async () => {
@@ -1042,7 +1384,10 @@ describe("static pharmacy Translate gateway", () => {
 
     const response = await callGateway(translated("www-budzdorov-ru.translate.goog", "/letter/%D0%A2").toString());
     expect(response.status).toBe(200);
-    expect(await response.text()).toContain(`href="https://www.budzdorov.ru${productPath}"`);
+    const proof = await response.text();
+    expect(proof).toContain('class="alphabet-forms"');
+    expect(proof).toContain('class="alphabet-forms__item-link"');
+    expect(proof).toContain(`href="https://www.budzdorov.ru${productPath}"`);
     expect((await callGateway(translated("www-budzdorov-ru.translate.goog", "/letter/%D0%A2%D0%B8%D0%BA").toString())).status).toBe(400);
   });
 
@@ -1052,7 +1397,10 @@ describe("static pharmacy Translate gateway", () => {
       <script type="application/ld+json">${JSON.stringify({
         "@type": "Product", sku: "5e3268eaca7bdc000192d316", name: "Оциллококцинум 30 шт. гранулы",
         aggregateRating: { ratingValue: 4.9, reviewCount: 44, ratingCount: 57 }
-      })}</script></head><body><h1>Оциллококцинум 30 шт. гранулы</h1></body></html>`, {
+      })}</script></head><body><h1>Оциллококцинум 30 шт. гранулы</h1>
+      <div class="variantButton" aria-selected="true"><a class="variantButton__link" href="${source}" aria-label="Оциллококцинум 30 шт. гранулы"></a>
+        <div class="variantButton__rating"><div class="ItemRating"><span class="ItemRating__label">4.9</span><span class="caption3">(<span>57</span> reviews)</span></div></div>
+      </div></body></html>`, {
       headers: { "content-type": "text/html" }
     })));
 
@@ -1062,6 +1410,7 @@ describe("static pharmacy Translate gateway", () => {
     expect(response.headers.get("x-ratings-source")).toBe("google-translate-pharmacy-ssr");
     expect(proof).toContain('"reviewCount":44');
     expect(proof).toContain('"ratingCount":57');
+    expect(proof).toContain('class="variantButton" aria-selected="true"');
     expect((await callGateway("https://apteka.ru/search?q=Оциллококцинум")).status).toBe(400);
   });
 
@@ -1095,6 +1444,29 @@ describe("static pharmacy Translate gateway", () => {
     expect(response.headers.get("x-ratings-source")).toBe("apteka-first-party-product-sitemap");
     expect(proof).toContain(match);
     expect(proof).not.toContain("drug-x");
+  });
+
+  it("filters an exact ASNA card sitemap before it leaves the fixed gateway", async () => {
+    const match = "https://asna.ru/cards/tsereton_400mg_n56_kaps_soteks.html";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe("https://www.asna.ru/sitemap/sitemap_cards1.xml");
+      return new Response(`<urlset><url><loc>${match}</loc></url>` +
+        `<url><loc>https://www.asna.ru/cards/unrelated_400mg_n10.html</loc></url></urlset>`, {
+        headers: { "content-type": "application/xml" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const target = "https://www.asna.ru/sitemap/sitemap_cards1.xml?slugs=cereton%2Ctsereton";
+    const response = await callGateway(target);
+    const proof = await response.text();
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("asna-first-party-card-sitemap");
+    expect(proof).toContain("https://www.asna.ru/cards/tsereton_400mg_n56_kaps_soteks.html");
+    expect(proof).not.toContain("unrelated_400mg_n10");
+
+    expect((await callGateway(`${target}&extra=1`)).status).toBe(400);
+    expect(upstream).toHaveBeenCalledOnce();
   });
 
   it("canonicalizes translated Apteka.ru preparation links to the source host", async () => {
@@ -1316,15 +1688,24 @@ describe("fixed first-party collection egress", () => {
     expect(await incomplete.text()).not.toContain('"processed":2');
   });
 
-  it("retries only a transiently truncated Yandex batch shard and accepts its complete second proof", async () => {
-    const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_1220000000-1229999999-0.xml";
-    const upstream = vi.fn(async () => upstream.mock.calls.length === 1
-      ? new Response("<urlset>", { headers: { "content-type": "application/xml" } })
-      : new Response(
-        "<urlset><url><loc>https://reviews.yandex.ru/product/oscillococcinum--1225000000</loc></url></urlset>",
-        { headers: { "content-type": "application/xml" } }
-      ));
-    vi.stubGlobal("fetch", upstream);
+  it("proves a Yandex batch shard when exact XML tags and locations cross stream chunks", async () => {
+    const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_1030000000-1039999999-0.xml";
+    const chunks = [
+      "<?xml version=\"1.0\"?><urlset><url><lo",
+      "c>https://reviews.yandex.ru/product/ingavirin--1031000000</loc></url><url><loc>https://reviews.yandex.ru/product/entero",
+      "laktis-duo--1032000000</loc></url></url",
+      "set>"
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      const encoder = new TextEncoder();
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+          controller.close();
+        }
+      }), { headers: { "content-type": "application/xml" } });
+    }));
+
     const response = await staticReviewFetch(new Request(
       "https://ratings.example/api/internal/static-review-fetch",
       {
@@ -1334,26 +1715,211 @@ describe("fixed first-party collection egress", () => {
           url: "https://reviews.yandex.ru/ugcpub/__ratings_batch__",
           yandexBatch: {
             sitemaps: [sitemap],
-            brands: [{ brand: "oscillococcinum", tokens: ["oscillococcinum"] }]
+            brands: [{ brand: "Энтеролактис", tokens: ["enterolaktis"] }]
           }
         })
       }
     ), { INTERNAL_AGENT_TOKEN: token });
-    const proof = await response.json() as { processed: number; matches: Array<{ url: string }> };
 
     expect(response.status).toBe(200);
-    expect(upstream).toHaveBeenCalledTimes(2);
-    expect(proof.processed).toBe(1);
-    expect(proof.matches).toEqual([{
-      brand: "oscillococcinum",
-      url: "https://reviews.yandex.ru/product/oscillococcinum--1225000000",
-      sitemap
-    }]);
+    await expect(response.json()).resolves.toMatchObject({
+      processed: 1,
+      verifiedSitemaps: [sitemap],
+      matches: [{
+        brand: "Энтеролактис",
+        url: "https://reviews.yandex.ru/product/enterolaktis-duo--1032000000",
+        sitemap
+      }]
+    });
   });
 
-  it("treats an exact indexed Yandex batch shard HTTP 404 as a complete empty proof only", async () => {
-    const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_5880000000-5889999999-0.xml";
-    const callBatch = () => staticReviewFetch(new Request(
+  it("assigns an overlapping Yandex URL to the longest requested brand token", async () => {
+    const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_0-9999999-0.xml";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "<urlset>" +
+      "<url><loc>https://reviews.yandex.ru/product/vidora-mikro-tabletki--301</loc></url>" +
+      "<url><loc>https://reviews.yandex.ru/product/vidora-tabletki--302</loc></url>" +
+      "</urlset>",
+      { headers: { "content-type": "application/xml" } }
+    )));
+
+    const response = await staticReviewFetch(new Request(
+      "https://ratings.example/api/internal/static-review-fetch",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          url: "https://reviews.yandex.ru/ugcpub/__ratings_batch__",
+          yandexBatch: {
+            sitemaps: [sitemap],
+            brands: [
+              { brand: "Видора", tokens: ["vidora"] },
+              { brand: "Видора Микро", tokens: ["vidora mikro"] }
+            ]
+          }
+        })
+      }
+    ), { INTERNAL_AGENT_TOKEN: token });
+    const proof = await response.json() as { matches: Array<{ brand: string; url: string }> };
+
+    expect(response.status).toBe(200);
+    expect(proof.matches).toHaveLength(2);
+    expect(proof.matches).toEqual(expect.arrayContaining([
+      expect.objectContaining({ brand: "Видора Микро", url: expect.stringContaining("vidora-mikro") }),
+      expect.objectContaining({ brand: "Видора", url: expect.stringContaining("vidora-tabletki") })
+    ]));
+  });
+
+  it("settles an in-flight Yandex shard before returning the first batch failure", async () => {
+    const endpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const sitemaps = [
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_690000000-699999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_700000000-709999999-0.xml"
+    ];
+    let releaseSibling: (() => void) | undefined;
+    let siblingSettled = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === sitemaps[0]) throw new Error("first shard failed");
+      await new Promise<void>((resolve) => { releaseSibling = resolve; });
+      siblingSettled = true;
+      return new Response("<urlset></urlset>", { headers: { "content-type": "application/xml" } });
+    }));
+
+    const responsePromise = staticReviewFetch(new Request(
+      "https://ratings.example/api/internal/static-review-fetch",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          url: endpoint,
+          yandexBatch: {
+            sitemaps,
+            brands: [{ brand: "Бактоблис", tokens: ["baktoblis"] }]
+          }
+        })
+      }
+    ), { INTERNAL_AGENT_TOKEN: token });
+
+    await vi.waitFor(() => expect(releaseSibling).toBeTypeOf("function"));
+    expect(siblingSettled).toBe(false);
+    releaseSibling!();
+    const response = await responsePromise;
+
+    expect(siblingSettled).toBe(true);
+    expect(response.status).toBe(502);
+    expect(await response.text()).toContain("first shard failed");
+  });
+
+  it("recovers one exact Yandex shard after two fast incomplete XML copies", async () => {
+    vi.useFakeTimers();
+    try {
+      const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_1220000000-1229999999-0.xml";
+      const upstream = vi.fn(async () => upstream.mock.calls.length <= 2
+        ? new Response("<urlset>", { headers: { "content-type": "application/xml" } })
+        : new Response(
+          "<urlset><url><loc>https://reviews.yandex.ru/product/oscillococcinum--1225000000</loc></url></urlset>",
+          { headers: { "content-type": "application/xml" } }
+        ));
+      vi.stubGlobal("fetch", upstream);
+      const responsePromise = staticReviewFetch(new Request(
+        "https://ratings.example/api/internal/static-review-fetch",
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({
+            url: "https://reviews.yandex.ru/ugcpub/__ratings_batch__",
+            yandexBatch: {
+              sitemaps: [sitemap],
+              brands: [{ brand: "oscillococcinum", tokens: ["oscillococcinum"] }]
+            }
+          })
+        }
+      ), { INTERNAL_AGENT_TOKEN: token });
+
+      await vi.waitFor(() => expect(upstream).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(upstream).toHaveBeenCalledTimes(2));
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => expect(upstream).toHaveBeenCalledTimes(3));
+      const response = await responsePromise;
+      const proof = await response.json() as { processed: number; matches: Array<{ url: string }> };
+
+      expect(response.status).toBe(200);
+      expect(proof.processed).toBe(1);
+      expect(proof.matches).toEqual([{
+        brand: "oscillococcinum",
+        url: "https://reviews.yandex.ru/product/oscillococcinum--1225000000",
+        sitemap
+      }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("abandons one stalled Yandex egress and retries the same exact shard inside the public Function ceiling", async () => {
+    vi.useFakeTimers();
+    try {
+      const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_1110000000-1119999999-0.xml";
+      const upstream = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (upstream.mock.calls.length === 1) {
+          await new Promise<never>((_resolve, reject) => {
+            const signal = init?.signal;
+            if (!signal) throw new Error("missing exact shard abort signal");
+            const abort = () => reject(signal.reason);
+            if (signal.aborted) abort();
+            else signal.addEventListener("abort", abort, { once: true });
+          });
+        }
+        return new Response(
+          "<urlset><url><loc>https://reviews.yandex.ru/product/kagotsel--1115000000</loc></url></urlset>",
+          { headers: { "content-type": "application/xml" } }
+        );
+      });
+      vi.stubGlobal("fetch", upstream);
+      const responsePromise = staticReviewFetch(new Request(
+        "https://ratings.example/api/internal/static-review-fetch",
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({
+            url: "https://reviews.yandex.ru/ugcpub/__ratings_batch__",
+            yandexBatch: {
+              sitemaps: [sitemap],
+              brands: [{ brand: "Кагоцел", tokens: ["kagotsel"] }]
+            }
+          })
+        }
+      ), { INTERNAL_AGENT_TOKEN: token });
+
+      await vi.waitFor(() => expect(upstream).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(20_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(upstream).toHaveBeenCalledTimes(2));
+      const response = await responsePromise;
+      const proof = await response.json() as { processed: number; matches: Array<{ url: string }> };
+
+      expect(response.status).toBe(200);
+      expect(upstream).toHaveBeenCalledTimes(2);
+      expect(proof).toMatchObject({
+        processed: 1,
+        matches: [{ url: "https://reviews.yandex.ru/product/kagotsel--1115000000" }]
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recognizes only proven Yandex index tombstones and keeps adjacent shard failures closed", async () => {
+    const tombstones = [
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_5880000000-5889999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_5890000000-5899999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_5980000000-5989999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_6010000000-6019999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_6020000000-6029999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_6030000000-6039999999-0.xml"
+    ];
+    const unknown = "https://reviews.yandex.ru/ugcpub/sitemap_model_6040000000-6049999999-0.xml";
+    const callBatch = (sitemap: string) => staticReviewFetch(new Request(
       "https://ratings.example/api/internal/static-review-fetch",
       {
         method: "POST",
@@ -1367,17 +1933,27 @@ describe("fixed first-party collection egress", () => {
         })
       }
     ), { INTERNAL_AGENT_TOKEN: token });
-    const missingFetch = vi.fn(async () => new Response("missing", { status: 404 }));
+    const missingFetch = vi.fn(async () => new Response(null, { status: 404 }));
     vi.stubGlobal("fetch", missingFetch);
 
-    const missing = await callBatch();
-    expect(missing.status).toBe(200);
-    expect(await missing.json()).toMatchObject({ processed: 1, matches: [] });
-    expect(missingFetch).toHaveBeenCalledOnce();
+    for (const tombstone of tombstones) {
+      const known = await callBatch(tombstone);
+      const proof = await known.json() as { processed: number; tombstonedSitemaps?: string[] };
+      expect(known.status).toBe(200);
+      expect(proof).toMatchObject({ processed: 1, tombstonedSitemaps: [tombstone] });
+    }
+    expect(missingFetch).toHaveBeenCalledTimes(tombstones.length);
+
+    const unknownFetch = vi.fn(async () => new Response(null, { status: 404 }));
+    vi.stubGlobal("fetch", unknownFetch);
+    const missing = await callBatch(unknown);
+    expect(missing.status).toBe(502);
+    expect(await missing.text()).not.toContain('"processed":1');
+    expect(unknownFetch).toHaveBeenCalledOnce();
 
     const blockedFetch = vi.fn(async () => new Response("blocked", { status: 403 }));
     vi.stubGlobal("fetch", blockedFetch);
-    const blocked = await callBatch();
+    const blocked = await callBatch(tombstones[0]!);
     expect(blocked.status).toBe(502);
     expect(await blocked.text()).not.toContain('"processed":1');
     expect(blockedFetch).toHaveBeenCalledOnce();
@@ -1447,6 +2023,25 @@ describe("fixed first-party collection egress", () => {
     expect((await callGateway("https://zdravcity.ru/g_kagocel/?redirect=https://evil.example")).status).toBe(400);
     expect((await callGateway("https://reviews.yandex.ru/ugcpub/private.xml")).status).toBe(400);
     expect(upstream).toHaveBeenCalledTimes(3);
+  });
+
+  it("compacts Zdravcity written reviews without inventing a missing star rating", async () => {
+    const source = "https://zdravcity.ru/p_grippferon-kapli-10000me-ml-10ml-12345.html";
+    const product = {
+      id: "D875DF4F-3A76-4BEB-89A1-DF358BD5538A",
+      attributes: { name: "Гриппферон капли 10000 МЕ/мл 10 мл", url: new URL(source).pathname, rating: null, sku: "33978" },
+      reviews: [{ ID: "6548", rate: 0 }, { ID: "6549", rate: 0 }]
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head><base href="${source}"></head><body>
+      <script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { productV2: product } } })}</script>
+      </body></html>`, { headers: { "content-type": "text/html; charset=utf-8" } })));
+
+    const response = await callGateway(source);
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(proof).toContain('"reviews":[{"ID":"6548","rate":0},{"ID":"6549","rate":0}]');
+    expect(proof).not.toContain('"rating":0');
   });
 
   it("fails closed when translated Zdravcity HTML is not bound to the exact source", async () => {

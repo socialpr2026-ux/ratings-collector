@@ -179,6 +179,116 @@ describe("Ozon browser collector", () => {
       .resolves.toHaveLength(3);
   });
 
+  it("exhausts both Biviart query paginations, merges duplicate SKUs, and excludes foreign alias results", async () => {
+    const brand = "\u0411\u0438\u0432\u0438\u0430\u0440\u0442";
+    const searchCalls: string[] = [];
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      const endpoint = new URL(String(input));
+      expect(endpoint.origin).toBe("https://www-ozon-ru.translate.goog");
+      expect(endpoint.pathname).toBe("/api/composer-api.bx/page/json/v2");
+      const source = new URL(endpoint.searchParams.get("url")!, "https://www.ozon.ru");
+      const query = source.searchParams.get("text")!;
+      const pageNumber = Number(source.searchParams.get("page") ?? "1");
+      searchCalls.push(`${query}:${pageNumber}`);
+
+      if (query === brand) {
+        const items = pageNumber === 1
+          ? [
+              tile(1394991705, `${brand} \u0423\u043b\u044c\u0442\u0440\u0430 10 \u043c\u043b`, "4.9", "21626"),
+              tile(2213689406, `${brand} \u041a\u043e\u043c\u0444\u043e\u0440\u0442 10 \u043c\u043b`, "4.9", "18764")
+            ]
+          : [
+              tile(3521481433, `${brand} \u041a\u043e\u043c\u0444\u043e\u0440\u0442 10 \u043c\u043b`, "5.0", "1"),
+              tile(1394991705, `${brand} \u0423\u043b\u044c\u0442\u0440\u0430 10 \u043c\u043b`, "4.9", "21626")
+            ];
+        return new Response(JSON.stringify(page(items, 2)), { headers: { "content-type": "application/json" } });
+      }
+      if (query === "Biviart") {
+        const items = pageNumber === 1
+          ? [
+              tile(1553415091, `${brand} \u0421\u043e\u0444\u0442 \u043a\u0430\u043f\u043b\u0438 10 \u043c\u043b - 3 \u0448\u0442.`, "4.9", "299"),
+              tile(1553412968, `${brand} \u041a\u043e\u043c\u0444\u043e\u0440\u0442 10 \u043c\u043b - 3 \u0448\u0442.`, "4.8", "246"),
+              tile(990001, "Biviart: The Life and Work of an Artist", "4.7", "44")
+            ]
+          : [
+              tile(1615897495, `${brand} \u0421\u043e\u0444\u0442 10 \u043c\u043b - 2 \u0448\u0442.`, "4.9", "128"),
+              tile(1394991705, `${brand} \u0423\u043b\u044c\u0442\u0440\u0430 10 \u043c\u043b`, "4.9", "21626"),
+              tile(990002, "Biviart abstract art print", "4.6", "12")
+            ];
+        return new Response(JSON.stringify(page(items, 2)), { headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`Unexpected Ozon query ${query}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({ fetch, googleComposerEnabled: true, detailDelayMs: 0 });
+
+    const refs = await adapter.discover(brand, { ...context, runId: "biviart-alias", brands: [brand] });
+
+    expect(searchCalls).toEqual([`${brand}:1`, `${brand}:2`, "Biviart:1", "Biviart:2"]);
+    expect(refs.map((ref) => ref.listingId)).toEqual([
+      "1394991705",
+      "2213689406",
+      "3521481433",
+      "1553415091",
+      "1553412968",
+      "1615897495"
+    ]);
+    expect(refs.filter((ref) => ["1553415091", "1553412968", "1615897495"].includes(ref.listingId)))
+      .toMatchObject([
+        { listingId: "1553415091", metadata: { rating: 4.9, reviewCount: 299 } },
+        { listingId: "1553412968", metadata: { rating: 4.8, reviewCount: 246 } },
+        { listingId: "1615897495", metadata: { rating: 4.9, reviewCount: 128 } }
+      ]);
+    expect(refs.some((ref) => ref.listingId === "990001" || ref.listingId === "990002")).toBe(false);
+  });
+
+  it("fails closed when the bounded Biviart alias pagination cannot prove exhaustion", async () => {
+    const brand = "\u0411\u0438\u0432\u0438\u0430\u0440\u0442";
+    const searchCalls: string[] = [];
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      const endpoint = new URL(String(input));
+      const source = new URL(endpoint.searchParams.get("url")!, "https://www.ozon.ru");
+      const query = source.searchParams.get("text")!;
+      const pageNumber = Number(source.searchParams.get("page") ?? "1");
+      searchCalls.push(`${query}:${pageNumber}`);
+      const payload = query === brand
+        ? page([tile(1394991705, `${brand} \u0423\u043b\u044c\u0442\u0440\u0430`, "4.9", "21626")], 1)
+        : page([tile(1553415000 + pageNumber, `${brand} \u0421\u043e\u0444\u0442 ${pageNumber}`, "4.8", String(200 + pageNumber))]);
+      return new Response(JSON.stringify(payload), { headers: { "content-type": "application/json" } });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({ fetch, googleComposerEnabled: true, maxPages: 2, detailDelayMs: 0 });
+
+    await expect(adapter.discover(brand, { ...context, runId: "biviart-alias-cap", brands: [brand] }))
+      .rejects.toThrow(/Biviart.*2-page safety limit.*proving exhaustion/i);
+    expect(searchCalls).toEqual([`${brand}:1`, "Biviart:1", "Biviart:2"]);
+  });
+
+
+  it("exhausts Кагоцел transliteration aliases and de-duplicates SKUs across queries", async () => {
+    const brand = "\u041a\u0430\u0433\u043e\u0446\u0435\u043b";
+    const searchCalls: string[] = [];
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      const endpoint = new URL(String(input));
+      const source = new URL(endpoint.searchParams.get("url")!, "https://www.ozon.ru");
+      const query = source.searchParams.get("text")!;
+      searchCalls.push(query);
+      const items = query === brand
+        ? [tile(146806398, `${brand} 12 \u043c\u0433 \u211610`, "4.9", "5759")]
+        : query === "Kagocel"
+          ? [
+              tile(146806398, `${brand} 12 \u043c\u0433 \u211610`, "4.9", "5759"),
+              tile(1074811895, `${brand} 12 \u043c\u0433 \u211620`, "5.0", "25")
+            ]
+          : [tile(2022961191, `${brand} 12 \u043c\u0433 \u211630`, "5.0", "38")];
+      return new Response(JSON.stringify(page(items, 1)), { headers: { "content-type": "application/json" } });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({ fetch, googleComposerEnabled: true, detailDelayMs: 0 });
+
+    const refs = await adapter.discover(brand, { ...context, runId: "kagocel-aliases", brands: [brand] });
+
+    expect(searchCalls).toEqual([brand, "Kagocel", "Kagotsel"]);
+    expect(refs.map((ref) => ref.listingId)).toEqual(["146806398", "1074811895", "2022961191"]);
+  });
+
   it("stops the product queue after the first systemic 502", async () => {
     const touchedProducts: string[] = [];
     const fetch = vi.fn(async (input: URL | RequestInfo) => {
@@ -250,7 +360,7 @@ describe("Ozon browser collector", () => {
         ), { headers: { "content-type": "text/html" } });
       }
       searchCalls += 1;
-      expect(source.searchParams.get("text")).toBe("Кагоцел");
+      expect(["Кагоцел", "Kagocel", "Kagotsel"]).toContain(source.searchParams.get("text"));
       return new Response(translatedHtml(source, [
         translatedTile("303003", "Кагоцел таблетки 12 мг 20 шт", "4.9", 25)
       ], 1), { headers: { "content-type": "text/html" } });
@@ -260,7 +370,7 @@ describe("Ozon browser collector", () => {
 
     await expect(adapter.healthCheck(runContext)).resolves.toMatchObject({ ok: true });
     await expect(adapter.discover("Кагоцел", runContext)).resolves.toHaveLength(1);
-    expect(searchCalls).toBe(1);
+    expect(searchCalls).toBe(3);
   });
 
   it("accepts an explicit empty result for the requested health brand", async () => {
@@ -456,7 +566,7 @@ describe("Ozon browser collector", () => {
 
     const refs = await adapter.discover("\u041a\u0430\u0433\u043e\u0446\u0435\u043b", context);
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(7);
     expect(refs).toMatchObject([{ listingId: "303003", metadata: { reviewCount: 25, rating: 5 } }]);
   });
 
@@ -716,7 +826,7 @@ describe("Ozon browser collector", () => {
     });
   });
 
-  it("reuses completed search and product proofs when only the last Ozon card remains blocked", async () => {
+  it("returns and reuses completed product proofs when only the last Ozon card remains blocked", async () => {
     const items = [
       translatedTile("730001", "Бактоблис саше №10", "4.9", 11),
       translatedTile("730002", "Бактоблис саше №30", "4.8", 12),
@@ -754,8 +864,17 @@ describe("Ozon browser collector", () => {
     });
     const runContext = { ...context, runId: "run-baktoblis", brands: ["Бактоблис"] };
 
-    await expect(adapter.discover("Бактоблис", runContext)).rejects.toThrow("product composer");
-    await expect(adapter.discover("Бактоблис", runContext)).rejects.toThrow("product composer");
+    const first = await adapter.discover("Бактоблис", runContext);
+    const second = await adapter.discover("Бактоблис", runContext);
+
+    expect(first.map(({ listingId }) => listingId)).toEqual(["730001", "730002"]);
+    expect(second.map(({ listingId }) => listingId)).toEqual(["730001", "730002"]);
+    expect(first.every((ref) =>
+      ref.metadata.partialDiscoveryStatus === "blocked" &&
+      ref.metadata.partialDiscoveryTotal === 3 &&
+      String(ref.metadata.partialDiscoveryMessage).includes("product composer")
+    )).toBe(true);
+    await expect(Promise.all(first.map((ref) => adapter.collect(ref, runContext)))).resolves.toHaveLength(2);
 
     expect(searchCalls).toBe(1);
     expect(detailCalls.get("730001")).toBe(1);
@@ -827,7 +946,7 @@ describe("Ozon browser collector", () => {
     const refs = await adapter.discover("Кагоцел", context);
     const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context)));
 
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(6);
     expect(observations).toMatchObject([
       { listingId: "101", reviews: 1234, rating: 4.9, status: "ok", source: "ozon:composer-api:edgeone-browser" },
       { listingId: "202", reviews: 0, rating: null, status: "no_reviews", source: "ozon:composer-api:edgeone-browser" }

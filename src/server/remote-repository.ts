@@ -1,8 +1,10 @@
 import type { EvidenceStore } from "./evidence.js";
-import type { Observation, ProductRecord, PublicationRecord, RunState, SiteProfile } from "../shared/types.js";
+import type { Observation, ProductRecord, PublicationRecord, RunHistoryItem, RunState, SiteProfile, SourceCardRecord } from "../shared/types.js";
 import type { Repository } from "./repository.js";
 
 export type RepositoryRpc =
+  | { action: "findRuns"; brand: string; limit?: number }
+  | { action: "listRuns"; ownerEmail?: string; limit?: number }
   | { action: "getRun"; id: string }
   | { action: "saveRun"; run: RunState }
   | { action: "getProfile"; domain: string }
@@ -10,6 +12,8 @@ export type RepositoryRpc =
   | { action: "listProducts"; spreadsheetId: string }
   | { action: "saveProducts"; spreadsheetId: string; records: ProductRecord[] }
   | { action: "replaceProducts"; spreadsheetId: string; records: ProductRecord[] }
+  | { action: "listSourceCards"; spreadsheetId: string }
+  | { action: "saveSourceCards"; spreadsheetId: string; records: SourceCardRecord[] }
   | { action: "getSnapshots"; spreadsheetId: string }
   | { action: "saveSnapshot"; spreadsheetId: string; month: string; observations: Observation[] }
   | { action: "replaceSnapshots"; spreadsheetId: string; snapshots: Record<string, Record<string, Observation>> }
@@ -22,11 +26,14 @@ export type RepositoryRpc =
   | { action: "putEvidence"; payload: unknown };
 
 const RETRYABLE_ACTIONS = new Set<RepositoryRpc["action"]>([
+  "findRuns",
+  "listRuns",
   "getRun",
   "saveRun",
   "getProfile",
   "saveProfile",
   "listProducts",
+  "listSourceCards",
   "getSnapshots",
   "getPublication",
   "putEvidence"
@@ -51,7 +58,10 @@ export class RemoteRepository implements Repository {
   }
 
   async call<T>(request: RepositoryRpc): Promise<T> {
-    const attempts = RETRYABLE_ACTIONS.has(request.action) ? 3 : 1;
+    // A run checkpoint is idempotent and is the employee's recovery boundary.
+    // Keep retrying it through a short edge rollout/gateway brownout instead of
+    // losing the just-completed partition after only 600 ms of backoff.
+    const attempts = request.action === "saveRun" ? 7 : RETRYABLE_ACTIONS.has(request.action) ? 3 : 1;
     let lastError: unknown;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
@@ -67,14 +77,14 @@ export class RemoteRepository implements Repository {
           value = JSON.parse(text) as typeof value;
         } catch {
           if (attempt < attempts && transientStatus(response.status)) {
-            await this.wait(200 * attempt);
+            await this.wait(Math.min(4_000, 200 * 2 ** (attempt - 1)));
             continue;
           }
           throw new Error(`Repository RPC HTTP ${response.status}: non-JSON response`);
         }
         if (!response.ok) {
           if (attempt < attempts && transientStatus(response.status)) {
-            await this.wait(200 * attempt);
+            await this.wait(Math.min(4_000, 200 * 2 ** (attempt - 1)));
             continue;
           }
           throw new Error(value.error ?? `Repository RPC HTTP ${response.status}`);
@@ -83,7 +93,7 @@ export class RemoteRepository implements Repository {
       } catch (error) {
         lastError = error;
         if (attempt >= attempts || error instanceof Error && /^Repository RPC HTTP \d+:/.test(error.message)) throw error;
-        await this.wait(200 * attempt);
+        await this.wait(Math.min(4_000, 200 * 2 ** (attempt - 1)));
       }
     }
     throw lastError;
@@ -91,11 +101,14 @@ export class RemoteRepository implements Repository {
 
   getRun(id: string) { return this.call<RunState | undefined>({ action: "getRun", id }); }
   async saveRun(run: RunState) { await this.call({ action: "saveRun", run }); }
+  listRecentRuns(ownerEmail?: string, limit?: number) { return this.call<RunHistoryItem[]>({ action: "listRuns", ownerEmail, limit }); }
   getProfile(domain: string) { return this.call<SiteProfile | undefined>({ action: "getProfile", domain }); }
   async saveProfile(profile: SiteProfile) { await this.call({ action: "saveProfile", profile }); }
   listProducts(spreadsheetId: string) { return this.call<ProductRecord[]>({ action: "listProducts", spreadsheetId }); }
   async saveProducts(spreadsheetId: string, records: ProductRecord[]) { await this.call({ action: "saveProducts", spreadsheetId, records }); }
   async replaceProducts(spreadsheetId: string, records: ProductRecord[]) { await this.call({ action: "replaceProducts", spreadsheetId, records }); }
+  listSourceCards(spreadsheetId: string) { return this.call<SourceCardRecord[]>({ action: "listSourceCards", spreadsheetId }); }
+  async saveSourceCards(spreadsheetId: string, records: SourceCardRecord[]) { await this.call({ action: "saveSourceCards", spreadsheetId, records }); }
   getSnapshots(spreadsheetId: string) { return this.call<Record<string, Record<string, Observation>>>({ action: "getSnapshots", spreadsheetId }); }
   async saveSnapshot(spreadsheetId: string, month: string, observations: Observation[]) { await this.call({ action: "saveSnapshot", spreadsheetId, month, observations }); }
   async replaceSnapshots(spreadsheetId: string, snapshots: Record<string, Record<string, Observation>>) { await this.call({ action: "replaceSnapshots", spreadsheetId, snapshots }); }

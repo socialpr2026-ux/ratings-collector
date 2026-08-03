@@ -28,6 +28,13 @@ function targetsResolvedTab(record: PublicationRecord, run: RunState): boolean {
   );
 }
 
+function publicationStatus(run: RunState): RunState["status"] {
+  // A partial write is a durable checkpoint, not the end of the employee
+  // workflow. Keep the run retryable until every failed partition has either
+  // recovered or the employee starts another explicit partial write.
+  return (run.publicationExclusions?.length ?? 0) > 0 ? "review" : "published";
+}
+
 export class PublicationCommitUncertainError extends Error {
   constructor(readonly saveError: unknown, readonly verificationError: unknown) {
     super("Маркер публикации мог быть сохранён, но его состояние не удалось подтвердить");
@@ -43,7 +50,7 @@ export async function reconcileBrowserPublication(
   const spreadsheetId = extractSpreadsheetId(run.request.sheetUrl);
   const prior = await repository.getPublication(`${spreadsheetId}:${run.request.month}`);
   if (prior?.payloadHash !== run.payloadHash || !targetsResolvedTab(prior, run)) return run;
-  run.status = "published";
+  run.status = publicationStatus(run);
   run.publication = prior;
   run.updatedAt = prior.publishedAt;
   await repository.saveRun(run);
@@ -76,7 +83,7 @@ export async function prepareBrowserPublication(
 
   const prior = await repository.getPublication(publicationKey);
   if (prior?.payloadHash === run.payloadHash && targetsResolvedTab(prior, run)) {
-    run.status = "published";
+    run.status = publicationStatus(run);
     run.publication = prior;
     run.updatedAt = prior.publishedAt;
     await repository.saveRun(run);
@@ -141,7 +148,7 @@ export async function completeBrowserPublication(
     }
     if (confirmed?.payloadHash !== publication.payloadHash) throw saveError;
   }
-  run.status = "published";
+  run.status = publicationStatus(run);
   run.publication = publication;
   run.updatedAt = publication.publishedAt;
   // The publication record above remains the source-of-truth commit marker.

@@ -5,6 +5,7 @@ import {
   canConfirmObservation,
   canPublishSuccessfulPartitions,
   canRetryFailedPartitions,
+  hasCurrentPartialPublication,
   finalProductLabel,
   friendlyErrorMessage,
   friendlyIssueText,
@@ -79,6 +80,10 @@ describe("setup readiness copy", () => {
 describe("plain-language feedback", () => {
   it("hides infrastructure wording in common errors", () => {
     expect(friendlyErrorMessage(new Error("Failed to fetch"), "start")).toBe("Нет связи с сервисом. Проверьте интернет и повторите.");
+    expect(friendlyErrorMessage(new Error("Failed to fetch"), "retry"))
+      .toBe("Сервис не подтвердил повторный запуск. Сохранённый результат не изменён — повторите позже.");
+    expect(friendlyErrorMessage(new Error("POST /ratings returned status code 404"), "retry"))
+      .toBe("Сервис не подтвердил повторный запуск. Сохранённый результат не изменён — повторите позже.");
     expect(friendlyErrorMessage("quota_exceeded: Apify limit reached", "start")).toBe("Доступный лимит сбора исчерпан. Повторите позже или временно уберите эту площадку.");
     expect(friendlyErrorMessage("POST /api/runs returned status code 500", "start")).toBe("Не удалось запустить сбор. Проверьте настройки и повторите.");
     expect(friendlyErrorMessage("permission denied", "publish")).toContain("доступ «Редактор»");
@@ -97,6 +102,15 @@ describe("plain-language feedback", () => {
     const message = friendlyErrorMessage("Неожиданная ошибка оформления", "publish");
     expect(message).toBe("Не удалось записать данные в Google Таблицу. Результат сбора сохранён — повторите запись.");
     expect(message).not.toContain("Редактор");
+  });
+
+  it("does not misreport a collector quota embedded in a publication failure", () => {
+    const message = friendlyErrorMessage(
+      "Публикация заблокирована: ozon.ru / Энтеролактис: Monthly sandbox GB-s quota exceeded",
+      "publish"
+    );
+    expect(message).toBe("Не удалось записать данные в Google Таблицу. Результат сбора сохранён — повторите запись.");
+    expect(message).not.toContain("лимит сбора");
   });
 
   it("keeps the affected site while simplifying QA blockers", () => {
@@ -208,6 +222,29 @@ describe("failed partition retry eligibility", () => {
     expect(canRetryFailedPartitions("running", 1)).toBe(false);
     expect(canRetryFailedPartitions("publishing", 1)).toBe(false);
     expect(canRetryFailedPartitions("published", 1)).toBe(false);
+  });
+});
+
+describe("partial publication checkpoint", () => {
+  it("recognizes a current partial write while the run remains retryable", () => {
+    expect(hasCurrentPartialPublication({
+      status: "review",
+      payloadHash: "partial-hash",
+      publicationExclusions: [{
+        domain: "ozon.ru",
+        brand: "Энтеролактис",
+        reason: "quota",
+        excludedAt: "2026-07-31T08:00:00.000Z"
+      }],
+      publication: {
+        runId: "run-1",
+        spreadsheetId: "sheet-1",
+        month: "2026-07",
+        payloadHash: "partial-hash",
+        publishedAt: "2026-07-31T08:01:00.000Z",
+        updatedRange: "'Ratings Энтеролактис'!A1:F54"
+      }
+    })).toBe(true);
   });
 });
 

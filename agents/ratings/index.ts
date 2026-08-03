@@ -9,6 +9,7 @@ import { readAgentJson } from "../../src/server/utils/agent-request.js";
 import { safeErrorMessage } from "../../src/server/utils/error-message.js";
 import { loadPlaywright } from "../../src/server/utils/playwright-runtime.js";
 import { playwrightCdpBaseUrl } from "../../src/server/utils/sandbox-cdp.js";
+import { collectorPublicEndpoint } from "../../src/server/utils/collector-public-endpoint.js";
 import { assertSafePublicDestination, isPrivateNetworkAddress } from "../../src/server/utils/safe-fetch.js";
 
 type BrowserApi = { cdpUrl: string };
@@ -42,6 +43,7 @@ export function shouldAutoRetryInitialCollection(
 }
 
 export const MAX_INITIAL_TRANSIENT_RECOVERY_PASSES = 3;
+export const STATIC_PROXY_REQUEST_TIMEOUT_MS = 55_000;
 
 export function transientRecoveryDelayMs(
   partitions: Array<{ domain?: string; status: string; message?: string }>,
@@ -56,7 +58,17 @@ export function transientRecoveryDelayMs(
 
 const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);
 const YANDEX_BATCH_ENDPOINT = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
-type YandexBatchCapableFetch = typeof fetch & { yandexBatchEndpoint?: string };
+// The singleton fixed Function owns a 55-second exact-shard budget and the
+// public boundary closes around sixty seconds. Give that response a small
+// delivery margin, then release the Agent lane so the adapter's failed-shard
+// recovery round can continue; the old 125-second two-shard split budget only
+// doubled every stalled singleton pause.
+export const YANDEX_BATCH_GATEWAY_TIMEOUT_MS = 70_000;
+type YandexBatchCapableFetch = typeof fetch & {
+  yandexBatchEndpoint?: string;
+  yandexDirectRecovery?: boolean;
+};
+type YandexMarketCapableFetch = YandexBatchCapableFetch & { yandexMarketBrowserEndpoint?: string };
 
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
@@ -108,8 +120,107 @@ export function createLazySandboxAcquire(sandbox: Pick<SandboxApi, "commands">):
     .then(() => sandbox.commands.run("true"))
     .then(() => undefined)
     .catch((error) => {
-      throw new AdapterBlockedError(`EdgeOne Sandbox is unavailable: ${safeErrorMessage(error)}`);
+      const message = safeErrorMessage(error);
+      if (/quota|monthly[^.]{0,80}GB-s|limit[^.]{0,80}(?:exceeded|reached)|лимит[^.]{0,80}(?:исчерпан|превышен)/i.test(message)) {
+        throw new AdapterQuotaError(`EdgeOne Sandbox quota is exhausted: ${message}`);
+      }
+      throw new AdapterBlockedError(`EdgeOne Sandbox is unavailable: ${message}`);
     });
+}
+
+export function hasExplicitYandexMarketNoResults(bodyText: string, query: string): boolean {
+  const normalizedQuery = normalizedVisibleText(query);
+  if (!normalizedQuery) return false;
+  const body = normalizedVisibleText(bodyText);
+  return body.includes(`по запросу ${normalizedQuery} ничего не нашли`) ||
+    body.includes(`по запросу ${normalizedQuery} ничего не нашлось`);
+}
+
+type YandexMarketSearchProductProof = {
+  id: string;
+  name: string;
+  url: string;
+  ratingCount?: number;
+  rating?: number;
+  familyId?: string;
+};
+
+function structuredFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const normalized = value.trim().replace(",", ".");
+  if (!/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(normalized)) return undefined;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+export function extractYandexMarketSearchHtmlProof(
+  html: string,
+  query: string,
+  pageNumber: number
+): { query: string; page: number; hasNext: boolean; products: YandexMarketSearchProductProof[] } | undefined {
+  const normalizedQuery = normalizedVisibleText(query);
+  if (!normalizedQuery || !Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > 50) return undefined;
+  const products = new Map<string, YandexMarketSearchProductProof>();
+  const scriptPattern = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+  for (const match of html.matchAll(scriptPattern)) {
+    if (!/\btype\s*=\s*(?:["']application\/ld\+json["']|application\/ld\+json(?:\s|$))/i.test(match[1] ?? "")) continue;
+    let value: unknown;
+    try { value = JSON.parse(match[2] ?? ""); }
+    catch { continue; }
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const itemList = value as Record<string, unknown>;
+    if (itemList["@type"] !== "ItemList" || typeof itemList.name !== "string" ||
+      !normalizedVisibleText(itemList.name).includes(normalizedQuery) || !Array.isArray(itemList.itemListElement)) continue;
+    for (const entry of itemList.itemListElement) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const item = (entry as Record<string, unknown>).item;
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const product = item as Record<string, unknown>;
+      const name = typeof product.name === "string" ? product.name.trim() : "";
+      const rawUrl = typeof product.url === "string" ? product.url :
+        typeof product["@id"] === "string" ? product["@id"] : "";
+      let target: URL;
+      try { target = new URL(rawUrl); }
+      catch { continue; }
+      const id = target.pathname.match(/^\/card\/[a-z0-9][a-z0-9-]*\/(\d+)\/?$/i)?.[1];
+      if (!name || target.origin !== "https://market.yandex.ru" || !id || target.search || target.hash) continue;
+      const proof: YandexMarketSearchProductProof = { id, name, url: target.toString() };
+      const aggregate = product.aggregateRating;
+      if (aggregate && typeof aggregate === "object" && !Array.isArray(aggregate)) {
+        const ratingCount = structuredFiniteNumber((aggregate as Record<string, unknown>).ratingCount);
+        const rating = structuredFiniteNumber((aggregate as Record<string, unknown>).ratingValue);
+        if (ratingCount !== undefined && Number.isSafeInteger(ratingCount) && ratingCount >= 0 &&
+          rating !== undefined && rating >= 0 && rating <= 5 &&
+          (ratingCount === 0 || rating > 0)) {
+          proof.ratingCount = ratingCount;
+          proof.rating = rating;
+        }
+      }
+      const familyId = typeof product.sku === "number" || typeof product.sku === "string"
+        ? String(product.sku).trim()
+        : "";
+      if (/^\d{1,40}$/.test(familyId)) proof.familyId = familyId;
+      products.set(id, proof);
+    }
+  }
+  if (products.size === 0) return undefined;
+
+  let hasNext = false;
+  const hrefPattern = /<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi;
+  for (const match of html.matchAll(hrefPattern)) {
+    const href = (match[1] ?? match[2] ?? match[3] ?? "").replace(/&amp;/gi, "&");
+    try {
+      const target = new URL(href, "https://market.yandex.ru");
+      if (target.origin === "https://market.yandex.ru" && target.pathname === "/search" &&
+        normalizedVisibleText(target.searchParams.get("text") ?? "") === normalizedQuery &&
+        Number(target.searchParams.get("page")) === pageNumber + 1) {
+        hasNext = true;
+        break;
+      }
+    } catch { /* ignore malformed links */ }
+  }
+  return { query, page: pageNumber, hasNext, products: [...products.values()] };
 }
 
 export function browserFetch(
@@ -125,16 +236,71 @@ export function browserFetch(
   const wildberriesResponseChecks: Promise<void>[] = [];
   let wildberriesNetworkViolation: Error | undefined;
   const hardenedContexts = new Map<string, Promise<BrowserContext>>();
-  const fetchViaStaticProxy = (url: URL, signal: AbortSignal) => {
+  const fetchViaStaticProxy = async (url: URL, signal: AbortSignal) => {
     if (!staticProxy) throw new Error("Static proxy is not configured");
-    return fetch(staticProxy.endpoint, {
+    const attemptAbort = new AbortController();
+    const combinedSignal = AbortSignal.any([signal, attemptAbort.signal]);
+    try {
+      const response = await withDeadline(fetch(staticProxy.endpoint, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${staticProxy.token}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ url: url.toString() }),
+        signal: combinedSignal
+      }), STATIC_PROXY_REQUEST_TIMEOUT_MS, `Static proxy request exceeded ${STATIC_PROXY_REQUEST_TIMEOUT_MS} ms`);
+      // A fetch promise resolves as soon as response headers arrive. Buffer the
+      // bounded proxy response before disposing the per-attempt signal; aborting
+      // it while the caller still reads the stream produces a misleading
+      // `This operation was aborted` health-check failure on selective retry.
+      const body = await withDeadline(
+        response.arrayBuffer(),
+        STATIC_PROXY_REQUEST_TIMEOUT_MS,
+        `Static proxy response exceeded ${STATIC_PROXY_REQUEST_TIMEOUT_MS} ms`
+      );
+      return new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers
+      });
+    } catch (error) {
+      // A failed fixed-egress request is an access-path failure, never evidence
+      // that the marketplace markup changed. Preserve an explicit blocked
+      // classification so Ozon can offer the employee its local Chrome route.
+      if (signal.aborted) throw error;
+      throw new AdapterBlockedError(
+        error instanceof Error ? error.message : `Static proxy request failed: ${String(error)}`
+      );
+    } finally {
+      attemptAbort.abort();
+    }
+  };
+  const fetchVaptekeViaStaticProxy = async (request: Request) => {
+    const url = new URL(request.url);
+    if (request.method !== "POST" || url.pathname !== "/ajax/autocomplete") {
+      return fetchViaStaticProxy(url, request.signal);
+    }
+    const contentType = request.headers.get("content-type") ?? "";
+    if (!/^application\/x-www-form-urlencoded(?:\s*;|$)/i.test(contentType)) {
+      throw new AdapterBlockedError("vapteke.ru autocomplete request has an unexpected content type");
+    }
+    const text = await request.text();
+    if (text.length > 1_000) throw new AdapterBlockedError("vapteke.ru autocomplete request is too large");
+    const form = new URLSearchParams(text);
+    const query = form.get("query")?.normalize("NFKC").trim() ?? "";
+    if ([...form.keys()].some((key) => key !== "query") || form.getAll("query").length !== 1 ||
+      query.length < 2 || query.length > 160) {
+      throw new AdapterBlockedError("vapteke.ru autocomplete request is not an exact bounded brand query");
+    }
+    return fetch(staticProxy!.endpoint, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${staticProxy.token}`,
+        authorization: `Bearer ${staticProxy!.token}`,
         "content-type": "application/json"
       },
-      body: JSON.stringify({ url: url.toString() }),
-      signal
+      body: JSON.stringify({ url: url.toString(), vaptekeAutocomplete: { query } }),
+      signal: request.signal
     });
   };
   const fetchYandexBatchViaStaticProxy = async (request: Request) => {
@@ -144,15 +310,90 @@ export function browserFetch(
     let batch: unknown;
     try { batch = JSON.parse(text); }
     catch { throw new Error("Yandex batch request is not valid JSON"); }
-    return fetch(staticProxy.endpoint, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${staticProxy.token}`,
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({ url: request.url, yandexBatch: batch }),
-      signal: request.signal
-    });
+    const input = batch && typeof batch === "object" && !Array.isArray(batch)
+      ? batch as { sitemaps?: unknown; brands?: unknown }
+      : undefined;
+    // The fixed Function already retries the exact upstream shard. Return its
+    // authoritative batch response unchanged: YandexAdapter owns the bounded
+    // batch-level retry, so stacking another loop here would multiply a slow
+    // shard into as many as nine expensive attempts.
+    const requestProof = async (payload: unknown): Promise<Response> => {
+      const attemptAbort = new AbortController();
+      const signal = AbortSignal.any([request.signal, attemptAbort.signal]);
+      try {
+        return await withDeadline(fetch(staticProxy.endpoint, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${staticProxy.token}`,
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({ url: request.url, yandexBatch: payload }),
+          signal
+        }), YANDEX_BATCH_GATEWAY_TIMEOUT_MS, "Yandex batch gateway transport timed out");
+      } catch (error) {
+        attemptAbort.abort(error);
+        request.signal.throwIfAborted();
+        // The deadline is beyond the Function's platform ceiling, so this
+        // synthetic response cannot overlap a still-valid fixed invocation.
+        return json({ error: safeErrorMessage(error) }, 504);
+      }
+    };
+    const splitTimedOutProof = async (payload: { sitemaps: string[]; brands?: unknown }): Promise<Response> => {
+      const response = await requestProof(payload);
+      // A transport/runtime 502 has the same practical meaning here as the
+      // explicit 504 deadline: the fixed function could not prove this whole
+      // bounded group. Reduce the payload recursively instead of repeating the
+      // same expensive group request.
+      if (![500, 502, 503, 504].includes(response.status) || payload.sitemaps.length <= 1) return response;
+      await response.body?.cancel().catch(() => undefined);
+      request.signal.throwIfAborted();
+
+      const middle = Math.ceil(payload.sitemaps.length / 2);
+      // Both halves are independent and the production adapter sends two-shard
+      // groups. Recover them in parallel so the bounded 125-second gateway
+      // attempts remain inside the adapter's 330-second transport deadline.
+      // Proof is still fail-closed: neither half is accepted on its own.
+      const [left, right] = await Promise.all([
+        splitTimedOutProof({ ...payload, sitemaps: payload.sitemaps.slice(0, middle) }),
+        splitTimedOutProof({ ...payload, sitemaps: payload.sitemaps.slice(middle) })
+      ]);
+      if (!left.ok || !right.ok) {
+        if (!left.ok) {
+          await right.body?.cancel().catch(() => undefined);
+          return left;
+        }
+        await left.body?.cancel().catch(() => undefined);
+        return right;
+      }
+      const [leftProof, rightProof] = await Promise.all([
+        left.json(),
+        right.json()
+      ]) as Array<{
+        processed?: unknown; firstSitemap?: unknown; lastSitemap?: unknown;
+        verifiedSitemaps?: unknown; tombstonedSitemaps?: unknown; matches?: unknown;
+      }>;
+      if (!Array.isArray(leftProof.matches) || !Array.isArray(rightProof.matches) ||
+        !Array.isArray(leftProof.verifiedSitemaps) || !Array.isArray(rightProof.verifiedSitemaps)) {
+        return json({ error: "Split Yandex batch proof is unreadable" }, 502);
+      }
+      const tombstonedSitemaps = [
+        ...(Array.isArray(leftProof.tombstonedSitemaps) ? leftProof.tombstonedSitemaps : []),
+        ...(Array.isArray(rightProof.tombstonedSitemaps) ? rightProof.tombstonedSitemaps : [])
+      ];
+      return json({
+        processed: Number(leftProof.processed) + Number(rightProof.processed),
+        firstSitemap: leftProof.firstSitemap,
+        lastSitemap: rightProof.lastSitemap,
+        verifiedSitemaps: [...leftProof.verifiedSitemaps, ...rightProof.verifiedSitemaps],
+        ...(tombstonedSitemaps.length > 0 ? { tombstonedSitemaps } : {}),
+        matches: [...leftProof.matches, ...rightProof.matches]
+      });
+    };
+    if (input && Array.isArray(input.sitemaps) && input.sitemaps.length > 1 &&
+      input.sitemaps.every((item): item is string => typeof item === "string")) {
+      return splitTimedOutProof({ ...input, sitemaps: input.sitemaps });
+    }
+    return requestProof(batch);
   };
   const fetchWildberriesViaStaticProxy = async (url: URL, signal: AbortSignal) => {
     const first = await fetchViaStaticProxy(url, signal);
@@ -172,7 +413,7 @@ export function browserFetch(
       headers: { "X-Access-Token": sandbox.envdAccessToken },
       timeout: 60_000
     }));
-  const getContext = (key: "trusted-yandex" | "trusted-irecommend" | "trusted-ozon" | "trusted-wildberries" | "untrusted-static") => {
+  const getContext = (key: "trusted-yandex" | "trusted-yandex-market" | "trusted-irecommend" | "trusted-ozon" | "trusted-wildberries" | "untrusted-static") => {
     const trustedDynamic = key !== "untrusted-static";
     let context = hardenedContexts.get(key);
     if (!context) {
@@ -303,6 +544,11 @@ export function browserFetch(
           [...url.searchParams.keys()].every((key) => key === "slugs") &&
           url.searchParams.get("slugs")!.split(",").every((slug) => /^[a-z0-9-]{3,80}$/i.test(slug))
       );
+    const fixedAsnaSitemapTarget = url.protocol === "https:" && url.hostname === "www.asna.ru" &&
+      !url.port && !url.username && !url.password && !url.hash &&
+      ["/sitemap/sitemap_cards.xml", "/sitemap/sitemap_cards1.xml"].includes(url.pathname) &&
+      url.searchParams.getAll("slugs").length === 1 && [...url.searchParams.keys()].every((key) => key === "slugs") &&
+      url.searchParams.get("slugs")!.split(",").every((slug) => /^[a-z0-9][a-z0-9-]{0,79}$/i.test(slug));
     if (fixedYandexBatchTarget) {
       return fetchYandexBatchViaStaticProxy(request);
     }
@@ -316,19 +562,49 @@ export function browserFetch(
       "apteka-ru.translate.goog",
       "nfapteka-ru.translate.goog",
       "www-budzdorov-ru.translate.goog",
+      "market-yandex-ru.translate.goog",
       "megamarket-ru.translate.goog"
     ].includes(url.hostname)) {
-      const first = await fetchViaStaticProxy(url, request.signal);
-      if (![429, 502, 503, 504].includes(first.status)) return first;
-      await first.body?.cancel().catch(() => undefined);
-      request.signal.throwIfAborted();
-      // One bounded retry covers a transient Function/upstream hand-off. A
-      // second failure is returned unchanged and remains fail-closed.
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      request.signal.throwIfAborted();
-      return fetchViaStaticProxy(url, request.signal);
+      const maxAttempts = url.hostname === "megamarket-ru.translate.goog" ? 3 : 2;
+      for (let attempt = 1; ; attempt += 1) {
+        const response = await fetchViaStaticProxy(url, request.signal);
+        if (![429, 502, 503, 504].includes(response.status)) return response;
+        if (attempt >= maxAttempts) {
+          if ([
+            "apteka-ru.translate.goog",
+            "www-budzdorov-ru.translate.goog",
+            "www-asna-ru.translate.goog"
+          ].includes(url.hostname)) {
+            try {
+              const direct = await fetch(request);
+              if (direct.ok) {
+                await response.body?.cancel().catch(() => undefined);
+                return direct;
+              }
+              await direct.body?.cancel().catch(() => undefined);
+            } catch {
+              request.signal.throwIfAborted();
+            }
+          }
+          return response;
+        }
+        await response.body?.cancel().catch(() => undefined);
+        request.signal.throwIfAborted();
+        // Megamarket's translated product renderer intermittently returns two
+        // consecutive 502s for a valid card. A third bounded attempt with a
+        // short increasing cooldown recovers that exact route; every final
+        // failure remains unchanged and fail-closed.
+        const delayMs = url.hostname === "megamarket-ru.translate.goog" ? attempt * 500 : 200;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        request.signal.throwIfAborted();
+      }
     }
     if (staticProxy && fixedAptekaTarget) {
+      return fetchViaStaticProxy(url, request.signal);
+    }
+    if (staticProxy && fixedAsnaSitemapTarget) {
+      // ASNA serves multi-megabyte card maps. Keep their bounded brand-filtered
+      // route on the same fixed egress as the proven translated product card.
       return fetchViaStaticProxy(url, request.signal);
     }
     if (staticProxy && fixedWildberriesTarget) {
@@ -350,7 +626,7 @@ export function browserFetch(
         throw error;
       }
     }
-    if (staticProxy && fixedYandexTarget) {
+    if (staticProxy && fixedYandexTarget && request.headers.get("x-ratings-yandex-direct-recovery") !== "1") {
       // EdgeOne's direct egress can leave an exact Yandex sitemap or product
       // request pending until the adapter's 90-second discovery deadline.
       // The fixed Function route is the proven collector path for these
@@ -374,11 +650,15 @@ export function browserFetch(
         return fetchViaStaticProxy(url, request.signal);
       }
     }
+    if (staticProxy && host === "vapteke.ru" && !shouldUseHardenedBrowser(request)) {
+      return fetchVaptekeViaStaticProxy(request);
+    }
     if (staticProxy && (
       host === "uteka.ru" ||
       host === "megapteka.ru" ||
       host === "irecommend.ru" ||
       host === "otzovik.com" ||
+      host === "vseotzyvy.ru" ||
       host === "pravogolosa.net" ||
       host === "ru.otzyv.com" ||
       host === "med-otzyv.ru"
@@ -443,6 +723,219 @@ export function browserFetch(
           status: result.status >= 200 && result.status <= 599 ? result.status : 502,
           headers: { "content-type": result.contentType, "x-ratings-final-url": final.toString() }
         });
+      });
+      await queue;
+      return response;
+    }
+    if (browserMode === "yandex-market-proof") {
+      const query = url.searchParams.get("text")?.normalize("NFKC").trim() ?? "";
+      const pageText = url.searchParams.get("page") ?? "1";
+      const isSearch = url.protocol === "https:" && url.hostname === "market.yandex.ru" &&
+        url.pathname === "/search" && !url.hash && query.length >= 2 && query.length <= 160 &&
+        /^\d+$/.test(pageText) && Number(pageText) >= 1 && Number(pageText) <= 50 &&
+        url.searchParams.getAll("text").length === 1 && url.searchParams.getAll("page").length <= 1 &&
+        [...url.searchParams.keys()].every((key) => key === "text" || key === "page");
+      const card = url.pathname.match(/^\/card\/([a-z0-9][a-z0-9-]*)\/(\d+)\/reviews\/?$/i);
+      const isCard = url.protocol === "https:" && url.hostname === "market.yandex.ru" && !url.search &&
+        !url.hash && Boolean(card);
+      if (!isSearch && !isCard) {
+        throw new Error("Yandex Market browser proof is restricted to bounded search or exact reviews routes");
+      }
+      if (isSearch && staticProxy) {
+        try {
+          const proxied = await fetchViaStaticProxy(url, request.signal);
+          const contentType = proxied.headers.get("content-type") ?? "";
+          const contentLength = Number(proxied.headers.get("content-length"));
+          if (proxied.ok && /html/i.test(contentType) &&
+            (!Number.isFinite(contentLength) || contentLength <= 10_000_000)) {
+            const html = await proxied.text();
+            if (html.length <= 10_000_000) {
+              const proof = extractYandexMarketSearchHtmlProof(html, query, Number(pageText));
+              if (proof) return json(proof);
+            }
+          }
+        } catch {
+          // The strict first-party JSON-LD proof was unavailable through fixed
+          // egress. Continue to the rendered browser route without changing a
+          // challenge, timeout or unknown response into an empty result.
+        }
+      }
+      let response!: Response;
+      queue = queue.catch(() => undefined).then(async () => {
+        request.signal.throwIfAborted();
+        const initial = await assertSafePublicDestination(url.toString());
+        const context = await getContext("trusted-yandex-market");
+        const page = await context.newPage();
+        try {
+          const responseChecks: Promise<void>[] = [];
+          let networkViolation: Error | undefined;
+          page.on("response", (pageResponse) => {
+            responseChecks.push(assertActualServer(pageResponse).catch((error) => {
+              networkViolation ??= error as Error;
+            }));
+          });
+          await page.route("**/*", async (route) => {
+            const targetText = route.request().url();
+            if (/^(?:data|blob):/i.test(targetText)) return route.continue();
+            try {
+              await assertSafePublicDestination(targetText);
+              return route.continue();
+            } catch {
+              return route.abort("blockedbyclient");
+            }
+          });
+          const navigation = await page.goto(initial.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
+          if (!navigation) throw new Error("Yandex Market browser proof returned no network response");
+          await assertActualServer(navigation);
+          const final = await assertSafePublicDestination(page.url() || initial.toString());
+          if (!sameDomain("market.yandex.ru", final.hostname) || final.pathname !== initial.pathname) {
+            throw new Error(`Yandex Market browser proof redirected to ${final.hostname}${final.pathname}`);
+          }
+
+          if (isSearch) {
+            let explicitNoResults = false;
+            let visibleProducts = 0;
+            for (let attempt = 0; attempt < 30; attempt += 1) {
+              request.signal.throwIfAborted();
+              await page.waitForTimeout(1_000);
+              const bodyText = await page.locator("body").innerText({ timeout: 5_000 });
+              explicitNoResults = hasExplicitYandexMarketNoResults(bodyText, query);
+              visibleProducts = await page.locator('article a[href*="/card/"]').count();
+              if (explicitNoResults || visibleProducts > 0) break;
+            }
+            if (!explicitNoResults && visibleProducts === 0) {
+              throw new Error("Yandex Market search rendered neither product cards nor explicit no-results proof");
+            }
+            const pageNumber = Number(pageText);
+            const proof = await page.evaluate(({ query, pageNumber, explicitNoResults }) => {
+              const products = new Map<string, {
+                id: string;
+                name: string;
+                url: string;
+                ratingCount?: number;
+                rating?: number;
+                familyId?: string;
+              }>();
+              const normalizedQuery = query.normalize("NFKC").trim().toLocaleLowerCase("ru-RU");
+              const structuredNumber = (value: unknown): number | undefined => {
+                if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+                if (typeof value !== "string" || !value.trim()) return undefined;
+                const normalized = value.trim().replace(",", ".");
+                if (!/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(normalized)) return undefined;
+                const parsed = Number(normalized);
+                return Number.isFinite(parsed) ? parsed : undefined;
+              };
+              for (const script of document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]')) {
+                let itemList: Record<string, unknown>;
+                try { itemList = JSON.parse(script.textContent ?? "") as Record<string, unknown>; }
+                catch { continue; }
+                if (itemList["@type"] !== "ItemList" || typeof itemList.name !== "string" ||
+                  !itemList.name.normalize("NFKC").toLocaleLowerCase("ru-RU").includes(normalizedQuery) ||
+                  !Array.isArray(itemList.itemListElement)) continue;
+                for (const entry of itemList.itemListElement) {
+                  if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+                  const item = (entry as Record<string, unknown>).item;
+                  if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+                  const product = item as Record<string, unknown>;
+                  const name = typeof product.name === "string" ? product.name.trim() : "";
+                  const rawUrl = typeof product.url === "string" ? product.url :
+                    typeof product["@id"] === "string" ? product["@id"] : "";
+                  let target: URL;
+                  try { target = new URL(rawUrl, window.location.origin); }
+                  catch { continue; }
+                  const match = target.pathname.match(/^\/card\/[a-z0-9][a-z0-9-]*\/(\d+)\/?$/i);
+                  if (!name || target.origin !== "https://market.yandex.ru" || !match) continue;
+                  target.search = "";
+                  target.hash = "";
+                  const proof: {
+                    id: string;
+                    name: string;
+                    url: string;
+                    ratingCount?: number;
+                    rating?: number;
+                    familyId?: string;
+                  } = { id: match[1]!, name, url: target.toString() };
+                  const aggregate = product.aggregateRating;
+                  if (aggregate && typeof aggregate === "object" && !Array.isArray(aggregate)) {
+                    const ratingCount = structuredNumber((aggregate as Record<string, unknown>).ratingCount);
+                    const rating = structuredNumber((aggregate as Record<string, unknown>).ratingValue);
+                    if (ratingCount !== undefined && Number.isSafeInteger(ratingCount) && ratingCount >= 0 &&
+                      rating !== undefined && rating >= 0 && rating <= 5 && (ratingCount === 0 || rating > 0)) {
+                      proof.ratingCount = ratingCount;
+                      proof.rating = rating;
+                    }
+                  }
+                  const familyId = typeof product.sku === "number" || typeof product.sku === "string"
+                    ? String(product.sku).trim()
+                    : "";
+                  if (/^\d{1,40}$/.test(familyId)) proof.familyId = familyId;
+                  products.set(match[1]!, proof);
+                }
+              }
+              for (const article of document.querySelectorAll("article")) {
+                const link = article.querySelector<HTMLAnchorElement>('a[href*="/card/"]');
+                if (!link) continue;
+                let target: URL;
+                try { target = new URL(link.href, window.location.origin); }
+                catch { continue; }
+                const match = target.pathname.match(/^\/card\/[a-z0-9][a-z0-9-]*\/(\d+)\/?$/i);
+                if (target.origin !== "https://market.yandex.ru" || !match) continue;
+                target.search = "";
+                target.hash = "";
+                const imageTitle = article.querySelector<HTMLImageElement>("img[alt]")?.alt?.trim();
+                const name = imageTitle || link.textContent?.replace(/\s+/g, " ").trim() || "";
+                if (!name) continue;
+                if (!products.has(match[1]!)) {
+                  products.set(match[1]!, { id: match[1]!, name, url: target.toString() });
+                }
+              }
+              let hasNext = false;
+              for (const anchor of document.querySelectorAll<HTMLAnchorElement>("a[href]")) {
+                try {
+                  const target = new URL(anchor.href, window.location.origin);
+                  if (target.origin === "https://market.yandex.ru" && target.pathname === "/search" &&
+                    target.searchParams.get("text") === query && Number(target.searchParams.get("page")) === pageNumber + 1) {
+                    hasNext = true;
+                    break;
+                  }
+                } catch { /* ignore malformed page links */ }
+              }
+              return { query, page: pageNumber, hasNext, products: [...products.values()], explicitNoResults };
+            }, { query, pageNumber, explicitNoResults });
+            if (proof.products.length === 0 && !proof.explicitNoResults) {
+              throw new Error("Yandex Market search product proof disappeared before extraction");
+            }
+            response = json({
+              query: proof.query,
+              page: proof.page,
+              hasNext: proof.hasNext,
+              products: proof.products
+            });
+          } else {
+            let productProof = false;
+            for (let attempt = 0; attempt < 30; attempt += 1) {
+              request.signal.throwIfAborted();
+              await page.waitForTimeout(1_000);
+              productProof = await page.locator('script[type="application/ld+json"]').evaluateAll((nodes) =>
+                nodes.some((node) => /"@type"\s*:\s*"Product"/i.test(node.textContent ?? ""))
+              );
+              if (productProof) break;
+            }
+            if (!productProof) throw new Error(`Yandex Market card ${card![2]} has no rendered Product JSON-LD`);
+            response = new Response(await page.content(), {
+              status: navigation.status() >= 200 && navigation.status() <= 599 ? navigation.status() : 200,
+              headers: {
+                "content-type": "text/html; charset=utf-8",
+                "x-ratings-final-url": final.toString(),
+                "x-ratings-proof-route": "yandex-market-browser"
+              }
+            });
+          }
+          await Promise.all(responseChecks);
+          if (networkViolation) throw networkViolation;
+        } finally {
+          await page.close();
+        }
       });
       await queue;
       return response;
@@ -664,8 +1157,10 @@ export function browserFetch(
     });
     await queue;
     return response;
-  }) as YandexBatchCapableFetch;
+  }) as YandexMarketCapableFetch;
   if (staticProxy) routedFetch.yandexBatchEndpoint = YANDEX_BATCH_ENDPOINT;
+  if (staticProxy) routedFetch.yandexDirectRecovery = true;
+  routedFetch.yandexMarketBrowserEndpoint = "https://market.yandex.ru/search";
   return routedFetch;
 }
 
@@ -677,7 +1172,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
   try {
     const body = await readAgentJson<{ runId?: string }>(context.request);
     if (!body.runId || !/^[0-9a-f-]{36}$/i.test(body.runId)) throw new Error("Некорректный runId");
-    const endpoint = new URL("/api/internal/repository", context.request.url).toString();
+    const endpoint = collectorPublicEndpoint("/api/internal/repository");
     const repository = new RemoteRepository(endpoint, context.env.INTERNAL_AGENT_TOKEN ?? "");
     const lease = await repository.acquireLease(`execute-run:${body.runId}`, 3_700_000);
     try {
@@ -706,7 +1201,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
           repository,
           evidence: new RemoteEvidenceStore(repository),
           fetch: browserFetch(context.sandbox, {
-            endpoint: new URL("/api/internal/static-review-fetch", context.request.url).toString(),
+            endpoint: collectorPublicEndpoint("/api/internal/static-review-fetch"),
             token: context.env.INTERNAL_AGENT_TOKEN ?? ""
           }),
           env: context.env,

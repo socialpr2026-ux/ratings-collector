@@ -129,6 +129,31 @@ describe("EaptekaAdapter", () => {
     }, context)).rejects.toBeInstanceOf(ParserChangedError);
   });
 
+  it("prefers an exact visible review aggregate over stale product dataLayer counters", async () => {
+    const title = "АкваОптик раствор для линз 60 мл 1 шт";
+    const productUrl = "https://www.eapteka.ru/goods/id334424/";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestedUrl(input);
+      if (url.hostname === "www.eapteka.ru") return new Response("Forbidden", { status: 403 });
+      if (url.hostname === "www-eapteka-ru.translate.goog") {
+        return new Response(translatedProduct(productUrl, `<h1>${title}</h1>
+          <script>dataLayer.push({item_reviews_count:20,item_rating:5});</script>
+          ${reviewSection("334424", title, 21, 4.81)}`), { headers: { "content-type": "text/html" } });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch;
+
+    const observation = await new EaptekaAdapter(new MemoryEvidenceStore(), fetchMock).collect({
+      domain: "eapteka.ru", platform: "eapteka.ru", listingId: "334424", brand: "АкваОптик",
+      url: productUrl, metadata: {}
+    }, context);
+
+    expect(observation).toMatchObject({
+      listingId: "334424", reviews: 21, rating: 4.81, ratingCount: 21,
+      status: "ok", source: "eapteka-visible-product-reviews:google-translate"
+    });
+  });
+
   it("ignores Eapteka's stale dataLayer rating when the product has no visible review section", async () => {
     const productUrl = "https://www.eapteka.ru/goods/id217962/";
     const productBody = `<h1>Церетон капсулы 400 мг 14 шт</h1>

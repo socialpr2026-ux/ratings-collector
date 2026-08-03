@@ -176,6 +176,12 @@ function validatePayload(
     if (item.status === "no_reviews" && (item.reviews !== 0 || item.rating !== null)) {
       throw new Error(`ozon.ru:${item.listingId}: карточка без отзывов должна иметь 0 и пустой рейтинг`);
     }
+    if (item.aggregateGroupId) {
+      const members = item.aggregateGroupId.slice("ozon:variants:".length).split(",");
+      if (!members.includes(item.listingId)) {
+        throw new Error(`ozon.ru:${item.listingId}: семейный рейтинг не содержит текущий SKU`);
+      }
+    }
     const productEvidence = titleProductEvidence(
       item.product,
       { type: "sku", value: item.listingId },
@@ -200,6 +206,7 @@ function validatePayload(
       reviews: item.reviews,
       rating: item.rating,
       ...(item.rating === null ? {} : { rawRating: item.rating, rawRatingScale: 5 }),
+      ...(item.aggregateGroupId ? { aggregateGroupId: item.aggregateGroupId } : {}),
       status,
       capturedAt: item.capturedAt,
       source: "ozon:composer-api:local-companion",
@@ -222,6 +229,16 @@ function validatePayload(
     )) {
       throw new Error(`Ozon / ${brand}: число карточек не совпадает с итогом локального сбора`);
     }
+  }
+  const aggregateMetrics = new Map<string, string>();
+  for (const item of input.observations) {
+    if (!item.aggregateGroupId) continue;
+    const fingerprint = `${item.reviews ?? "null"}:${item.rating ?? "null"}`;
+    const previous = aggregateMetrics.get(item.aggregateGroupId);
+    if (previous && previous !== fingerprint) {
+      throw new Error(`${item.aggregateGroupId}: варианты семейного рейтинга имеют разные метрики`);
+    }
+    aggregateMetrics.set(item.aggregateGroupId, fingerprint);
   }
   return observationsByBrand;
 }
@@ -262,31 +279,49 @@ async function importOzonCompanionResultExclusive(
   );
   const eligibleKeys = new Set(session.eligibleBrands.map(normalizeText));
   const imported = [...observationsByBrand.values()].flat();
+  const existingEligible = run.observations.filter((item) =>
+    item.domain === OZON_DOMAIN && eligibleKeys.has(normalizeText(item.brand))
+  );
+  const partitionsByBrand = new Map(input.partitions.map((item) => [normalizeText(item.brand), item]));
+  for (const [brandKey, importedPartition] of partitionsByBrand) {
+    if (
+      importedPartition.status === "no_results" &&
+      existingEligible.some((item) => normalizeText(item.brand) === brandKey)
+    ) {
+      throw new Error(`Ozon / ${importedPartition.brand}: локальный пустой результат противоречит уже доказанным карточкам`);
+    }
+  }
   const preserved = run.observations.filter((item) =>
     item.domain !== OZON_DOMAIN || !eligibleKeys.has(normalizeText(item.brand))
   );
   const seen = new Set(preserved.map((item) => productKey(item.domain, item.listingId)));
+  const mergedEligible = new Map(existingEligible.map((item) => [productKey(item.domain, item.listingId), item]));
   for (const item of imported) {
     const key = productKey(item.domain, item.listingId);
     if (seen.has(key)) throw new Error(`${key}: SKU уже присутствует в другом разделе запуска`);
-    seen.add(key);
+    const existing = mergedEligible.get(key);
+    if (existing && normalizeText(existing.brand) !== normalizeText(item.brand)) {
+      throw new Error(`${key}: SKU уже доказан для другого бренда`);
+    }
+    mergedEligible.set(key, item);
   }
-  const partitionsByBrand = new Map(input.partitions.map((item) => [normalizeText(item.brand), item]));
+  const merged = [...mergedEligible.values()];
   run.partitions = run.partitions.map((partition) => {
     if (partition.domain !== OZON_DOMAIN || !eligibleKeys.has(normalizeText(partition.brand))) return partition;
     const importedPartition = partitionsByBrand.get(normalizeText(partition.brand))!;
+    const mergedCount = merged.filter((item) => normalizeText(item.brand) === normalizeText(partition.brand)).length;
     return {
       domain: OZON_DOMAIN,
       brand: partition.brand,
       status: importedPartition.status,
-      discovered: importedPartition.discovered,
-      collected: importedPartition.collected,
+      discovered: importedPartition.status === "no_results" ? 0 : mergedCount,
+      collected: importedPartition.status === "no_results" ? 0 : mergedCount,
       message: importedPartition.status === "no_results"
         ? "Локальный Chrome исчерпал поиск Ozon: карточек нет"
         : "Собрано через локальный Chrome сотрудника"
     };
   });
-  run.observations = [...preserved, ...imported].sort((left, right) =>
+  run.observations = [...preserved, ...merged].sort((left, right) =>
     run.request.domains.indexOf(left.domain) - run.request.domains.indexOf(right.domain) ||
     run.request.brands.indexOf(left.brand) - run.request.brands.indexOf(right.brand) ||
     left.product.localeCompare(right.product, "ru") || left.listingId.localeCompare(right.listingId)
@@ -299,6 +334,7 @@ async function importOzonCompanionResultExclusive(
   run.progress.completedPartitions = run.partitions.length;
   delete run.progress.current;
   run.publication = undefined;
+  run.publicationExclusions = undefined;
   run.updatedAt = now.toISOString();
   run.companionSessions = {
     ...run.companionSessions,

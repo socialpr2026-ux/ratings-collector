@@ -163,6 +163,7 @@ async function evidenceObservation(
     title: string;
     reviews: number;
     rating: number | null;
+    ratingUnavailable?: boolean;
     ratingCount?: number | null;
     capturedAt: string;
     html: string;
@@ -187,6 +188,7 @@ async function evidenceObservation(
       canonicalUrl: input.canonicalUrl,
       reviews: input.reviews,
       rating: input.rating,
+      ...(input.ratingUnavailable ? { ratingUnavailable: true } : {}),
       ratingCount: input.ratingCount ?? null
     },
     productEvidence,
@@ -203,6 +205,7 @@ async function evidenceObservation(
     rating: input.reviews === 0 ? null : input.rating,
     rawRating: input.rating,
     rawRatingScale: 5,
+    ...(input.ratingUnavailable ? { ratingUnavailable: true } : {}),
     ratingCount: input.ratingCount,
     status: input.reviews === 0 ? "no_reviews" : "ok",
     capturedAt: input.capturedAt,
@@ -489,9 +492,36 @@ export class RiglaAdapter extends PharmacyAdapter {
     if (!canonical || canonical.id !== ref.listingId) throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: canonical ведёт на другую карточку`);
     const title = compactText($("h1").first().text());
     if (!title) throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: название не найдено`);
+    const emptyReviews = compactText($(".reviews-list__empty-text").first().text());
+    if (/^(?:Отзывов пока нет|No reviews yet)$/iu.test(emptyReviews)) {
+      return evidenceObservation(this.evidence, {
+        domain: RIGLA_DOMAIN,
+        listingId: ref.listingId,
+        brand: ref.brand,
+        canonicalUrl: canonical.url,
+        title,
+        reviews: 0,
+        rating: null,
+        ratingCount: 0,
+        capturedAt: new Date().toISOString(),
+        html: result.html,
+        status: result.status,
+        requestedUrl: result.requestedUrl,
+        source: "rigla-visible-no-reviews"
+      });
+    }
+    const visibleReviewCount = integer(
+      compactText($(".reviews-list__reviews-count").first().text()).match(/(?:Отзывы|Reviews)\s+(\d+)/iu)?.[1]
+    );
+    if (visibleReviewCount === undefined || visibleReviewCount <= 0) {
+      throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: публичный блок отзывов не доказан`);
+    }
     const state = riglaState(result.html) as { productView?: { reviews?: unknown[] } };
     const reviewItems = state.productView?.reviews;
     if (!Array.isArray(reviewItems)) throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: список отзывов не найден`);
+    if (reviewItems.length !== visibleReviewCount) {
+      throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: скрытые отзывы не совпадают с публичным счетчиком`);
+    }
     const reviewIds = new Set<string>();
     const ratings: number[] = [];
     for (const item of reviewItems) {
@@ -500,14 +530,25 @@ export class RiglaAdapter extends PharmacyAdapter {
       const id = String(object.id ?? "").trim();
       if (!id || reviewIds.has(id)) throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: дублирован или отсутствует ID отзыва`);
       reviewIds.add(id);
-      const values = Array.isArray(object.ratings)
-        ? object.ratings.map((entry) => rating((entry as { value?: unknown })?.value)).filter((value): value is number => value !== undefined)
-        : [];
-      if (values.length !== 1) throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: у отзыва нет единственной общей оценки`);
-      ratings.push(values[0]);
+      if (!Array.isArray(object.ratings)) {
+        throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: некорректное состояние оценки отзыва`);
+      }
+      if (object.ratings.length === 0) continue;
+      const value = object.ratings.length === 1
+        ? rating((object.ratings[0] as { value?: unknown })?.value)
+        : undefined;
+      if (value === undefined) {
+        throw new ParserChangedError(`${RIGLA_DOMAIN}:${ref.listingId}: у отзыва нет единственной общей оценки`);
+      }
+      ratings.push(value);
     }
     const reviews = reviewItems.length;
-    const average = reviews ? Math.round(ratings.reduce((sum, value) => sum + value, 0) / reviews * 100) / 100 : null;
+    const ratingUnavailable = reviews > 0 && ratings.length !== reviews;
+    // A complete, unique review list proves the written-review count, but a
+    // partial set of stars cannot prove the product's aggregate rating.
+    const average = reviews > 0 && !ratingUnavailable
+      ? Math.round(ratings.reduce((sum, value) => sum + value, 0) / reviews * 100) / 100
+      : null;
     return evidenceObservation(this.evidence, {
       domain: RIGLA_DOMAIN,
       listingId: ref.listingId,
@@ -516,6 +557,7 @@ export class RiglaAdapter extends PharmacyAdapter {
       title,
       reviews,
       rating: average,
+      ratingUnavailable,
       ratingCount: ratings.length,
       capturedAt: new Date().toISOString(),
       html: result.html,
@@ -593,7 +635,18 @@ export class ZdravcityAdapter extends PharmacyAdapter {
   readonly id = "pharmacy:zdravcity:v1";
   readonly supportedDomains = [ZDRAV_DOMAIN, `www.${ZDRAV_DOMAIN}`] as const;
 
-  healthCheck(context: AdapterContext): Promise<AdapterHealth> { return this.canary("Кагоцел", context); }
+  async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
+    const checkedAt = new Date().toISOString();
+    const brand = context.brands?.[0]?.trim() || "Кагоцел";
+    try {
+      const refs = await this.discover(brand, { ...context, previousIds: [], previousRefs: [] });
+      return refs.length
+        ? { ok: true, checkedAt, message: `${this.id}: operative discovery found ${refs.length} product card(s)` }
+        : { ok: true, checkedAt, message: `${this.id}: complete brand lookup proved no current product for ${brand}` };
+    } catch (error) {
+      return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
+    }
+  }
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = new Map<string, ProductRef>();
@@ -651,14 +704,21 @@ export class ZdravcityAdapter extends PharmacyAdapter {
     const reviewItems = product?.reviews;
     if (!product || !canonical || !title || !Array.isArray(reviewItems)) throw new ParserChangedError(`${ZDRAV_DOMAIN}:${ref.listingId}: карточка неполна`);
     const reviewIds = new Set<string>();
+    let ratedReviews = 0;
     for (const item of reviewItems) {
       const reviewId = String(item.ID ?? "").trim();
-      if (!reviewId || reviewIds.has(reviewId)) throw new ParserChangedError(`${ZDRAV_DOMAIN}:${ref.listingId}: дублирован или отсутствует ID отзыва`);
+      const score = integer(item.rate);
+      if (!reviewId || reviewIds.has(reviewId) || score === undefined || score < 0 || score > 5) {
+        throw new ParserChangedError(`${ZDRAV_DOMAIN}:${ref.listingId}: дублирован ID или некорректная оценка отзыва`);
+      }
       reviewIds.add(reviewId);
+      if (score > 0) ratedReviews += 1;
     }
     const reviews = reviewItems.length;
     const rawRating = rating(product.attributes?.rating);
-    if (reviews > 0 && rawRating === undefined) throw new ParserChangedError(`${ZDRAV_DOMAIN}:${ref.listingId}: отзывы есть, но общий рейтинг отсутствует`);
+    if (reviews > 0 && rawRating === undefined && ratedReviews > 0) {
+      throw new ParserChangedError(`${ZDRAV_DOMAIN}:${ref.listingId}: у оценённых отзывов отсутствует общий рейтинг`);
+    }
     const structuredCount = zdravStructuredFeedback(result.html, {
       canonicalUrl: canonical.url,
       title,
@@ -666,7 +726,7 @@ export class ZdravcityAdapter extends PharmacyAdapter {
         ? String(product.attributes.sku).trim()
         : undefined
     });
-    return evidenceObservation(this.evidence, {
+    const observation = await evidenceObservation(this.evidence, {
       domain: ZDRAV_DOMAIN,
       listingId: ref.listingId,
       brand: ref.brand,
@@ -674,6 +734,7 @@ export class ZdravcityAdapter extends PharmacyAdapter {
       title,
       reviews,
       rating: rawRating ?? null,
+      ratingUnavailable: reviews > 0 && ratedReviews === 0,
       // The storefront labels this structured counter reviewCount, while its
       // visible written-review array can differ. Preserve it only technically.
       ratingCount: structuredCount,
@@ -683,6 +744,7 @@ export class ZdravcityAdapter extends PharmacyAdapter {
       requestedUrl: result.requestedUrl,
       source: "zdravcity-next-data-written-reviews"
     });
+    return observation;
   }
 }
 

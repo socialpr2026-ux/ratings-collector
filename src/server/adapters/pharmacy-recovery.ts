@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { load, type CheerioAPI } from "cheerio";
 import type { AdapterContext, AdapterHealth, Observation, ProductRef, SiteAdapter } from "../../shared/types.js";
 import type { EvidenceStore } from "../evidence.js";
-import { aliasesForBrand } from "../utils/normalize.js";
+import { aliasesForBrand, normalizeText } from "../utils/normalize.js";
 import { titleProductEvidence } from "../utils/product-evidence.js";
 import { readTextBounded, safeFetch } from "../utils/safe-fetch.js";
 import { canonicalizeUrl } from "../utils/urls.js";
@@ -206,6 +206,23 @@ function slugMatches(pathSlug: string, slugs: readonly string[]): boolean {
   return slugs.some((slug) => pathSlug === slug || new RegExp(`^${slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[-_]`).test(pathSlug));
 }
 
+function asnaSitemapUrls(slugs: readonly string[]): string[] {
+  const uniqueSlugs = [...new Set(slugs)];
+  const names = ["sitemap_cards.xml", "sitemap_cards1.xml"] as const;
+  const requests: string[] = [];
+  for (let offset = 0; offset < uniqueSlugs.length; offset += 12) {
+    const candidates = uniqueSlugs.slice(offset, offset + 12);
+    for (const name of names) {
+      const url = new URL(`/sitemap/${name}`, "https://www.asna.ru");
+      // The Agent routes only this exact, bounded request through the fixed
+      // gateway. The Function filters the large public map before returning it.
+      url.searchParams.set("slugs", candidates.join(","));
+      requests.push(url.toString());
+    }
+  }
+  return requests;
+}
+
 function previousRefs(
   domain: PharmacyDomain,
   brand: string,
@@ -354,20 +371,17 @@ function polzaProduct($: CheerioAPI, expectedId?: string): ParsedProduct | undef
 
 function polzaProductMetrics(
   root: ReturnType<CheerioAPI>,
-  $: CheerioAPI
+  $: CheerioAPI,
+  expectedId: string
 ): Pick<ParsedProduct, "reviews" | "rating"> | undefined {
   const aggregate = root.find("[itemprop='aggregateRating']").first();
   const reviews = exactInteger(aggregate.find("meta[itemprop='reviewCount']").first().attr("content"));
   const rating = exactRating(aggregate.find("meta[itemprop='ratingValue']").first().attr("content"));
-  if (reviews === undefined || reviews > 0 && rating === undefined) return undefined;
-  if (reviews === 0) return { reviews: 0, rating: null };
-
-  // Polza can leave a stale AggregateRating on a product that has no review
-  // section at all. Accept a positive total only when the same product root
-  // exposes the visible review block, its total and at least one review item.
   const reviewBlocks = $("#review_block");
   const reviewBlock = reviewBlocks.first();
   const reviewItems = reviewBlock.find(".reviews__item.review-item");
+  const reviewProductId = reviewBlock.find("input.js-product_id[name='product_id']").first().attr("value");
+  if (reviewBlocks.length === 1 && reviewProductId !== expectedId) return undefined;
   const explicitEmpty = reviewBlocks.length === 1 && reviewBlock.find(
     ".reviews__empty, .reviews-empty, [data-empty-reviews]"
   ).length === 1 && /(?:отзывов\s+(?:пока\s+)?нет|нет\s+отзывов)/iu.test(reviewBlock.text());
@@ -379,6 +393,12 @@ function polzaProductMetrics(
   const explicitStaleZero = reviewBlocks.length === 0 && reviewItems.length === 0 &&
     $(".review-add-modal, .js-notify-add-modal").length > 0;
   if (explicitStaleZero) return { reviews: 0, rating: null };
+  if (reviews === undefined || reviews > 0 && rating === undefined) return undefined;
+  if (reviews === 0) return { reviews: 0, rating: null };
+
+  // Polza can leave a stale AggregateRating on a product that has no review
+  // section at all. Accept a positive total only when the exact public review
+  // block exposes its total and at least one review item.
   if (!reviewBlocks.length && !reviewItems.length) return undefined;
   if (reviewBlocks.length !== 1) return undefined;
   const visibleTotal = exactInteger(reviewBlock.find(".reviews__amount").first().text());
@@ -458,9 +478,11 @@ export class PolzaAdapter implements SiteAdapter {
         if (!parsed) return;
         const productSlug = new URL(parsed.canonicalUrl).pathname.split("/").filter(Boolean)[1]?.replace(/_\d+$/, "") ?? "";
         if (!slugMatches(productSlug, slugs)) return;
+        const sourceTitle = root.find("meta[itemprop='name']").first().attr("content")
+          ?.normalize("NFKC").replace(/\s+/g, " ").trim();
         refs.set(parsed.listingId, {
           domain: "polza.ru", platform: "polza.ru", listingId: parsed.listingId, brand,
-          url: parsed.canonicalUrl, title: polzaProductTitle(parsed.canonicalUrl, brand),
+          url: parsed.canonicalUrl, title: sourceTitle || polzaProductTitle(parsed.canonicalUrl, brand),
           metadata: { discovery: "polza-current-sitemap-family", familyUrl: familyUrl.toString() }
         });
       });
@@ -474,8 +496,27 @@ export class PolzaAdapter implements SiteAdapter {
     if (!parsedRef || parsedRef.listingId !== ref.listingId) throw new ParserChangedError(`polza.ru: invalid product ref ${ref.listingId}`);
     const capturedAt = new Date().toISOString();
     const { html, $ } = await translatedPage(new URL(parsedRef.canonicalUrl), "polza-ru.translate.goog", context, this.fetchImpl);
-    const root = $(`meta[itemprop='sku'][content='${parsedRef.listingId}']`).closest("[itemscope]").first();
-    const metrics = root.length === 1 ? polzaProductMetrics(root, $) : undefined;
+    const productRoots = $(`meta[itemprop='sku'][content='${parsedRef.listingId}']`).toArray()
+      .map((node) => $(node).closest("[itemscope]").get(0))
+      .filter((node): node is NonNullable<typeof node> => Boolean(node))
+      .filter((node, index, nodes) => nodes.indexOf(node) === index)
+      .filter((node) => {
+        const candidate = $(node);
+        const path = candidate.find("link[itemprop='url']").first().attr("href");
+        if (!path) return true;
+        const bound = polzaRef(new URL(path, parsedRef.canonicalUrl));
+        return bound?.listingId === parsedRef.listingId && bound.canonicalUrl === parsedRef.canonicalUrl;
+      });
+    const aggregateRoots = productRoots.filter((node) => $(node).find("[itemprop='aggregateRating']").length === 1);
+    const exactMainRoots = productRoots.filter((node) => {
+      const candidate = $(node);
+      return candidate.is("main") || candidate.is("section.product-detail__block");
+    });
+    const selectedRoot = aggregateRoots.length === 1
+      ? aggregateRoots[0]
+      : aggregateRoots.length === 0 && exactMainRoots.length === 1 ? exactMainRoots[0] : undefined;
+    const root = selectedRoot ? $(selectedRoot) : undefined;
+    const metrics = root ? polzaProductMetrics(root, $, parsedRef.listingId) : undefined;
     if (!metrics) {
       throw new ParserChangedError(`polza.ru:${ref.listingId}: product aggregate is incomplete`);
     }
@@ -562,6 +603,16 @@ function asnaProduct($: CheerioAPI): ParsedProduct | undefined {
   const canonical = $("link[rel='canonical']").first().attr("href");
   const parsedRef = canonical && listingId ? asnaRef(canonical, listingId) : undefined;
   const aggregate = root.find("[itemprop='aggregateRating']").first();
+  if (parsedRef && aggregate.length === 0) {
+    const feedback = root.find("#feedBack.product__feedback");
+    const heading = normalizeText(feedback.children("h2.product__feedbackTitle").first().text());
+    const title = normalizeText(root.find("h1").first().text() || $("h1").first().text());
+    const exactEmpty = feedback.length === 1 && title.length > 0 && heading === `оставить отзыв о ${title}` &&
+      feedback.find("#product__feedbackBtnWrapper.product__feedbackBtnWrapper").length === 1 &&
+      root.find("[itemprop='review'], #feedbackListContainer, .product__ratingText").length === 0 &&
+      !/(?:loading|error|ошибка|не удалось загрузить|повторите позже)/iu.test(feedback.text());
+    if (exactEmpty) return { ...parsedRef, reviews: 0, rating: null };
+  }
   const reviews = exactInteger(aggregate.find("meta[itemprop='reviewCount']").first().attr("content"));
   const rating = exactRating(aggregate.find("meta[itemprop='ratingValue']").first().attr("content"));
   if (!parsedRef || reviews === undefined || reviews > 0 && rating === undefined) return undefined;
@@ -581,6 +632,10 @@ function asnaProduct($: CheerioAPI): ParsedProduct | undefined {
   }
   return { ...parsedRef, reviews, rating: reviews === 0 ? null : rating! };
 }
+
+const ASNA_PRODUCT_FAMILY_SLUGS: Record<string, readonly string[]> = {
+  "энтеролактис": ["enterolaktis_plyus", "enterolaktis_duo", "enterolaktis_fibra"]
+};
 
 export class AsnaAdapter implements SiteAdapter {
   readonly id = "asna.ru:translate-v1";
@@ -619,10 +674,7 @@ export class AsnaAdapter implements SiteAdapter {
       return [...refs.values()].sort((left, right) => left.listingId.localeCompare(right.listingId));
     }
     const slugs = brandSlugs(brand);
-    const maps = await Promise.allSettled([
-      sitemap("https://www.asna.ru/sitemap/sitemap_cards.xml", context, this.fetchImpl),
-      sitemap("https://www.asna.ru/sitemap/sitemap_cards1.xml", context, this.fetchImpl)
-    ]);
+    const maps = await Promise.allSettled(asnaSitemapUrls(slugs).map((url) => sitemap(url, context, this.fetchImpl)));
     const candidates = new Map<string, { listingId: string; canonicalUrl: string; discovery: string }>();
     for (const map of maps) {
       if (map.status !== "fulfilled") continue;
@@ -641,12 +693,17 @@ export class AsnaAdapter implements SiteAdapter {
     // ASNA's current card sitemaps can omit an otherwise live medicine family.
     // Its exact `/product/<brand>/` page is a source-bound first-party listing,
     // so use it only to discover card URLs; every card aggregate is still
-    // fetched and verified independently below.
-    for (const slug of slugs) {
+    // fetched and verified independently below. Prefer the translated renderer
+    // and retain the exact launcher as a bounded fallback.
+    const familySlugs = [...new Set([
+      ...slugs,
+      ...(ASNA_PRODUCT_FAMILY_SLUGS[normalizeText(brand)] ?? [])
+    ])];
+    for (const slug of familySlugs) {
       const family = new URL(`https://www.asna.ru/product/${slug}/`);
       let $: CheerioAPI;
       try {
-        ({ $ } = await translatedPageViaLauncher(family, "www-asna-ru.translate.goog", context, this.fetchImpl));
+        ({ $ } = await translatedPage(family, "www-asna-ru.translate.goog", context, this.fetchImpl, true));
       } catch (error) {
         if (error instanceof AdapterBlockedError || error instanceof ParserChangedError) continue;
         throw error;
@@ -672,9 +729,13 @@ export class AsnaAdapter implements SiteAdapter {
         for (const [existingId, existing] of refs) {
           if (existingId !== parsed.listingId && existing.url === parsed.canonicalUrl) refs.delete(existingId);
         }
+        const sourceTitle = $("h1").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+        const title = sourceTitle && normalizeText(sourceTitle).includes(normalizeText(brand))
+          ? sourceTitle
+          : asnaTitle(parsed.canonicalUrl, brand, slugs);
         refs.set(parsed.listingId, {
           domain: "asna.ru", platform: "asna.ru", listingId: parsed.listingId, brand,
-          url: parsed.canonicalUrl, title: asnaTitle(parsed.canonicalUrl, brand, slugs),
+          url: parsed.canonicalUrl, title,
           metadata: { discovery: preliminary.discovery, reviewCount: parsed.reviews, rating: parsed.rating }
         });
       } catch (error) {

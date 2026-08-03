@@ -54,7 +54,9 @@ export const runRequestSchema = z.object({
   month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
   region: z.string().trim().min(2).max(100).default("Москва"),
   domains: z.array(z.string().trim().min(3).max(253)).min(1).max(30),
-  brands: z.array(z.string().trim().min(2).max(160)).min(1).max(200)
+  brands: z.array(z.string().trim().min(2).max(160)).min(1).max(200),
+  /** Explicitly request an exhaustive source discovery instead of known cards only. */
+  discoveryMode: z.enum(["known_first", "refresh"]).optional()
 }).superRefine((request, context) => {
   const partitions = request.domains.length * request.brands.length;
   if (partitions > MAX_RUN_PARTITIONS) {
@@ -136,7 +138,9 @@ export type AdapterContext = {
   month?: string;
   signal?: AbortSignal;
   previousIds?: string[];
-  previousRefs?: Array<{ listingId: string; url: string }>;
+  previousRefs?: Array<{ listingId: string; url: string; title?: string }>;
+  /** Bypass the saved-card fast path and search the source for newly added cards. */
+  refreshDiscovery?: boolean;
   fetch?: typeof globalThis.fetch;
   /** Collector-reported operations; absent for older adapters and callers. */
   activity?: (event: AdapterActivityEvent) => void | Promise<void>;
@@ -200,6 +204,26 @@ export type ProductRecord = {
   productIdentity?: ProductIdentity;
   firstSeenMonth: string;
   lastSeenMonth: string;
+};
+
+/** Exact source card retained as soon as collection succeeds, independently of publication. */
+export type SourceCardRecord = {
+  key: string;
+  domain: string;
+  listingId: string;
+  brand: string;
+  canonicalUrl: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+};
+
+export type RunHistoryItem = {
+  id: string;
+  brands: string[];
+  createdAt: string;
+  collectionStartedAt: string;
+  collectionFinishedAt?: string;
+  durationMs: number | null;
 };
 
 export type PublicationRecord = {
@@ -290,6 +314,9 @@ export type RunState = {
   status: "queued" | "running" | "review" | "publishing" | "published" | "failed";
   createdAt: string;
   updatedAt: string;
+  /** Wall-clock collection interval; publishing/review time is deliberately excluded. */
+  collectionStartedAt?: string;
+  collectionFinishedAt?: string;
   progress: RunProgress;
   observations: Observation[];
   partitions: PartitionResult[];
@@ -306,6 +333,21 @@ export type RunState = {
   publication?: PublicationRecord;
   /** Ratings sheet resolved during preflight; legacy Russian tabs remain supported. */
   sheetTabName?: string;
+  /** Exact Apps Script preimage captured by the separate preflight Agent call. */
+  sheetPreflight?: {
+    spreadsheetId: string;
+    capturedAt: string;
+    tabs: Array<{
+      spreadsheetId: string;
+      tabName: string;
+      values: Array<Array<string | number | null>>;
+      formulas: Array<Array<string | null>>;
+      merges: Array<{ startRow: number; endRow: number; startColumn: number; endColumn: number }>;
+      revision: string;
+      rows: number;
+      columns: number;
+    }>;
+  };
   /** Recent runtime work for the live process map. Backward-compatible. */
   activity?: RunActivityTrace;
   /** One-time browser-companion sessions. Existing stored runs omit this field. */

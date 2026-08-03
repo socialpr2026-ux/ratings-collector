@@ -4,7 +4,9 @@ import type {
   Observation,
   ProductRecord,
   PublicationRecord,
+  RunHistoryItem,
   RunState,
+  SourceCardRecord,
   SiteProfile
 } from "../shared/types.js";
 
@@ -13,6 +15,7 @@ export type Database = {
   runs: Record<string, RunState>;
   profiles: Record<string, SiteProfile>;
   products: Record<string, Record<string, ProductRecord>>;
+  sourceCards: Record<string, Record<string, SourceCardRecord>>;
   snapshots: Record<string, Record<string, Record<string, Observation>>>;
   publications: Record<string, PublicationRecord>;
   usage: Record<string, number>;
@@ -21,11 +24,14 @@ export type Database = {
 export interface Repository {
   getRun(id: string): Promise<RunState | undefined>;
   saveRun(run: RunState): Promise<void>;
+  listRecentRuns(ownerEmail?: string, limit?: number): Promise<RunHistoryItem[]>;
   getProfile(domain: string): Promise<SiteProfile | undefined>;
   saveProfile(profile: SiteProfile): Promise<void>;
   listProducts(spreadsheetId: string): Promise<ProductRecord[]>;
   saveProducts(spreadsheetId: string, records: ProductRecord[]): Promise<void>;
   replaceProducts(spreadsheetId: string, records: ProductRecord[]): Promise<void>;
+  listSourceCards(spreadsheetId: string): Promise<SourceCardRecord[]>;
+  saveSourceCards(spreadsheetId: string, records: SourceCardRecord[]): Promise<void>;
   getSnapshots(spreadsheetId: string): Promise<Record<string, Record<string, Observation>>>;
   saveSnapshot(spreadsheetId: string, month: string, observations: Observation[]): Promise<void>;
   replaceSnapshots(spreadsheetId: string, snapshots: Record<string, Record<string, Observation>>): Promise<void>;
@@ -43,6 +49,7 @@ const emptyDatabase = (): Database => ({
   runs: {},
   profiles: {},
   products: {},
+  sourceCards: {},
   snapshots: {},
   publications: {},
   usage: {}
@@ -61,6 +68,14 @@ export class MemoryRepository implements Repository {
 
   async getRun(id: string) { return this.db.runs[id] ? clone(this.db.runs[id]) : undefined; }
   async saveRun(run: RunState) { this.db.runs[run.id] = clone(run); await this.changed(); }
+  async listRecentRuns(ownerEmail?: string, limit = 8): Promise<RunHistoryItem[]> {
+    const boundedLimit = Math.max(1, Math.min(20, Math.trunc(limit) || 8));
+    return Object.values(this.db.runs)
+      .filter((run) => !ownerEmail || run.ownerEmail === ownerEmail)
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+      .slice(0, boundedLimit)
+      .map(runHistoryItem);
+  }
   async getProfile(domain: string) { return this.db.profiles[domain] ? clone(this.db.profiles[domain]) : undefined; }
   async saveProfile(profile: SiteProfile) { this.db.profiles[profile.domain] = clone(profile); await this.changed(); }
   async listProducts(spreadsheetId: string) { return Object.values(clone(this.db.products[spreadsheetId] ?? {})); }
@@ -71,6 +86,20 @@ export class MemoryRepository implements Repository {
   }
   async replaceProducts(spreadsheetId: string, records: ProductRecord[]) {
     this.db.products[spreadsheetId] = Object.fromEntries(records.map((record) => [record.key, clone(record)]));
+    await this.changed();
+  }
+  async listSourceCards(spreadsheetId: string) {
+    return Object.values(clone((this.db.sourceCards ??= {})[spreadsheetId] ?? {}));
+  }
+  async saveSourceCards(spreadsheetId: string, records: SourceCardRecord[]) {
+    const sourceCards = (this.db.sourceCards ??= {})[spreadsheetId] ??= {};
+    for (const record of records) {
+      const previous = sourceCards[record.key];
+      sourceCards[record.key] = clone({
+        ...record,
+        firstSeenAt: previous?.firstSeenAt ?? record.firstSeenAt
+      });
+    }
     await this.changed();
   }
   async getSnapshots(spreadsheetId: string) { return clone(this.db.snapshots[spreadsheetId] ?? {}); }
@@ -150,4 +179,18 @@ export class FileRepository extends MemoryRepository {
 
 export function productKey(domain: string, listingId: string): string {
   return `${domain.toLocaleLowerCase("ru-RU")}:${listingId}`;
+}
+
+export function runHistoryItem(run: RunState): RunHistoryItem {
+  const startedAt = run.collectionStartedAt ?? run.createdAt;
+  const finishedAt = run.collectionFinishedAt;
+  const duration = finishedAt ? Date.parse(finishedAt) - Date.parse(startedAt) : Number.NaN;
+  return {
+    id: run.id,
+    brands: [...run.request.brands],
+    createdAt: run.createdAt,
+    collectionStartedAt: startedAt,
+    collectionFinishedAt: finishedAt,
+    durationMs: Number.isFinite(duration) && duration >= 0 ? duration : null
+  };
 }

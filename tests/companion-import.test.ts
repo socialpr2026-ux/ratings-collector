@@ -72,7 +72,11 @@ describe("Ozon companion import", () => {
   });
 
   it("atomically replaces only the failed Ozon partition and makes the run publishable", async () => {
-    const repository = new MemoryRepository({ runs: { "run-companion": blockedRun() } });
+    const initial = blockedRun();
+    initial.publicationExclusions = [{
+      domain: "ozon.ru", brand: "Тестбренд", reason: "quota_exceeded", excludedAt: now.toISOString()
+    }];
+    const repository = new MemoryRepository({ runs: { "run-companion": initial } });
     const session = await issueOzonCompanionSession(repository, "run-companion", owner, { now: () => now });
     const imported = await importOzonCompanionResult(
       repository, "run-companion", owner, result(session.nonce), { now: () => now }
@@ -89,7 +93,42 @@ describe("Ozon companion import", () => {
     })]);
     expect(imported.errors).toEqual([]);
     expect(imported.qa?.ok).toBe(true);
+    expect(imported.publicationExclusions).toBeUndefined();
     expect(imported.companionSessions?.ozon).toMatchObject({ usedAt: now.toISOString() });
+  });
+
+  it("preserves only source-proven shared variant groups and rejects diverging group metrics", async () => {
+    const repository = new MemoryRepository({ runs: { "run-companion": blockedRun() } });
+    const session = await issueOzonCompanionSession(repository, "run-companion", owner, { now: () => now });
+    const groupId = "ozon:variants:123456789,123456790";
+    const observations = [
+      {
+        listingId: "123456789", brand: "Тестбренд",
+        canonicalUrl: "https://www.ozon.ru/product/testbrand-tabletki-123456789/",
+        product: "Тестбренд таблетки 10 мг №20", reviews: 7, rating: 4.9,
+        aggregateGroupId: groupId, status: "ok", capturedAt: now.toISOString()
+      },
+      {
+        listingId: "123456790", brand: "Тестбренд",
+        canonicalUrl: "https://www.ozon.ru/product/testbrand-tabletki-123456790/",
+        product: "Тестбренд таблетки 10 мг №30", reviews: 7, rating: 4.9,
+        aggregateGroupId: groupId, status: "ok", capturedAt: now.toISOString()
+      }
+    ] as const;
+    const payload = {
+      version: 1 as const, nonce: session.nonce, observations,
+      partitions: [{ brand: "Тестбренд", status: "complete" as const, discovered: 2, collected: 2 }]
+    };
+    const imported = await importOzonCompanionResult(repository, "run-companion", owner, payload, { now: () => now });
+    expect(imported.observations.map((item) => item.aggregateGroupId)).toEqual([groupId, groupId]);
+
+    const secondRepository = new MemoryRepository({ runs: { "run-companion": blockedRun() } });
+    const secondSession = await issueOzonCompanionSession(secondRepository, "run-companion", owner, { now: () => now });
+    await expect(importOzonCompanionResult(secondRepository, "run-companion", owner, {
+      ...payload,
+      nonce: secondSession.nonce,
+      observations: observations.map((item, index) => ({ ...item, rating: index === 0 ? 4.9 : 4.8 }))
+    }, { now: () => now })).rejects.toThrow("разные метрики");
   });
 
   it("allows an idempotent replay of the same payload but rejects a changed replay", async () => {
@@ -155,5 +194,60 @@ describe("Ozon companion import", () => {
     expect(imported.observations).toEqual([]);
     expect(imported.partitions[0]).toMatchObject({ status: "no_results", discovered: 0, collected: 0 });
     expect(imported.qa?.ok).toBe(true);
+  });
+
+  it("merges local cards with already proven cloud cards without duplicates", async () => {
+    const current = blockedRun();
+    current.observations = [{
+      domain: "ozon.ru",
+      platform: "ozon",
+      listingId: "111111111",
+      brand: "Тестбренд",
+      canonicalUrl: "https://www.ozon.ru/product/testbrand-kapsuly-111111111/",
+      product: "Тестбренд капсулы 5 мг №10",
+      reviews: 3,
+      rating: 4.7,
+      status: "ok",
+      capturedAt: now.toISOString(),
+      source: "ozon:composer-api:edgeone-browser"
+    }];
+    current.partitions[0] = { ...current.partitions[0]!, discovered: 2, collected: 1 };
+    const repository = new MemoryRepository({ runs: { "run-companion": current } });
+    const session = await issueOzonCompanionSession(repository, "run-companion", owner, { now: () => now });
+
+    const imported = await importOzonCompanionResult(
+      repository, "run-companion", owner, result(session.nonce), { now: () => now }
+    );
+
+    expect(imported.observations.map((item) => item.listingId).sort()).toEqual(["111111111", "123456789"]);
+    expect(imported.partitions[0]).toMatchObject({ status: "complete", discovered: 2, collected: 2 });
+    expect(imported.qa?.ok).toBe(true);
+  });
+
+  it("rejects local no_results when a cloud card is already proven", async () => {
+    const current = blockedRun();
+    current.observations = [{
+      domain: "ozon.ru",
+      platform: "ozon",
+      listingId: "111111111",
+      brand: "Тестбренд",
+      canonicalUrl: "https://www.ozon.ru/product/testbrand-kapsuly-111111111/",
+      product: "Тестбренд капсулы 5 мг №10",
+      reviews: 3,
+      rating: 4.7,
+      status: "ok",
+      capturedAt: now.toISOString()
+    }];
+    current.partitions[0] = { ...current.partitions[0]!, discovered: 1, collected: 1 };
+    const repository = new MemoryRepository({ runs: { "run-companion": current } });
+    const session = await issueOzonCompanionSession(repository, "run-companion", owner, { now: () => now });
+
+    await expect(importOzonCompanionResult(repository, "run-companion", owner, {
+      version: 1,
+      nonce: session.nonce,
+      observations: [],
+      partitions: [{ brand: "Тестбренд", status: "no_results", discovered: 0, collected: 0 }]
+    }, { now: () => now })).rejects.toThrow("противоречит уже доказанным карточкам");
+    expect((await repository.getRun("run-companion"))?.observations).toHaveLength(1);
   });
 });

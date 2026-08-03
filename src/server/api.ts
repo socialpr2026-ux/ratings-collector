@@ -38,6 +38,10 @@ export async function registerApi(server: FastifyInstance, runtime: Runtime) {
     });
     return reply.code(202).send(run);
   });
+  server.get<{ Querystring: { limit?: string } }>("/api/runs", async (request) => {
+    const limit = Math.max(1, Math.min(20, Math.trunc(Number(request.query.limit ?? 8)) || 8));
+    return runtime.service.listRecentRuns(undefined, limit);
+  });
   server.get<{ Params: { runId: string } }>("/api/runs/:runId", async (request, reply) => {
     const run = await runtime.service.getRun(request.params.runId);
     return run ?? reply.code(404).send({ error: "Запуск не найден" });
@@ -49,11 +53,12 @@ export async function registerApi(server: FastifyInstance, runtime: Runtime) {
     // selective executeRun path so retry semantics match production exactly.
     return runtime.service.executeRun(run.id);
   });
-  server.post<{ Params: { runId: string }; Body: { acceptedKeys?: string[]; productLabels?: Record<string, string> } }>("/api/runs/:runId/review", async (request) =>
+  server.post<{ Params: { runId: string }; Body: { acceptedKeys?: string[]; rejectedKeys?: string[]; productLabels?: Record<string, string> } }>("/api/runs/:runId/review", async (request) =>
     runtime.service.approveObservations(
       request.params.runId,
       request.body?.acceptedKeys ?? [],
-      request.body?.productLabels ?? {}
+      request.body?.productLabels ?? {},
+      request.body?.rejectedKeys ?? []
     )
   );
   server.post<{ Params: { runId: string } }>("/api/runs/:runId/companion/ozon/session", async (request) => {

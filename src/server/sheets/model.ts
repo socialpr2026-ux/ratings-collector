@@ -6,6 +6,10 @@ import { productKey } from "../repository.js";
 
 export type SheetScalar = string | number | null;
 export type ExistingSheet = { values: SheetScalar[][] };
+export type SheetBuildOptions = {
+  /** Failed domain/brand partitions whose current-month cells must remain untouched. */
+  preserveCurrentMonthFor?: ReadonlyArray<{ domain: string; brand: string }>;
+};
 export type SheetRowKind = "brand" | "title" | "subheader" | "section" | "product" | "blank" | "summaryHeader" | "summary" | "footnote";
 export type SheetDocument = {
   values: SheetScalar[][];
@@ -80,9 +84,13 @@ const MARKETPLACE_DOMAINS = new Set([
 ]);
 
 const PHARMACY_DOMAINS = new Set([
-  "uteka.ru", "megapteka.ru", "medum.ru", "eapteka.ru", "polza.ru", "asna.ru",
-  "farmlend.ru", "okapteka.ru", "rigla.ru", "zdravcity.ru", "apteka.ru", "nfapteka.ru",
-  "budzdorov.ru", "etabl.ru", "apteka-april.ru"
+  "aptekaplus.ru", "megapteka.ru", "redapteka.ru", "maksavit.ru", "vapteke.ru", "polza.ru",
+  "expero.ru", "rigla.ru", "gorzdrav.org", "366.ru", "stolichki.ru", "neopharm.ru", "ozerki.ru",
+  "stoletov.ru", "apteka-april.ru", "farmlend.ru", "planetazdorovo.ru", "budzdorov.ru",
+  "samson-pharma.ru", "zdesapteka.ru", "apteka.magnit.ru", "superapteka.ru", "vitaexpress.ru",
+  "zhivika.ru", "aptekasalve.ru", "zdorov.ru", "tabletka.ru", "pharmeconom.ru", "aptstore.ru",
+  "newapteka.ru", "ovita.ru", "uteka.ru", "eapteka.ru", "medum.ru", "asna.ru", "okapteka.ru",
+  "zdravcity.ru", "apteka.ru", "nfapteka.ru", "etabl.ru"
 ]);
 
 const PLATFORM_LABELS: Readonly<Record<string, string>> = {
@@ -98,6 +106,30 @@ const PLATFORM_LABELS: Readonly<Record<string, string>> = {
   "otzyvru.com": "ОтзывРу",
   "pravogolosa.net": "Право голоса",
   "ru.otzyv.com": "Otzyv.com",
+  "aptekaplus.ru": "Аптека Плюс",
+  "redapteka.ru": "REDapteka",
+  "maksavit.ru": "Максавит",
+  "vapteke.ru": "ВАптеке",
+  "expero.ru": "Expero",
+  "gorzdrav.org": "Горздрав",
+  "366.ru": "36,6",
+  "stolichki.ru": "Столички",
+  "neopharm.ru": "Неофарм",
+  "stoletov.ru": "Доктор Столетов",
+  "planetazdorovo.ru": "Планета Здоровья",
+  "samson-pharma.ru": "Самсон-Фарма",
+  "zdesapteka.ru": "Здесь Аптека",
+  "apteka.magnit.ru": "Магнит Аптека",
+  "superapteka.ru": "СуперАптека",
+  "vitaexpress.ru": "Аптека Вита",
+  "zhivika.ru": "Живика",
+  "aptekasalve.ru": "Salve",
+  "zdorov.ru": "Здоров.ру",
+  "tabletka.ru": "tabletka.ru",
+  "pharmeconom.ru": "ФАРМЭКОНОМ",
+  "aptstore.ru": "aptstore.ru",
+  "newapteka.ru": "Новая аптека",
+  "ovita.ru": "Овита.ру",
   "uteka.ru": "Ютека",
   "megapteka.ru": "Мегаптека",
   "medum.ru": "Medum",
@@ -107,6 +139,7 @@ const PLATFORM_LABELS: Readonly<Record<string, string>> = {
   "farmlend.ru": "Фармленд",
   "okapteka.ru": "ОК Аптека",
   "rigla.ru": "Ригла",
+  "ozerki.ru": "Озерки",
   "zdravcity.ru": "Здравсити",
   "apteka.ru": "Apteka.ru",
   "nfapteka.ru": "Надежда-Фарм",
@@ -289,7 +322,8 @@ export function buildSheetDocument(
   request: RunRequest,
   registry: ProductRecord[],
   snapshots: Record<string, Record<string, Observation>>,
-  brandScope?: string
+  brandScope?: string,
+  options: SheetBuildOptions = {}
 ): SheetDocument {
   const legacy = parseLegacy(existing, request);
   const months = [...new Set([...legacy.months, ...Object.keys(snapshots), request.month])].sort();
@@ -302,8 +336,16 @@ export function buildSheetDocument(
     const previous = productMap.get(item.key);
     productMap.set(item.key, { ...item, metrics: previous?.metrics ?? {} });
   }
+  const preservedCurrentMonthPartitions = new Set((options.preserveCurrentMonthFor ?? []).map((item) =>
+    `${item.domain.toLocaleLowerCase("ru")}\u0000${normalizeText(item.brand)}`
+  ));
   for (const item of productMap.values()) {
-    if (request.domains.includes(item.domain) && request.brands.includes(item.brand)) {
+    const partition = `${item.domain.toLocaleLowerCase("ru")}\u0000${normalizeText(item.brand)}`;
+    if (
+      request.domains.includes(item.domain) &&
+      request.brands.includes(item.brand) &&
+      !preservedCurrentMonthPartitions.has(partition)
+    ) {
       item.metrics[request.month] = { reviews: null, rating: null };
     }
   }
@@ -420,7 +462,7 @@ export function buildSheetDocument(
   const summaryHeaderRow = values.length;
   add("summaryHeader", summaryHeader);
   merges.push({ startRow: summaryHeaderRow, endRow: summaryHeaderRow + 1, startColumn: 0, endColumn: 3 });
-  const labels = ["Всего отзывов / оценок", "Карточки с рейтингом ≥4 баллов", "Карточки с рейтингом <4 баллов", "Карточки без отзывов / оценок"];
+  const labels = ["Всего отзывов / оценок", "Карточки с рейтингом ≥4,5 баллов", "Карточки с рейтингом <4,5 баллов", "Карточки без отзывов / оценок"];
   labels.forEach((label, metricIndex) => {
     const row: SheetScalar[] = [label]; const formula: Array<string | null> = [];
     months.forEach((_month, index) => {
@@ -430,11 +472,14 @@ export function buildSheetDocument(
       const ratingCells = productRows.map(({ row: productRow }) => `${ratingColumn}${productRow}`);
       const reviewArray = `{${reviewCells.join(";")}}`;
       const ratingArray = `{${ratingCells.join(";")}}`;
+      const reviewSumArgument = productStartRow === productEndRow
+        ? `${reviewsColumn}${productStartRow}`
+        : `${reviewsColumn}${productStartRow}:${reviewsColumn}${productEndRow}`;
       const formulasForMetric = [
-        reviewCells.length ? `=SUM(${reviewCells.join(";")})` : "=0",
-        ratingCells.length ? `=COUNTIFS(${ratingArray};">=4";${reviewArray};">0")` : "=0",
-        ratingCells.length ? `=COUNTIFS(${ratingArray};"<4";${ratingArray};"<>";${reviewArray};">0")` : "=0",
-        ratingCells.length ? `=COUNTIFS(${reviewArray};0;${reviewArray};"<>";${ratingArray};"")` : "=0"
+        reviewCells.length ? `=SUM(${reviewSumArgument})` : "=0",
+        ratingCells.length ? `=COUNTIFS(${ratingArray};">="&9/2;${reviewArray};">0")` : "=0",
+        ratingCells.length ? `=COUNTIFS(${ratingArray};"<"&9/2;${ratingArray};"<>";${reviewArray};">0")` : "=0",
+        ratingCells.length ? `=COUNTIFS(${ratingArray};"";${reviewArray};"<>")` : "=0"
       ];
       formula[4 + index * 2] = formulasForMetric[metricIndex];
       if (metricIndex > 0) formula[5 + index * 2] = `=IFERROR(${reviewsColumn}${countRow}/SUM(${reviewsColumn}${summaryStartRow + 2}:${reviewsColumn}${summaryStartRow + 4});0)`;
@@ -453,7 +498,8 @@ export function buildBrandSheetDocument(
   request: RunRequest,
   brand: string,
   registry: ProductRecord[],
-  snapshots: Record<string, Record<string, Observation>>
+  snapshots: Record<string, Record<string, Observation>>,
+  options: SheetBuildOptions = {}
 ): SheetDocument {
   const normalizedBrand = normalizeText(brand);
   const scopedRegistry = registry.filter((item) => normalizeText(item.brand) === normalizedBrand);
@@ -466,7 +512,8 @@ export function buildBrandSheetDocument(
     { ...request, brands: [brand] },
     scopedRegistry,
     scopedSnapshots,
-    brand
+    brand,
+    options
   );
 }
 

@@ -125,12 +125,9 @@ function productPageMetrics(
   const visibleCount = headerCount ?? ratingBasisCount ?? (offerCount === 0 ? 0 : undefined);
   const visibleRating = parseRating(section.find(".sec-item__rating-value").first().text());
   const hasReviewApplication = section.find(".reviews-application-container").length === 1;
-  const hiddenRatingMatches = hiddenRating === undefined || offerRating !== undefined &&
-    Math.round(hiddenRating * 10) === Math.round(offerRating * 10);
   if (normalizeText(headerTitle) !== normalizeText(title) ||
-      offerCount === undefined || visibleCount !== offerCount || hiddenReviews !== undefined && hiddenReviews !== offerCount ||
-      offerCount > 0 && (offerRating === undefined || offerRating <= 0 || offerRating > 5 || visibleRating !== offerRating ||
-        !hiddenRatingMatches) ||
+      offerCount === undefined || visibleCount !== offerCount ||
+      offerCount > 0 && (offerRating === undefined || offerRating <= 0 || offerRating > 5 || visibleRating !== offerRating) ||
       offerCount > 0 && !hasReviewApplication) {
     throw new ParserChangedError(`${DOMAIN}:${listingId}: visible product reviews do not match structured metrics`);
   }

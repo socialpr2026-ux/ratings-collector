@@ -1,10 +1,15 @@
 import { timingSafeEqual } from "node:crypto";
 import { load } from "cheerio";
+import { Parser } from "htmlparser2";
 import { COMPANY_BRANDS, INITIAL_BRANDS, INITIAL_DOMAINS } from "../../src/shared/constants.js";
 import type { RunState } from "../../src/shared/types.js";
+import { isKnownYandexIndexTombstoneSitemap } from "../../src/shared/yandex-sitemaps.js";
 import { authenticate, authConfig, type AuthUser } from "../../src/server/auth.js";
 import { BlobEvidenceStore, BlobRepository } from "../../src/server/blob-repository.js";
-import { reconcileStaleCollectionCheckpoint } from "../../src/server/collection-checkpoint.js";
+import {
+  reconcileStaleCollectionCheckpoint,
+  reconcileStalePublicationCheckpoint
+} from "../../src/server/collection-checkpoint.js";
 import { RatingsService } from "../../src/server/orchestrator.js";
 import type { RepositoryRpc } from "../../src/server/remote-repository.js";
 import { prepareBrowserPublication, reconcileBrowserPublication } from "../../src/server/sheets/publication-state.js";
@@ -47,6 +52,7 @@ const APTEKA_TRANSLATE_HOST = "apteka-ru.translate.goog";
 const NFAPTEKA_TRANSLATE_HOST = "nfapteka-ru.translate.goog";
 const BUDZDOROV_TRANSLATE_HOST = "www-budzdorov-ru.translate.goog";
 const ETABL_TRANSLATE_HOST = "etabl-ru.translate.goog";
+const YANDEX_MARKET_TRANSLATE_HOST = "market-yandex-ru.translate.goog";
 const YANDEX_MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_(\d+)-(\d+)-\d+\.xml$/i;
 const YANDEX_BATCH_ENDPOINT = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
 
@@ -64,6 +70,11 @@ type AptekaRuTarget = {
   source: URL;
   productId?: string;
   slugs?: string[];
+};
+
+type AsnaSitemapTarget = {
+  source: URL;
+  slugs: string[];
 };
 
 type OzonTranslateTarget = {
@@ -89,14 +100,46 @@ type IrecommendTarget = {
   brand?: string;
 };
 
+type VseotzyvyTarget = {
+  kind: "search";
+  source: URL;
+  brand: string;
+} | {
+  kind: "product";
+  source: URL;
+  listingId: string;
+};
+
 type RuOtzyvTarget = {
+  kind: "product";
   source: URL;
   translated: URL;
+} | {
+  kind: "search";
+  source: URL;
+  translated: URL;
+  brand: string;
 };
 
 type UtekaReviewsTarget = {
   source: URL;
 };
+
+type YandexMarketTranslateTarget = {
+  source: URL;
+  listingId: string;
+};
+
+function parseYandexMarketTranslateTarget(target: URL): YandexMarketTranslateTarget | undefined {
+  if (target.protocol !== "https:" || target.hostname !== YANDEX_MARKET_TRANSLATE_HOST || target.port ||
+    target.username || target.password || target.hash || !exactTranslateParameters(target) ||
+    [...target.searchParams.keys()].some((key) => !PHARMACY_TRANSLATE_PARAMETERS.has(key) || target.searchParams.getAll(key).length !== 1)) {
+    return undefined;
+  }
+  const card = target.pathname.match(/^\/card\/[a-z0-9][a-z0-9-]*\/(\d+)\/reviews\/?$/i);
+  if (!card) return undefined;
+  return { source: new URL(target.pathname, "https://market.yandex.ru"), listingId: card[1] };
+}
 
 function parseUtekaReviewsTarget(target: URL): UtekaReviewsTarget | undefined {
   if (
@@ -108,16 +151,27 @@ function parseUtekaReviewsTarget(target: URL): UtekaReviewsTarget | undefined {
 }
 
 function parseRuOtzyvTarget(target: URL): RuOtzyvTarget | undefined {
-  if (
-    target.protocol !== "https:" || target.hostname !== "ru.otzyv.com" || target.port ||
-    target.username || target.password || target.search || target.hash ||
-    !/^\/[a-z0-9][a-z0-9-]*$/i.test(target.pathname)
-  ) return undefined;
+  if (target.protocol !== "https:" || target.hostname !== "ru.otzyv.com" || target.port ||
+    target.username || target.password || target.hash) return undefined;
+  if (target.pathname === "/search/") {
+    if ([...target.searchParams.keys()].some((key) => key !== "q") || target.searchParams.getAll("q").length !== 1) {
+      return undefined;
+    }
+    const brand = target.searchParams.get("q")?.normalize("NFKC").trim() ?? "";
+    if (brand.length < 2 || brand.length > 160) return undefined;
+    const translated = new URL(target.pathname, "https://ru-otzyv-com.translate.goog");
+    translated.searchParams.set("q", brand);
+    translated.searchParams.set("_x_tr_sl", "ru");
+    translated.searchParams.set("_x_tr_tl", "en");
+    translated.searchParams.set("_x_tr_hl", "en");
+    return { kind: "search", source: new URL(target.toString()), translated, brand };
+  }
+  if (target.search || !/^\/[a-z0-9][a-z0-9-]*$/i.test(target.pathname)) return undefined;
   const translated = new URL(target.pathname, "https://ru-otzyv-com.translate.goog");
   translated.searchParams.set("_x_tr_sl", "ru");
   translated.searchParams.set("_x_tr_tl", "en");
   translated.searchParams.set("_x_tr_hl", "en");
-  return { source: new URL(target.toString()), translated };
+  return { kind: "product", source: new URL(target.toString()), translated };
 }
 
 function parseIrecommendTarget(target: URL): IrecommendTarget | undefined {
@@ -302,10 +356,40 @@ function parseAptekaRuTarget(target: URL): AptekaRuTarget | undefined {
   return product ? { kind: "product", source: new URL(target.toString()), productId: product[1] } : undefined;
 }
 
+function parseAsnaSitemapTarget(target: URL): AsnaSitemapTarget | undefined {
+  if (target.protocol !== "https:" || target.hostname !== "www.asna.ru" || target.port || target.username ||
+    target.password || target.hash || !["/sitemap/sitemap_cards.xml", "/sitemap/sitemap_cards1.xml"].includes(target.pathname)) {
+    return undefined;
+  }
+  if ([...target.searchParams.keys()].some((key) => key !== "slugs") || target.searchParams.getAll("slugs").length !== 1) {
+    return undefined;
+  }
+  const slugs = target.searchParams.get("slugs")!.split(",");
+  if (!slugs.length || slugs.length > 12 || slugs.some((slug) => !/^[a-z0-9][a-z0-9-]{0,79}$/i.test(slug))) return undefined;
+  return { source: new URL(target.pathname, "https://www.asna.ru"), slugs: [...new Set(slugs)] };
+}
+
 function translatedSourceMatches(value: string | undefined, requested: URL): boolean {
   if (!value) return false;
   try {
     return exactUrlSignature(new URL(value)) === exactUrlSignature(requested);
+  } catch {
+    return false;
+  }
+}
+
+function asnaSourceMatches(value: string | undefined, requested: URL): boolean {
+  if (!value) return false;
+  try {
+    const normalize = (url: URL) => {
+      const copy = new URL(url.toString());
+      if (!["asna.ru", "www.asna.ru"].includes(copy.hostname) || copy.protocol !== "https:" || copy.port ||
+        copy.username || copy.password || copy.hash) return undefined;
+      copy.hostname = "www.asna.ru";
+      return exactUrlSignature(copy);
+    };
+    const candidate = normalize(new URL(value));
+    return candidate !== undefined && candidate === normalize(requested);
   } catch {
     return false;
   }
@@ -486,7 +570,9 @@ function compactZdravcityTranslateHtml(html: string, requested: URL): string | u
       reviews.push({ ID: reviewId, rate });
     }
     const rating = Number(attributes?.rating);
-    if (reviews.length > 0 && (!Number.isFinite(rating) || rating <= 0 || rating > 5)) return undefined;
+    const ratingAvailable = Number.isFinite(rating) && rating > 0 && rating <= 5;
+    const allWrittenReviewsUnrated = reviews.length > 0 && reviews.every((review) => review.rate === 0);
+    if (reviews.length > 0 && !ratingAvailable && !allWrittenReviewsUnrated) return undefined;
     const structuredCounts: number[] = [];
     const currentSku = typeof attributes?.sku === "string" || typeof attributes?.sku === "number"
       ? String(attributes.sku).trim()
@@ -535,7 +621,7 @@ function compactZdravcityTranslateHtml(html: string, requested: URL): string | u
         attributes: {
           name,
           url: requested.pathname,
-          ...(reviews.length > 0 ? { rating } : {}),
+          ...(reviews.length > 0 && ratingAvailable ? { rating } : {}),
           ...(typeof attributes?.sku === "string" || typeof attributes?.sku === "number" ? { sku: attributes.sku } : {})
         },
         reviews
@@ -600,7 +686,8 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
   if (/(?:captcha|access denied|unusual traffic|подозрительн\w*\s+активност|проверка\s+браузера|Target URL returned error)/i.test(title) ||
     /<(?:iframe|form|input)\b[^>]*(?:captcha|challenge)/i.test(html.slice(0, 150_000))) return undefined;
   const baseValue = $("base[href]").first().attr("href");
-  if (!translatedSourceMatches(baseValue, requested.source)) return undefined;
+  const sourceMatches = requested.kind === "asna-product" ? asnaSourceMatches : translatedSourceMatches;
+  if (!sourceMatches(baseValue, requested.source)) return undefined;
   const base = `<base href="${escapeHtml(requested.source.toString())}">`;
 
   if (requested.kind === "apteka-preparation" || requested.kind === "apteka-product") {
@@ -700,8 +787,10 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
     const pageText = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();
     const empty = pageText.match(/(?:ничего не найдено|товары не найдены|нет препаратов)/i)?.[0];
     if (!products.size && !empty) return undefined;
-    return `<html><head>${base}</head><body><main>${[...products.values()].map(({ pathname, title }) =>
-      `<a href="https://www.budzdorov.ru${escapeHtml(pathname)}" title="${escapeHtml(title)}">${escapeHtml(title)}</a>`
+    const letterClass = requested.kind === "budzdorov-letter" ? ` class="alphabet-forms"` : "";
+    const linkClass = requested.kind === "budzdorov-letter" ? ` class="alphabet-forms__item-link"` : "";
+    return `<html><head>${base}</head><body><main${letterClass}>${[...products.values()].map(({ pathname, title }) =>
+      `<a${linkClass} href="https://www.budzdorov.ru${escapeHtml(pathname)}" title="${escapeHtml(title)}">${escapeHtml(title)}</a>`
     ).join("")}${empty ? `<p>${escapeHtml(empty)}</p>` : ""}</main></body></html>`;
   }
 
@@ -779,6 +868,7 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
 
   if (requested.kind === "polza-family") {
     const cards: string[] = [];
+    let invalidCard = false;
     $(".catalog__block--cards .catalog-block__items > .catalog-card[itemscope]").each((_index, node) => {
       const root = $(node);
       const sku = root.find("meta[itemprop='sku']").first().attr("content")?.trim();
@@ -787,23 +877,32 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
       const aggregate = root.find("[itemprop='aggregateRating']").first();
       const reviews = aggregate.find("meta[itemprop='reviewCount']").first().attr("content")?.trim();
       const rating = aggregate.find("meta[itemprop='ratingValue']").first().attr("content")?.trim();
-      if (!sku || !/^\d+$/.test(sku) || !href || !name || !reviews || !/^\d+$/.test(reviews)) return;
+      if (!sku || !/^\d+$/.test(sku) || !href || !name) {
+        invalidCard = true;
+        return;
+      }
       let product: URL;
       try { product = new URL(href, requested.source); }
-      catch { return; }
+      catch {
+        invalidCard = true;
+        return;
+      }
       const productId = product.pathname.match(/^\/catalog\/[a-z0-9][a-z0-9-]*_(\d+)\/$/i)?.[1];
-      const reviewCount = Number(reviews);
+      const reviewCount = reviews && /^\d+$/.test(reviews) ? Number(reviews) : Number.NaN;
       const ratingValue = rating && /^\d(?:[.,]\d+)?$/.test(rating) ? Number(rating.replace(",", ".")) : Number.NaN;
       if (product.protocol !== "https:" || product.hostname !== "polza.ru" || productId !== sku ||
-        !Number.isSafeInteger(reviewCount) || reviewCount < 0 ||
-        reviewCount > 0 && (!Number.isFinite(ratingValue) || ratingValue <= 0 || ratingValue > 5)) return;
+        aggregate.length > 0 && (!Number.isSafeInteger(reviewCount) || reviewCount < 0 ||
+          reviewCount > 0 && (!Number.isFinite(ratingValue) || ratingValue <= 0 || ratingValue > 5))) {
+        invalidCard = true;
+        return;
+      }
       cards.push(`<div class="catalog-card" itemscope itemtype="https://schema.org/Product">` +
         `<link itemprop="url" href="${escapeHtml(product.pathname)}"><meta itemprop="sku" content="${escapeHtml(sku)}">` +
-        `<meta itemprop="name" content="${escapeHtml(name)}"><span itemprop="aggregateRating">` +
-        `<meta itemprop="reviewCount" content="${escapeHtml(reviews)}">` +
-        `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</span></div>`);
+        `<meta itemprop="name" content="${escapeHtml(name)}">${aggregate.length > 0 ? `<span itemprop="aggregateRating">` +
+          `<meta itemprop="reviewCount" content="${escapeHtml(reviews!)}">` +
+          `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</span>` : ""}</div>`);
     });
-    if (!cards.length) return undefined;
+    if (invalidCard || !cards.length) return undefined;
     return `<html><head>${base}</head><body><script data-source-url="${escapeHtml(requested.source.toString())}"></script>` +
       `<div class="catalog__block--cards"><div class="catalog-block__items">${cards.join("")}</div></div></body></html>`;
   }
@@ -829,20 +928,55 @@ function compactPharmacyTranslateHtml(html: string, requested: PharmacyTranslate
         reviewCount > 0 && (!Number.isFinite(ratingValue) || ratingValue <= 0 || ratingValue > 5)) return undefined;
       candidates.push({ reviews: reviews!, ...(rating ? { rating } : {}), reviewCount, ratingValue });
     }
-    if (candidates.length === 0 || new Set(candidates.map((item) => `${item.reviewCount}:${item.ratingValue}`)).size !== 1) {
-      return undefined;
+    const candidateKeys = new Set(candidates.map((item) => `${item.reviewCount}:${item.ratingValue}`));
+    if (candidateKeys.size > 1) return undefined;
+    const selected = candidates[0];
+    let compactReviewProof = "";
+    const reviewBlocks = $("#review_block");
+    const reviewBlock = reviewBlocks.first();
+    const reviewProductId = reviewBlock.find("input.js-product_id[name='product_id']").first().attr("value")?.trim();
+    if (!selected) {
+      const exactMainRoots = roots.toArray().filter((node) => {
+        const root = $(node);
+        if (!(root.is("main") || root.is("section.product-detail__block"))) return false;
+        const href = root.find("link[itemprop='url']").first().attr("href");
+        return Boolean(href && translatedSourceMatches(new URL(href, requested.source).toString(), requested.source));
+      });
+      const emptyText = reviewBlock.text().normalize("NFKC").replace(/\s+/g, " ").trim();
+      if (exactMainRoots.length !== 1 || reviewBlocks.length !== 1 || reviewProductId !== requested.productId ||
+        reviewBlock.find(".reviews__item.review-item").length > 0 || !/отзывов пока нет/iu.test(emptyText)) return undefined;
+      compactReviewProof = `<div id="review_block"><input class="js-product_id" name="product_id" value="${escapeHtml(requested.productId!)}">` +
+        `<div class="reviews__empty" data-empty-reviews>Отзывов пока нет</div></div>`;
+    } else if (selected.reviewCount > 0) {
+      const visibleTotal = reviewBlock.find(".reviews__amount").first().text().replace(/[\s\u00a0]/g, "");
+      const reviewItems = reviewBlock.find(".reviews__item.review-item");
+      if (reviewBlocks.length === 1 && reviewProductId === requested.productId && visibleTotal === selected.reviews && reviewItems.length > 0) {
+        compactReviewProof = `<div id="review_block"><input class="js-product_id" name="product_id" value="${escapeHtml(requested.productId!)}">` +
+          `<div class="reviews__amount">${escapeHtml(selected.reviews)}</div><div class="reviews__list">${reviewItems.toArray().map(() =>
+            `<article class="reviews__item review-item"></article>`
+          ).join("")}</div></div>`;
+      } else if (reviewBlocks.length === 0 && $(".review-add-modal, .js-notify-add-modal").length > 0) {
+        // Some exact Polza pages retain stale positive AggregateRating
+        // microdata after their public review block has been removed. Preserve
+        // only the page's explicit add-review UI so the adapter can map this
+        // source-bound current state to no_reviews instead of a false positive.
+        compactReviewProof = `<div class="review-add-modal js-notify-add-modal"></div>`;
+      } else {
+        return undefined;
+      }
     }
-    const [{ reviews, rating }] = candidates;
+    const reviews = selected?.reviews;
+    const rating = selected?.rating;
     return `<html><head>${base}</head><body><script data-source-url="${escapeHtml(requested.source.toString())}"></script>` +
       `<main itemscope itemtype="https://schema.org/Product"><meta itemprop="sku" content="${escapeHtml(requested.productId!)}">` +
       `<link itemprop="url" href="${escapeHtml(requested.source.pathname)}">` +
-      `<div itemprop="aggregateRating" itemscope><meta itemprop="reviewCount" content="${escapeHtml(reviews)}">` +
-      `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</div></main></body></html>`;
+      `${reviews === undefined ? "" : `<div itemprop="aggregateRating" itemscope><meta itemprop="reviewCount" content="${escapeHtml(reviews)}">` +
+        `${rating ? `<meta itemprop="ratingValue" content="${escapeHtml(rating)}">` : ""}</div>`}</main>${compactReviewProof}</body></html>`;
   }
 
   if (requested.kind === "asna-product") {
     const canonicalValue = $("link[rel='canonical'][href]").first().attr("href");
-    if (!translatedSourceMatches(canonicalValue, requested.source)) return undefined;
+    if (!asnaSourceMatches(canonicalValue, requested.source)) return undefined;
     const roots = $(".productPage__content.product__item[itemscope]");
     if (roots.length !== 1) return undefined;
     const root = roots.first();
@@ -1214,6 +1348,82 @@ function escapeHtml(value: string): string {
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
+function compactYandexMarketTranslateHtml(
+  html: string,
+  requested: YandexMarketTranslateTarget
+): string | undefined {
+  // Google Translate appends its own navigation script after the origin's
+  // closing tag. A complete bounded read plus one closed source document is
+  // the relevant proof; requiring the closing tag to be the final byte would
+  // reject a healthy translated response.
+  if (!/<\/html>/i.test(html)) return undefined;
+  const $ = load(html);
+  const baseValue = $("base[href]").first().attr("href");
+  let base: URL;
+  try { base = new URL(baseValue ?? ""); }
+  catch { return undefined; }
+  if (base.protocol !== "https:" || base.hostname !== "market.yandex.ru" || base.port || base.username ||
+    base.password || base.search || base.hash || base.pathname.replace(/\/$/, "") !== requested.source.pathname.replace(/\/$/, "")) {
+    return undefined;
+  }
+
+  const products: Array<Record<string, unknown>> = [];
+  $("script[type='application/ld+json']").each((_index, node) => {
+    let root: unknown;
+    try { root = JSON.parse($(node).text().trim()); }
+    catch { return; }
+    const queue: unknown[] = [root];
+    for (let visited = 0; queue.length > 0 && visited < 2_000; visited += 1) {
+      const value = queue.shift();
+      if (Array.isArray(value)) queue.push(...value);
+      else if (value && typeof value === "object") {
+        const object = value as Record<string, unknown>;
+        const types = Array.isArray(object["@type"]) ? object["@type"] : [object["@type"]];
+        if (types.some((type) => typeof type === "string" && type.toLowerCase() === "product")) products.push(object);
+        queue.push(...Object.values(object));
+      }
+    }
+  });
+  const identified = products.filter((product) => {
+    if (typeof product.url !== "string") return false;
+    try {
+      const url = new URL(product.url, requested.source);
+      return url.protocol === "https:" && url.hostname === "market.yandex.ru" && !url.port && !url.username &&
+        !url.password && !url.search && !url.hash && url.pathname.replace(/\/$/, "") === requested.source.pathname.replace(/\/$/, "");
+    } catch { return false; }
+  });
+  if (identified.length !== 1) return undefined;
+  const product = identified[0];
+  const name = typeof product.name === "string" ? product.name.normalize("NFKC").replace(/\s+/g, " ").trim() : "";
+  const aggregate = product.aggregateRating && typeof product.aggregateRating === "object" && !Array.isArray(product.aggregateRating)
+    ? product.aggregateRating as Record<string, unknown>
+    : undefined;
+  const ratingCount = Number(aggregate?.ratingCount);
+  const reviewCount = aggregate?.reviewCount === undefined ? undefined : Number(aggregate.reviewCount);
+  const ratingValue = Number(aggregate?.ratingValue);
+  const bestRating = aggregate?.bestRating === undefined ? 5 : Number(aggregate.bestRating);
+  if (!name || !Number.isSafeInteger(ratingCount) || ratingCount < 0 ||
+    reviewCount !== undefined && (!Number.isSafeInteger(reviewCount) || reviewCount < 0) ||
+    ratingCount > 0 && (!Number.isFinite(ratingValue) || !Number.isFinite(bestRating) || bestRating <= 0 || ratingValue < 0 || ratingValue > bestRating)) {
+    return undefined;
+  }
+  const proof = JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name,
+    url: requested.source.toString(),
+    aggregateRating: {
+      "@type": "AggregateRating",
+      bestRating,
+      ratingValue: ratingCount > 0 ? ratingValue : 0,
+      ratingCount,
+      ...(reviewCount === undefined ? {} : { reviewCount })
+    }
+  }).replace(/<\//g, "\\u003c/");
+  return `<html><head><base href="${escapeHtml(requested.source.toString())}"></head><body>` +
+    `<script type="application/ld+json">${proof}</script></body></html>`;
+}
+
 const MED_OTZYV_PRODUCT_PATH = /^\/lekarstva\/\d+-[a-z0-9-]+\/(\d+)-[a-z0-9-]+\/?$/i;
 
 function medOtzyvProductFromSearchHref(value: string, base: URL): URL | undefined {
@@ -1343,7 +1553,39 @@ function compactOtzovikSearchHtml(html: string, requested: URL, brand: string): 
     .map(([url, title]) => `<a class="result__a" href="${escapeHtml(url)}">${escapeHtml(title)}</a>`).join("\n")}</body></html>`;
 }
 
+function validOtzovikProductProof(html: string, requested: URL): boolean {
+  const sourceMatches = (value: string | undefined): boolean => {
+    if (!value) return false;
+    try {
+      const source = new URL(value);
+      return source.protocol === "https:" && source.hostname === "otzovik.com" &&
+        source.pathname === requested.pathname && !source.search && !source.hash;
+    } catch {
+      return false;
+    }
+  };
+  const attribute = (tag: string, name: string): string | undefined =>
+    tag.match(new RegExp(`\\b${name}=["']([^"']+)["']`, "i"))?.[1];
+  const baseTag = html.match(/<base\b[^>]*>/i)?.[0];
+  const canonicalTag = [...html.matchAll(/<link\b[^>]*>/gi)]
+    .find((match) => /\brel=["'][^"']*\bcanonical\b[^"']*["']/i.test(match[0]))?.[0];
+  const canonicalMatches = Boolean(canonicalTag && sourceMatches(attribute(canonicalTag, "href")));
+  const $ = load(html);
+  const productAggregate = $("[itemscope][itemtype$='/Product']").toArray().some((node) => {
+    const product = $(node);
+    const productUrl = product.find("link[itemprop='url'][href], a[itemprop='url'][href]").first().attr("href");
+    const aggregate = product.find("[itemprop='aggregateRating']").first();
+    const rating = aggregate.find("[itemprop='ratingValue']").first().attr("content");
+    const reviews = aggregate.find("[itemprop='reviewCount']").first().attr("content");
+    return (sourceMatches(productUrl) || !productUrl && canonicalMatches) && /^\d(?:[.,]\d+)?$/.test(rating ?? "") &&
+      /^\d[\d\s\u00a0]*$/.test(reviews ?? "");
+  });
+  return sourceMatches(baseTag ? attribute(baseTag, "href") : undefined) &&
+    (!canonicalTag || canonicalMatches) && productAggregate;
+}
+
 function compactRuOtzyvTranslateHtml(html: string, requested: RuOtzyvTarget): string | undefined {
+  if (requested.kind !== "product") return undefined;
   if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
   const leadingHtml = html.slice(0, 150_000);
   // A normal review form loads Google's reCAPTCHA script even on a healthy
@@ -1478,6 +1720,63 @@ function exactIrecommendReaderSource(markdown: string, expected: URL): boolean {
   } catch {
     return false;
   }
+}
+
+function compactVseotzyvyReaderProof(markdown: string, target: VseotzyvyTarget): string | undefined {
+  const sourceValue = markdown.match(/^URL Source:\s*(https:\/\/[^\s]+)\s*$/mi)?.[1];
+  try {
+    if (!sourceValue || exactUrlSignature(new URL(sourceValue)) !== exactUrlSignature(target.source)) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  if (target.kind === "search") {
+    const declaredText = markdown.match(/^Найдено\s+([\d\s\u00a0]+)\s+результат(?:а|ов)?\s*$/mi)?.[1];
+    const declared = Number(declaredText?.replace(/[\s\u00a0]+/g, ""));
+    if (!Number.isSafeInteger(declared) || declared < 0 || declared > 500) return undefined;
+    const results = new Map<string, string>();
+    const linkPattern = /\[([^\]\n]+)\]\((https:\/\/vseotzyvy\.ru\/otzyvy\/[a-z0-9-]+-(\d+)\/?)\)/giu;
+    for (const match of markdown.matchAll(linkPattern)) {
+      let title = match[1]!.normalize("NFKC").replace(/\s+/g, " ").trim();
+      title = title.replace(/^Image\s+\d+\s*:\s*/iu, "").trim();
+      if (!title) return undefined;
+      const url = new URL(match[2]!);
+      url.search = "";
+      url.hash = "";
+      const canonical = url.toString().replace(/\/$/, "");
+      const existing = results.get(canonical);
+      if (existing && existing !== title) return undefined;
+      results.set(canonical, title);
+    }
+    if (results.size !== declared) return undefined;
+    const cards = [...results].map(([url, title]) =>
+      `<article><h2><a href="${escapeHtml(url)}">${escapeHtml(title)}</a></h2></article>`
+    ).join("");
+    return `<html><head><link rel="canonical" href="${escapeHtml(target.source.toString())}"></head><body>` +
+      `<main><h1>Поиск</h1><input type="search" name="q" value="${escapeHtml(target.brand)}">` +
+      `<p>Найдено ${declared} результатов</p>${cards}</main></body></html>`;
+  }
+
+  const productTitle = markdown.match(/^#{1,2}\s+(.+?)\s+отзывы\s*$/mi)?.[1]
+    ?.normalize("NFKC").replace(/\s+/g, " ").trim();
+  const aggregate = markdown.match(/^\s*([0-5](?:[.,]\d+)?)\s*[·•]\s*([\d\s\u00a0]+)\s+оцен(?:ка|ки|ок)\s+([\d\s\u00a0]+)\s+отзыв(?:а|ов)?(?:\s|$)/mi);
+  const reviewHeading = markdown.match(/^##\s+Отзывы покупателей о\s+(.+?)\s*\(\s*([\d\s\u00a0]+)\s+отзыв(?:а|ов)?\s*\)\s*$/mi);
+  const rating = Number(aggregate?.[1]?.replace(",", "."));
+  const ratingCount = Number(aggregate?.[2]?.replace(/[\s\u00a0]+/g, ""));
+  const reviews = Number(aggregate?.[3]?.replace(/[\s\u00a0]+/g, ""));
+  const headingReviews = Number(reviewHeading?.[2]?.replace(/[\s\u00a0]+/g, ""));
+  const headingTitle = reviewHeading?.[1]?.normalize("NFKC").replace(/\s+/g, " ").trim();
+  if (!productTitle || !headingTitle || productTitle.toLocaleLowerCase("ru-RU") !== headingTitle.toLocaleLowerCase("ru-RU") ||
+    !Number.isSafeInteger(ratingCount) || ratingCount < 0 || !Number.isSafeInteger(reviews) || reviews < 0 ||
+    reviews !== headingReviews || ratingCount < reviews ||
+    reviews > 0 && (!Number.isFinite(rating) || rating <= 0 || rating > 5) ||
+    reviews === 0 && Number.isFinite(rating) && rating !== 0) return undefined;
+  const ratingProof = reviews > 0
+    ? `<img alt="Оценка ${rating} из 5"><div>${rating} · ${ratingCount} оценки</div>`
+    : `<div>0 оценок</div>`;
+  return `<html><head><link rel="canonical" href="${escapeHtml(target.source.toString())}"></head><body><main>` +
+    `<h1>${escapeHtml(productTitle)} отзывы</h1>${ratingProof}` +
+    `<h2>Отзывы покупателей о ${escapeHtml(productTitle)} (${reviews} отзывов)</h2></main></body></html>`;
 }
 
 function compactIrecommendReaderSearch(
@@ -1652,6 +1951,27 @@ function compactAptekaRuHtml(html: string, requested: AptekaRuTarget): string | 
   const counts = [reviewCount, ratingCount].filter((value) => /^\d+$/.test(value)).map(Number);
   const ratingValue = Number(String(metrics.ratingValue ?? "").replace(",", "."));
   if (!counts.length || Math.max(...counts) > 0 && (!Number.isFinite(ratingValue) || ratingValue <= 0 || ratingValue > 5)) return undefined;
+  const feedbackCount = Math.max(...counts);
+  let variantProof = "";
+  if (feedbackCount > 0) {
+    const normalizedProductName = String(product.name).normalize("NFKC").replace(/\s+/g, " ").trim();
+    const candidates = $(".variantButton, .variantButtonExp").filter((_index, element) => {
+      const node = $(element);
+      const link = node.find("a.variantButton__link[href][aria-label], a.variantButtonExp__link[href][aria-label]").first();
+      const title = (link.attr("aria-label") ?? "").normalize("NFKC").replace(/\s+/g, " ").trim();
+      let url: URL;
+      try { url = new URL(link.attr("href") ?? "", requested.source); }
+      catch { return false; }
+      if (url.pathname !== requested.source.pathname || title !== normalizedProductName) return false;
+      const count = Number(node.find(".variantButton__rating .caption3 span, .variantButtonExp__rating .caption3 span").first().text().replace(/[\s\u00a0\u202f]+/g, ""));
+      const rating = Number(node.find(".variantButton__rating .ItemRating__label, .variantButtonExp__rating .ItemRating__label").first().text().replace(",", ".").replace(/[\s\u00a0\u202f]+/g, ""));
+      return Number.isSafeInteger(count) && count === feedbackCount && Number.isFinite(rating) && rating === ratingValue;
+    });
+    if (candidates.length !== 1) return undefined;
+    variantProof = `<div class="variantButton" aria-selected="true"><a class="variantButton__link" href="${escapeHtml(requested.source.toString())}" aria-label="${escapeHtml(normalizedProductName)}"></a>` +
+      `<div class="variantButton__rating"><div class="ItemRating"><span class="ItemRating__label">${ratingValue}</span>` +
+      `<span class="caption3">(<span>${feedbackCount}</span> reviews)</span></div></div></div>`;
+  }
   const compactProduct = {
     "@context": "https://schema.org", "@type": "Product", sku: requested.productId, name: product.name,
     aggregateRating: {
@@ -1663,7 +1983,48 @@ function compactAptekaRuHtml(html: string, requested: AptekaRuTarget): string | 
   };
   return `<html><head>${base}<link rel="canonical" href="${escapeHtml(requested.source.toString())}">` +
     `<script type="application/ld+json">${JSON.stringify(compactProduct).replace(/</g, "\\u003c")}</script>` +
-    `</head><body><h1>${escapeHtml(String(product.name))}</h1></body></html>`;
+    `</head><body><h1>${escapeHtml(String(product.name))}</h1>${variantProof}</body></html>`;
+}
+
+function compactRuOtzyvSearchHtml(html: string, requested: RuOtzyvTarget): string | undefined {
+  if (requested.kind !== "search" || !/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
+  const leadingHtml = html.slice(0, 150_000);
+  if (/<(?:form|div|section)\b[^>]*(?:id|class)=["'][^"']*(?:captcha|challenge)[^"']*["']/iu.test(leadingHtml) ||
+    /(?:access denied|unusual traffic|проверка браузера|подтвердите, что вы не робот)/iu.test(leadingHtml)) {
+    return undefined;
+  }
+  const $ = load(html);
+  const baseValue = $("base[href]").first().attr("href");
+  if (baseValue) {
+    try {
+      if (exactUrlSignature(new URL(baseValue)) !== exactUrlSignature(requested.source)) return undefined;
+    } catch { return undefined; }
+  }
+  const query = $("input[name='q']").first().attr("value")?.normalize("NFKC").trim() ?? "";
+  if (query.toLocaleLowerCase("ru-RU") !== requested.brand.toLocaleLowerCase("ru-RU")) return undefined;
+  const text = $.root().text().normalize("NFKC").replace(/\s+/g, " ").trim();
+  const declared = Number(text.match(/По вашему запросу найдено:\s*(\d+)\s+результат/iu)?.[1]);
+  if (!Number.isSafeInteger(declared) || declared < 0 || declared > 500) return undefined;
+  if (declared === 0) {
+    return `<html><head><title>${escapeHtml(requested.brand)}</title></head><body>` +
+      `<h1>Поиск отзывов для ${escapeHtml(requested.brand)}</h1>` +
+      `<p>По вашему запросу найдено: 0 результатов.</p></body></html>`;
+  }
+  const results = new Map<string, string>();
+  $("a[href]").each((_index, node) => {
+    const title = $(node).text().normalize("NFKC").replace(/\s+/g, " ").trim();
+    if (!title || !matchesBrand(title, requested.brand)) return;
+    try {
+      const product = new URL($(node).attr("href")!, requested.source);
+      if (product.protocol !== "https:" || product.hostname !== "ru.otzyv.com" || product.search || product.hash ||
+        !/^\/[a-z0-9][a-z0-9-]*\/?$/i.test(product.pathname)) return;
+      results.set(new URL(product.pathname.replace(/\/$/, ""), "https://ru.otzyv.com").toString(), title);
+    } catch { /* malformed search result */ }
+  });
+  if (!results.size || results.size !== declared) return undefined;
+  return `<html><head><title>${escapeHtml(requested.brand)}</title></head><body>` + [...results]
+    .map(([url, title]) => `<a class="result__a" href="${escapeHtml(url)}">${escapeHtml(title)}</a>`).join("\n") +
+    `</body></html>`;
 }
 
 /**
@@ -1734,7 +2095,7 @@ function compactUtekaReviewsHtml(html: string, requested: UtekaReviewsTarget): s
  * fields that the adapter never reads. The complete upstream document and
  * exact shard range are verified before any compact proof is returned.
  */
-function compactYandexModelSitemap(xml: string, requested: URL): string | undefined {
+function extractCompleteYandexModelLocations(xml: string, requested: URL): string[] | undefined {
   const range = requested.pathname.match(YANDEX_MODEL_SITEMAP_PATH);
   if (!range || !/<urlset\b/i.test(xml) || !/<\/urlset\s*>\s*$/i.test(xml)) return undefined;
   const minimumId = BigInt(range[1]);
@@ -1764,6 +2125,12 @@ function compactYandexModelSitemap(xml: string, requested: URL): string | undefi
     locations.push(product.toString());
   }
   if (locations.length !== $("url").length) return undefined;
+  return locations;
+}
+
+function compactYandexModelSitemap(xml: string, requested: URL): string | undefined {
+  const locations = extractCompleteYandexModelLocations(xml, requested);
+  if (!locations) return undefined;
   return `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` +
     locations.map((location) => `<url><loc>${escapeHtml(location)}</loc></url>`).join("") +
     `</urlset>`;
@@ -1806,37 +2173,220 @@ function parseYandexBatchRequest(value: unknown): YandexBatchRequest | undefined
   return { sitemaps, brands };
 }
 
-function yandexProductMatchesTokens(input: string, tokens: string[]): boolean {
+type PreparedYandexBrand = {
+  brand: string;
+  tokens: Array<{ value: string; score: number }>;
+};
+
+function yandexProductSlug(input: string): string | undefined {
+  // Every input has already passed the exact source/range proof above. Avoid
+  // constructing the same URL once per requested brand for every one of the
+  // millions of sitemap locations in a complete index scan.
+  const route = input.match(/^https:\/\/reviews\.yandex\.ru\/product\/([a-z0-9][a-z0-9_-]*)?--\d+$/i);
+  if (!route) return undefined;
+  return (route[1] ?? "")
+    .normalize("NFKC")
+    .toLocaleLowerCase("ru-RU")
+    .replace(/[^a-zа-я0-9]+/giu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseVseotzyvyTarget(target: URL): VseotzyvyTarget | undefined {
+  if (target.protocol !== "https:" || target.hostname !== "vseotzyvy.ru" || target.port ||
+    target.username || target.password || target.hash) return undefined;
+  if (target.pathname === "/search") {
+    if ([...target.searchParams.keys()].some((key) => key !== "q") || target.searchParams.getAll("q").length !== 1) {
+      return undefined;
+    }
+    const brand = target.searchParams.get("q")?.normalize("NFKC").trim() ?? "";
+    return brand.length >= 2 && brand.length <= 160
+      ? { kind: "search", source: new URL(target.toString()), brand }
+      : undefined;
+  }
+  if (target.search) return undefined;
+  const product = target.pathname.match(/^\/otzyvy\/[a-z0-9-]+-(\d+)\/?$/i);
+  return product ? { kind: "product", source: new URL(target.toString()), listingId: product[1] } : undefined;
+}
+
+function yandexProductMatchScore(slug: string, tokens: PreparedYandexBrand["tokens"]): number {
+  let best = -1;
+  const paddedSlug = ` ${slug} `;
+  for (const token of tokens) {
+    if (token.score > best && paddedSlug.includes(` ${token.value} `)) best = token.score;
+  }
+  return best;
+}
+
+type StreamedYandexMatch = { brand: string; url: string };
+
+/**
+ * Proves a complete model sitemap while it is being read. The former batch
+ * path retained the response chunks, a second combined byte array, the full
+ * UTF-16 XML string, a Cheerio DOM, and every model URL at the same time. A
+ * few concurrent multi-megabyte shards could therefore exhaust the fixed
+ * Function before an otherwise healthy response finished. This parser keeps
+ * only its small element stack, one <loc>, and exact requested-brand matches.
+ */
+async function readStreamedYandexBatchShard(
+  response: Response,
+  requested: URL,
+  preparedBrands: PreparedYandexBrand[]
+): Promise<StreamedYandexMatch[] | undefined> {
+  const range = requested.pathname.match(YANDEX_MODEL_SITEMAP_PATH);
+  if (!range || !response.body) return undefined;
+  const minimumId = BigInt(range[1]);
+  const maximumId = BigInt(range[2]);
+  const matches: StreamedYandexMatch[] = [];
+  const stack: string[] = [];
+  let invalid = false;
+  let rootSeen = false;
+  let rootClosed = false;
+  let allUrlElements = 0;
+  let directUrlElements = 0;
+  let currentUrlLocs = 0;
+  let currentLocText: string | undefined;
+
+  const acceptLocation = (raw: string): void => {
+    let product: URL;
+    try { product = new URL(raw.trim()); }
+    catch { invalid = true; return; }
+    const modelId = product.pathname.match(/^\/product\/(?:[a-z0-9][a-z0-9_-]*)?--(\d+)$/i)?.[1];
+    if (product.protocol !== "https:" || product.hostname !== "reviews.yandex.ru" || product.port ||
+      product.username || product.password || product.search || product.hash || !modelId) {
+      invalid = true;
+      return;
+    }
+    const numericId = BigInt(modelId);
+    if (numericId < minimumId || numericId > maximumId) {
+      invalid = true;
+      return;
+    }
+    const productUrl = product.toString();
+    const slug = yandexProductSlug(productUrl);
+    if (slug === undefined) {
+      invalid = true;
+      return;
+    }
+    let bestScore = -1;
+    const matchedBrands: string[] = [];
+    for (const brand of preparedBrands) {
+      const score = yandexProductMatchScore(slug, brand.tokens);
+      if (score < bestScore || score < 0) continue;
+      if (score > bestScore) {
+        bestScore = score;
+        matchedBrands.length = 0;
+      }
+      matchedBrands.push(brand.brand);
+    }
+    for (const brand of matchedBrands) matches.push({ brand, url: productUrl });
+  };
+
+  const parser = new Parser({
+    onopentag(name) {
+      const parent = stack.at(-1);
+      if (stack.length === 0) {
+        if (rootSeen || name !== "urlset") invalid = true;
+        rootSeen = true;
+      }
+      if (name === "url") {
+        allUrlElements += 1;
+        if (stack.length === 1 && parent === "urlset") {
+          directUrlElements += 1;
+          currentUrlLocs = 0;
+        }
+      }
+      if (name === "loc" && stack.length === 2 && parent === "url" && stack[0] === "urlset") {
+        currentUrlLocs += 1;
+        currentLocText = "";
+      }
+      stack.push(name);
+    },
+    ontext(value) {
+      if (stack.length === 0 && value.trim()) invalid = true;
+      if (currentLocText !== undefined && stack.length === 3 && stack.at(-1) === "loc") {
+        currentLocText += value;
+      }
+    },
+    onclosetag(name, isImplied) {
+      if (isImplied) invalid = true;
+      if (stack.at(-1) !== name) invalid = true;
+      if (name === "loc" && stack.length === 3 && stack[1] === "url") {
+        if (currentLocText === undefined) invalid = true;
+        else acceptLocation(currentLocText);
+        currentLocText = undefined;
+      }
+      if (name === "url" && stack.length === 2 && stack[0] === "urlset" && currentUrlLocs !== 1) {
+        invalid = true;
+      }
+      if (name === "urlset" && stack.length === 1) rootClosed = true;
+      stack.pop();
+    },
+    onerror() { invalid = true; }
+  }, { xmlMode: true, decodeEntities: true, lowerCaseTags: false });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let totalBytes = 0;
   try {
-    const url = new URL(input);
-    const slug = decodeURIComponent(url.pathname.split("/").filter(Boolean).at(-1) ?? "")
-      .replace(/--\d+$/, "")
-      .normalize("NFKC")
-      .toLocaleLowerCase("ru-RU")
-      .replace(/ё/g, "е")
-      .replace(/[^a-zа-я0-9]+/giu, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-    return Boolean(slug) && tokens.some((token) => ` ${slug} `.includes(` ${token} `));
-  } catch { return false; }
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > 12_000_000) throw new Error("Yandex batch shard exceeds the exact XML safety limit");
+      parser.write(decoder.decode(value, { stream: true }));
+    }
+    parser.end(decoder.decode());
+  } catch (error) {
+    await reader.cancel(error).catch(() => undefined);
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+  if (invalid || !rootSeen || !rootClosed || stack.length !== 0 || allUrlElements !== directUrlElements) {
+    return undefined;
+  }
+  return matches;
 }
 
 class NonRetryableYandexBatchShardError extends Error {}
 
-async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string> {
+// Production's public Function boundary closes stalled calls at about sixty
+// seconds, while a healthy streamed shard completes in single-digit seconds.
+// Abandon a stuck egress connection early enough to open two fresh exact
+// attempts and still return a controlled proof/blocker before that boundary.
+const YANDEX_BATCH_SHARD_ATTEMPT_MS = 20_000;
+const YANDEX_BATCH_SHARD_TOTAL_MS = 55_000;
+const YANDEX_BATCH_SHARD_MIN_ATTEMPT_MS = 8_000;
+const YANDEX_BATCH_SHARD_ATTEMPTS = 3;
+
+async function fetchCompleteYandexBatchShard(sitemap: string, preparedBrands: PreparedYandexBrand[]): Promise<{
+  matches: StreamedYandexMatch[];
+  tombstoned: boolean;
+}> {
   const target = new URL(sitemap);
+  const shardStartedAt = Date.now();
   let lastError: unknown;
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  for (let attempt = 1; attempt <= YANDEX_BATCH_SHARD_ATTEMPTS; attempt += 1) {
+    const remainingBudgetMs = YANDEX_BATCH_SHARD_TOTAL_MS - (Date.now() - shardStartedAt);
+    if (remainingBudgetMs < YANDEX_BATCH_SHARD_MIN_ATTEMPT_MS) break;
+    const attemptBudgetMs = Math.min(YANDEX_BATCH_SHARD_ATTEMPT_MS, remainingBudgetMs);
+    const startedAt = Date.now();
+    const attemptAbort = new AbortController();
+    const attemptTimer = setTimeout(() => {
+      attemptAbort.abort(new Error("Yandex batch shard attempt deadline exceeded"));
+    }, attemptBudgetMs);
     try {
       const upstream = await safeFetch(target.toString(), {
         method: "GET",
         redirect: "follow",
+        signal: attemptAbort.signal,
         headers: { accept: "application/xml,text/xml", "accept-language": "ru-RU,ru;q=0.9" }
-      }, fetch, 4, 60_000);
+      }, fetch, 4, attemptBudgetMs);
       if (!upstream.ok) {
         await upstream.body?.cancel().catch(() => undefined);
-        if (upstream.status === 404) {
-          return `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>`;
+        if (upstream.status === 404 && isKnownYandexIndexTombstoneSitemap(target)) {
+          return { matches: [], tombstoned: true };
         }
         const message = `Yandex batch shard returned HTTP ${upstream.status}`;
         if (![408, 425, 429].includes(upstream.status) && upstream.status < 500) {
@@ -1844,14 +2394,22 @@ async function fetchCompleteYandexBatchShard(sitemap: string): Promise<string> {
         }
         throw new Error(message);
       }
-      const xml = await readTextBounded(upstream, 12_000_000, 60_000);
-      const compact = compactYandexModelSitemap(xml, target);
-      if (!compact) throw new Error("Yandex batch shard did not prove complete exact XML");
-      return compact;
+      const shardMatches = await readStreamedYandexBatchShard(upstream, target, preparedBrands);
+      if (!shardMatches) throw new Error("Yandex batch shard did not prove complete exact XML");
+      return { matches: shardMatches, tombstoned: false };
     } catch (error) {
       lastError = error;
-      if (error instanceof NonRetryableYandexBatchShardError || attempt === 3) break;
-      await new Promise((resolve) => setTimeout(resolve, attempt * 100));
+      if (error instanceof NonRetryableYandexBatchShardError || attempt === YANDEX_BATCH_SHARD_ATTEMPTS) break;
+      // A fast HTTP 200 with incomplete XML can be a transient in-progress
+      // sitemap object. Give that object time to settle, but start another
+      // attempt only when at least eight useful seconds remain inside the
+      // observed public Function ceiling.
+      const retryDelayMs = attempt * 1_000;
+      const budgetAfterDelay = YANDEX_BATCH_SHARD_TOTAL_MS - (Date.now() - shardStartedAt) - retryDelayMs;
+      if (budgetAfterDelay < YANDEX_BATCH_SHARD_MIN_ATTEMPT_MS) break;
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    } finally {
+      clearTimeout(attemptTimer);
     }
   }
   throw new Error(`Yandex batch shard remained unproven: ${sitemap}: ${safeErrorMessage(lastError)}`);
@@ -1861,28 +2419,40 @@ async function collectYandexBatch(batch: YandexBatchRequest): Promise<{
   processed: number;
   firstSitemap: string;
   lastSitemap: string;
+  verifiedSitemaps: string[];
+  tombstonedSitemaps?: string[];
   matches: Array<{ brand: string; url: string; sitemap: string }>;
 }> {
   const matches: Array<{ brand: string; url: string; sitemap: string }> = [];
+  const tombstonedSitemaps: string[] = [];
+  const preparedBrands: PreparedYandexBrand[] = batch.brands.map(({ brand, tokens }) => ({
+    brand,
+    tokens: tokens.map((value) => ({ value, score: value.replace(/\s+/g, "").length }))
+  }));
   let cursor = 0;
+  let failure: unknown;
   const workers = Array.from({ length: Math.min(2, batch.sitemaps.length) }, async () => {
-    for (;;) {
+    while (failure === undefined) {
       const index = cursor++;
       if (index >= batch.sitemaps.length) return;
       const sitemap = batch.sitemaps[index]!;
-      const compact = await fetchCompleteYandexBatchShard(sitemap);
-      const $ = load(compact, { xmlMode: true });
-      for (const node of $("urlset").children("url").toArray()) {
-        const productUrl = $(node).children("loc").first().text().trim();
-        for (const brand of batch.brands) {
-          if (yandexProductMatchesTokens(productUrl, brand.tokens)) {
-            matches.push({ brand: brand.brand, url: productUrl, sitemap });
-          }
+      try {
+        const shard = await fetchCompleteYandexBatchShard(sitemap, preparedBrands);
+        if (shard.tombstoned) tombstonedSitemaps.push(sitemap);
+        for (const match of shard.matches) {
+          matches.push({ ...match, sitemap });
         }
+      } catch (error) {
+        failure ??= error;
+        return;
       }
     }
   });
+  // Settle the already-started sibling before returning the first failure.
+  // Otherwise a recursive retry can overlap the orphaned shard and reproduce
+  // the same function/egress overload as the original request.
   await Promise.all(workers);
+  if (failure !== undefined) throw failure;
   const sitemapOrder = new Map(batch.sitemaps.map((sitemap, index) => [sitemap, index]));
   matches.sort((left, right) =>
     (sitemapOrder.get(left.sitemap)! - sitemapOrder.get(right.sitemap)!) ||
@@ -1892,6 +2462,8 @@ async function collectYandexBatch(batch: YandexBatchRequest): Promise<{
     processed: batch.sitemaps.length,
     firstSitemap: batch.sitemaps[0]!,
     lastSitemap: batch.sitemaps.at(-1)!,
+    verifiedSitemaps: [...batch.sitemaps],
+    ...(tombstonedSitemaps.length > 0 ? { tombstonedSitemaps } : {}),
     matches
   };
 }
@@ -1925,10 +2497,18 @@ function assertOwner(run: RunState, user: AuthUser): void {
   if (run.ownerEmail && run.ownerEmail !== user.email) throw new Error("Этот запуск принадлежит другому сотруднику");
 }
 
-function pagedRun(run: RunState, url: URL): RunState & { observationPage: { offset: number; limit: number; total: number } } {
+function pagedRun(
+  run: RunState,
+  url: URL
+): Omit<RunState, "sheetPreflight"> & { observationPage: { offset: number; limit: number; total: number } } {
   const offset = Math.max(0, Math.trunc(Number(url.searchParams.get("offset") ?? 0)) || 0);
   const limit = Math.max(1, Math.min(250, Math.trunc(Number(url.searchParams.get("limit") ?? 200)) || 200));
-  return { ...run, observations: run.observations.slice(offset, offset + limit), observationPage: { offset, limit, total: run.observations.length } };
+  const { sheetPreflight: _privateSheetPreflight, ...publicRun } = run;
+  return {
+    ...publicRun,
+    observations: run.observations.slice(offset, offset + limit),
+    observationPage: { offset, limit, total: run.observations.length }
+  };
 }
 
 async function repositoryRpc(request: Request, env: Record<string, string | undefined>, repository: BlobRepository): Promise<Response> {
@@ -1938,6 +2518,8 @@ async function repositoryRpc(request: Request, env: Record<string, string | unde
   const body = await request.json() as RepositoryRpc;
   let result: unknown;
   switch (body.action) {
+    case "findRuns": result = await repository.findRecentRunsByBrand(body.brand, body.limit); break;
+    case "listRuns": result = await repository.listRecentRuns(body.ownerEmail, body.limit); break;
     case "getRun": result = await repository.getRun(body.id); break;
     case "saveRun": {
       const previous = await repository.getRun(body.run.id);
@@ -1949,6 +2531,8 @@ async function repositoryRpc(request: Request, env: Record<string, string | unde
     case "listProducts": result = await repository.listProducts(body.spreadsheetId); break;
     case "saveProducts": await repository.saveProducts(body.spreadsheetId, body.records); result = null; break;
     case "replaceProducts": await repository.replaceProducts(body.spreadsheetId, body.records); result = null; break;
+    case "listSourceCards": result = await repository.listSourceCards(body.spreadsheetId); break;
+    case "saveSourceCards": await repository.saveSourceCards(body.spreadsheetId, body.records); result = null; break;
     case "getSnapshots": result = await repository.getSnapshots(body.spreadsheetId); break;
     case "saveSnapshot": await repository.saveSnapshot(body.spreadsheetId, body.month, body.observations); result = null; break;
     case "replaceSnapshots": await repository.replaceSnapshots(body.spreadsheetId, body.snapshots); result = null; break;
@@ -1968,23 +2552,37 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
   const configured = env.INTERNAL_AGENT_TOKEN?.trim() ?? "";
   const supplied = (request.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
   if (configured.length < 32 || !secureEqual(configured, supplied)) return json({ error: "Internal authorization failed" }, 401);
-  const body = await request.json() as { url?: string; yandexBatch?: unknown };
+  const body = await request.json() as {
+    url?: string;
+    yandexBatch?: unknown;
+    vaptekeAutocomplete?: { query?: unknown };
+  };
   const target = new URL(String(body.url ?? ""));
   const yandexBatchTarget = target.toString() === YANDEX_BATCH_ENDPOINT;
   const yandexBatch = yandexBatchTarget ? parseYandexBatchRequest(body.yandexBatch) : undefined;
   if (yandexBatchTarget && !yandexBatch) return json({ error: "Invalid Yandex batch proof request" }, 400);
   const host = target.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
   const irecommendTarget = parseIrecommendTarget(target);
+  const vseotzyvyTarget = parseVseotzyvyTarget(target);
   const ruOtzyvTarget = parseRuOtzyvTarget(target);
   const utekaReviewsTarget = parseUtekaReviewsTarget(target);
   const utekaSitemapTarget = target.protocol === "https:" && target.hostname === "uteka.ru" &&
     !target.port && !target.username && !target.password && !target.search && !target.hash &&
     target.pathname === "/sitemaps/sitemap-reviews.xml";
+  const vaptekeQuery = typeof body.vaptekeAutocomplete?.query === "string"
+    ? body.vaptekeAutocomplete.query.normalize("NFKC").trim()
+    : "";
+  const vaptekeAutocompleteTarget = target.protocol === "https:" && host === "vapteke.ru" &&
+    !target.port && !target.username && !target.password && !target.search && !target.hash &&
+    target.pathname === "/ajax/autocomplete" && vaptekeQuery.length >= 2 && vaptekeQuery.length <= 160;
+  const vaptekeProductTarget = target.protocol === "https:" && host === "vapteke.ru" &&
+    !target.port && !target.username && !target.password && !target.search && !target.hash &&
+    /^\/product\/[a-z0-9-]+-\d+\/?$/i.test(target.pathname) && body.vaptekeAutocomplete === undefined;
   const reviewTarget = new Set([
     "megapteka.ru",
     "otzovik.com",
     "pravogolosa.net"
-  ]).has(host) || Boolean(irecommendTarget) || Boolean(ruOtzyvTarget) || Boolean(utekaReviewsTarget) || utekaSitemapTarget;
+  ]).has(host) || Boolean(irecommendTarget) || Boolean(vseotzyvyTarget) || Boolean(ruOtzyvTarget) || Boolean(utekaReviewsTarget) || utekaSitemapTarget;
   const medOtzyvSearchTarget = target.protocol === "https:" && host === "med-otzyv.ru" &&
     target.pathname === "/__external_search__" && !target.port && !target.username && !target.password && !target.hash &&
     [...target.searchParams.keys()].every((key) => key === "brand") && target.searchParams.getAll("brand").length === 1 &&
@@ -2028,6 +2626,8 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
   const ozonYandexComposerTarget = parseOzonYandexComposerTarget(target);
   const pharmacyTranslatedTarget = parsePharmacyTranslateTarget(target);
   const aptekaRuTarget = parseAptekaRuTarget(target);
+  const asnaSitemapTarget = parseAsnaSitemapTarget(target);
+  const yandexMarketTranslatedTarget = parseYandexMarketTranslateTarget(target);
   let ozonTarget = false;
   if (target.hostname === "www.ozon.ru" && target.pathname === "/api/composer-api.bx/page/json/v2") {
     const nested = target.searchParams.get("url") ?? "";
@@ -2047,8 +2647,30 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         [...target.searchParams.keys()].every((key) => key === "url") && (safeSearch || safeProduct);
     } catch { /* invalid nested Ozon search URL */ }
   }
-  if (target.protocol !== "https:" || !(yandexBatch || reviewTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget)) {
+  if (target.protocol !== "https:" || !(yandexBatch || reviewTarget || vaptekeAutocompleteTarget || vaptekeProductTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget || asnaSitemapTarget || yandexMarketTranslatedTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
+  }
+  if (vaptekeAutocompleteTarget) {
+    await assertSafePublicDestination(target.toString());
+    const upstream = await safeFetch(target.toString(), {
+      method: "POST",
+      redirect: "follow",
+      headers: {
+        accept: "application/json",
+        "accept-language": "ru-RU,ru;q=0.9",
+        "content-type": "application/x-www-form-urlencoded; charset=UTF-8"
+      },
+      body: new URLSearchParams({ query: vaptekeQuery }).toString()
+    }, fetch, 0, 60_000);
+    const text = await readTextBounded(upstream, 2_000_000, 60_000);
+    return new Response(text, {
+      status: upstream.status,
+      headers: {
+        "content-type": upstream.headers.get("content-type") ?? "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "vapteke-exact-autocomplete"
+      }
+    });
   }
   if (yandexBatch) {
     try {
@@ -2056,6 +2678,39 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     } catch (error) {
       return json({ error: safeErrorMessage(error) }, 502);
     }
+  }
+  if (yandexMarketTranslatedTarget) {
+    const upstream = await safeFetch(target.toString(), {
+      method: "GET",
+      redirect: "manual",
+      headers: {
+        accept: "text/html,application/xhtml+xml",
+        "accept-language": "ru-RU,ru;q=0.9",
+        "user-agent": "RatingsCollector/1.0 (+public aggregate metrics)"
+      }
+    }, fetch, 0, 60_000);
+    const html = await readTextBounded(upstream, 12_000_000, 60_000);
+    if (!upstream.ok) {
+      return new Response(html, {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "text/html; charset=utf-8" }
+      });
+    }
+    const compactHtml = compactYandexMarketTranslateHtml(html, yandexMarketTranslatedTarget);
+    if (!compactHtml || compactHtml.length > 100_000) {
+      return json({ error: "Translated Yandex Market page did not prove the exact product aggregate" }, 502);
+    }
+    return new Response(compactHtml, {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "google-translate-yandex-market-compact",
+        "x-ratings-final-url": yandexMarketTranslatedTarget.source.toString(),
+        "x-ratings-original-bytes": String(new TextEncoder().encode(html).byteLength),
+        "x-ratings-proof-bytes": String(new TextEncoder().encode(compactHtml).byteLength)
+      }
+    });
   }
   if (ozonTranslatedComposerTarget) {
     await assertSafePublicDestination(target.toString());
@@ -2437,6 +3092,45 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       }
     });
   }
+  if (asnaSitemapTarget) {
+    const upstream = await safeFetch(asnaSitemapTarget.source.toString(), {
+      method: "GET",
+      redirect: "manual",
+      headers: { accept: "application/xml,text/xml", "accept-language": "ru-RU,ru;q=0.9" }
+    }, fetch, 0, 60_000);
+    const xml = await readTextBounded(upstream, 12_000_000, 60_000);
+    if (!upstream.ok) {
+      return new Response(xml, {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "application/xml; charset=utf-8" }
+      });
+    }
+    if (!/<urlset\b/i.test(xml)) return json({ error: "ASNA card sitemap is invalid" }, 502);
+    const locations: string[] = [];
+    for (const match of xml.matchAll(/<loc>([^<]+)<\/loc>/gi)) {
+      let card: URL;
+      try { card = new URL(match[1].replace(/&amp;/gi, "&")); }
+      catch { continue; }
+      const slug = card.pathname.match(/^\/cards\/([a-z0-9_.-]+)\.html$/i)?.[1];
+      if (card.protocol !== "https:" || !["asna.ru", "www.asna.ru"].includes(card.hostname) || !slug ||
+        !asnaSitemapTarget.slugs.some((candidate) => slug === candidate || slug.startsWith(`${candidate}_`) || slug.startsWith(`${candidate}-`))) continue;
+      card.hostname = "www.asna.ru";
+      card.search = "";
+      card.hash = "";
+      locations.push(card.toString());
+    }
+    if (locations.length > 100) return json({ error: "ASNA sitemap filter is too broad" }, 400);
+    const compactXml = `<?xml version="1.0" encoding="UTF-8"?><urlset data-source-url="${escapeHtml(target.toString())}">` +
+      locations.map((location) => `<url><loc>${escapeHtml(location)}</loc></url>`).join("") + `</urlset>`;
+    return new Response(compactXml, {
+      status: 200,
+      headers: {
+        "content-type": "application/xml; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "asna-first-party-card-sitemap"
+      }
+    });
+  }
   if (pharmacyTranslatedTarget) {
     const upstream = await safeFetch(target.toString(), {
       method: "GET",
@@ -2559,7 +3253,37 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       }
     });
   }
-  if (ruOtzyvTarget) {
+  if (ruOtzyvTarget?.kind === "search") {
+    const attempts = [
+      { url: ruOtzyvTarget.source, source: "direct-ru-otzyv-search" },
+      { url: ruOtzyvTarget.translated, source: "google-translate-ru-otzyv-search" }
+    ];
+    for (const attempt of attempts) {
+      try {
+        const upstream = await safeFetch(attempt.url.toString(), {
+          method: "GET",
+          redirect: "follow",
+          headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+        }, fetch, 0, 60_000);
+        const html = await readTextBounded(upstream, 4_000_000, 60_000);
+        if (!upstream.ok || !/(?:text\/html|application\/xhtml\+xml)/i.test(upstream.headers.get("content-type") ?? "")) {
+          continue;
+        }
+        const compactHtml = compactRuOtzyvSearchHtml(html, ruOtzyvTarget);
+        if (!compactHtml || compactHtml.length > 100_000) continue;
+        return new Response(compactHtml, {
+          status: 200,
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store",
+            "x-ratings-source": attempt.source
+          }
+        });
+      } catch { /* try the fixed translated route */ }
+    }
+    return json({ error: "ru.otzyv.com search did not prove exact results or an explicit zero" }, 502);
+  }
+  if (ruOtzyvTarget?.kind === "product") {
     const upstream = await safeFetch(ruOtzyvTarget.translated.toString(), {
       method: "GET",
       redirect: "manual",
@@ -2585,6 +3309,26 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
         "x-ratings-source": "google-translate-ru-otzyv-ssr"
+      }
+    });
+  }
+  if (vseotzyvyTarget) {
+    const reader = await safeFetch(readerProxyUrl(vseotzyvyTarget.source).toString(), {
+      method: "GET",
+      redirect: "follow",
+      headers: { accept: "text/plain; charset=utf-8", "x-return-format": "markdown", dnt: "1" }
+    });
+    const markdown = await readTextBounded(reader, 12_000_000, 60_000);
+    const compact = reader.ok ? compactVseotzyvyReaderProof(markdown, vseotzyvyTarget) : undefined;
+    if (!compact || compact.length > 500_000) {
+      return json({ error: "Vseotzyvy reader did not prove the exact source and complete aggregate" }, 502);
+    }
+    return new Response(compact, {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "vseotzyvy-reader-compact"
       }
     });
   }
@@ -2682,42 +3426,48 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     translated.searchParams.set("_x_tr_sl", "ru");
     translated.searchParams.set("_x_tr_tl", "en");
     translated.searchParams.set("_x_tr_hl", "en");
-    const upstream = await safeFetch(translated.toString(), {
+    const translatedAttempts = [translated, new URL(translated.toString())];
+    translatedAttempts[1]!.searchParams.set("_x_tr_pto", "wapp");
+    for (const attempt of translatedAttempts) {
+      const upstream = await safeFetch(attempt.toString(), {
+        method: "GET",
+        redirect: "follow",
+        headers: {
+          accept: "text/html,application/xhtml+xml",
+          "accept-language": "ru-RU,ru;q=0.9",
+          ...(attempt.searchParams.has("_x_tr_pto") ? { "cache-control": "no-cache" } : {})
+        }
+      });
+      const html = await readTextBounded(upstream, 12_000_000, 60_000);
+      if (!upstream.ok || !validOtzovikProductProof(html, target)) continue;
+      return new Response(html, {
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "x-ratings-source": attempt.searchParams.has("_x_tr_pto")
+            ? "google-translate-ssr-fallback"
+            : "google-translate-ssr"
+        }
+      });
+    }
+    const reader = await safeFetch(readerProxyUrl(translatedAttempts[1]!).toString(), {
       method: "GET",
       redirect: "follow",
-      headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+      headers: { accept: "text/plain; charset=utf-8", "x-return-format": "html", dnt: "1" }
     });
-    const html = await readTextBounded(upstream, 12_000_000, 60_000);
-    if (!upstream.ok) return new Response(html, { status: upstream.status, headers: { "content-type": "text/html; charset=utf-8" } });
-    const sourceMatches = (value: string | undefined): boolean => {
-      if (!value) return false;
-      try {
-        const source = new URL(value);
-        return source.protocol === "https:" && source.hostname === "otzovik.com" &&
-          source.pathname === target.pathname && !source.search && !source.hash;
-      } catch { return false; }
-    };
-    const attribute = (tag: string, name: string): string | undefined =>
-      tag.match(new RegExp(`\\b${name}=["']([^"']+)["']`, "i"))?.[1];
-    const baseTag = html.match(/<base\b[^>]*>/i)?.[0];
-    const canonicalTag = [...html.matchAll(/<link\b[^>]*>/gi)]
-      .find((match) => /\brel=["'][^"']*\bcanonical\b[^"']*["']/i.test(match[0]))?.[0];
-    const productAggregate = /itemtype=["']https?:\/\/schema\.org\/Product["']/i.test(html) &&
-      /itemprop=["']aggregateRating["']/i.test(html) &&
-      /itemprop=["']ratingValue["'][^>]*content=["'][\d.,]+["']/i.test(html) &&
-      /itemprop=["']reviewCount["'][^>]*content=["'][\d\s\u00a0]+["']/i.test(html);
-    if (!sourceMatches(baseTag ? attribute(baseTag, "href") : undefined) ||
-      !sourceMatches(canonicalTag ? attribute(canonicalTag, "href") : undefined) || !productAggregate) {
-      return json({ error: "Otzovik translated page did not prove the requested product aggregate" }, 502);
+    const readerHtml = await readTextBounded(reader, 12_000_000, 60_000);
+    if (reader.ok && validOtzovikProductProof(readerHtml, target)) {
+      return new Response(readerHtml, {
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "x-ratings-source": "otzovik-translated-reader-html"
+        }
+      });
     }
-    return new Response(html, {
-      status: 200,
-      headers: {
-        "content-type": "text/html; charset=utf-8",
-        "cache-control": "no-store",
-        "x-ratings-source": "google-translate-ssr"
-      }
-    });
+    return json({ error: "Otzovik translated page did not prove the requested product aggregate" }, 502);
   }
   if (host === "megapteka.ru" || host === "otzovik.com") {
     let readerTarget = target;
@@ -2819,8 +3569,8 @@ export default async function onRequest(context: Context): Promise<Response> {
     authRequired: context.env.RATINGS_ALLOW_UNAUTHENTICATED !== "true", agentMode: true
   });
   if (url.pathname === "/api/health") return json({ ok: true, service: "ratings-collector", runtime: "edgeone" });
-  const repository = new BlobRepository();
   if (url.pathname === "/api/internal/repository" && context.request.method === "POST") {
+    const repository = new BlobRepository();
     try { return await repositoryRpc(context.request, context.env, repository); }
     catch (error) { return json({ error: safeErrorMessage(error) }, 400); }
   }
@@ -2831,6 +3581,29 @@ export default async function onRequest(context: Context): Promise<Response> {
   let user: AuthUser;
   try { user = await authenticate(context.request.headers, authConfig(context.env)); }
   catch (error) { return json({ error: safeErrorMessage(error) }, 401); }
+  const runMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
+  const publishMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/publish$/);
+  const reviewMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/review$/);
+  const companionSessionMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/companion\/ozon\/session$/);
+  const companionImportMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/companion\/ozon$/);
+  const profileGetMatch = url.pathname.match(/^\/api\/site-profiles\/([^/]+)$/);
+  const profileMatch = url.pathname.match(/^\/api\/site-profiles\/([^/]+)\/approve$/);
+  let reviewBody: {
+    acceptedKeys?: string[];
+    rejectedKeys?: string[];
+    productLabels?: Record<string, string>;
+  } | undefined;
+  try {
+    // Edge runtimes may release or reuse the incoming request stream after an
+    // awaited storage operation. Buffer review decisions before getRun() so a
+    // valid employee action is parsed exactly once while the body is usable.
+    reviewBody = context.request.method === "POST" && reviewMatch
+      ? await context.request.json() as typeof reviewBody
+      : undefined;
+  } catch (error) {
+    return json({ error: safeErrorMessage(error) }, 400);
+  }
+  const repository = new BlobRepository();
   const service = new RatingsService(repository, async () => { throw new Error("Адаптеры выполняются только в изолированном Agent"); });
   try {
     if (context.request.method === "POST" && url.pathname === "/api/runs") {
@@ -2841,25 +3614,30 @@ export default async function onRequest(context: Context): Promise<Response> {
       const run = await service.createRun(input, user.email);
       return json(pagedRun(run, url), 202);
     }
-    const runMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
-    const publishMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/publish$/);
-    const reviewMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/review$/);
-    const companionSessionMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/companion\/ozon\/session$/);
-    const companionImportMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/companion\/ozon$/);
-    const profileGetMatch = url.pathname.match(/^\/api\/site-profiles\/([^/]+)$/);
-    const profileMatch = url.pathname.match(/^\/api\/site-profiles\/([^/]+)\/approve$/);
+    if (context.request.method === "GET" && url.pathname === "/api/runs") {
+      const limit = Math.max(1, Math.min(20, Math.trunc(Number(url.searchParams.get("limit") ?? 8)) || 8));
+      return json(await service.listRecentRuns(user.email, limit));
+    }
     if (context.request.method === "GET" && runMatch) {
       let run = await service.getRun(decodeURIComponent(runMatch[1]));
       if (!run) return json({ error: "Запуск не найден" }, 404);
       assertOwner(run, user);
       if (reconcileStaleCollectionCheckpoint(run)) await repository.saveRun(run);
-      if (run.status !== "published") run = await reconcileBrowserPublication(repository, run);
+      if (reconcileStalePublicationCheckpoint(run)) await repository.saveRun(run);
+      run = await service.reconcileInterruptedRun(run);
+      // Older deployments marked a successful partial write as fully
+      // published. Reconcile those stored runs too so failed-only retry becomes
+      // available without creating a replacement run.
+      if (run.status !== "published" || (run.publicationExclusions?.length ?? 0) > 0) {
+        run = await reconcileBrowserPublication(repository, run);
+      }
       return json(pagedRun(run, url));
     }
     if (context.request.method === "POST" && publishMatch) {
       let run = await service.getRun(decodeURIComponent(publishMatch[1]));
       if (!run) return json({ error: "Запуск не найден" }, 404);
       assertOwner(run, user);
+      run = await service.reconcileInterruptedRun(run);
       const body = await context.request.json().catch(() => ({})) as { excludeFailedPartitions?: boolean };
       if (body.excludeFailedPartitions === true) {
         run = await service.excludeFailedPartitionsFromPublication(run.id);
@@ -2871,11 +3649,11 @@ export default async function onRequest(context: Context): Promise<Response> {
       const run = await service.getRun(decodeURIComponent(reviewMatch[1]));
       if (!run) return json({ error: "Запуск не найден" }, 404);
       assertOwner(run, user);
-      const body = await context.request.json() as { acceptedKeys?: string[]; productLabels?: Record<string, string> };
       return json(pagedRun(await service.approveObservations(
         run.id,
-        body.acceptedKeys ?? [],
-        body.productLabels ?? {}
+        reviewBody?.acceptedKeys ?? [],
+        reviewBody?.productLabels ?? {},
+        reviewBody?.rejectedKeys ?? []
       ), url));
     }
     if (context.request.method === "POST" && companionSessionMatch) {

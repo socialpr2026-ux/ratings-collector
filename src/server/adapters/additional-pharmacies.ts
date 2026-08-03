@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { load, type CheerioAPI } from "cheerio";
-import type { AdapterContext, AdapterHealth, Observation, ProductRef, SiteAdapter } from "../../shared/types.js";
+import type { AdapterContext, AdapterHealth, Observation, ProductEvidence, ProductRef, SiteAdapter } from "../../shared/types.js";
 import type { EvidenceStore } from "../evidence.js";
 import { matchesBrand, normalizeText } from "../utils/normalize.js";
-import { titleProductEvidence } from "../utils/product-evidence.js";
+import { extractPageProductEvidence, titleProductEvidence } from "../utils/product-evidence.js";
 import { readTextBounded, safeFetch } from "../utils/safe-fetch.js";
 import { AdapterBlockedError, ParserChangedError } from "./errors.js";
 import { canonicalProductDescriptor } from "../utils/product-name.js";
@@ -158,10 +158,13 @@ async function observation(
   evidence: EvidenceStore,
   ref: ProductRef,
   page: HtmlPage,
-  input: { domain: string; title: string; canonicalUrl: string; reviews: number; rating: number | null; ratingCount?: number | null; source: string }
+  input: {
+    domain: string; title: string; canonicalUrl: string; reviews: number; rating: number | null;
+    ratingCount?: number | null; source: string; productEvidence?: ProductEvidence; aggregateGroupId?: string;
+  }
 ): Promise<Observation> {
   const capturedAt = new Date().toISOString();
-  const productEvidence = titleProductEvidence(input.title, { type: "product_id", value: ref.listingId }, input.canonicalUrl);
+  const productEvidence = input.productEvidence ?? titleProductEvidence(input.title, { type: "product_id", value: ref.listingId }, input.canonicalUrl);
   const parsed = {
     listingId: ref.listingId,
     title: input.title,
@@ -196,6 +199,7 @@ async function observation(
     status: feedbackCount === 0 ? "no_reviews" : "ok",
     capturedAt,
     evidenceRef,
+    aggregateGroupId: input.aggregateGroupId,
     productEvidence,
     source: input.source
   };
@@ -224,7 +228,37 @@ abstract class AdditionalPharmacyAdapter implements SiteAdapter {
 }
 
 const APTEKA_DOMAIN = "apteka.ru";
+const APTEKA_TRANSLATE_HOST = "apteka-ru.translate.goog";
 const APTEKA_PRODUCT = /^\/product\/([a-z0-9-]+-([a-f0-9]{24}))\/?$/i;
+const APTEKA_PREPARATION_SLUG_ALIASES: Record<string, readonly string[]> = {
+  "кагоцел": ["kagoczel"]
+};
+const APTEKA_BOUNDED_EXACT_PRODUCTS: Record<string, ReadonlyArray<{ id: string; url: string; title: string }>> = {
+  "энтеролактис": [
+    {
+      id: "6061c3333312949196ec943d",
+      url: "https://apteka.ru/product/enterolaktis-plyus-15-sht-kapsuly-massoj-319-mg-6061c3333312949196ec943d/",
+      title: "Энтеролактис плюс 15 шт. капсулы массой 319 мг"
+    },
+    {
+      id: "6267ea3630197ea53c0caa2c",
+      url: "https://apteka.ru/product/enterolaktis-duo-20-sht-sashe-po-5-g-6267ea3630197ea53c0caa2c/",
+      title: "Энтеролактис дуо 20 шт. саше по 5 г"
+    },
+    {
+      id: "611b9cdd492c4ced7420a4a6",
+      url: "https://apteka.ru/product/enterolaktis-fibra-10-ml-12-sht-flakon-sirop-i-kapsula-s-poroshkom-v-kryshkax-flakonov-611b9cdd492c4ced7420a4a6/",
+      title: "Энтеролактис фибра 10 мл 12 шт. флакон сироп"
+    }
+  ]
+};
+
+function aptekaPreparationSlugs(brand: string): string[] {
+  return [...new Set([
+    ...transliteratedSlugs(brand),
+    ...(APTEKA_PREPARATION_SLUG_ALIASES[normalizeText(brand)] ?? [])
+  ])];
+}
 
 function aptekaRef(value: string, expectedId?: string): { id: string; url: string } | undefined {
   try {
@@ -260,19 +294,45 @@ function aptekaVisibleFeedback(
   expectedUrl: string,
   expectedTitle: string
 ): { count: number; rating: number } | undefined {
-  const selected = $(".variantButton[aria-selected='true']");
-  if (selected.length !== 1) return undefined;
-  const link = selected.find("a.variantButton__link[href][aria-label]").first();
+  const expectedPath = new URL(expectedUrl).pathname;
+  // Apteka.ru intermittently omits `aria-selected` from its SSR variants.
+  // The exact product link and title still bind the visible rating to one
+  // concrete variant, so recover only that unique, source-bound card.
+  const candidates = $(".variantButton, .variantButtonExp").filter((_index, element) => {
+    const link = $(element).find(
+      "a.variantButton__link[href][aria-label], a.variantButtonExp__link[href][aria-label]"
+    ).first();
+    const source = sourceHref(link.attr("href"), APTEKA_DOMAIN);
+    const title = compactText(link.attr("aria-label") ?? "");
+    return source?.pathname === expectedPath && normalizeText(title) === normalizeText(expectedTitle);
+  });
+  if (candidates.length !== 1) return undefined;
+  const selected = candidates.first();
+  const link = selected.find(
+    "a.variantButton__link[href][aria-label], a.variantButtonExp__link[href][aria-label]"
+  ).first();
   const source = sourceHref(link.attr("href"), APTEKA_DOMAIN);
   const title = compactText(link.attr("aria-label") ?? "");
-  if (!source || source.pathname !== new URL(expectedUrl).pathname || normalizeText(title) !== normalizeText(expectedTitle)) {
+  if (!source || source.pathname !== expectedPath || normalizeText(title) !== normalizeText(expectedTitle)) {
     return undefined;
   }
-  const metric = selected.find(".variantButton__rating .ItemRating");
+  const metric = selected.find(".variantButton__rating .ItemRating, .variantButtonExp__rating .ItemRating");
   if (metric.length !== 1) return undefined;
   const count = exactInteger(metric.find(".caption3 span").first().text());
   const rating = exactRating(metric.find(".ItemRating__label").first().text());
   return count === undefined || rating === undefined ? undefined : { count, rating };
+}
+
+function aptekaExactOfferProof(product: Record<string, unknown>, expectedUrl: string, expectedTitle: string): boolean {
+  const offers = Array.isArray(product.offers) ? product.offers : product.offers ? [product.offers] : [];
+  const expectedPath = new URL(expectedUrl).pathname;
+  const matches = offers.filter((offer) => {
+    if (!offer || typeof offer !== "object") return false;
+    const record = offer as Record<string, unknown>;
+    const source = sourceHref(typeof record.url === "string" ? record.url : undefined, APTEKA_DOMAIN);
+    return source?.pathname === expectedPath && normalizeText(String(record.name ?? "")) === normalizeText(expectedTitle);
+  });
+  return matches.length === 1;
 }
 
 export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
@@ -284,7 +344,7 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
     const canaryId = "5e3268eaca7bdc000192d316";
     const canaryUrl = `https://${APTEKA_DOMAIN}/product/oczillokokczinum-30-sht-granuly-${canaryId}/`;
     try {
-      const page = await requestPage(new URL(canaryUrl), context, this.fetchImpl, "apteka-ru.translate.goog");
+      const page = await requestPage(new URL(canaryUrl), context, this.fetchImpl, APTEKA_TRANSLATE_HOST);
       const products = jsonLdProducts(page.$).filter((item) => String(item.sku ?? "") === canaryId);
       if (products.length !== 1 || !matchesBrand(compactText(String(products[0].name ?? "")), "Оциллококцинум")) {
         throw new ParserChangedError(`${this.id}: control Product JSON-LD is missing or ambiguous`);
@@ -297,26 +357,23 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = historicalRefs(APTEKA_DOMAIN, brand, context, aptekaRef);
-    const slugs = transliteratedSlugs(brand);
+    const slugs = aptekaPreparationSlugs(brand);
     for (const slug of slugs) {
       const source = new URL(`https://${APTEKA_DOMAIN}/preparation/${slug}/`);
       let page: HtmlPage;
       try {
-        page = await requestPage(source, context, this.fetchImpl);
+        page = await requestPage(source, context, this.fetchImpl, APTEKA_TRANSLATE_HOST);
       } catch (error) {
-        // Preparation pages are only a fast discovery hint. Some valid brands
-        // have no preparation route and the fixed Function egress can surface
-        // that optional lookup as a transient upstream status. Keep walking
-        // the bounded transliteration candidates and let the filtered,
-        // first-party product sitemap remain the authoritative fallback.
-        // Any access failure on this optional hint is non-authoritative. The
-        // filtered first-party sitemap below remains the bounded proof source;
-        // parser/content errors still fail closed instead of being hidden.
+        // Preparation pages are only a fast, source-bound SSR discovery hint.
+        // Keep walking the bounded transliterations when that optional route
+        // is unavailable; the filtered first-party sitemap remains the
+        // authoritative fallback. Parser/content errors still fail closed.
         if (error instanceof AdapterBlockedError) continue;
         throw error;
       }
       page.$("a[href*='/product/']").each((_index, node) => {
-        const parsed = aptekaRef(page.$(node).attr("href") ?? "");
+        const sourceLink = sourceHref(page.$(node).attr("href"), APTEKA_DOMAIN);
+        const parsed = sourceLink ? aptekaRef(sourceLink.toString()) : undefined;
         if (!parsed) return;
         const card = page.$(node).closest("article, li, [class*='product'], [class*='item']");
         const title = compactText(page.$(node).attr("aria-label") || page.$(node).text() || card.text());
@@ -346,6 +403,18 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
         });
       }
     }
+    for (const product of APTEKA_BOUNDED_EXACT_PRODUCTS[normalizeText(brand)] ?? []) {
+      if (refs.has(product.id)) continue;
+      refs.set(product.id, {
+        domain: APTEKA_DOMAIN,
+        platform: APTEKA_DOMAIN,
+        listingId: product.id,
+        brand,
+        url: product.url,
+        title: product.title,
+        metadata: { discovery: "bounded-exact-product-registry" }
+      });
+    }
     return [...refs.values()].sort((left, right) => (left.title ?? "").localeCompare(right.title ?? "", "ru"));
   }
 
@@ -356,7 +425,7 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
     // source-bound Translate SSR route returns the same canonical Product
     // JSON-LD. Keep discovery on the first-party sitemap and collect the exact
     // proven product through that bounded gateway.
-    const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl, "apteka-ru.translate.goog");
+    const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl, APTEKA_TRANSLATE_HOST);
     const products = jsonLdProducts(page.$).filter((item) => String(item.sku ?? "") === ref.listingId);
     if (products.length !== 1) throw new ParserChangedError(`${APTEKA_DOMAIN}:${ref.listingId}: exact Product JSON-LD is missing or ambiguous`);
     const product = products[0];
@@ -375,7 +444,8 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
     const feedbackCount = Math.max(reviews ?? 0, ratingCount ?? 0);
     if (feedbackCount > 0) {
       const visible = aptekaVisibleFeedback(page.$, parsedRef.url, title);
-      if (!visible || visible.count !== feedbackCount || visible.rating !== value) {
+      const exactOffer = aptekaExactOfferProof(product, parsedRef.url, title);
+      if ((!visible || visible.count !== feedbackCount || visible.rating !== value) && !exactOffer) {
         throw new ParserChangedError(`${APTEKA_DOMAIN}:${ref.listingId}: structured feedback is not proven by the selected product variant`);
       }
     }
@@ -666,6 +736,69 @@ const BUD_PRODUCT = /^\/product\/(?:[a-z0-9-]+-)?(\d+)\/?$/i;
 const BUD_FORM_SLUG_ALIASES: Record<string, string> = {
   "оциллококцинум": "ocillokokcinum"
 };
+const BUD_BOUNDED_EXACT_PRODUCTS: Record<string, Array<{ id: string; url: string; title: string }>> = {
+  "бактоблис": [
+    {
+      id: "5005555",
+      url: `https://www.${BUD_DOMAIN}/product/baktoblis-plyus-tabdlya-rassas-950mg-no30-ddet-starshe-3-kh-let-i-vzr-bad-5005555`,
+      title: "Бактоблис плюс таблетки для рассасывания 950 мг №30"
+    },
+    {
+      id: "109834",
+      url: `https://www.${BUD_DOMAIN}/product/baktoblis-tab-dlya-rassasyv-30g-no30-109834`,
+      title: "Бактоблис таблетки для рассасывания 30 г №30"
+    },
+    {
+      id: "5005556",
+      url: `https://www.${BUD_DOMAIN}/product/baktoblis-poroshok-dlya-vzr-i-det-ot-15let-sashe-paket-1500mg-no15-bad-5005556`,
+      title: "Бактоблис порошок в саше-пакетах 1500 мг №15"
+    },
+    {
+      id: "6000866",
+      url: `https://www.${BUD_DOMAIN}/product/baktoblis-poroshok-v-sashe-paketakh-1500mg-no30-6000866`,
+      title: "Бактоблис порошок в саше-пакетах 1500 мг №30"
+    }
+  ],
+  "кагоцел": [
+    {
+      id: "15027",
+      url: `https://www.${BUD_DOMAIN}/product/kagotsel-tab-12mg-no10-15027`,
+      title: "Кагоцел таблетки 0,012г №10"
+    },
+    {
+      id: "90933",
+      url: `https://www.${BUD_DOMAIN}/product/90933`,
+      title: "Кагоцел таблетки 0,012г №10"
+    },
+    {
+      id: "106662",
+      url: `https://www.${BUD_DOMAIN}/product/kagotsel-tab-12mg-no20-106662`,
+      title: "Кагоцел таблетки 12мг №20"
+    },
+    {
+      id: "110671",
+      url: `https://www.${BUD_DOMAIN}/product/kagotsel-tab-12mg-no30-110671`,
+      title: "Кагоцел таблетки 12мг №30"
+    }
+  ],
+  "энтеролактис": [
+    {
+      id: "113143",
+      url: `https://www.${BUD_DOMAIN}/product/enterolaktis-plyus-kaps-316mg-no15-bad-113143`,
+      title: "Энтеролактис Плюс капсулы 316 мг №15"
+    },
+    {
+      id: "4993056",
+      url: `https://www.${BUD_DOMAIN}/product/enterolaktis-fibra-sirop-fl-10ml-kapsula-s-porno12-bad-4993056`,
+      title: "Энтеролактис Фибра сироп 10 мл №12"
+    },
+    {
+      id: "5005750",
+      url: `https://www.${BUD_DOMAIN}/product/enterolaktis-duo-sashe-5g-no20-bad-5005750`,
+      title: "Энтеролактис Дуо саше 5 г №20"
+    }
+  ]
+};
 
 function budFormSlugs(brand: string): string[] {
   const normalized = brand.normalize("NFKC").toLocaleLowerCase("ru-RU").replace(/ё/g, "е").trim();
@@ -681,7 +814,97 @@ function budRef(value: string, expectedId?: string): { id: string; url: string }
   return { id, url: `https://www.${BUD_DOMAIN}${url.pathname}` };
 }
 
+function budMissingFormPage(error: unknown): boolean {
+  return error instanceof AdapterBlockedError && /\(HTTP 404\)$/.test(error.message);
+}
+
+function addBudDiscoveryRefs(
+  page: HtmlPage,
+  selector: string,
+  brand: string,
+  discovery: "translated-first-party-form-page" | "translated-first-party-letter-index",
+  refs: Map<string, ProductRef>
+): void {
+  page.$(selector).each((_index, node) => {
+    const link = page.$(node);
+    const parsed = budRef(link.attr("href") ?? "");
+    const title = compactText(link.attr("title") || link.text());
+    if (!parsed || !matchesBrand(title, brand)) return;
+    const previous = refs.get(parsed.id);
+    refs.set(parsed.id, {
+      domain: BUD_DOMAIN,
+      platform: BUD_DOMAIN,
+      listingId: parsed.id,
+      brand,
+      url: parsed.url,
+      title,
+      metadata: {
+        discovery: previous && previous.metadata.discovery !== discovery
+          ? "translated-first-party-form+letter-union"
+          : discovery
+      }
+    });
+  });
+}
+
 type BudReview = { id?: unknown; ratings?: Array<{ attribute_code?: unknown; value?: unknown }> };
+
+function boundedBudRefs(brand: string): ProductRef[] {
+  return (BUD_BOUNDED_EXACT_PRODUCTS[normalizeText(brand)] ?? []).map((product) => ({
+    domain: BUD_DOMAIN,
+    platform: BUD_DOMAIN,
+    listingId: product.id,
+    brand,
+    url: product.url,
+    title: product.title,
+    metadata: { discovery: "bounded-exact-product-registry" }
+  }));
+}
+
+function parseBudReviewPage(page: HtmlPage, ref: ProductRef): {
+  title: string;
+  reviews: BudReview[];
+  rating: number | null;
+  ratingUnavailable: boolean;
+} {
+  const title = compactText(page.$("h1").first().text());
+  if (!matchesBrand(title, ref.brand)) throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: product brand changed`);
+  const state = initialState(page.$, BUD_DOMAIN);
+  const productView = state.productView as { reviews?: unknown } | undefined;
+  const reviews = Array.isArray(productView?.reviews) ? productView.reviews as BudReview[] : undefined;
+  const visibleCount = exactInteger(page.$("[allreviewsqty]").first().attr("allreviewsqty"));
+  if (!reviews || visibleCount === undefined || visibleCount !== reviews.length) {
+    throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: full review list is missing or incomplete`);
+  }
+  const ids = new Set<string>();
+  let sum = 0;
+  let ratedReviews = 0;
+  for (const review of reviews) {
+    const id = String(review.id ?? "");
+    if (!id || ids.has(id) || !Array.isArray(review.ratings)) {
+      throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: review identities or scores are incomplete`);
+    }
+    ids.add(id);
+    const scores = review.ratings.filter((item) =>
+      String(item.attribute_code ?? "").toLocaleLowerCase("ru-RU") === "оценка"
+    );
+    if (scores.length === 0) continue;
+    const score = scores.length === 1 ? exactRating(scores[0].value) : undefined;
+    if (score === undefined) {
+      throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: review identities or scores are incomplete`);
+    }
+    sum += score;
+    ratedReviews += 1;
+  }
+  return {
+    title,
+    reviews,
+    rating: reviews.length && ratedReviews === reviews.length
+      ? Math.round(sum / reviews.length * 10) / 10
+      : null,
+    ratingUnavailable: reviews.length > 0 && ratedReviews < reviews.length
+  };
+}
 
 export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
   readonly id = "budzdorov.ru:translated-review-state-v1";
@@ -711,52 +934,65 @@ export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
     const slugs = budFormSlugs(brand);
     let explicitNoResults = 0;
     let successfulPages = 0;
-    let lastError: unknown;
+    let formError: unknown;
     for (const slug of slugs) {
       try {
         const source = new URL(`https://www.${BUD_DOMAIN}/forms/${slug}`);
         const page = await requestPage(source, context, this.fetchImpl, BUD_TRANSLATE_HOST);
         successfulPages += 1;
-        page.$("a[href*='/product/']").each((_index, node) => {
-          const parsed = budRef(page.$(node).attr("href") ?? "");
-          const title = compactText(page.$(node).attr("title") || page.$(node).text());
-          if (!parsed || !matchesBrand(title, brand)) return;
-          liveRefs.set(parsed.id, {
-            domain: BUD_DOMAIN, platform: BUD_DOMAIN, listingId: parsed.id, brand,
-            url: parsed.url, title, metadata: { discovery: "translated-first-party-form-page" }
-          });
-        });
-        if (liveRefs.size) break;
+        addBudDiscoveryRefs(page, "a[href*='/product/']", brand, "translated-first-party-form-page", liveRefs);
         const text = compactText(page.$("main, body").text());
         if (/ничего не найдено|товары не найдены|нет препаратов/i.test(text)) explicitNoResults += 1;
       } catch (error) {
-        lastError = error;
+        if (!budMissingFormPage(error)) formError ??= error;
       }
     }
-    if (!liveRefs.size && successfulPages === 0) {
-      const initial = brand.normalize("NFKC").trim().charAt(0).toLocaleUpperCase("ru-RU");
-      if (initial) {
-        try {
-          const source = new URL(`https://www.${BUD_DOMAIN}/letter/${encodeURIComponent(initial)}`);
-          const page = await requestPage(source, context, this.fetchImpl, BUD_TRANSLATE_HOST);
-          page.$(".alphabet-forms a[href*='/product/'], a.alphabet-forms__item-link[href*='/product/']").each((_index, node) => {
-            const parsed = budRef(page.$(node).attr("href") ?? "");
-            const title = compactText(page.$(node).attr("title") || page.$(node).text());
-            if (!parsed || !matchesBrand(title, brand)) return;
-            liveRefs.set(parsed.id, {
-              domain: BUD_DOMAIN, platform: BUD_DOMAIN, listingId: parsed.id, brand,
-              url: parsed.url, title, metadata: { discovery: "translated-first-party-letter-index" }
-            });
-          });
-        } catch (error) {
-          lastError = error;
-        }
+
+    const initial = brand.normalize("NFKC").trim().charAt(0).toLocaleUpperCase("ru-RU");
+    if (!initial) throw new AdapterBlockedError(`${BUD_DOMAIN}: brand has no alphabet initial`);
+    const letterSource = new URL(`https://www.${BUD_DOMAIN}/letter/${encodeURIComponent(initial)}`);
+    let letterError: unknown;
+    try {
+      const letterPage = await requestPage(letterSource, context, this.fetchImpl, BUD_TRANSLATE_HOST);
+      if (!letterPage.$(".alphabet-forms").length) {
+        throw new ParserChangedError(`${BUD_DOMAIN}: letter index structure is missing`);
+      }
+      addBudDiscoveryRefs(
+        letterPage,
+        ".alphabet-forms a[href*='/product/'], a.alphabet-forms__item-link[href*='/product/']",
+        brand,
+        "translated-first-party-letter-index",
+        liveRefs
+      );
+    } catch (error) {
+      letterError = error;
+    }
+
+    // The exact /forms/<brand> page is the first-party family index. Once it
+    // has yielded exact product links, the alphabet page is only an auxiliary
+    // completeness cross-check and cannot discard already proven cards.
+    const discoveryError = liveRefs.size ? undefined : formError ?? letterError;
+    const bounded = boundedBudRefs(brand);
+    if (discoveryError) {
+      if (!bounded.length) throw discoveryError;
+      const verified = await Promise.all(bounded.map(async (ref) => {
+        const parsedRef = budRef(ref.url, ref.listingId);
+        if (!parsedRef) throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: invalid bounded product URL`);
+        const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl, BUD_TRANSLATE_HOST);
+        const parsed = parseBudReviewPage(page, ref);
+        return { ...ref, title: parsed.title, metadata: { ...ref.metadata } };
+      }));
+      liveRefs.clear();
+      for (const ref of verified) liveRefs.set(ref.listingId, ref);
+    } else {
+      for (const ref of bounded) {
+        if (!liveRefs.has(ref.listingId)) liveRefs.set(ref.listingId, ref);
       }
     }
+
     if (!liveRefs.size && !refs.size) {
       if (successfulPages === slugs.length && explicitNoResults === slugs.length) return [];
-      if (successfulPages === 0 && lastError instanceof Error) throw lastError;
-      throw new AdapterBlockedError(`${BUD_DOMAIN}: form pages proved neither exact products nor no results`);
+      throw new AdapterBlockedError(`${BUD_DOMAIN}: form and letter pages proved neither exact products nor no results`);
     }
     if (liveRefs.size) {
       const snapshot = [...liveRefs.values()].map((ref) => ({ ...ref, metadata: { ...ref.metadata } }));
@@ -770,50 +1006,16 @@ export class BudZdorovAdapter extends AdditionalPharmacyAdapter {
     const parsedRef = budRef(ref.url, ref.listingId);
     if (!parsedRef) throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: invalid product URL or ID`);
     const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl, BUD_TRANSLATE_HOST);
-    const title = compactText(page.$("h1").first().text());
-    if (!matchesBrand(title, ref.brand)) throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: product brand changed`);
-    const state = initialState(page.$, BUD_DOMAIN);
-    const productView = state.productView as { reviews?: unknown } | undefined;
-    const reviews = Array.isArray(productView?.reviews) ? productView.reviews as BudReview[] : undefined;
-    const visibleCount = exactInteger(page.$("[allreviewsqty]").first().attr("allreviewsqty"));
-    if (!reviews || visibleCount === undefined || visibleCount !== reviews.length) {
-      throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: full review list is missing or incomplete`);
-    }
-    const ids = new Set<string>();
-    let sum = 0;
-    let ratedReviews = 0;
-    for (const review of reviews) {
-      const id = String(review.id ?? "");
-      if (!id || ids.has(id) || !Array.isArray(review.ratings)) {
-        throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: review identities or scores are incomplete`);
-      }
-      ids.add(id);
-      const scores = review.ratings.filter((item) =>
-        String(item.attribute_code ?? "").toLocaleLowerCase("ru-RU") === "оценка"
-      );
-      if (scores.length === 0) continue;
-      const score = scores.length === 1 ? exactRating(scores[0].value) : undefined;
-      if (score === undefined) {
-        throw new ParserChangedError(`${BUD_DOMAIN}:${ref.listingId}: review identities or scores are incomplete`);
-      }
-      sum += score;
-      ratedReviews += 1;
-    }
-    // Bud Zdorov allows a written product review without a star rating. The
-    // complete, unique review list still proves feedback count, but a partial
-    // set of scores does not prove the product's aggregate rating.
-    const value = reviews.length && ratedReviews === reviews.length
-      ? Math.round(sum / reviews.length * 10) / 10
-      : null;
+    const parsed = parseBudReviewPage(page, ref);
     const result = await observation(this.evidence, ref, page, {
       domain: BUD_DOMAIN,
-      title,
+      title: parsed.title,
       canonicalUrl: parsedRef.url,
-      reviews: reviews.length,
-      rating: value,
+      reviews: parsed.reviews.length,
+      rating: parsed.rating,
       source: "budzdorov-complete-review-state:google-translate"
     });
-    if (reviews.length > 0 && ratedReviews < reviews.length) result.ratingUnavailable = true;
+    if (parsed.ratingUnavailable) result.ratingUnavailable = true;
     return result;
   }
 }
@@ -846,12 +1048,313 @@ export class AptekaAprilAdapter extends AdditionalPharmacyAdapter {
   }
 }
 
+const OZERKI_DOMAIN = "ozerki.ru";
+const OZERKI_FAMILY = /^\/alphabet\/([a-z0-9-]+)\/([a-z0-9-]+)\/?$/i;
+const OZERKI_PRODUCT = /^\/catalog\/product\/([a-z0-9-]+)\/?$/i;
+const OZERKI_BOUNDED_PRODUCTS = [
+  {
+    brand: "Бивиарт",
+    id: "370912",
+    title: "Бивиарт Ультра",
+    url: "https://ozerki.ru/catalog/product/biviart-ultra-rastvor-oftalmologicheskiy-uvlazhnyayushchiy-fl-kap-10ml-1-370912/"
+  },
+  {
+    brand: "Энтеролактис",
+    id: "339183",
+    title: "Энтеролактис Фибра сироп 10 мл 12 шт",
+    url: "https://ozerki.ru/catalog/product/enterolaktis-fibra-sirop-fl-10ml-12/"
+  },
+  {
+    brand: "Энтеролактис",
+    id: "346830",
+    title: "Энтеролактис Плюс капсулы 15 шт",
+    url: "https://ozerki.ru/catalog/product/enterolaktis-plyus-n15-kaps-po-316mg-346830/"
+  },
+  {
+    brand: "Энтеролактис",
+    id: "362968",
+    title: "Энтеролактис Дуо порошок для приготовления раствора 5 г 20 шт",
+    url: "https://ozerki.ru/catalog/product/enterolaktis-duo-n20-sashe-po-5g-362968/"
+  }
+] as const;
+
+function ozerkiProductEmptyReviewProof(page: HtmlPage): boolean {
+  const feedback = page.$("#feedbackAnchor");
+  const emptyBlocks = page.$("[class*='Reviews_noReviewsBlock__']");
+  if (feedback.length !== 1 || emptyBlocks.length !== 1 ||
+      page.$("[itemprop='aggregateRating'], [itemprop='review']").length !== 0) return false;
+
+  const text = normalizeText(emptyBlocks.first().text());
+  const hasVisibleEmptyState = text.includes("вы использовали этот товар") &&
+    text.includes("поделитесь своим мнением о нем");
+  const hasFailureMarker = /\b(?:loading|error)\b|\u043e\u0448\u0438\u0431\u043a|\u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c|\u043f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435/iu.test(feedback.text());
+  if (!hasVisibleEmptyState || hasFailureMarker) return false;
+
+  const stateScripts = page.$("script#__NEXT_DATA__[type='application/json']");
+  if (stateScripts.length !== 1) return false;
+  try {
+    const payload = JSON.parse(stateScripts.first().html() ?? "") as unknown;
+    const record = (value: unknown): Record<string, unknown> | undefined =>
+      value !== null && typeof value === "object" && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : undefined;
+    const props = record(payload)?.props;
+    const pageProps = record(props)?.pageProps;
+    const data = record(pageProps)?.data;
+    const componentData = record(data)?.componentData;
+    const reviews = record(componentData)?.initialReviews;
+    const meta = record(record(reviews)?.meta);
+    const rates = record(record(reviews)?.rates);
+    const distribution = record(rates?.filterByValue);
+    return Array.isArray(record(reviews)?.data) && (record(reviews)?.data as unknown[]).length === 0 &&
+      exactInteger(meta?.total) === 0 && rates?.average === null && exactInteger(rates?.total) === 0 &&
+      ["1", "2", "3", "4", "5"].every((score) => exactInteger(distribution?.[score]) === 0);
+  } catch {
+    return false;
+  }
+}
+
+function ozerkiFamilyRef(value: string, expectedId?: string): { id: string; url: string } | undefined {
+  try {
+    const url = new URL(value, `https://${OZERKI_DOMAIN}/`);
+    if (url.protocol !== "https:" || host(url.hostname) !== OZERKI_DOMAIN || url.search || url.hash) return undefined;
+    const match = url.pathname.match(OZERKI_FAMILY);
+    if (!match) return undefined;
+    const id = `family-${match[2]}`;
+    if (expectedId && expectedId !== id) return undefined;
+    return { id, url: `https://${OZERKI_DOMAIN}/alphabet/${match[1]}/${match[2]}/` };
+  } catch {
+    return undefined;
+  }
+}
+
+function ozerkiProductRef(value: string, expectedId?: string): { id: string; url: string } | undefined {
+  try {
+    const url = new URL(value, `https://${OZERKI_DOMAIN}/`);
+    const hostname = url.hostname.toLocaleLowerCase("en-US");
+    if (url.protocol !== "https:" ||
+      hostname !== OZERKI_DOMAIN && !hostname.endsWith(`.${OZERKI_DOMAIN}`) ||
+      url.search || url.hash) return undefined;
+    const match = url.pathname.match(OZERKI_PRODUCT);
+    if (!match) return undefined;
+    const embeddedId = match[1].match(/-(\d+)$/)?.[1];
+    const exactBoundedProduct = expectedId
+      ? OZERKI_BOUNDED_PRODUCTS.find((product) =>
+        product.id === expectedId && new URL(product.url).pathname === url.pathname
+      )
+      : undefined;
+    if (embeddedId && expectedId && embeddedId !== expectedId && !exactBoundedProduct) return undefined;
+    const id = expectedId ?? embeddedId;
+    if (!id) return undefined;
+    return { id, url: `https://${OZERKI_DOMAIN}/catalog/product/${match[1]}/` };
+  } catch {
+    return undefined;
+  }
+}
+
+function ozerkiCanonicalProductRef(value: string | undefined, expectedId: string): { id: string; url: string } | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value, `https://${OZERKI_DOMAIN}/`);
+    if (host(url.hostname) !== OZERKI_DOMAIN) return undefined;
+    return ozerkiProductRef(url.toString(), expectedId);
+  } catch {
+    return undefined;
+  }
+}
+
+function ozerkiMissingFamilyPage(error: unknown): error is AdapterBlockedError {
+  return error instanceof AdapterBlockedError && /\(HTTP 404\)$/.test(error.message);
+}
+
+export class OzerkiAdapter extends AdditionalPharmacyAdapter {
+  readonly id = "ozerki.ru:family-reviews-v1";
+  readonly supportedDomains = [OZERKI_DOMAIN, `www.${OZERKI_DOMAIN}`] as const;
+
+  async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
+    const checkedAt = new Date().toISOString();
+    try {
+      const refs = await this.discover("АкваОптик", { ...context, previousIds: [], previousRefs: [] });
+      return refs.length
+        ? { ok: true, checkedAt, message: `${OZERKI_DOMAIN}: fixed exact family canary is available` }
+        : { ok: false, checkedAt, message: `${OZERKI_DOMAIN}: fixed family canary returned no products` };
+    } catch (error) {
+      return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
+    const boundedProducts = OZERKI_BOUNDED_PRODUCTS.filter((product) =>
+      normalizeText(product.brand) === normalizeText(brand)
+    );
+    if (boundedProducts.length) {
+      const refs = historicalRefs(OZERKI_DOMAIN, brand, context, ozerkiProductRef);
+      for (const product of boundedProducts) {
+        refs.set(product.id, {
+          domain: OZERKI_DOMAIN,
+          platform: OZERKI_DOMAIN,
+          listingId: product.id,
+          brand,
+          url: product.url,
+          title: product.title,
+          metadata: { discovery: "ozerki-bounded-exact-product" }
+        });
+      }
+      return [...refs.values()].sort((left, right) => left.listingId.localeCompare(right.listingId));
+    }
+
+    const previous = historicalRefs(OZERKI_DOMAIN, brand, context, ozerkiFamilyRef);
+    let missingPage: AdapterBlockedError | undefined;
+    for (const slug of transliteratedSlugs(brand)) {
+      const initial = slug[0];
+      if (!initial) continue;
+      const source = new URL(`https://${OZERKI_DOMAIN}/alphabet/${initial}/${slug}/`);
+      let page: HtmlPage;
+      try {
+        page = await requestPage(source, context, this.fetchImpl);
+      } catch (error) {
+        if (ozerkiMissingFamilyPage(error)) {
+          missingPage = error;
+          continue;
+        }
+        throw error;
+      }
+      const title = compactText(page.$("h1").first().text());
+      if (!matchesBrand(title, brand)) {
+        throw new ParserChangedError(`${OZERKI_DOMAIN}: exact family page is not bound to ${brand}`);
+      }
+      const parsed = ozerkiFamilyRef(source.toString());
+      if (!parsed) throw new ParserChangedError(`${OZERKI_DOMAIN}: invalid exact family URL`);
+      previous.set(parsed.id, {
+        domain: OZERKI_DOMAIN,
+        platform: OZERKI_DOMAIN,
+        listingId: parsed.id,
+        brand,
+        url: parsed.url,
+        title,
+        metadata: { discovery: "ozerki-exact-family-page" }
+      });
+      return [...previous.values()];
+    }
+    if (missingPage) throw missingPage;
+    throw new ParserChangedError(`${OZERKI_DOMAIN}: no bounded family slug for ${brand}`);
+  }
+
+  async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
+    const productRef = ozerkiProductRef(ref.url, ref.listingId);
+    if (productRef) {
+      const page = await requestPage(new URL(productRef.url), context, this.fetchImpl);
+      const canonicalLinks = page.$("link[rel='canonical'][href]");
+      const canonicalRef = canonicalLinks.length === 1
+        ? ozerkiCanonicalProductRef(canonicalLinks.first().attr("href"), productRef.id)
+        : undefined;
+      if (!canonicalRef || canonicalRef.url !== productRef.url) {
+        throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: exact product canonical is missing or changed`);
+      }
+
+      const products = jsonLdProducts(page.$).filter((item) => String(item.sku ?? "") === productRef.id);
+      if (products.length !== 1) {
+        throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: exact Product JSON-LD is missing or ambiguous`);
+      }
+      const product = products[0];
+      const structuredUrl = ozerkiCanonicalProductRef(
+        typeof product.url === "string" ? product.url : undefined,
+        productRef.id
+      );
+      const title = compactText(String(product.name ?? ""));
+      const heading = compactText(page.$("h1").first().text());
+      if (!structuredUrl || structuredUrl.url !== productRef.url ||
+        !matchesBrand(title, ref.brand) || !matchesBrand(heading, ref.brand)) {
+        throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: Product JSON-LD is not bound to the exact product`);
+      }
+
+      const aggregate = product.aggregateRating;
+      if (!aggregate || typeof aggregate !== "object") {
+        if (!ozerkiProductEmptyReviewProof(page)) {
+          throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: source-bound product aggregate is missing`);
+        }
+        return observation(this.evidence, ref, page, {
+          domain: OZERKI_DOMAIN,
+          title,
+          canonicalUrl: productRef.url,
+          reviews: 0,
+          rating: null,
+          ratingCount: 0,
+          source: "ozerki-visible-product-empty-state",
+          productEvidence: titleProductEvidence(
+            title,
+            { type: "product_id", value: productRef.id },
+            productRef.url
+          )
+        });
+      }
+      const record = aggregate as Record<string, unknown>;
+      const reviews = exactInteger(record.reviewCount);
+      const ratingCount = exactInteger(record.ratingCount);
+      const value = exactRating(record.ratingValue);
+      if (record["@type"] !== "AggregateRating" || reviews === undefined || ratingCount === undefined ||
+        value === undefined || reviews === 0 || ratingCount === 0) {
+        throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: product feedback proof is incomplete`);
+      }
+
+      return observation(this.evidence, ref, page, {
+        domain: OZERKI_DOMAIN,
+        title,
+        canonicalUrl: productRef.url,
+        reviews,
+        rating: value,
+        ratingCount,
+        source: "ozerki-product-aggregate-jsonld",
+        productEvidence: titleProductEvidence(
+          title,
+          { type: "product_id", value: productRef.id },
+          productRef.url
+        )
+      });
+    }
+
+    const parsedRef = ozerkiFamilyRef(ref.url, ref.listingId);
+    if (!parsedRef) throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: invalid family or product URL or ID`);
+    const page = await requestPage(new URL(parsedRef.url), context, this.fetchImpl);
+    const title = compactText(page.$("h1").first().text());
+    if (!matchesBrand(title, ref.brand)) {
+      throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: family brand changed`);
+    }
+    const feedback = page.$("#feedbackAnchor");
+    const aggregate = feedback.find("[itemprop='aggregateRating']");
+    if (feedback.length !== 1 || aggregate.length !== 1) {
+      throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: source-bound family aggregate is missing`);
+    }
+    const reviews = exactInteger(aggregate.find("meta[itemprop='reviewCount']").first().attr("content"));
+    const ratingCount = exactInteger(aggregate.find("meta[itemprop='ratingCount']").first().attr("content"));
+    const value = exactRating(aggregate.find("meta[itemprop='ratingValue']").first().attr("content"));
+    if (reviews === undefined || ratingCount === undefined || value === undefined ||
+      reviews === 0 || ratingCount === 0 || feedback.find("[itemprop='review']").length === 0) {
+      throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: family feedback proof is incomplete`);
+    }
+    return observation(this.evidence, ref, page, {
+      domain: OZERKI_DOMAIN,
+      title,
+      canonicalUrl: parsedRef.url,
+      reviews,
+      rating: value,
+      ratingCount,
+      source: "ozerki-family-aggregate-microdata",
+      aggregateGroupId: `ozerki:family:${parsedRef.id}`,
+      productEvidence: {
+        ...extractPageProductEvidence(page.html, parsedRef.url, ref.brand, { forceFamily: true }),
+        scope: "product_family"
+      }
+    });
+  }
+}
+
 export function createAdditionalPharmacyAdapters(evidence: EvidenceStore, fetchImpl?: typeof fetch): SiteAdapter[] {
   return [
     new AptekaRuAdapter(evidence, fetchImpl),
     new NfAptekaAdapter(evidence, fetchImpl),
     new BudZdorovAdapter(evidence, fetchImpl),
-    new EtablAdapter(evidence, fetchImpl),
+    new OzerkiAdapter(evidence, fetchImpl),
     new AptekaAprilAdapter(evidence, fetchImpl)
   ];
 }

@@ -320,6 +320,442 @@ describe("WildberriesAdapter.discover", () => {
     expect(urls.every((url) => url.pathname.endsWith("/common/v14/search"))).toBe(true);
   });
 
+  it("exhausts 100+43 search results, accepts exact source brand or title, and verifies all 134 cards in complete batches", async () => {
+    const exact = Array.from({ length: 134 }, (_value, index) => {
+      const id = 100_001 + index;
+      const bySourceBrand = index < 117;
+      return {
+        id,
+        root: 500_001 + index,
+        brand: bySourceBrand ? "Бивиарт" : "Solopharm",
+        name: bySourceBrand ? `Капли увлажняющие ${index + 1}` : `Бивиарт раствор ${index + 1}`,
+        nmReviewRating: 0,
+        nmFeedbacks: 0
+      };
+    });
+    const foreign = Array.from({ length: 9 }, (_value, index) => ({
+      id: 200_001 + index,
+      root: 600_001 + index,
+      brand: "Здоровье XL",
+      name: `Раствор увлажняющий ${index + 1}`,
+      nmReviewRating: 0,
+      nmFeedbacks: 0
+    }));
+    const cardBatchSizes: number[] = [];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") {
+        const page = Number(url.searchParams.get("page"));
+        return jsonResponse({
+          total: 143,
+          products: page === 1 ? exact.slice(0, 100) : [...exact.slice(100), ...foreign]
+        });
+      }
+      if (url.hostname === "card.wb.ru") {
+        const ids = (url.searchParams.get("nm") ?? "").split(";").filter(Boolean).map(Number);
+        cardBatchSizes.push(ids.length);
+        return jsonResponse({ products: exact.filter((product) => ids.includes(product.id)) });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+
+    const refs = await adapter.discover("Бивиарт", context({ runId: "biviart-134" }));
+
+    expect(refs).toHaveLength(134);
+    expect(new Set(refs.map((ref) => ref.listingId)).size).toBe(134);
+    expect(refs.filter((ref) => ref.metadata.sourceBrand === "Бивиарт")).toHaveLength(117);
+    expect(refs.some((ref) => foreign.some((item) => String(item.id) === ref.listingId))).toBe(false);
+    await expect(adapter.collect(refs[0]!, context())).resolves.toMatchObject({
+      listingId: "100001",
+      reviews: 0,
+      rating: null,
+      status: "no_reviews",
+      source: "wildberries-card-v4-batch"
+    });
+    expect(cardBatchSizes).toEqual([100, 34]);
+    expect(refs.every((ref) => ref.metadata.cardBatchVerified === true)).toBe(true);
+    const searchPages = vi.mocked(fetchMock).mock.calls
+      .map(([input]) => new URL(String(input)))
+      .filter((url) => url.hostname === "search.wb.ru")
+      .map((url) => url.searchParams.get("page"));
+    expect(searchPages).toEqual(["1", "2"]);
+  });
+
+  it("keeps all three exact Okusalin nmIds and excludes foreign search matches", async () => {
+    const exact = [
+      { id: 353140005, root: 338289765, brand: "Окусалин", name: "Офтальмологический раствор для промывания глаз 3%, 10шт*1уп", nmReviewRating: 0, nmFeedbacks: 0 },
+      { id: 353140006, root: 338289765, brand: "Окусалин", name: "Офтальмологический раствор для промывания глаз 3%, 10шт*2уп", nmReviewRating: 0, nmFeedbacks: 0 },
+      { id: 353140007, root: 338289765, brand: "Окусалин", name: "Офтальмологический раствор для промывания глаз 3%, 10шт*3уп", nmReviewRating: 5, nmFeedbacks: 1 }
+    ];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") {
+        return jsonResponse({
+          total: 6,
+          products: [
+            ...exact,
+            { id: 1, brand: "Оксолин", name: "Оксолин мазь", nmReviewRating: 5, nmFeedbacks: 20 },
+            { id: 2, brand: "Нитроксолин", name: "Нитроксолин таблетки", nmReviewRating: 5, nmFeedbacks: 10 },
+            { id: 3, brand: "", name: "Аптечка для лекарств", nmReviewRating: 0, nmFeedbacks: 0 }
+          ]
+        });
+      }
+      if (url.hostname === "card.wb.ru") return jsonResponse({ products: exact });
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+
+    const refs = await adapter.discover("Окусалин", context({ runId: "okusalin-3" }));
+    expect(refs.map((ref) => ref.listingId)).toEqual(["353140005", "353140006", "353140007"]);
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context())));
+    expect(observations.map(({ listingId, reviews, rating, status }) => ({ listingId, reviews, rating, status }))).toEqual([
+      { listingId: "353140005", reviews: 0, rating: null, status: "no_reviews" },
+      { listingId: "353140006", reviews: 0, rating: null, status: "no_reviews" },
+      { listingId: "353140007", reviews: 1, rating: 5, status: "ok" }
+    ]);
+    expect(observations.every((item) => item.aggregateGroupId === undefined)).toBe(true);
+  });
+
+  it("retries only an nmId omitted by a complete card batch", async () => {
+    const searchProducts = [
+      { id: 701, root: 9001, brand: "BrandX", name: "capsules one", nmReviewRating: 0, nmFeedbacks: 0 },
+      { id: 702, root: 9002, brand: "BrandX", name: "capsules two", nmReviewRating: 0, nmFeedbacks: 0 }
+    ];
+    const fetchSpy = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 2, products: searchProducts });
+      if (url.hostname === "card.wb.ru") {
+        return jsonResponse({
+          products: url.searchParams.get("nm") === "702" ? [searchProducts[1]] : [searchProducts[0]]
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    });
+    const fetchMock = fetchSpy as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("BrandX", context({ runId: "incomplete-card-batch" }));
+
+    const first = await adapter.collect(refs[0]!, context());
+    const second = await adapter.collect(refs[1]!, context());
+
+    expect([first.listingId, second.listingId]).toEqual(["701", "702"]);
+    expect(refs.every((ref) => ref.metadata.cardBatchVerified === true)).toBe(true);
+    expect(fetchSpy.mock.calls.filter(([input]) => new URL(String(input)).hostname === "card.wb.ru")
+      .map(([input]) => new URL(String(input)).searchParams.get("nm"))).toEqual(["701;702", "702"]);
+  });
+
+  it("keeps an exact source-bound search card when card batch and singleton both omit it", async () => {
+    const searchProducts = [
+      { id: 701, root: 9001, brand: "BrandX", name: "BrandX capsules one", nmReviewRating: 4.8, nmFeedbacks: 12 },
+      { id: 702, root: 9002, brand: "BrandX", name: "BrandX capsules two", nmReviewRating: 5, nmFeedbacks: 3 }
+    ];
+    const fetchSpy = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 2, products: searchProducts });
+      if (url.hostname === "card.wb.ru") {
+        return jsonResponse({ products: url.searchParams.get("nm") === "702" ? [] : [searchProducts[0]] });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    });
+    const adapter = createAdapter(fetchSpy as unknown as typeof globalThis.fetch);
+    const refs = await adapter.discover("BrandX", context({ runId: "search-card-fallback" }));
+
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context())));
+
+    expect(observations).toMatchObject([
+      { listingId: "701", reviews: 12, rating: 4.8, source: "wildberries-card-v4-batch" },
+      { listingId: "702", reviews: 3, rating: 5, source: "wildberries-search-exact-fallback" }
+    ]);
+    expect(refs.every((ref) => ref.metadata.cardBatchVerified === true)).toBe(true);
+  });
+
+  it("fails closed when batch and singleton verification both omit an nmId", async () => {
+    const searchProducts = [
+      { id: 701, root: 9001, brand: "BrandX", name: "capsules one", nmReviewRating: 0, nmFeedbacks: 0 },
+      { id: 702, root: 9002, brand: "BrandX", name: "capsules two", nmReviewRating: 0, nmFeedbacks: 0 }
+    ];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 2, products: searchProducts });
+      if (url.hostname === "card.wb.ru") return jsonResponse({ products: [searchProducts[0]] });
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("BrandX", context({ runId: "incomplete-singleton-card" }));
+
+    await expect(adapter.collect(refs[0]!, context())).rejects.toThrow(/singleton card request returned unexpected nmId 701/);
+    expect(refs.every((ref) => ref.metadata.cardBatchVerified !== true)).toBe(true);
+  });
+
+  it("uses complete nm distributions instead of duplicating equal root-level card metrics", async () => {
+    const products = [
+      { id: 197525583, root: 223990643, brand: "Solopharm", name: "Капли для глаз Бивиарт Комфорт 10 мл", nmReviewRating: 4.9, nmFeedbacks: 5616 },
+      { id: 220076217, root: 223990643, brand: "Solopharm", name: "Капли для глаз Бивиарт Ультра 10 мл", nmReviewRating: 4.9, nmFeedbacks: 5616 }
+    ];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 2, products });
+      if (url.hostname === "card.wb.ru") return jsonResponse({ products });
+      if (url.hostname === "feedbacks1.wb.ru") {
+        return jsonResponse({
+          feedbackCount: 5501,
+          valuation: 4.8,
+          nmValuationDistribution: [
+            { nm: 197525583, valuationDistribution: { 1: 50, 2: 21, 3: 53, 4: 181, 5: 2973 } },
+            { nm: 220076217, valuationDistribution: { 1: 34, 2: 17, 3: 38, 4: 118, 5: 2003 } }
+          ]
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("Бивиарт", context({ runId: "root-nm-distribution" }));
+
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context())));
+    expect(observations).toMatchObject([
+      { listingId: "197525583", reviews: 3278, ratingCount: 3278, rating: 4.8, source: "wildberries-root-nm-distribution" },
+      { listingId: "220076217", reviews: 2210, ratingCount: 2210, rating: 4.8, source: "wildberries-root-nm-distribution" }
+    ]);
+    expect(observations.every((item) => item.aggregateGroupId === undefined)).toBe(true);
+  });
+
+  it("recovers three exact Kagocel cards when card v4 omits nm metrics", async () => {
+    const searchProducts = [
+      { id: 822662670, root: 907227394, brand: "Кагоцел", name: "Кагоцел таблетки 12 мг 10 шт", nmFeedbacks: 68, nmReviewRating: 5 },
+      { id: 822686443, root: 907251168, brand: "Кагоцел", name: "Кагоцел таблетки 12 мг 20 шт", nmFeedbacks: 110, nmReviewRating: 4.9 },
+      { id: 822671923, root: 907236647, brand: "Кагоцел", name: "Кагоцел таблетки 12 мг 30 шт", nmFeedbacks: 79, nmReviewRating: 5 }
+    ];
+    const cardProducts = searchProducts.map(({ nmFeedbacks: _count, nmReviewRating: _rating, ...product }) => ({
+      ...product,
+      feedbacks: 999,
+      reviewRating: 4.1
+    }));
+    const distributions = new Map<string, Record<string, number>>([
+      ["907227394", { 1: 0, 2: 0, 3: 0, 4: 7, 5: 61 }],
+      ["907251168", { 1: 0, 2: 0, 3: 0, 4: 11, 5: 99 }],
+      ["907236647", { 1: 0, 2: 0, 3: 0, 4: 1, 5: 78 }]
+    ]);
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 3, products: searchProducts });
+      if (url.hostname === "card.wb.ru") return jsonResponse({ products: cardProducts });
+      if (url.hostname === "feedbacks1.wb.ru") {
+        const rootId = url.pathname.split("/").at(-1)!;
+        const product = searchProducts.find(({ root }) => String(root) === rootId)!;
+        return jsonResponse({
+          feedbackCount: 999,
+          valuation: 4.1,
+          nmValuationDistribution: [{ nm: product.id, valuationDistribution: distributions.get(rootId) }]
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("Кагоцел", context({ runId: "kagocel-card-v4-without-nm" }));
+
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context())));
+
+    expect(observations).toMatchObject([
+      { listingId: "822662670", reviews: 68, ratingCount: 68, rating: 4.9, source: "wildberries-root-nm-distribution" },
+      { listingId: "822686443", reviews: 110, ratingCount: 110, rating: 4.9, source: "wildberries-root-nm-distribution" },
+      { listingId: "822671923", reviews: 79, ratingCount: 79, rating: 5, source: "wildberries-root-nm-distribution" }
+    ]);
+    expect(observations.every((item) => item.aggregateGroupId === undefined)).toBe(true);
+  });
+
+  it("keeps a card-v4 nm omission blocked when the root lacks the exact nm distribution", async () => {
+    const searchProduct = {
+      id: 822662670,
+      root: 907227394,
+      brand: "Кагоцел",
+      name: "Кагоцел таблетки 12 мг 10 шт",
+      nmFeedbacks: 68,
+      nmReviewRating: 5
+    };
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 1, products: [searchProduct] });
+      if (url.hostname === "card.wb.ru") {
+        const { nmFeedbacks: _count, nmReviewRating: _rating, ...card } = searchProduct;
+        return jsonResponse({ products: [{ ...card, feedbacks: 68, reviewRating: 5 }] });
+      }
+      if (url.hostname === "feedbacks1.wb.ru") {
+        return jsonResponse({
+          feedbackCount: 68,
+          valuation: 0,
+          nmValuationDistribution: [
+            { nm: 999999999, valuationDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 68 } }
+          ]
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("Кагоцел", context({ runId: "kagocel-missing-exact-nm-distribution" }));
+
+    await expect(adapter.collect(refs[0]!, context())).rejects.toThrow(
+      /does not contain exact nm distribution for 822662670/
+    );
+  });
+
+  it("accepts a source-bound root zero when Wildberries has not calculated rating distributions", async () => {
+    const searchProduct = {
+      id: 393735497,
+      root: 393735497,
+      brand: "Энтеролактис",
+      name: "Энтеролактис Плюс капсулы"
+    };
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 1, products: [searchProduct] });
+      if (url.hostname === "card.wb.ru") return jsonResponse({ products: [searchProduct] });
+      if (url.hostname === "feedbacks1.wb.ru") {
+        return jsonResponse({
+          feedbackCount: 0,
+          valuation: "",
+          valuationDistribution: null,
+          nmValuationDistribution: null
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("Энтеролактис", context({ runId: "explicit-root-zero" }));
+
+    const observation = await adapter.collect(refs[0]!, context());
+
+    expect(observation).toMatchObject({
+      listingId: "393735497",
+      reviews: 0,
+      writtenReviewCount: 0,
+      ratingCount: 0,
+      rating: null,
+      status: "no_reviews",
+      aggregateGroupId: "wildberries:root:393735497",
+      source: "wildberries-root-explicit-zero"
+    });
+    expect(observation.evidenceRef).toBe("https://feedbacks1.wb.ru/feedbacks/v2/393735497");
+    expect(observation).not.toHaveProperty("rawRating");
+  });
+
+  it("collapses a root aggregate when card v4 omits metrics and the nm distribution covers only one variant", async () => {
+    const products = [790240262, 790240263, 790240264, 790240265].map((id, index) => ({
+      id,
+      root: 828092104,
+      brand: "Энтеролактис",
+      name: `Энтеролактис Плюс капсулы вариант ${index + 1}`
+    }));
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: products.length, products });
+      if (url.hostname === "card.wb.ru") return jsonResponse({ products });
+      if (url.hostname === "feedbacks1.wb.ru") {
+        return jsonResponse({
+          feedbackCount: 1,
+          valuation: "5.0",
+          valuationDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 1 },
+          nmValuationDistribution: [{
+            nm: 790240265,
+            valuationDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 1 }
+          }]
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("Энтеролактис", context({ runId: "partial-nm-root-aggregate" }));
+
+    const observations = await Promise.all(refs.map((item) => adapter.collect(item, context())));
+
+    expect(observations).toHaveLength(4);
+    expect(observations.every((item) => item.reviews === 1 && item.writtenReviewCount === 1 &&
+      item.ratingCount === 1 && item.rating === 5 &&
+      item.aggregateGroupId === "wildberries:root:828092104" &&
+      item.source === "wildberries-root-family-aggregate")).toBe(true);
+  });
+
+  it("marks a proven root-only aggregate for family-row collapse", async () => {
+    const products = [
+      { id: 801, root: 9901, brand: "BrandX", name: "BrandX comfort", nmReviewRating: 4.8, nmFeedbacks: 50 },
+      { id: 802, root: 9901, brand: "BrandX", name: "BrandX ultra", nmReviewRating: 4.8, nmFeedbacks: 50 }
+    ];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 2, products });
+      if (url.hostname === "card.wb.ru") return jsonResponse({ products });
+      if (url.hostname === "feedbacks1.wb.ru") {
+        return jsonResponse({
+          feedbackCount: 50,
+          valuation: 4.8,
+          valuationDistribution: { 1: 1, 2: 1, 3: 1, 4: 2, 5: 45 }
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("BrandX", context({ runId: "root-family-aggregate" }));
+
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context())));
+    expect(observations).toMatchObject([
+      { reviews: 50, writtenReviewCount: 50, ratingCount: 50, rating: 4.8, aggregateGroupId: "wildberries:root:9901" },
+      { reviews: 50, writtenReviewCount: 50, ratingCount: 50, rating: 4.8, aggregateGroupId: "wildberries:root:9901" }
+    ]);
+    expect(observations.every((item) => item.source === "wildberries-root-family-aggregate")).toBe(true);
+  });
+
+  it("collapses a valid root aggregate when Wildberries omits one duplicated nm distribution", async () => {
+    const products = [
+      { id: 493939488, root: 501370411, brand: "Бактоблис", name: "Бактоблис Плюс 90 таблеток", nmReviewRating: 5, nmFeedbacks: 2 },
+      { id: 493941788, root: 501370411, brand: "Бактоблис", name: "Бактоблис Плюс 90 таблеток 2 упаковки", nmReviewRating: 5, nmFeedbacks: 2 }
+    ];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 2, products });
+      if (url.hostname === "card.wb.ru") return jsonResponse({ products });
+      if (url.hostname === "feedbacks1.wb.ru") {
+        return jsonResponse({
+          feedbackCount: 3,
+          valuation: 5,
+          valuationDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 2 },
+          nmValuationDistribution: [
+            { nm: 493939488, valuationDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 2 } }
+          ]
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("Бактоблис", context({ runId: "partial-root-distribution" }));
+
+    const persistedSecondRef = { ...refs[1]!, metadata: { ...refs[1]!.metadata } };
+    const observations = [
+      await adapter.collect(refs[0]!, context()),
+      await adapter.collect(persistedSecondRef, context())
+    ];
+    expect(observations).toMatchObject([
+      { reviews: 3, ratingCount: 2, rating: 5, aggregateGroupId: "wildberries:root:501370411" },
+      { reviews: 3, ratingCount: 2, rating: 5, aggregateGroupId: "wildberries:root:501370411" }
+    ]);
+    expect(observations.every((item) => item.source === "wildberries-root-family-aggregate")).toBe(true);
+  });
+
+  it("excludes a foreign first-party brand even when the product title contains the requested brand name", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      total: 2,
+      products: [
+        { id: 9101, brand: "Андромакс", name: "Андромакс порошок 10 г №30", nmReviewRating: 4.8, nmFeedbacks: 12 },
+        { id: 9102, brand: "Персональный подарок", name: "Кружка Андромакс с именем", nmReviewRating: 5, nmFeedbacks: 1 }
+      ]
+    })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+
+    const refs = await adapter.discover("Андромакс", context({ runId: "andromax-brand-authority" }));
+
+    expect(refs.map((ref) => ref.listingId)).toEqual(["9101"]);
+    expect(refs[0]?.metadata.sourceBrand).toBe("Андромакс");
+  });
+
   it("fails closed at the configured maximum when every page remains non-empty", async () => {
     const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
       const page = Number(new URL(String(input)).searchParams.get("page"));
@@ -371,6 +807,43 @@ describe("WildberriesAdapter.discover", () => {
 });
 
 describe("WildberriesAdapter.collect", () => {
+  it("recovers exact Enterolactis variants and seller bundles from truncated buyer titles", async () => {
+    const adapter = createAdapter(vi.fn(async () => {
+      throw new Error("no fallback request is needed for source-bound search metrics");
+    }) as unknown as typeof globalThis.fetch);
+    const examples = [
+      ["Энтеролактис Дуо 2 шт", "Энтеролактис Дуо саше 5 г №20 ×2 упаковки", undefined],
+      ["Энтеролактис дуо симбиотик 20 шт. 3 упаковки", "Энтеролактис Дуо саше 5 г №20 ×3 упаковки", undefined],
+      ["Энтеролактис ПЛЮС Enterolactis PLUS капсулы массой 319 мг 15…", "Энтеролактис Плюс капсулы 319 мг №15", undefined],
+      ["Энтеролактис Фибра 4 шт", "Энтеролактис Фибра сироп 10 мл №12 ×4 упаковки", undefined],
+      ["Пробиотики + пребиотики для кишечника №12", "Энтеролактис Фибра сироп 10 мл №12", "ЭНТЕРОЛАКТИС"],
+      ["Пробиотик с лактобактериями для взрослых и детей", "Энтеролактис Плюс капсулы 319 мг №15", "ЭНТЕРОЛАКТИС"]
+    ] as const;
+
+    const observations = await Promise.all(examples.map(([title, expected, sourceBrand], index) =>
+      adapter.collect(productRef({
+        listingId: String(900_000 + index),
+        brand: "Энтеролактис",
+        title,
+        metadata: {
+          source: "wildberries-search-v18",
+          ...(sourceBrand ? { sourceBrand } : {}),
+          nmReviewRating: 5,
+          nmFeedbacks: 1
+        }
+      }), context()).then((observation) => ({ observation, expected }))
+    ));
+
+    for (const { observation, expected } of observations) {
+      expect(observation).toMatchObject({ product: expected, reviews: 1, rating: 5, status: "ok" });
+      expect(analyzeProductIdentity({
+        brand: observation.brand,
+        product: observation.product,
+        url: observation.canonicalUrl
+      }).granularity).toBe("variant");
+    }
+  });
+
   it("restores the exact package count from the same-nm product card when the buyer API title is truncated", async () => {
     const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
       const url = new URL(String(input));

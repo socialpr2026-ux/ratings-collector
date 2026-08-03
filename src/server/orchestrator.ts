@@ -4,8 +4,10 @@ import type {
   Observation,
   ProductRecord,
   ProductRef,
+  RunHistoryItem,
   RunRequest,
   RunState,
+  SourceCardRecord,
   SiteAdapter,
   SiteProfile
 } from "../shared/types.js";
@@ -16,6 +18,7 @@ import { GenericSiteAdapter } from "./generic/adapter.js";
 import { profileSite } from "./generic/profiler.js";
 import { validateRun } from "./qa.js";
 import { productKey, type Repository } from "./repository.js";
+import { observationsForPublication } from "./publication-scope.js";
 import { AdapterBlockedError, AdapterQuotaError, ParserChangedError } from "./adapters/errors.js";
 import { safeErrorMessage } from "./utils/error-message.js";
 import { matchesBrand, normalizeText } from "./utils/normalize.js";
@@ -104,6 +107,39 @@ function errorStatus(error: unknown): "blocked" | "quota_exceeded" | "parser_cha
   if (error instanceof AdapterQuotaError) return "quota_exceeded";
   if (error instanceof ParserChangedError) return "parser_changed";
   return "error";
+}
+
+type PartialDiscoveryFailure = {
+  status: "blocked" | "quota_exceeded" | "parser_changed";
+  message: string;
+  total: number;
+};
+
+function partialDiscoveryFailure(refs: readonly ProductRef[]): PartialDiscoveryFailure | undefined {
+  const marked = refs.filter((ref) => ref.metadata.partialDiscoveryStatus !== undefined);
+  if (marked.length === 0) return undefined;
+  if (marked.length !== refs.length) {
+    throw new ParserChangedError("Сборщик смешал полную и частичную выдачу карточек");
+  }
+  const first = marked[0]!.metadata;
+  const status = first.partialDiscoveryStatus;
+  const message = first.partialDiscoveryMessage;
+  const total = first.partialDiscoveryTotal;
+  if (
+    !["blocked", "quota_exceeded", "parser_changed"].includes(String(status)) ||
+    typeof message !== "string" || !message.trim() ||
+    !Number.isSafeInteger(total) || Number(total) < refs.length
+  ) {
+    throw new ParserChangedError("Сборщик вернул некорректный признак частичной выдачи");
+  }
+  if (marked.some((ref) =>
+    ref.metadata.partialDiscoveryStatus !== status ||
+    ref.metadata.partialDiscoveryMessage !== message ||
+    ref.metadata.partialDiscoveryTotal !== total
+  )) {
+    throw new ParserChangedError("Сборщик вернул противоречивые причины частичной выдачи");
+  }
+  return { status: status as PartialDiscoveryFailure["status"], message, total: Number(total) };
 }
 
 function healthCheckFailure(message: string): AdapterBlockedError | AdapterQuotaError | ParserChangedError {
@@ -214,6 +250,57 @@ export class RatingsService {
 
   async getRun(id: string): Promise<RunState | undefined> { return this.repository.getRun(id); }
 
+  /**
+   * Converts a worker-level persistence interruption into an ordinary partial
+   * result. Successful checkpoints stay intact; every request partition that
+   * never reached durable storage becomes an explicit blocked partition. This
+   * keeps both completed-only publication and failed-only retry available.
+   */
+  async reconcileInterruptedRun(run: RunState): Promise<RunState> {
+    const orchestratorErrors = run.errors.filter((error) => error.partition === "orchestrator");
+    if (run.status !== "failed" || orchestratorErrors.length === 0) return run;
+
+    const expectedPartitions = run.request.domains.flatMap((domain) =>
+      run.request.brands.map((brand) => ({ domain, brand, key: partitionKey(domain, brand) }))
+    );
+    const existing = new Set(run.partitions.map((partition) => partitionKey(partition.domain, partition.brand)));
+    const missing = expectedPartitions.filter(({ key }) => !existing.has(key));
+    const interruption = orchestratorErrors.map((error) => error.message).join("; ");
+    const recoveredAt = new Date().toISOString();
+
+    new RunActivityTracker(run, () => recoveredAt);
+    run.errors = run.errors.filter((error) => error.partition !== "orchestrator");
+    for (const { domain, brand } of missing) {
+      const message = `Сбор прерван до сохранения результата: ${interruption}`;
+      run.partitions.push({ domain, brand, status: "blocked", discovered: 0, collected: 0, message });
+      run.errors.push({ partition: `${domain}/${brand}`, message });
+    }
+    run.partitions.sort((left, right) =>
+      run.request.domains.indexOf(left.domain) - run.request.domains.indexOf(right.domain) ||
+      run.request.brands.indexOf(left.brand) - run.request.brands.indexOf(right.brand)
+    );
+    run.observations.sort((left, right) =>
+      run.request.domains.indexOf(left.domain) - run.request.domains.indexOf(right.domain) ||
+      run.request.brands.indexOf(left.brand) - run.request.brands.indexOf(right.brand) ||
+      left.product.localeCompare(right.product, "ru") || left.listingId.localeCompare(right.listingId)
+    );
+    run.progress.totalPartitions = expectedPartitions.length;
+    run.progress.completedPartitions = run.partitions.length;
+    delete run.progress.current;
+    await this.refreshDraftProfileExamples(run);
+    run.payloadHash = stableHash({ request: run.request, observations: run.observations });
+    run.status = "review";
+    run.collectionFinishedAt ??= recoveredAt;
+    run.updatedAt = recoveredAt;
+    run.qa = validateRun(run);
+    await this.repository.saveRun(run);
+    return run;
+  }
+
+  async listRecentRuns(ownerEmail?: string, limit = 8): Promise<RunHistoryItem[]> {
+    return this.repository.listRecentRuns(ownerEmail, limit);
+  }
+
   async executeRun(id: string): Promise<RunState> {
     if (this.active.has(id)) throw new Error("Запуск уже выполняется");
     this.active.add(id);
@@ -236,8 +323,13 @@ export class RatingsService {
     ]));
     const isRetry = run.status !== "queued" && run.partitions.length > 0;
     if (isRetry) run.publicationExclusions = undefined;
+    const reviewPartitions = new Set(run.observations
+      .filter((observation) => observation.status === "needs_review")
+      .map((observation) => partitionKey(observation.domain, observation.brand)));
     const retryTargets = isRetry
-      ? expectedPartitions.filter(({ key }) => !SUCCESSFUL_PARTITION_STATUSES.has(previousPartitions.get(key)?.status ?? ""))
+      ? expectedPartitions.filter(({ key }) =>
+        !SUCCESSFUL_PARTITION_STATUSES.has(previousPartitions.get(key)?.status ?? "") || reviewPartitions.has(key)
+      )
       : expectedPartitions;
 
     // A repeated Agent request after every partition succeeded is a true
@@ -263,28 +355,25 @@ export class RatingsService {
       await this.refreshDraftProfileExamples(run);
       run.payloadHash = stableHash({ request: run.request, observations: run.observations });
       run.status = "review";
+      run.collectionFinishedAt ??= new Date().toISOString();
       run.qa = validateRun(run);
       await this.touch(run);
       return run;
     }
 
     const retryErrorPartitions = new Set(retryTargets.map(({ domain, brand }) => `${domain}/${brand}`));
+    const retryTargetKeys = new Set(retryTargets.map(({ key }) => key));
     const preservedPartitions = isRetry
       ? expectedPartitions.flatMap(({ key }) => {
         const previous = previousPartitions.get(key);
-        return previous && SUCCESSFUL_PARTITION_STATUSES.has(previous.status) ? [previous] : [];
+        return previous && SUCCESSFUL_PARTITION_STATUSES.has(previous.status) && !retryTargetKeys.has(key) ? [previous] : [];
       })
       : [];
-    const preservedPartitionKeys = new Set(preservedPartitions.map((partition) =>
-      partitionKey(partition.domain, partition.brand)
-    ));
     run.status = "running";
     run.errors = isRetry
       ? run.errors.filter((error) => !retryErrorPartitions.has(error.partition) && error.partition !== "orchestrator")
       : [];
-    run.observations = isRetry
-      ? run.observations.filter((observation) => preservedPartitionKeys.has(partitionKey(observation.domain, observation.brand)))
-      : [];
+    if (!isRetry) run.observations = [];
     run.partitions = preservedPartitions;
     run.qa = undefined;
     run.payloadHash = undefined;
@@ -292,6 +381,8 @@ export class RatingsService {
     run.progress.totalPartitions = expectedPartitions.length;
     run.progress.completedPartitions = preservedPartitions.length;
     delete run.progress.current;
+    run.collectionStartedAt ??= new Date().toISOString();
+    run.collectionFinishedAt = undefined;
     const activity = new RunActivityTracker(run);
     activity.instant({
       stage: "prepare",
@@ -304,9 +395,15 @@ export class RatingsService {
       () => deadline.abort(new Error("run_deadline_exceeded")),
       RUN_SOFT_DEADLINE_MS
     );
-    deadlineTimer.unref?.();
+    // Keep the deadline referenced for the lifetime of the collection. Some
+    // edge transports do not themselves keep Node's event loop referenced;
+    // unref() allowed a stalled upstream request to outlive this guard.
     try {
-      const products = await this.repository.listProducts(extractSpreadsheetId(run.request.sheetUrl));
+      const spreadsheetId = extractSpreadsheetId(run.request.sheetUrl);
+      const [products, sourceCards] = await Promise.all([
+        this.repository.listProducts(spreadsheetId),
+        this.repository.listSourceCards(spreadsheetId)
+      ]);
       const seen = new Map(run.observations.map((observation) => [
         productKey(observation.domain, observation.listingId),
         observation
@@ -345,9 +442,16 @@ export class RatingsService {
             } as const;
             const existing = activeOperations.get(event.operationId);
             if (event.status === "active") {
-              if (existing) activity.warn(existing, { detail: "Операция перезапущена" });
-              const id = activity.start(input);
-              activeOperations.set(event.operationId, id);
+              if (existing) {
+                activity.progress(existing, {
+                  channels: event.channels,
+                  parsers: event.parsers,
+                  detail: event.detail
+                });
+              } else {
+                const id = activity.start(input);
+                activeOperations.set(event.operationId, id);
+              }
               // Persist the first active nested operation immediately. Parallel
               // product checks then share the same snapshot without flooding
               // the repository with one write per request.
@@ -380,6 +484,14 @@ export class RatingsService {
       }
       await Promise.all(run.request.domains.filter((domain) => retryBrandsByDomain.has(domain)).map(async (domain) => {
         const retryBrands = retryBrandsByDomain.get(domain)!;
+        const retryBrandKeys = new Set(retryBrands.map(normalizeText));
+        const previousDomainRecords = [
+          ...sourceCards.filter((item) => item.domain === domain && retryBrandKeys.has(normalizeText(item.brand)))
+            .map((item) => ({ listingId: item.listingId, url: item.canonicalUrl })),
+          ...products.filter((item) => item.domain === domain && retryBrandKeys.has(normalizeText(item.brand)))
+            .map((item) => ({ listingId: item.listingId, url: item.canonicalUrl, title: item.product }))
+        ];
+        const previousDomainRefs = [...new Map(previousDomainRecords.map((item) => [item.listingId, item])).values()];
         let adapter: SiteAdapter;
         const healthReporter = createAdapterActivityReporter({ domain });
         const healthActivity = activity.start({
@@ -396,6 +508,9 @@ export class RatingsService {
             brands: retryBrands,
             region: run.request.region,
             month: run.request.month,
+            previousIds: previousDomainRefs.map((item) => item.listingId),
+            previousRefs: previousDomainRefs,
+            refreshDiscovery: run.request.discoveryMode === "refresh",
             signal: deadline.signal,
             activity: healthReporter.report
           });
@@ -444,9 +559,17 @@ export class RatingsService {
         }
         await forEachWithConcurrency(retryBrands, brandConcurrency(domain), async (brand) => {
           run.progress.current = `${domain} / ${brand}`;
-          const previousRecords = products.filter((item) => item.domain === domain && item.brand === brand);
-          const previousIds = previousRecords.map((item) => item.listingId);
-          const previousRefs = previousRecords.map((item) => ({ listingId: item.listingId, url: item.canonicalUrl }));
+          const previousRecords = products.filter((item) =>
+            item.domain === domain && normalizeText(item.brand) === normalizeText(brand)
+          );
+          const previousSourceCards = sourceCards.filter((item) =>
+            item.domain === domain && normalizeText(item.brand) === normalizeText(brand)
+          );
+          const previousRefs = [...new Map([
+            ...previousSourceCards.map((item) => ({ listingId: item.listingId, url: item.canonicalUrl })),
+            ...previousRecords.map((item) => ({ listingId: item.listingId, url: item.canonicalUrl, title: item.product }))
+          ].map((item) => [item.listingId, item])).values()];
+          const previousIds = previousRefs.map((item) => item.listingId);
           const discoveryActivity = activity.start({
             stage: "discovery",
             label: "Поиск карточек",
@@ -455,6 +578,17 @@ export class RatingsService {
           });
           let activeCollection: string | undefined;
           let activeNormalization: string | undefined;
+          let discoveredCount = 0;
+          let viableDiscovered = 0;
+          let collected = 0;
+          const collectionFailures: Array<{ listingId: string; kind: ReturnType<typeof errorStatus>; message: string }> = [];
+          const refreshedKeys = new Set<string>();
+          const previousObservationKeys = new Set([...seen.entries()]
+            .filter(([, observation]) =>
+              observation.domain === domain && normalizeText(observation.brand) === normalizeText(brand)
+            )
+            .map(([key]) => key));
+          const retainedSourceCards: SourceCardRecord[] = [];
           const adapterReporter = createAdapterActivityReporter({ domain, brand });
           // Discovery is frequently the longest operation (sitemaps, search
           // pagination and exact product proof), so always expose its start to
@@ -469,21 +603,26 @@ export class RatingsService {
               month: run.request.month,
               previousIds,
               previousRefs,
+              refreshDiscovery: run.request.discoveryMode === "refresh",
               signal: deadline.signal,
               activity: adapterReporter.report
             }), domain, brand);
+            const partialFailure = partialDiscoveryFailure(discovered);
+            discoveredCount = discovered.length;
+            viableDiscovered = discovered.length;
             const discoverySignals = runtimeSignals(discovered.map((ref) => ref.metadata));
             activity.complete(discoveryActivity, {
               ...discoverySignals,
-              detail: discovered.length ? `Найдено карточек: ${discovered.length}` : "Поиск завершён без карточек"
+              detail: partialFailure
+                ? `Доказано карточек: ${discovered.length} из ${partialFailure.total}`
+                : discovered.length ? `Найдено карточек: ${discovered.length}` : "Поиск завершён без карточек"
             });
             if (!discovered.length) {
+              for (const key of previousObservationKeys) seen.delete(key);
               this.addPartition(run, domain, brand, "no_results", 0, 0, "Поиск исчерпан, карточек нет");
               await saveProgress();
               return;
             }
-            let collected = 0;
-            let viableDiscovered = discovered.length;
             const previousById = new Map(previousRecords.map((item) => [item.listingId, item]));
             for (const ref of discovered) {
               deadline.signal.throwIfAborted();
@@ -495,6 +634,7 @@ export class RatingsService {
                 listingId: ref.listingId
               });
               await saveActivityProgress();
+              try {
               const observation = validateCollectedObservation(await adapter.collect(ref, {
                 runId: run.id,
                 brands: retryBrands,
@@ -502,6 +642,7 @@ export class RatingsService {
                 month: run.request.month,
                 previousIds,
                 previousRefs,
+                refreshDiscovery: run.request.discoveryMode === "refresh",
                 signal: deadline.signal,
                 activity: adapterReporter.report
               }), ref, domain, brand);
@@ -531,12 +672,14 @@ export class RatingsService {
                 } else if ([
                   "yandex_reviews_missing_candidate",
                   "otzovik_missing_candidate",
+                  "review_site_missing_candidate",
                   "review_site_non_product_candidate"
                 ].includes(observation.source ?? "")) {
                   // A first-party search may retain an explicitly removed
                   // candidate. Its exact missing-page proof means it is not a
                   // current card and must not enter the sheet or review queue.
                   viableDiscovered -= 1;
+                  seen.delete(productKey(observation.domain, observation.listingId));
                   activity.complete(activeNormalization, { detail: "Удалённая карточка исключена" });
                   activeNormalization = undefined;
                   continue;
@@ -585,24 +728,82 @@ export class RatingsService {
                 observation.status = "needs_review";
                 existing.status = "needs_review";
                 run.errors.push({ partition: `${domain}/${brand}`, message: `${key} найден у двух брендов` });
-              } else if (!existing) {
+              } else {
                 seen.set(key, observation);
-                collected += 1;
+                if (!refreshedKeys.has(key)) {
+                  refreshedKeys.add(key);
+                  collected += 1;
+                }
+              }
+              if (
+                domain === "market.yandex.ru" &&
+                ["ok", "no_reviews"].includes(observation.status) &&
+                matchesBrand(observation.product, brand)
+              ) {
+                retainedSourceCards.push({
+                  key,
+                  domain: observation.domain,
+                  listingId: observation.listingId,
+                  brand,
+                  canonicalUrl: observation.canonicalUrl,
+                  firstSeenAt: observation.capturedAt,
+                  lastSeenAt: observation.capturedAt
+                });
               }
               activity.complete(activeNormalization, {
                 detail: observation.productIdentity?.label ?? observation.product
               });
               activeNormalization = undefined;
+              } catch (error) {
+                if (deadline.signal.aborted) throw error;
+                const kind = errorStatus(error);
+                const message = safeErrorMessage(error);
+                collectionFailures.push({ listingId: ref.listingId, kind, message });
+                adapterReporter.warnActive(message);
+                if (activeCollection) activity.warn(activeCollection, { ...runtimeSignals(message), detail: message });
+                if (activeNormalization) activity.warn(activeNormalization, { detail: message });
+                activeCollection = undefined;
+                activeNormalization = undefined;
+              }
             }
-            this.addPartition(
-              run,
-              domain,
-              brand,
-              viableDiscovered === 0 ? "no_results" : "complete",
-              viableDiscovered,
-              collected,
-              viableDiscovered === 0 ? "Поиск исчерпан, живых карточек нет" : undefined
-            );
+            if (partialFailure || collectionFailures.length > 0) {
+              const failureDetails = [
+                ...(partialFailure ? [`${partialFailure.status}: ${partialFailure.message}`] : []),
+                ...collectionFailures.map((failure) =>
+                  `${failure.listingId}: ${failure.kind}: ${failure.message}`
+                )
+              ];
+              const message = failureDetails.join("; ");
+              run.errors.push({ partition: `${domain}/${brand}`, message });
+              const retainedCount = [...seen.values()].filter((observation) =>
+                observation.domain === domain && normalizeText(observation.brand) === normalizeText(brand)
+              ).length;
+              this.addPartition(
+                run,
+                domain,
+                brand,
+                collectionFailures.some((failure) => failure.kind === "error") ? "error" : "blocked",
+                partialFailure?.total ?? discoveredCount,
+                retainedCount,
+                message
+              );
+            } else {
+              for (const key of previousObservationKeys) {
+                if (!refreshedKeys.has(key)) seen.delete(key);
+              }
+              this.addPartition(
+                run,
+                domain,
+                brand,
+                viableDiscovered === 0 ? "no_results" : "complete",
+                viableDiscovered,
+                collected,
+                viableDiscovered === 0 ? "Поиск исчерпан, живых карточек нет" : undefined
+              );
+            }
+            if (retainedSourceCards.length > 0) {
+              await this.repository.saveSourceCards(spreadsheetId, retainedSourceCards);
+            }
           } catch (error) {
             const kind = errorStatus(error);
             const message = safeErrorMessage(error);
@@ -611,7 +812,18 @@ export class RatingsService {
             if (activeCollection) activity.warn(activeCollection, { ...runtimeSignals(message), detail: message });
             if (activeNormalization) activity.warn(activeNormalization, { detail: message });
             run.errors.push({ partition: `${domain}/${brand}`, message: `${kind}: ${message}` });
-            this.addPartition(run, domain, brand, kind === "error" ? "error" : "blocked", 0, 0, `${kind}: ${message}`);
+            const retainedCount = [...seen.values()].filter((observation) =>
+              observation.domain === domain && normalizeText(observation.brand) === normalizeText(brand)
+            ).length;
+            this.addPartition(
+              run,
+              domain,
+              brand,
+              kind === "error" ? "error" : "blocked",
+              Math.max(discoveredCount, retainedCount),
+              Math.max(collected, retainedCount),
+              `${kind}: ${message}`
+            );
           }
           await saveProgress();
         });
@@ -630,6 +842,7 @@ export class RatingsService {
       await this.refreshDraftProfileExamples(run);
       run.payloadHash = stableHash({ request: run.request, observations: run.observations });
       run.status = "review";
+      run.collectionFinishedAt = new Date().toISOString();
       const qaActivity = activity.start({
         stage: "qa",
         label: "Проверка целостности"
@@ -647,15 +860,28 @@ export class RatingsService {
     }
   }
 
-  async approveObservations(id: string, keys: string[], productLabels: Record<string, string> = {}): Promise<RunState> {
+  async approveObservations(
+    id: string,
+    keys: string[],
+    productLabels: Record<string, string> = {},
+    rejectedKeys: string[] = []
+  ): Promise<RunState> {
     const run = await this.requireRun(id);
     if (run.status !== "review") {
       throw new Error(`Нельзя подтверждать карточки из статуса ${run.status}`);
     }
     const accepted = new Set(keys);
+    const rejected = new Set(rejectedKeys);
     const reviewKeys = new Set(run.observations
       .filter((item) => item.status === "needs_review")
       .map((item) => productKey(item.domain, item.listingId)));
+    for (const key of accepted) {
+      if (!reviewKeys.has(key)) throw new Error(`Карточка для подтверждения не найдена: ${key}`);
+      if (rejected.has(key)) throw new Error(`Карточка одновременно подтверждена и исключена: ${key}`);
+    }
+    for (const key of rejected) {
+      if (!reviewKeys.has(key)) throw new Error(`Карточка для исключения не найдена: ${key}`);
+    }
     for (const [key, value] of Object.entries(productLabels)) {
       if (!accepted.has(key)) throw new Error(`Уточнение продукта передано для невыбранной карточки ${key}`);
       if (!reviewKeys.has(key)) throw new Error(`Карточка для уточнения не найдена: ${key}`);
@@ -664,6 +890,7 @@ export class RatingsService {
       }
     }
     const profiles = new Map<string, SiteProfile | undefined>();
+    const resolved = new Map<string, Observation>();
     for (const item of run.observations) {
       if (item.status !== "needs_review" || !accepted.has(productKey(item.domain, item.listingId))) continue;
       // Dedicated adapters do not carry a generated profile version. A stale
@@ -685,10 +912,10 @@ export class RatingsService {
         if (!manualIdentity) {
           throw new Error(`Уточните форму, дозировку или упаковку товара для карточки ${key}`);
         }
-        item.productOverride = manualIdentity.label;
-        item.productIdentity = manualIdentity;
+        resolved.set(key, { ...item, productOverride: manualIdentity.label, productIdentity: manualIdentity });
       }
-      const identity = item.productIdentity;
+      const candidate = resolved.get(key) ?? item;
+      const identity = candidate.productIdentity;
       const exactVariant = identity?.granularity === "variant" && identity.confidence === "exact";
       const knownReviewAggregate = Boolean(identity && isKnownReviewAggregateDomain(item.domain) &&
         identity.granularity !== "not_product" && identity.confidence !== "ambiguous");
@@ -698,7 +925,26 @@ export class RatingsService {
       if (!exactVariant && !provenAggregate && !knownReviewAggregate) {
         throw new Error(`Карточка ${item.domain}:${item.listingId} не содержит доказанного товарного варианта`);
       }
-      item.status = item.reviews === 0 ? "no_reviews" : "ok";
+      resolved.set(key, { ...candidate, status: candidate.reviews === 0 ? "no_reviews" : "ok" });
+    }
+    const rejectedByPartition = new Map<string, number>();
+    for (const item of run.observations) {
+      if (item.status !== "needs_review" || !rejected.has(productKey(item.domain, item.listingId))) continue;
+      const partitionKey = `${item.domain}\u0000${item.brand}`;
+      rejectedByPartition.set(partitionKey, (rejectedByPartition.get(partitionKey) ?? 0) + 1);
+    }
+    run.observations = run.observations.flatMap((item) => {
+      const key = productKey(item.domain, item.listingId);
+      const acceptedItem = resolved.get(key);
+      if (acceptedItem) return [acceptedItem];
+      if (item.status === "needs_review" && rejected.has(key)) return [];
+      return [item];
+    });
+    for (const partition of run.partitions) {
+      const rejectedCount = rejectedByPartition.get(`${partition.domain}\u0000${partition.brand}`) ?? 0;
+      if (rejectedCount === 0) continue;
+      partition.discovered = Math.max(0, partition.discovered - rejectedCount);
+      partition.collected = Math.max(0, partition.collected - rejectedCount);
     }
     run.qa = validateRun(run);
     run.payloadHash = stableHash({ request: run.request, observations: run.observations });
@@ -747,7 +993,8 @@ export class RatingsService {
     if (!qa.ok) throw new Error(`Публикация заблокирована: ${qa.blockers.join("; ")}`);
     const spreadsheetId = extractSpreadsheetId(run.request.sheetUrl);
     const existing = new Map((await this.repository.listProducts(spreadsheetId)).map((item) => [item.key, item]));
-    const records: ProductRecord[] = run.observations.map((item) => ({
+    const publishedObservations = observationsForPublication(run);
+    const records: ProductRecord[] = publishedObservations.map((item) => ({
       key: productKey(item.domain, item.listingId), domain: item.domain, listingId: item.listingId,
       brand: item.brand, canonicalUrl: item.canonicalUrl, product: item.product, platform: item.platform,
       groupId: item.groupId,
@@ -762,7 +1009,7 @@ export class RatingsService {
         : laterMonth(existing.get(productKey(item.domain, item.listingId))?.lastSeenMonth, run.request.month)
     }));
     await this.repository.saveProducts(spreadsheetId, records);
-    await this.repository.saveSnapshot(spreadsheetId, run.request.month, run.observations);
+    await this.repository.saveSnapshot(spreadsheetId, run.request.month, publishedObservations);
   }
 
   async excludeFailedPartitionsFromPublication(id: string): Promise<RunState> {
@@ -779,7 +1026,6 @@ export class RatingsService {
     if (!failed.length) return run;
     if (!successful.length) throw new Error("Нет ни одной успешно проверенной площадки для записи");
 
-    const failedKeys = new Set(failed.map((partition) => partitionKey(partition.domain, partition.brand)));
     const excludedAt = new Date().toISOString();
     run.publicationExclusions = failed.map((partition) => ({
       domain: partition.domain,
@@ -787,12 +1033,9 @@ export class RatingsService {
       reason: partition.message ?? partition.status,
       excludedAt
     }));
-    run.observations = run.observations.filter((item) =>
-      !failedKeys.has(partitionKey(item.domain, item.brand))
-    );
     run.payloadHash = stableHash({
       request: run.request,
-      observations: run.observations,
+      observations: observationsForPublication(run),
       publicationExclusions: run.publicationExclusions
     });
     run.status = "review";

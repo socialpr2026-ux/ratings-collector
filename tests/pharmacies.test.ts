@@ -32,6 +32,7 @@ const fixtures = {
   </body></html>`,
   riglaProduct: `<!doctype html><html><head><link rel="canonical" href="https://www.rigla.ru/product/kagotsel-tab-12mg-no10-15027"></head><body>
     <h1>Кагоцел таблетки 0,012г №10</h1>
+    <div class="reviews-list__reviews-count"><div>Отзывы 3</div></div>
     <script>window.__INITIAL_STATE__={"productView":{"reviews":[{"id":11,"ratings":[{"attribute_code":"Оценка","value":5}]},{"id":12,"ratings":[{"attribute_code":"Оценка","value":4}]},{"id":13,"ratings":[{"attribute_code":"Оценка","value":4}]}]}};(function(){})()</script>
   </body></html>`,
   zdravGroup: `<!doctype html><html><body><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
@@ -158,6 +159,27 @@ describe("RiglaAdapter", () => {
     expect(observation).toMatchObject({ reviews: 3, rating: 4.33, ratingCount: 3, status: "ok" });
   });
 
+  it("prefers the visible no-reviews state over stale hidden Rigla reviews", async () => {
+    const hiddenStale = fixtures.riglaProduct.replace(
+      '<div class="reviews-list__reviews-count"><div>Отзывы 3</div></div>',
+      '<div class="reviews-list__empty-text">Отзывов пока нет</div>'
+    );
+    const adapter = new RiglaAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(hiddenStale, { status: 200 })
+    ) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "rigla.ru", platform: "rigla.ru", listingId: "15027", brand: "Кагоцел",
+      url: "https://www.rigla.ru/product/kagotsel-tab-12mg-no10-15027", metadata: {}
+    }, context)).resolves.toMatchObject({
+      reviews: 0,
+      rating: null,
+      ratingCount: 0,
+      status: "no_reviews",
+      source: "rigla-visible-no-reviews"
+    });
+  });
+
   it("checks the requested Rigla brand instead of an unrelated fixed canary", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = requestedUrl(input);
@@ -199,9 +221,37 @@ describe("RiglaAdapter", () => {
     });
   });
 
-  it("fails closed when a written review has no single product rating", async () => {
-    const malformed = fixtures.riglaProduct.replace('"ratings":[{"attribute_code":"Оценка","value":4}]', '"ratings":[]');
-    const adapter = new RiglaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(malformed)) as unknown as typeof fetch);
+  it("preserves the complete Rigla review count when one review has no rating", async () => {
+    const partiallyRated = fixtures.riglaProduct.replace(
+      '"ratings":[{"attribute_code":"Оценка","value":4}]',
+      '"ratings":[]'
+    );
+    const adapter = new RiglaAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(partiallyRated)
+    ) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "rigla.ru", platform: "rigla.ru", listingId: "15027", brand: "Кагоцел",
+      url: "https://www.rigla.ru/product/kagotsel-tab-12mg-no10-15027", metadata: {}
+    }, context)).resolves.toMatchObject({
+      reviews: 3,
+      rating: null,
+      rawRating: null,
+      ratingCount: 2,
+      ratingUnavailable: true,
+      status: "ok"
+    });
+  });
+
+  it("keeps malformed Rigla rating state fail-closed", async () => {
+    const malformed = fixtures.riglaProduct.replace(
+      '"ratings":[{"attribute_code":"Оценка","value":4}]',
+      '"ratings":{"attribute_code":"Оценка","value":4}'
+    );
+    const adapter = new RiglaAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(malformed)
+    ) as unknown as typeof fetch);
+
     await expect(adapter.collect({
       domain: "rigla.ru", platform: "rigla.ru", listingId: "15027", brand: "Кагоцел",
       url: "https://www.rigla.ru/product/kagotsel-tab-12mg-no10-15027", metadata: {}
@@ -210,6 +260,21 @@ describe("RiglaAdapter", () => {
 });
 
 describe("ZdravcityAdapter", () => {
+  it("checks the requested brand instead of an unrelated fixed canary", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestedUrl(input);
+      expect(url.pathname).toBe("/g_cereton/");
+      return new Response(fixtures.zdravGroup
+        .replaceAll("Кагоцел", "Церетон")
+        .replaceAll("КАГОЦЕЛ", "ЦЕРЕТОН")
+        .replaceAll("kagocel", "cereton"));
+    }) as unknown as typeof fetch;
+
+    await expect(new ZdravcityAdapter(new MemoryEvidenceStore(), fetchMock).healthCheck({
+      ...context, brands: ["Церетон"]
+    })).resolves.toMatchObject({ ok: true, message: "pharmacy:zdravcity:v1: operative discovery found 1 product card(s)" });
+  });
+
   it("keeps the stable UUID and separates visible written reviews from the structured counter", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = requestedUrl(input);
@@ -221,6 +286,22 @@ describe("ZdravcityAdapter", () => {
     expect(refs[0]).toMatchObject({ listingId: "6CE96B93-3DAD-39C8-EE05-3E30A030A486" });
     const observation = await adapter.collect(refs[0], context);
     expect(observation).toMatchObject({ reviews: 2, rating: 5, ratingCount: 21, status: "ok" });
+  });
+
+  it("keeps written Zdravcity reviews with no star scores and leaves rating empty", async () => {
+    const unrated = fixtures.zdravProduct
+      .replace('"rating":5,"sku":"228330"', '"rating":null,"sku":"228330"')
+      .replaceAll('"rate":5', '"rate":0');
+    const adapter = new ZdravcityAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(unrated, { status: 200 })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "zdravcity.ru", platform: "zdravcity.ru",
+      listingId: "6CE96B93-3DAD-39C8-EE05-3E30A030A486", brand: "Кагоцел",
+      url: "https://zdravcity.ru/p_kagocel-tab-12mg-n20-0093573.html", metadata: {}
+    }, context)).resolves.toMatchObject({
+      reviews: 2, rating: null, ratingUnavailable: true, status: "ok"
+    });
   });
 });
 

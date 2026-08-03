@@ -211,7 +211,7 @@ describe("Google Sheets model", () => {
     const row = document.values.find((_, index) => document.rowKinds[index] === "product")!;
     expect(row.slice(4, 8)).toEqual([10, 3.9, null, null]);
     const formulas = document.formulas.flat().filter(Boolean).join("\n");
-    expect(formulas).toContain('"\u003e=4"'.replace("\\u003e", ">"));
+    expect(formulas).toContain('"\u003e="&9/2'.replace("\\u003e", ">"));
     expect(formulas).not.toContain("34");
   });
 
@@ -241,8 +241,11 @@ describe("Google Sheets model", () => {
       "Ozon", "https://www.ozon.ru/product/otsillokoktsinum-148170210/",
       "гранулы 1 г №12 и №30", null, 2454, 4.9
     ]);
+    // Google Sheets canonicalizes a one-cell range from SUM(E5:E5) to
+    // SUM(E5). Emitting the canonical form keeps exact Apps Script readback
+    // verification from rejecting an otherwise successful publication.
     expect(summary[0][4]).toBe("=SUM(E5)");
-    expect(summary[1][4]).toBe('=COUNTIFS({F5};">=4";{E5};">0")');
+    expect(summary[1][4]).toBe('=COUNTIFS({F5};">="&9/2;{E5};">0")');
   });
 
   it("never merges distinct listings merely because rating and review count match", () => {
@@ -294,7 +297,7 @@ describe("Google Sheets model", () => {
     });
     const summary = document.formulas.filter((_row, index) => document.rowKinds[index] === "summary");
 
-    expect(summary[0][4]).toBe("=SUM(E5;E6)");
+    expect(summary[0][4]).toBe("=SUM(E5:E6)");
   });
 
   it("clears the current pair when a SKU disappears on a same-month rerun", () => {
@@ -305,6 +308,68 @@ describe("Google Sheets model", () => {
     const document = buildSheetDocument(existing, request, [], { "2026-07": {} });
     const row = document.values.find((_, index) => document.rowKinds[index] === "product")!;
     expect(row.slice(4, 6)).toEqual([null, null]);
+  });
+
+  it("preserves prior current-month metrics for a failed partition during partial publication", () => {
+    const brand = "Здравсити";
+    const partialRequest: RunRequest = {
+      ...request,
+      domains: ["irecommend.ru", "ru.otzyv.com"],
+      brands: [brand]
+    };
+    const prior: Observation = {
+      domain: "ru.otzyv.com",
+      platform: "ru.otzyv.com",
+      listingId: "apteka-zdravsiti",
+      brand,
+      canonicalUrl: "https://ru.otzyv.com/apteka-zdravsiti",
+      product: "Аптека ЗдравСити",
+      reviews: 25,
+      rating: 3.7,
+      status: "ok",
+      capturedAt: "2026-07-01T00:00:00.000Z"
+    };
+    const previousDocument = buildBrandSheetDocument(
+      { values: [] },
+      partialRequest,
+      brand,
+      [],
+      { "2026-07": { "ru.otzyv.com:apteka-zdravsiti": prior } }
+    );
+    const priorRecord: ProductRecord = {
+      key: "ru.otzyv.com:apteka-zdravsiti",
+      domain: prior.domain,
+      listingId: prior.listingId,
+      brand,
+      platform: prior.platform,
+      canonicalUrl: prior.canonicalUrl,
+      product: prior.product,
+      firstSeenMonth: "2026-07",
+      lastSeenMonth: "2026-07"
+    };
+    const current: Observation = {
+      ...prior,
+      domain: "irecommend.ru",
+      platform: "irecommend.ru",
+      listingId: "zdravcity",
+      canonicalUrl: "https://irecommend.ru/content/zdravcity",
+      reviews: 8,
+      rating: 4.5
+    };
+
+    const document = buildBrandSheetDocument(
+      { values: previousDocument.values },
+      partialRequest,
+      brand,
+      [priorRecord],
+      { "2026-07": { "irecommend.ru:zdravcity": current } },
+      { preserveCurrentMonthFor: [{ domain: "ru.otzyv.com", brand }] }
+    );
+    const rows = document.values.filter((_row, index) => document.rowKinds[index] === "product");
+    const preserved = rows.find((row) => row[1] === prior.canonicalUrl);
+
+    expect(preserved?.slice(4, 6)).toEqual([25, 3.7]);
+    expect(rows.find((row) => row[1] === current.canonicalUrl)?.slice(4, 6)).toEqual([8, 4.5]);
   });
 
   it("keeps an out-of-scope brand out of a dedicated brand sheet", () => {
@@ -349,6 +414,28 @@ describe("Google Sheets model", () => {
     expect(document.values.filter((_, index) => document.rowKinds[index] === "product")).toHaveLength(2);
   });
 
+  it("collapses shared family metrics into one row when a source exposes several variants", () => {
+    const brand = "АкваОптик";
+    const records: ProductRecord[] = ["120", "450"].map((listingId) => ({
+      key: `ozerki.ru:family-${listingId}`, domain: "ozerki.ru", listingId: `family-${listingId}`, brand,
+      platform: "ozerki.ru", canonicalUrl: "https://ozerki.ru/alphabet/a/akvaoptik/",
+      product: `раствор ${listingId} мл`, aggregateGroupId: "ozerki:family:family-akvaoptik",
+      productIdentity: { label: `${brand} — раствор ${listingId} мл`, granularity: "family", confidence: "exact", missing: [], reasons: [] },
+      firstSeenMonth: "2026-07", lastSeenMonth: "2026-07"
+    }));
+    const snapshots = Object.fromEntries(records.map((record) => [record.key, {
+      domain: record.domain, platform: record.platform, listingId: record.listingId, brand,
+      canonicalUrl: record.canonicalUrl, product: record.product, reviews: 2, rating: 5,
+      status: "ok", capturedAt: new Date().toISOString(), aggregateGroupId: record.aggregateGroupId,
+      productIdentity: record.productIdentity
+    } satisfies Observation]));
+    const document = buildSheetDocument({ values: [] }, { ...request, domains: ["ozerki.ru"], brands: [brand] }, records, { "2026-07": snapshots });
+    const rows = document.values.filter((_, index) => document.rowKinds[index] === "product");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.[2]).toContain(brand);
+    expect(rows[0]?.slice(4)).toEqual([2, 5]);
+  });
+
   it("renders only three report sections and preserves platform order inside each section", () => {
     const domains = [
       "wildberries.ru", "otzovik.com", "ozon.ru", "uteka.ru", "irecommend.ru", "eapteka.ru"
@@ -388,14 +475,33 @@ describe("Google Sheets model", () => {
     expect(reviewRows.map((row) => row[2])).toEqual(["таблетки №10", "таблетки №10"]);
   });
 
-  it("classifies 4.9, 4.0, 3.9, rating zero, no reviews and blank errors without overlap", () => {
+  it("keeps every connected or requested pharmacy out of the review-sites section", () => {
+    const domains = ["vapteke.ru", "maksavit.ru", "vitaexpress.ru", "apteka.magnit.ru", "superapteka.ru"];
+    const records: ProductRecord[] = domains.map((domain) => ({
+      key: `${domain}:card`, domain, listingId: "card", brand: "Кагоцел", platform: domain,
+      canonicalUrl: `https://${domain}/product/card`, product: "Кагоцел таблетки №10",
+      firstSeenMonth: "2026-07", lastSeenMonth: "2026-07"
+    }));
+    const document = buildSheetDocument({ values: [] }, { ...request, domains }, records, {});
+    const sections = document.values
+      .filter((_row, index) => document.rowKinds[index] === "section")
+      .map((row) => row[0]);
+    const labels = document.values
+      .filter((_row, index) => document.rowKinds[index] === "product")
+      .map((row) => row[0]);
+
+    expect(sections).toEqual(["Аптеки"]);
+    expect(labels).toEqual(["ВАптеке", "Максавит", "Аптека Вита", "Магнит Аптека", "СуперАптека"]);
+  });
+
+  it("classifies 4.9, 4.5, 4.4, rating zero, no reviews and blank errors without overlap", () => {
     const metric = (listingId: string, reviews: number, rating: number | null, status: "ok" | "no_reviews"): Observation => ({
       ...observation(listingId, reviews), rating, status
     });
     const observations = [
-      metric("49", 10, 4.9, "ok"), metric("40", 10, 4.0, "ok"),
-      metric("39", 10, 3.9, "ok"), metric("00", 10, 0, "ok"),
-      metric("none", 0, null, "no_reviews")
+      metric("49", 10, 4.9, "ok"), metric("45", 10, 4.5, "ok"),
+      metric("44", 10, 4.4, "ok"), metric("00", 10, 0, "ok"),
+      metric("none", 0, null, "no_reviews"), metric("norating", 10, null, "ok")
     ];
     const blank: ProductRecord = {
       key: "ozon.ru:blank", domain: "ozon.ru", listingId: "blank", brand: "Кагоцел", platform: "ozon",
@@ -406,21 +512,20 @@ describe("Google Sheets model", () => {
       "2026-07": Object.fromEntries(observations.map((item) => [`ozon.ru:${item.listingId}`, item]))
     });
     const rows = document.values.filter((_, index) => document.rowKinds[index] === "product");
-    expect(rows.filter((row) => typeof row[5] === "number" && row[5] >= 4)).toHaveLength(2);
-    expect(rows.filter((row) => typeof row[5] === "number" && row[5] < 4)).toHaveLength(2);
+    expect(rows.filter((row) => typeof row[5] === "number" && row[5] >= 4.5)).toHaveLength(2);
+    expect(rows.filter((row) => typeof row[5] === "number" && row[5] < 4.5)).toHaveLength(2);
     expect(rows.filter((row) => row[4] === 0 && row[5] === null)).toHaveLength(1);
     expect(rows.filter((row) => row[4] === null && row[5] === null)).toHaveLength(1);
 
     const summary = document.formulas.filter((_, index) => document.rowKinds[index] === "summary");
-    expect(summary[1][4]).toContain('">=4"');
+    expect(summary[1][4]).toContain('">="&9/2');
     expect(summary[1][4]).toContain('{E');
     expect(summary[1][4]).toContain('">0"');
     expect(summary[1][4]).not.toContain('$B$3:$B');
-    expect(summary[2][4]).toContain('"<4"');
+    expect(summary[2][4]).toContain('"<"&9/2');
     expect(summary[2][4]).toContain('"<>"');
-    expect(summary[3][4]).toContain(';0;');
-    expect(summary[3][4]).toContain(';"<>";');
-    expect(summary[3][4]).toContain(';"")');
+    expect(summary[3][4]).toContain(';"";');
+    expect(summary[3][4]).toContain(';"<>")');
   });
 
   it("re-reads the new brand/link/product layout without losing history", () => {
@@ -464,8 +569,8 @@ describe("Google Sheets model", () => {
 
     expect(summaryLabels).toEqual([
       "Всего отзывов / оценок",
-      "Карточки с рейтингом ≥4 баллов",
-      "Карточки с рейтингом <4 баллов",
+      "Карточки с рейтингом ≥4,5 баллов",
+      "Карточки с рейтингом <4,5 баллов",
       "Карточки без отзывов / оценок"
     ]);
     expect(footnote).toContain("отзывов, оценок и голосов");

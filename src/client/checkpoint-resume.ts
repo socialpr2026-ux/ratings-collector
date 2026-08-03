@@ -1,6 +1,9 @@
 import type { RunState } from "../shared/types.js";
 
 export const MAX_AUTOMATIC_CONTINUATIONS = 3;
+// One immediate read plus 36 normal 2.5 s poll intervals covers the observed
+// delayed EdgeOne Agent start without extending the Agent execution itself.
+export const AMBIGUOUS_TRIGGER_GRACE_POLLS = 37;
 
 const timeoutFailure = /run_deadline_exceeded|the operation was aborted due to timeout/i;
 const unsafeAutomaticRetry = /quota(?:_exceeded)?|\blease\b|reserveUsage|releaseUsage|acquireLease|releaseLease|publish(?:ing|ed)?|квот|аренд|публикац/iu;
@@ -19,9 +22,56 @@ export type AutomaticContinuationNotice = {
 
 export type CollectionAttemptResult = { run: RunState; error?: unknown };
 
+export type CollectionAttemptPollOptions = {
+  checkpoint: RunState;
+  readCheckpoint: () => Promise<RunState>;
+  triggerError: () => Error | undefined;
+  triggerFinished: () => boolean;
+  onCheckpoint?: (run: RunState) => void;
+  wait?: () => Promise<void>;
+  unstartedFailurePollLimit?: number;
+};
+
+const pendingStatuses = new Set<RunState["status"]>(["queued", "running", "publishing"]);
+
 function timestamp(value: string): number {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Observes the saved run after one collection POST. A rejected POST is
+ * ambiguous: the Agent may already be running after the client connection was
+ * closed. Give that transition a bounded read-only grace period, then keep
+ * following a proven new checkpoint to terminal without ever issuing another
+ * POST.
+ */
+export async function pollSavedCollectionAttempt({
+  checkpoint,
+  readCheckpoint,
+  triggerError,
+  triggerFinished,
+  onCheckpoint,
+  wait = () => new Promise((resolve) => setTimeout(resolve, 2500)),
+  unstartedFailurePollLimit = AMBIGUOUS_TRIGGER_GRACE_POLLS
+}: CollectionAttemptPollOptions): Promise<RunState> {
+  let lastUpdatedAt = checkpoint.updatedAt;
+  let unchangedPollsAfterFailure = 0;
+  let attemptStarted = false;
+  for (;;) {
+    const next = await readCheckpoint();
+    onCheckpoint?.(next);
+    attemptStarted ||= next.updatedAt !== checkpoint.updatedAt || next.status !== checkpoint.status;
+    const failure = triggerError();
+    if (!pendingStatuses.has(next.status) && (attemptStarted || (triggerFinished() && !failure))) return next;
+    if (failure) {
+      if (next.updatedAt === lastUpdatedAt) unchangedPollsAfterFailure += 1;
+      else unchangedPollsAfterFailure = 0;
+      lastUpdatedAt = next.updatedAt;
+      if (!attemptStarted && unchangedPollsAfterFailure >= unstartedFailurePollLimit) return next;
+    }
+    await wait();
+  }
 }
 
 export function checkpointContinuationDecision(
@@ -58,15 +108,20 @@ export async function collectWithCheckpointContinuation(
   let checkpoint = initial;
   let continuations = 0;
   for (;;) {
-    const result = await executeAttempt(checkpoint);
+    const attempted = await executeAttempt(checkpoint);
+    // The persisted terminal checkpoint is authoritative after an Agent
+    // transition even when its long HTTP response is lost or returns a proxy
+    // error. Preserve a transport error only when the checkpoint did not move,
+    // which proves neither successful execution nor a saved failure.
+    const terminalAdvanced = ["review", "published", "failed"].includes(attempted.run.status) &&
+      timestamp(attempted.run.updatedAt) > timestamp(checkpoint.updatedAt);
+    const result = attempted.error && terminalAdvanced
+      ? { ...attempted, error: undefined }
+      : attempted;
     if (["review", "published"].includes(result.run.status)) {
-      // A dropped HTTP response after a completed server transition is safe to
-      // ignore. An unchanged terminal checkpoint means the Agent never
-      // started (for example, lease rejection), so its error must remain.
-      const terminalAdvanced = timestamp(result.run.updatedAt) > timestamp(checkpoint.updatedAt);
-      return !result.error || terminalAdvanced
-        ? { ...result, error: undefined, continuations }
-        : { ...result, continuations };
+      return result.error
+        ? { ...result, continuations }
+        : { ...result, error: undefined, continuations };
     }
     if (result.run.status !== "failed") return { ...result, continuations };
     const decision = checkpointContinuationDecision(checkpoint, result.run, continuations, maxContinuations);

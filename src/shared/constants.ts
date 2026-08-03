@@ -1,4 +1,33 @@
-export const INITIAL_DOMAINS = ["ozon.ru", "wildberries.ru", "market.yandex.ru"] as const;
+export const INITIAL_DOMAINS = [
+  "ozon.ru",
+  "wildberries.ru",
+  "market.yandex.ru",
+  "megamarket.ru",
+  "irecommend.ru",
+  "reviews.yandex.ru",
+  "otzovik.com",
+  "otzyv.pro",
+  "vseotzyvy.ru",
+  "otzyvru.com",
+  "pravogolosa.net",
+  "ru.otzyv.com",
+  "megapteka.ru",
+  "maksavit.ru",
+  "vapteke.ru",
+  "polza.ru",
+  "rigla.ru",
+  "ozerki.ru",
+  "farmlend.ru",
+  "budzdorov.ru",
+  "vitaexpress.ru",
+  "uteka.ru",
+  "eapteka.ru",
+  "asna.ru",
+  "okapteka.ru",
+  "zdravcity.ru",
+  "apteka.ru",
+  "nfapteka.ru"
+] as const;
 
 export const INITIAL_BRANDS = [
   "Арбидол",

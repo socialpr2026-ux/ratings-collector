@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { assertAllowedOzonComposerUrl } from "../companion/ozon-residential.js";
+import { applyOzonBrandFilter, assertAllowedOzonComposerUrl } from "../companion/ozon-residential.js";
 import { createCompanionServer, type CompanionCollector } from "../companion/server.js";
 import { AdapterBlockedError } from "../src/server/adapters/errors.js";
 
@@ -34,6 +34,21 @@ describe("local Ozon companion", () => {
       .toThrow("Unexpected Ozon composer parameter");
     expect(() => assertAllowedOzonComposerUrl("https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=/product/baktoblis-123456789/?redirect=https://metadata.google.internal"))
       .toThrow("only permits Ozon product search or an exact product card");
+  });
+
+  it("rewrites an oversized generic search to the exact Ozon brand filter and keeps pagination bounded", () => {
+    const input = "https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=%2Fsearch%2F%3Ftext%3D%D0%92%D0%B8%D0%B0%D1%80%D0%B4%D0%BE%2B%D0%A4%D0%BE%D1%80%D1%82%D0%B5%26from_global%3Dtrue%26page%3D2";
+    const filtered = "/category/bady-dlya-muzhchin-6188/viardo-forte-140464399/?__rr=1&category_was_predicted=true&deny_category_prediction=true&from_global=true&text=%D0%92%D0%B8%D0%B0%D1%80%D0%B4%D0%BE+%D0%A4%D0%BE%D1%80%D1%82%D0%B5";
+    const rewritten = applyOzonBrandFilter(input, new Map([["виардо форте", filtered]]));
+    const endpoint = assertAllowedOzonComposerUrl(rewritten);
+    const nested = new URL(endpoint.searchParams.get("url")!, "https://www.ozon.ru");
+
+    expect(nested.pathname).toBe("/category/bady-dlya-muzhchin-6188/viardo-forte-140464399/");
+    expect(nested.searchParams.get("text")).toBe("Виардо Форте");
+    expect(nested.searchParams.get("page")).toBe("2");
+    expect(() => assertAllowedOzonComposerUrl(
+      "https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=%2Fcategory%2Fbady-6183%2Fviardo-forte-140464399%2F%3Ftext%3D%D0%92%D0%B8%D0%B0%D1%80%D0%B4%D0%BE"
+    )).toThrow("incomplete exact-brand proof");
   });
 
   it("supports the production-origin private-network preflight", async () => {

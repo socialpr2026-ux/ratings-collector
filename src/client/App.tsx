@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { MAX_RUN_PARTITIONS, type Observation, type RunActivityStage, type RunState, type SiteProfile } from "../shared/types.js";
+import { MAX_RUN_PARTITIONS, type Observation, type RunActivityStage, type RunHistoryItem, type RunState, type SiteProfile } from "../shared/types.js";
 import type { OzonCompanionResult, OzonCompanionSession } from "../shared/companion.js";
 import { formatRatingValue } from "../shared/rating.js";
 import { analyzeProductIdentity, canonicalProductVariants } from "../server/utils/product-name.js";
@@ -9,6 +9,7 @@ import {
   brandSheetDestinationText,
   canConfirmObservation,
   canPublishSuccessfulPartitions,
+  hasCurrentPartialPublication,
   canRetryFailedPartitions,
   finalProductLabel,
   friendlyErrorMessage,
@@ -21,6 +22,7 @@ import {
   summarizeIssues
 } from "./review-copy.js";
 import {
+  CATALOG_DOMAINS,
   SELECTABLE_CATALOG_DOMAINS,
   SITE_CATALOG,
   countCustomDomains,
@@ -30,8 +32,10 @@ import {
 } from "./site-catalog.js";
 import {
   collectWithCheckpointContinuation,
+  pollSavedCollectionAttempt,
   type AutomaticContinuationNotice
 } from "./checkpoint-resume.js";
+import { completedCollectionHistory, formatCollectionDuration, historyBrandLabel } from "./run-history.js";
 
 type Config = {
   domains: readonly string[];
@@ -58,7 +62,19 @@ const FORM_STORAGE_KEY = "ratings-last-configuration";
 const CONVERSATION_STORAGE_KEY = "ratings-conversation-id";
 const LAST_RUN_STORAGE_KEY = "ratings-last-run-id";
 const pendingStatuses = new Set<RunState["status"]>(["queued", "running", "publishing"]);
-type BusyAction = "resume" | "start" | "retry" | "continue" | "review" | "profile" | "publish" | "companion";
+type BusyAction = "resume" | "start" | "refresh" | "retry" | "continue" | "review" | "profile" | "publish" | "companion";
+
+export async function completeRunPage(
+  first: RunPage,
+  readPage: (offset: number, limit: number) => Promise<RunPage>
+): Promise<RunState> {
+  const page = first.observationPage;
+  if (!page || page.total <= first.observations.length || pendingStatuses.has(first.status)) return first;
+  const pageCount = Math.ceil(page.total / page.limit);
+  const offsets = Array.from({ length: pageCount - 1 }, (_, index) => (index + 1) * page.limit);
+  const rest = await Promise.all(offsets.map((offset) => readPage(offset, page.limit)));
+  return { ...first, observations: [first.observations, ...rest.map((item) => item.observations)].flat() };
+}
 
 type CompanionState = {
   status: "idle" | "checking" | "collecting" | "importing" | "unavailable" | "captcha" | "error";
@@ -196,8 +212,8 @@ export function retainValidSelection(selected: Set<string>, validKeys: ReadonlyS
   return next;
 }
 
-export function shouldShowReviewSelectionBar(visibleConfirmableCount: number, selectedCount: number) {
-  return visibleConfirmableCount > 0 || selectedCount > 0;
+export function shouldShowReviewSelectionBar(reviewCount: number, visibleConfirmableCount: number, selectedCount: number) {
+  return reviewCount > 0 || visibleConfirmableCount > 0 || selectedCount > 0;
 }
 
 type ReviewCountMeaning = SiteProfile["reviewCountMeaning"];
@@ -226,6 +242,12 @@ function formatMonth(value: string) {
   if (!year || !month) return value;
   return new Intl.DateTimeFormat("ru-RU", { month: "long", year: "numeric" })
     .format(new Date(Date.UTC(year, month - 1, 1)));
+}
+
+function formatCollectionTime(value: string) {
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit"
+  }).format(new Date(value));
 }
 
 function formatReviews(value: number | null) {
@@ -260,6 +282,7 @@ export function App() {
   const [automaticContinuation, setAutomaticContinuation] = useState<AutomaticContinuationNotice>();
   const [error, setError] = useState("");
   const [companionState, setCompanionState] = useState<CompanionState>({ status: "idle" });
+  const [runHistory, setRunHistory] = useState<RunHistoryItem[]>([]);
   const formRef = useRef<HTMLFormElement>(null);
 
   useEffect(() => {
@@ -279,6 +302,11 @@ export function App() {
       });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (!config || config.authRequired) return;
+    void refreshRunHistory();
+  }, [config?.authRequired]);
 
   useEffect(() => {
     const queryRunId = new URLSearchParams(window.location.search).get("runId")?.trim();
@@ -324,6 +352,11 @@ export function App() {
     if (run.status === "published") localStorage.removeItem(LAST_RUN_STORAGE_KEY);
     else localStorage.setItem(LAST_RUN_STORAGE_KEY, run.id);
   }, [run?.id, run?.status]);
+
+  useEffect(() => {
+    if (!run || pendingStatuses.has(run.status)) return;
+    void refreshRunHistory();
+  }, [run?.id, run?.status, run?.collectionFinishedAt]);
 
   const normalizedDomains = useMemo(() => parseRunnableDomainList(domains), [domains]);
   const temporarilyBlockedDomains = useMemo(() => parseTemporarilyBlockedDomainList(domains), [domains]);
@@ -379,14 +412,18 @@ export function App() {
 
   async function fetchRun(id: string): Promise<RunState> {
     const first = await api(`/api/runs/${encodeURIComponent(id)}?offset=0&limit=250`) as RunPage;
-    const page = first.observationPage;
-    if (!page || page.total <= first.observations.length || pendingStatuses.has(first.status)) return first;
-    const pageCount = Math.ceil(page.total / page.limit);
-    const offsets = Array.from({ length: pageCount - 1 }, (_, index) => (index + 1) * page.limit);
-    const rest = await Promise.all(offsets.map((offset) =>
-      api(`/api/runs/${encodeURIComponent(id)}?offset=${offset}&limit=${page.limit}`) as Promise<RunPage>
-    ));
-    return { ...first, observations: [first.observations, ...rest.map((item) => item.observations)].flat() };
+    return completeRunPage(first, (offset, limit) =>
+      api(`/api/runs/${encodeURIComponent(id)}?offset=${offset}&limit=${limit}`) as Promise<RunPage>
+    );
+  }
+
+  async function refreshRunHistory() {
+    try {
+      const items = await api("/api/runs?limit=8") as RunHistoryItem[];
+      setRunHistory(completedCollectionHistory(items));
+    } catch {
+      // History is secondary and must never interrupt collection or publication.
+    }
   }
 
   async function poll(id: string, triggerError?: () => Error | undefined) {
@@ -402,29 +439,17 @@ export function App() {
 
   async function pollCollectionAttempt(
     id: string,
-    previousUpdatedAt: string,
+    checkpoint: RunState,
     triggerError: () => Error | undefined,
     triggerFinished: () => boolean
   ) {
-    let lastUpdatedAt = previousUpdatedAt;
-    let unchangedPollsAfterFailure = 0;
-    for (;;) {
-      const next = await fetchRun(id);
-      setRun(next);
-      const retryHasStarted = next.updatedAt !== previousUpdatedAt || pendingStatuses.has(next.status);
-      if (!pendingStatuses.has(next.status) && (retryHasStarted || triggerFinished())) return next;
-      const failure = triggerError();
-      if (failure) {
-        if (next.updatedAt === lastUpdatedAt) unchangedPollsAfterFailure += 1;
-        else unchangedPollsAfterFailure = 0;
-        lastUpdatedAt = next.updatedAt;
-        // A lost Agent response may precede its final failed checkpoint. Keep
-        // polling while the server is still advancing, but never hang forever
-        // on a stale `running` marker.
-        if (unchangedPollsAfterFailure >= 4) return next;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 2500));
-    }
+    return pollSavedCollectionAttempt({
+      checkpoint,
+      readCheckpoint: () => fetchRun(id),
+      triggerError,
+      triggerFinished,
+      onCheckpoint: setRun
+    });
   }
 
   async function executeCollectionAttempt(id: string, checkpoint: RunState) {
@@ -441,7 +466,7 @@ export function App() {
       .finally(() => { triggerFinished = true; });
     const polled = await pollCollectionAttempt(
       id,
-      checkpoint.updatedAt,
+      checkpoint,
       () => triggerFailure,
       () => triggerFinished
     );
@@ -459,7 +484,7 @@ export function App() {
         if (firstAttempt && initialAttemptAlreadyStarted) {
           firstAttempt = false;
           return {
-            run: await pollCollectionAttempt(initial.id, checkpoint.updatedAt, () => undefined, () => false)
+            run: await pollCollectionAttempt(initial.id, checkpoint, () => undefined, () => false)
           };
         }
         firstAttempt = false;
@@ -531,21 +556,57 @@ export function App() {
     }
   }
 
+  async function searchNewYandexCards() {
+    if (!run || !run.request.domains.includes("market.yandex.ru")) return;
+    setBusyAction("refresh");
+    setError("");
+    setSelected(new Set());
+    setAutomaticContinuation(undefined);
+    try {
+      const created = await api("/api/runs", {
+        method: "POST",
+        body: JSON.stringify({
+          ...run.request,
+          domains: ["market.yandex.ru"],
+          discoveryMode: "refresh"
+        })
+      }) as RunState;
+      setRun(created);
+      if (config?.agentMode) {
+        await api("/sheet-publisher", {
+          method: "POST",
+          body: JSON.stringify({ runId: created.id, operation: "preflight" })
+        });
+      }
+      await collectRun(created, !config?.agentMode);
+    } catch (caught) {
+      setError(friendlyErrorMessage(caught, "start"));
+    } finally {
+      setBusyAction(undefined);
+    }
+  }
+
   async function acceptSelected() {
-    if (!run || validSelectedKeys.length === 0) return;
+    if (!run) return;
     setBusyAction("review");
     setError("");
     try {
-      await api(`/api/runs/${run.id}/review`, {
+      const acceptedKeySet = new Set(validSelectedKeys);
+      const reviewed = await api(`/api/runs/${run.id}/review`, {
         method: "POST",
         body: JSON.stringify({
           acceptedKeys: validSelectedKeys,
+          rejectedKeys: run.observations
+            .filter((item) => item.status === "needs_review" && !acceptedKeySet.has(productKey(item)))
+            .map(productKey),
           productLabels: Object.fromEntries(validSelectedKeys
             .map((key) => [key, normalizeProductOverride(productEdits[key] ?? "")] as const)
             .filter(([, value]) => Boolean(value)))
         })
-      });
-      setRun(await fetchRun(run.id));
+      }) as RunPage;
+      setRun(await completeRunPage(reviewed, (offset, limit) =>
+        api(`/api/runs/${encodeURIComponent(run.id)}?offset=${offset}&limit=${limit}`) as Promise<RunPage>
+      ));
       setSelected(new Set());
       setProductEdits({});
     } catch (caught) {
@@ -745,6 +806,7 @@ export function App() {
   );
   const validSelectedKeys = [...selected].filter((key) => confirmableReviewKeys.has(key));
   const selectedCount = validSelectedKeys.length;
+  const hasInvalidSelectedReview = selected.size !== selectedCount;
   const validSelectedKeySet = new Set(validSelectedKeys);
   const selectedProfileDomains = [...new Set(confirmableReviewItems
     .filter((item) => item.profileVersion !== undefined && validSelectedKeySet.has(productKey(item)))
@@ -775,6 +837,7 @@ export function App() {
     failedPartitionCount,
     reviewItems.length
   ));
+  const partialPublicationCompleted = Boolean(run && hasCurrentPartialPublication(run));
   const cleanReviewReady = Boolean(run?.status === "review" && reviewItems.length === 0 && failedPartitionCount === 0 && run.qa?.ok !== false);
   const reviewSectionTitle = run?.status === "published"
     ? "Результат записан"
@@ -961,7 +1024,7 @@ export function App() {
         <div className="setup-lists">
           <section className="site-picker" aria-labelledby="sites-title">
             <div className="picker-heading">
-              <div><span className="label-row"><span id="sites-title">Площадки</span><small>{normalizedDomains.length}</small></span><p>Выберите готовые варианты или добавьте свои.</p></div>
+              <div><span className="label-row"><span id="sites-title">Площадки</span><small>{normalizedDomains.length} выбрано · {CATALOG_DOMAINS.length} всего</small></span><p>Выберите готовые варианты или добавьте свои.</p></div>
               <div className="picker-actions">
                 <button type="button" onClick={() => setPresetSites(SELECTABLE_CATALOG_DOMAINS, true)} disabled={SELECTABLE_CATALOG_DOMAINS.every((domain) => selectedDomainSet.has(domain))}>Выбрать все доступные</button>
                 <button type="button" onClick={() => setDomains("")} disabled={normalizedDomains.length === 0}>Очистить</button>
@@ -1085,14 +1148,26 @@ export function App() {
             <span id="setup-status">{setupStatus}</span>
           </div>
           <button className="button button-primary button-large" type="submit" disabled={!formIsReady || busy || config?.authRequired} aria-describedby="setup-status">
-            <span>{busyAction === "resume" ? "Восстанавливаем…" : busyAction === "continue" ? "Продолжаем сбор…" : busyAction === "start" ? "Собираем данные…" : "Начать сбор"}</span><span aria-hidden="true">→</span>
+            <span>{busyAction === "resume" ? "Восстанавливаем…" : busyAction === "continue" ? "Продолжаем сбор…" : busyAction === "refresh" ? "Ищем новые карточки…" : busyAction === "start" ? "Собираем данные…" : "Начать сбор"}</span><span aria-hidden="true">→</span>
           </button>
         </div>
+        {runHistory.length > 0 && <details className="collection-history">
+          <summary>Недавние сборы <span>{runHistory.length}</span></summary>
+          <ol>
+            {runHistory.map((item) => <li key={item.id}>
+              <a href={`?runId=${encodeURIComponent(item.id)}`}>
+                <strong>{historyBrandLabel(item.brands)}</strong>
+                <span>{formatCollectionTime(item.collectionStartedAt)}</span>
+                <small>{formatCollectionDuration(item.durationMs)}</small>
+              </a>
+            </li>)}
+          </ol>
+        </details>}
       </form>
 
       {(busy || run) && <section className={`card progress-card ${run && (pendingStatuses.has(run.status) || collectionIsContinuing) ? "progress-active" : ""}`} aria-labelledby="progress-title" aria-busy={Boolean(run && (pendingStatuses.has(run.status) || collectionIsContinuing))}>
         <div className="card-heading compact">
-          <div><p className="section-number">Шаг 2</p><h2 id="progress-title">{busyAction === "resume" ? "Восстанавливаем последний запуск" : busyAction === "continue" ? `Автоматически продолжаем сбор · ${automaticContinuation?.attempt ?? 1}/${automaticContinuation?.maxAttempts ?? 3}` : busyAction === "retry" ? "Повторяем неуспешные площадки" : cleanReviewReady ? "Сбор готов" : run ? runStatusLabels[run.status] : "Создаём запуск"}</h2><p>{busyAction === "resume" ? "Загружаем сохранённый результат и актуальный статус площадок." : busyAction === "continue" ? `Сохранено ${automaticContinuation?.completedPartitions ?? run?.progress.completedPartitions ?? 0} из ${automaticContinuation?.totalPartitions ?? run?.progress.totalPartitions ?? 0} проверок. Готовые площадки остаются на месте; продолжаются только незавершённые.` : busyAction === "retry" ? "Уже собранные данные сохранены. Обновляем только площадки с ошибками." : cleanReviewReady ? "Данные собраны и проверены. Можно записывать их в таблицу." : run?.progress.current ? "Получаем страницы, извлекаем рейтинг и сверяем продукт." : pendingStatuses.has(run?.status ?? "queued") ? "Можно перейти в другую вкладку — этот экран обновится автоматически." : "Сбор завершён. Ниже можно проверить результат."}</p></div>
+          <div><p className="section-number">Шаг 2</p><h2 id="progress-title">{busyAction === "resume" ? "Восстанавливаем последний запуск" : busyAction === "continue" ? `Автоматически продолжаем сбор · ${automaticContinuation?.attempt ?? 1}/${automaticContinuation?.maxAttempts ?? 3}` : busyAction === "refresh" ? "Ищем новые карточки Яндекса" : busyAction === "retry" ? "Повторяем неуспешные площадки" : cleanReviewReady ? "Сбор готов" : run ? runStatusLabels[run.status] : "Создаём запуск"}</h2><p>{busyAction === "resume" ? "Загружаем сохранённый результат и актуальный статус площадок." : busyAction === "continue" ? `Сохранено ${automaticContinuation?.completedPartitions ?? run?.progress.completedPartitions ?? 0} из ${automaticContinuation?.totalPartitions ?? run?.progress.totalPartitions ?? 0} проверок. Готовые площадки остаются на месте; продолжаются только незавершённые.` : busyAction === "refresh" ? "Это отдельная проверка полного индекса; уже записанные данные остаются на месте." : busyAction === "retry" ? "Уже собранные данные сохранены. Обновляем только площадки с ошибками." : cleanReviewReady ? "Данные собраны и проверены. Можно записывать их в таблицу." : run?.progress.current ? "Получаем страницы, извлекаем рейтинг и сверяем продукт." : pendingStatuses.has(run?.status ?? "queued") ? "Можно перейти в другую вкладку — этот экран обновится автоматически." : "Сбор завершён. Ниже можно проверить результат."}</p></div>
           <div className="progress-value"><strong>{run ? `${progress}%` : "…"}</strong><small>{run ? `${run.progress.completedPartitions} из ${run.progress.totalPartitions}` : "подготовка"}</small></div>
         </div>
         <div className="progress-track" role="progressbar" aria-label="Ход сбора" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
@@ -1147,7 +1222,7 @@ export function App() {
 
         {(partitionSummary?.failed ?? 0) > 0 && run.status !== "published" && <div className="collection-warning" role="status">
           <span className="notice-icon" aria-hidden="true">!</span>
-          <div><strong>{collectionIsContinuing ? busyAction === "continue" ? "Автоматически продолжаем с сохранённого места…" : "Повторно проверяем проблемные площадки…" : canPublishCompletedOnly ? "Часть проверок не завершена" : "Сбор неполный — публикация отключена"}</strong><p>{collectionIsContinuing ? "Готовые результаты остаются на месте. После завершения список и проверка публикации обновятся автоматически." : canPublishCompletedOnly ? "Успешные бренды и площадки сохранены. Их можно записать сейчас, а неуспешные проверки повторить позже." : "Данные не будут записаны частично. Можно повторить только неуспешные площадки, не запуская весь сбор заново."}</p></div>
+          <div><strong>{collectionIsContinuing ? busyAction === "continue" ? "Автоматически продолжаем с сохранённого места…" : "Повторно проверяем проблемные площадки…" : partialPublicationCompleted ? "Готовая часть уже записана" : canPublishCompletedOnly ? "Часть проверок не завершена" : "Сбор неполный — публикация отключена"}</strong><p>{collectionIsContinuing ? "Готовые результаты остаются на месте. После завершения список и проверка публикации обновятся автоматически." : partialPublicationCompleted ? "Повторите только проблемные площадки. Уже записанные карточки сохранятся, а восстановленные результаты можно будет дописать без дублей." : canPublishCompletedOnly ? "Успешные бренды и площадки сохранены. Их можно записать сейчас, а неуспешные проверки повторить позже." : "Данные не будут записаны частично. Можно повторить только неуспешные площадки, не запуская весь сбор заново."}</p></div>
           <div className="collection-warning-actions">
             {canRetry && <button className="button button-secondary" type="button" onClick={retryFailedPartitions} disabled={busy}>{collectionIsContinuing ? "Продолжаем…" : "Повторить неуспешные площадки"}</button>}
             <a className="button button-quiet" href="#publish-status">Посмотреть причины</a>
@@ -1183,12 +1258,12 @@ export function App() {
           <span>Показано {visibleItems.length} из {unfilteredItems.length}</span>
         </div>}
 
-        {shouldShowReviewSelectionBar(visibleConfirmableReviewItems.length, selectedCount) && <div className={`selection-bar ${selectedUnapprovedProfileDomains.length > 0 ? "selection-bar-profile" : ""}`} role="region" aria-label="Подтверждение выбранных карточек">
+        {shouldShowReviewSelectionBar(reviewItems.length, visibleConfirmableReviewItems.length, selectedCount) && <div className={`selection-bar ${selectedUnapprovedProfileDomains.length > 0 ? "selection-bar-profile" : ""}`} role="region" aria-label="Подтверждение выбранных карточек">
           <div className="selection-bar-top">
             <label><input type="checkbox" checked={allReviewSelected} onChange={toggleAllReview} disabled={visibleConfirmableReviewItems.length === 0} /> <span>Выбрать все показанные</span></label>
             <div className="selection-actions">
-              <span aria-live="polite">Выбрано: {selectedCount}</span>
-              {selectedUnapprovedProfileDomains.length === 0 && <button className="button button-secondary button-compact" type="button" onClick={acceptSelected} disabled={selectedCount === 0 || busy}>{busyAction === "review" ? "Сохраняем…" : `Подтвердить выбранные · ${selectedCount}`}</button>}
+              <span aria-live="polite">Выбрано: {selectedCount}. Выбранные карточки будут сохранены, остальные — исключены.</span>
+              {selectedUnapprovedProfileDomains.length === 0 && <button className="button button-primary button-compact" type="button" onClick={acceptSelected} disabled={hasInvalidSelectedReview || busy}>{busyAction === "review" ? "Сохраняем…" : selectedCount > 0 ? `Сохранить решение · ${selectedCount} из ${reviewItems.length}` : `Исключить неподходящие · ${reviewItems.length}`}</button>}
             </div>
           </div>
 
@@ -1239,7 +1314,7 @@ export function App() {
                 const proofLines = productProofLines({ productIdentity: identity });
                 return <tr key={key} className={item.status === "needs_review" ? "row-review" : ""}>
                   <td className={`check-column ${item.status !== "needs_review" ? "check-empty" : ""}`} data-label="Выбрать">{item.status === "needs_review" && (confirmable
-                    ? <input aria-label={`Подтвердить карточку ${item.product}`} type="checkbox" checked={selected.has(key)} onChange={(event) => setSelected((current) => { const next = new Set(current); event.target.checked ? next.add(key) : next.delete(key); return next; })} />
+                    ? <input aria-label={`Выбрать карточку ${item.product}`} type="checkbox" checked={selected.has(key)} onChange={(event) => setSelected((current) => { const next = new Set(current); event.target.checked ? next.add(key) : next.delete(key); return next; })} />
                     : <span className="check-unavailable" aria-label={observationIssueText(item)}>—</span>)}</td>
                   <td data-label="Площадка"><span className="domain-name">{item.domain}</span></td>
                   <td className="brand-cell" data-label="Бренд"><strong>{item.brand}</strong></td>
@@ -1254,13 +1329,24 @@ export function App() {
           </table>
         </div>
 
+        {reviewItems.length > 0 && selectedUnapprovedProfileDomains.length === 0 && <div className="review-footer-action">
+          <button className="button button-primary" type="button" onClick={acceptSelected} disabled={hasInvalidSelectedReview || busy}>
+            {busyAction === "review" ? "Сохраняем решение…" : selectedCount > 0 ? `Сохранить выбранные и исключить остальные · ${selectedCount} из ${reviewItems.length}` : `Исключить неподходящие карточки · ${reviewItems.length}`}
+          </button>
+        </div>}
+
       </section>}
 
       {run?.qa && <section id="publish-status" className={`card publish-card ${run.qa.ok ? "publish-ready" : "publish-blocked"}`} aria-labelledby="publish-title">
         <div className="publish-summary">
           <span className="publish-icon" aria-hidden="true">{run.qa.ok ? "✓" : "!"}</span>
-          <div><p className="section-number">Шаг 4</p><h2 id="publish-title">{run.status === "published" ? "Готово — таблица обновлена" : run.qa.ok ? "Всё готово к записи" : canPublishCompletedOnly ? "Готовые результаты можно записать" : "Сначала устраните замечания"}</h2><p>{run.status === "published" ? `Данные за ${formatMonth(run.request.month)} сохранены в ${brandSheetDestinationText(publicationSummary.brands)}: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")}.` : run.qa.ok ? `Будет записано: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")} за ${formatMonth(run.request.month)} ${BRAND_SHEET_COLUMNS_TEXT}` : canPublishCompletedOnly ? `Будут записаны ${publicationSummary.cards} ${plural(publicationSummary.cards, "готовая карточка", "готовые карточки", "готовых карточек")} из ${successfulPartitionCount} ${plural(successfulPartitionCount, "успешно завершённой проверки", "успешно завершённых проверок", "успешно завершённых проверок")}. Неуспешные сочетания площадок и брендов останутся пустыми за текущий месяц; их ошибки не станут нулями.` : "Разберите отмеченные карточки или повторите проблемные площадки."}</p></div>
+          <div><p className="section-number">Шаг 4</p><h2 id="publish-title">{run.status === "published" ? "Готово — таблица обновлена" : partialPublicationCompleted ? "Готовые результаты записаны" : canPublishCompletedOnly ? "Готовые результаты можно записать" : run.qa.ok ? "Всё готово к записи" : "Сначала устраните замечания"}</h2><p>{run.status === "published" ? `Данные за ${formatMonth(run.request.month)} сохранены в ${brandSheetDestinationText(publicationSummary.brands)}: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")}.` : partialPublicationCompleted ? `${publicationSummary.cards} ${plural(publicationSummary.cards, "готовая карточка уже записана", "готовые карточки уже записаны", "готовых карточек уже записаны")}. Повторите ${failedPartitionCount} ${plural(failedPartitionCount, "неуспешную проверку", "неуспешные проверки", "неуспешных проверок")}; восстановленные данные можно будет дописать без потерь и дублей.` : canPublishCompletedOnly ? `Будут записаны ${publicationSummary.cards} ${plural(publicationSummary.cards, "готовая карточка", "готовые карточки", "готовых карточек")} из ${successfulPartitionCount} ${plural(successfulPartitionCount, "успешно завершённой проверки", "успешно завершённых проверок", "успешно завершённых проверок")}. Неуспешные сочетания площадок и брендов останутся пустыми за текущий месяц; их ошибки не станут нулями.` : run.qa.ok ? `Будет записано: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")} за ${formatMonth(run.request.month)} ${BRAND_SHEET_COLUMNS_TEXT}` : "Разберите отмеченные карточки или повторите проблемные площадки."}</p></div>
         </div>
+
+        {run.status === "published" && run.request.domains.includes("market.yandex.ru") && run.request.discoveryMode !== "refresh" && <div className="discovery-followup">
+          <div><strong>Проверить новые карточки Яндекса</strong><p>Текущие данные уже записаны. Полный поиск можно запустить отдельно.</p></div>
+          <button className="text-button" type="button" disabled={busy} onClick={searchNewYandexCards}>Найти новые</button>
+        </div>}
 
         {visibleBlockers.length > 0 && <div className="issue-list"><strong>Что нужно исправить</strong><ul>{visibleBlockers.map((item) => <li key={item}>{item}</li>)}</ul></div>}
         {visibleWarnings.length > 0 && <details className="warning-details"><summary>Есть замечания ({visibleWarnings.length})</summary><ul>{visibleWarnings.map((item) => <li key={item}>{item}</li>)}</ul></details>}
@@ -1273,10 +1359,10 @@ export function App() {
               {canPublishCompletedOnly && <button
                 className="button button-secondary"
                 type="button"
-                disabled={busy}
+                disabled={busy || partialPublicationCompleted}
                 onClick={() => publish(true)}
-              >{busyAction === "publish" ? "Записываем готовые данные…" : "Записать готовые результаты"}</button>}
-              <button className="button button-primary" type="button" disabled={!run.qa.ok || busy || run.status === "failed"} onClick={() => publish(false)}>{busyAction === "publish" ? "Записываем…" : "Записать в таблицу"} <span aria-hidden="true">→</span></button>
+              >{partialPublicationCompleted ? "Готовые результаты записаны" : busyAction === "publish" ? "Записываем готовые данные…" : "Записать готовые результаты"}</button>}
+              <button className="button button-primary" type="button" disabled={!run.qa.ok || failedPartitionCount > 0 || busy || run.status === "failed"} onClick={() => publish(false)}>{busyAction === "publish" ? "Записываем…" : "Записать в таблицу"} <span aria-hidden="true">→</span></button>
             </>}
         </div>
       </section>}

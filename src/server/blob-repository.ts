@@ -3,8 +3,8 @@ import { gzip } from "node:zlib";
 import { promisify } from "node:util";
 import { getStore, PreconditionFailedError, type Store } from "@edgeone/pages-blob";
 import type { EvidenceStore } from "./evidence.js";
-import type { Observation, ProductRecord, PublicationRecord, RunState, SiteProfile } from "../shared/types.js";
-import { productKey, type Repository } from "./repository.js";
+import type { Observation, ProductRecord, PublicationRecord, RunHistoryItem, RunState, SiteProfile, SourceCardRecord } from "../shared/types.js";
+import { productKey, runHistoryItem, type Repository } from "./repository.js";
 
 const gzipAsync = promisify(gzip);
 const strongJson = { type: "json" as const, consistency: "strong" as const };
@@ -20,12 +20,60 @@ export function ratingsBlobStore(): Store {
 export class BlobRepository implements Repository {
   constructor(private readonly store: Store = ratingsBlobStore()) {}
 
+  async findRecentRunsByBrand(brand: string, limit = 5): Promise<Array<{
+    id: string;
+    status: RunState["status"];
+    updatedAt: string;
+    brands: string[];
+    completedPartitions: number;
+    totalPartitions: number;
+  }>> {
+    const normalized = brand.normalize("NFKC").toLocaleLowerCase("ru-RU").trim();
+    if (normalized.length < 2 || normalized.length > 160) throw new Error("Invalid run brand lookup");
+    const boundedLimit = Math.max(1, Math.min(20, Math.trunc(limit) || 5));
+    const { blobs } = await this.store.list({ prefix: "runs/", consistency: "strong" });
+    const runs = await Promise.all(blobs.map((item) => this.store.get(item.key, strongJson) as Promise<RunState | null>));
+    return runs
+      .filter((run): run is RunState => Boolean(run?.request.brands.some((item) =>
+        item.normalize("NFKC").toLocaleLowerCase("ru-RU").trim() === normalized
+      )))
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+      .slice(0, boundedLimit)
+      .map((run) => ({
+        id: run.id,
+        status: run.status,
+        updatedAt: run.updatedAt,
+        brands: [...run.request.brands],
+        completedPartitions: run.progress.completedPartitions,
+        totalPartitions: run.progress.totalPartitions
+      }));
+  }
+
   async getRun(id: string): Promise<RunState | undefined> {
     return (await this.store.get(`runs/${segment(id)}.json`, strongJson) as RunState | null) ?? undefined;
   }
 
+  async listRecentRuns(ownerEmail?: string, limit = 8): Promise<RunHistoryItem[]> {
+    const boundedLimit = Math.max(1, Math.min(20, Math.trunc(limit) || 8));
+    const { blobs } = await this.store.list({ prefix: "run-history/", consistency: "strong" });
+    const history = await Promise.all(blobs.map((item) => this.store.get(item.key, strongJson) as Promise<(RunHistoryItem & { ownerEmail?: string }) | null>));
+    return history
+      .filter((item): item is RunHistoryItem & { ownerEmail?: string } => Boolean(item && (!ownerEmail || item.ownerEmail === ownerEmail)))
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+      .slice(0, boundedLimit)
+      .map(({ ownerEmail: _ownerEmail, ...item }) => item);
+  }
+
   async saveRun(run: RunState): Promise<void> {
-    await this.withLease(`run:${run.id}`, 20_000, () => this.store.setJSON(`runs/${segment(run.id)}.json`, run));
+    await this.withLease(`run:${run.id}`, 20_000, async () => {
+      await this.store.setJSON(`runs/${segment(run.id)}.json`, run);
+      if (run.collectionFinishedAt) {
+        await this.store.setJSON(`run-history/${segment(run.id)}.json`, {
+          ...runHistoryItem(run),
+          ownerEmail: run.ownerEmail
+        });
+      }
+    });
   }
 
   async getProfile(domain: string): Promise<SiteProfile | undefined> {
@@ -52,6 +100,24 @@ export class BlobRepository implements Repository {
     await this.withLease(`products:${spreadsheetId}`, 20_000, () =>
       this.store.setJSON(`sheets/${segment(spreadsheetId)}/products.json`, structuredClone(records))
     );
+  }
+
+  async listSourceCards(spreadsheetId: string): Promise<SourceCardRecord[]> {
+    return (await this.store.get(`sheets/${segment(spreadsheetId)}/source-cards.json`, strongJson) as SourceCardRecord[] | null) ?? [];
+  }
+
+  async saveSourceCards(spreadsheetId: string, records: SourceCardRecord[]): Promise<void> {
+    await this.withLease(`source-cards:${spreadsheetId}`, 20_000, async () => {
+      const sourceCards = new Map((await this.listSourceCards(spreadsheetId)).map((item) => [item.key, item]));
+      for (const record of records) {
+        const previous = sourceCards.get(record.key);
+        sourceCards.set(record.key, {
+          ...structuredClone(record),
+          firstSeenAt: previous?.firstSeenAt ?? record.firstSeenAt
+        });
+      }
+      await this.store.setJSON(`sheets/${segment(spreadsheetId)}/source-cards.json`, [...sourceCards.values()]);
+    });
   }
 
   async getSnapshots(spreadsheetId: string): Promise<Record<string, Record<string, Observation>>> {

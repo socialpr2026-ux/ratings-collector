@@ -13,6 +13,7 @@ function polzaFamily(source: string): string {
       <div class="catalog-card" itemscope itemtype="https://schema.org/Product">
         <link itemprop="url" href="/catalog/kagotsel-tabletki-12-mg-10-sht_6853/">
         <meta itemprop="sku" content="6853">
+        <meta itemprop="name" content="Кагоцел, таблетки 12 мг, 10 шт.">
         <span itemprop="aggregateRating"><meta itemprop="reviewCount" content="5"><meta itemprop="ratingValue" content="5"></span>
       </div>
       <div class="catalog-card" itemscope itemtype="https://schema.org/Product">
@@ -31,13 +32,13 @@ function polzaCard(source: string): string {
       <div itemprop="aggregateRating" itemscope>
         <meta itemprop="reviewCount" content="5"><meta itemprop="ratingValue" content="5">
       </div>
-      ${polzaReviewProof(5)}
+      ${polzaReviewProof(5, "6853")}
     </main>
   `);
 }
 
-function polzaReviewProof(reviews: number): string {
-  return `<div id="review_block"><div class="reviews__amount">${reviews}</div>
+function polzaReviewProof(reviews: number, productId: string): string {
+  return `<div id="review_block"><input class="js-product_id" name="product_id" value="${productId}"><div class="reviews__amount">${reviews}</div>
     <div class="reviews__list"><div class="reviews__item review-item">Проверенный отзыв</div></div></div>`;
 }
 
@@ -74,6 +75,63 @@ function translatedFinal(source: URL): string {
 }
 
 describe("recovered first-party pharmacy adapters", () => {
+  it("collects the public AquaOptic 250 ml Polza card with five visible reviews", async () => {
+    const card = "https://polza.ru/catalog/akvaoptik-rastvor-dlya-linz-250-ml_27787/";
+    const adapter = new PolzaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(translated(card, `
+      <div class="catalog-card" itemscope itemtype="https://schema.org/Product"><meta itemprop="sku" content="27787">
+        <link itemprop="url" href="${card}">
+      </div>
+      <main itemscope itemtype="https://schema.org/Product"><meta itemprop="sku" content="27787">
+        <link itemprop="url" href="${card}">
+        <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="5"><meta itemprop="ratingValue" content="5"></div>
+        <div id="review_block"><input class="js-product_id" name="product_id" value="27787"><div class="reviews__amount">5</div>
+          <div class="reviews__item review-item">Отзыв 1</div>
+          <div class="reviews__item review-item">Отзыв 2</div>
+          <div class="reviews__item review-item">Отзыв 3</div>
+          <div class="reviews__item review-item">Отзыв 4</div>
+          <div class="reviews__item review-item">Отзыв 5</div>
+        </div>
+      </main>`), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "polza.ru", platform: "polza.ru", listingId: "27787", brand: "АкваОптик", url: card, metadata: {}
+    }, { region: "Москва" })).resolves.toMatchObject({
+      listingId: "27787", reviews: 5, rating: 5, status: "ok", source: "polza-product-microdata:google-translate"
+    });
+  });
+
+  it("fails closed when the visible Polza review block belongs to another product", async () => {
+    const card = "https://polza.ru/catalog/akvaoptik-rastvor-dlya-linz-250-ml_27787/";
+    const adapter = new PolzaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(translated(card, `
+      <main itemscope itemtype="https://schema.org/Product"><meta itemprop="sku" content="27787">
+        <link itemprop="url" href="${card}">
+        <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="5"><meta itemprop="ratingValue" content="5"></div>
+      </main>
+      <div id="review_block"><input class="js-product_id" name="product_id" value="30714">
+        <div class="reviews__amount">5</div><div class="reviews__item review-item">Другой вариант</div>
+      </div>`), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "polza.ru", platform: "polza.ru", listingId: "27787", brand: "АкваОптик", url: card, metadata: {}
+    }, { region: "Москва" })).rejects.toThrow(/product aggregate is incomplete/);
+  });
+
+  it("collects an exact Polza card with the public no-reviews state and no AggregateRating", async () => {
+    const card = "https://polza.ru/catalog/akvaoptik-rastvor-dlya-obrabotki-i-khraneniya-linz-120-ml_30712/";
+    const adapter = new PolzaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(translated(card, `
+      <main itemscope itemtype="https://schema.org/Product"><meta itemprop="sku" content="30712">
+        <link itemprop="url" href="${card}"></main>
+      <div id="review_block"><input class="js-product_id" name="product_id" value="30712">
+        <div class="reviews__empty" data-empty-reviews>Отзывов пока нет</div>
+      </div>`), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "polza.ru", platform: "polza.ru", listingId: "30712", brand: "АкваОптик", url: card, metadata: {}
+    }, { region: "Москва" })).resolves.toMatchObject({
+      listingId: "30712", reviews: 0, rating: null, status: "no_reviews"
+    });
+  });
+
   it("discovers only exact Polza family cards and collects the product aggregate", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
@@ -93,7 +151,10 @@ describe("recovered first-party pharmacy adapters", () => {
 
     const refs = await adapter.discover("Кагоцел", { region: "Москва" });
     expect(refs).toHaveLength(1);
-    expect(refs[0]).toMatchObject({ listingId: "6853", url: "https://polza.ru/catalog/kagotsel-tabletki-12-mg-10-sht_6853/" });
+    expect(refs[0]).toMatchObject({
+      listingId: "6853", url: "https://polza.ru/catalog/kagotsel-tabletki-12-mg-10-sht_6853/",
+      title: "Кагоцел, таблетки 12 мг, 10 шт."
+    });
 
     const result = await adapter.collect(refs[0], { region: "Москва" });
     expect(result).toMatchObject({ listingId: "6853", reviews: 5, rating: 5, status: "ok", source: "polza-product-microdata:google-translate" });
@@ -106,7 +167,7 @@ describe("recovered first-party pharmacy adapters", () => {
       <main itemscope itemtype="https://schema.org/Product">
         <meta itemprop="sku" content="56071">
         <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5"></div>
-        <div id="review_block"><div class="reviews__empty">Отзывов пока нет</div></div>
+        <div id="review_block"><input class="js-product_id" name="product_id" value="56071"><div class="reviews__empty">Отзывов пока нет</div></div>
       </main>`), { headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
     const adapter = new PolzaAdapter(new MemoryEvidenceStore(), fetchMock);
 
@@ -155,7 +216,7 @@ describe("recovered first-party pharmacy adapters", () => {
       if (url.pathname.includes("_20630")) return new Response(translated(card, `
         <main itemscope><meta itemprop="sku" content="20630"><div itemprop="aggregateRating">
           <meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5">
-        </div>${polzaReviewProof(1)}</main>`), { headers: { "content-type": "text/html" } });
+        </div>${polzaReviewProof(1, "20630")}</main>`), { headers: { "content-type": "text/html" } });
       throw new Error(`unexpected ${url}`);
     }) as unknown as typeof fetch;
     const adapter = new PolzaAdapter(new MemoryEvidenceStore(), fetchMock);
@@ -196,7 +257,7 @@ describe("recovered first-party pharmacy adapters", () => {
         return new Response(translated(card, `
           <main itemscope><meta itemprop="sku" content="20630"><div itemprop="aggregateRating">
             <meta itemprop="reviewCount" content="1"><meta itemprop="ratingValue" content="5">
-          </div>${polzaReviewProof(1)}</main>`), { headers: { "content-type": "text/html" } });
+          </div>${polzaReviewProof(1, "20630")}</main>`), { headers: { "content-type": "text/html" } });
       }
       throw new Error(`unexpected ${url}`);
     }) as unknown as typeof fetch;
@@ -334,6 +395,52 @@ describe("recovered first-party pharmacy adapters", () => {
     expect(fetchMock.mock.calls.some(([input]) => new URL(String(input)).hostname === "translate.google.com")).toBe(true);
   });
 
+  it("recovers all four exact Enterolactis ASNA cards through their current family routes", async () => {
+    const cards = new Map([
+      ["/cards/enterolaktis_plyus_kaps_n15_sofar_spa.html", "921517892"],
+      ["/cards/enterolaktis_duo_sashe_5g_20_sht__sofar_s_p_a.html", "921517893"],
+      ["/cards/enterolaktis_fibra_sirop_i_kapsula_s_poroshkom_v_kryshkakh_10ml_n10_sofar_spa.html", "921517894"],
+      ["/cards/enterolaktis_fibra_sirop_i_kapsula_s_poroshkom_v_kryshkakh_10ml_n12_sofar_spa.html", "921517895"]
+    ]);
+    const families = new Map([
+      ["/product/enterolaktis_plyus/", ["/cards/enterolaktis_plyus_kaps_n15_sofar_spa.html"]],
+      ["/product/enterolaktis_duo/", ["/cards/enterolaktis_duo_sashe_5g_20_sht__sofar_s_p_a.html"]],
+      ["/product/enterolaktis_fibra/", [
+        "/cards/enterolaktis_fibra_sirop_i_kapsula_s_poroshkom_v_kryshkakh_10ml_n10_sofar_spa.html",
+        "/cards/enterolaktis_fibra_sirop_i_kapsula_s_poroshkom_v_kryshkakh_10ml_n12_sofar_spa.html"
+      ]]
+    ]);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www.asna.ru" && url.pathname.startsWith("/sitemap/")) {
+        return new Response("<urlset></urlset>");
+      }
+      if (url.hostname !== "www-asna-ru.translate.goog") throw new Error(`unexpected ${url}`);
+      const source = `https://www.asna.ru${url.pathname}`;
+      if (url.pathname === "/product/enterolaktis/") {
+        return new Response(translated(source, "<main>generic family unavailable</main>"), { headers: { "content-type": "text/html" } });
+      }
+      const familyCards = families.get(url.pathname);
+      if (familyCards) {
+        return new Response(translated(source, familyCards.map((path) =>
+          `<a href="https://www-asna-ru.translate.goog${path}?_x_tr_sl=ru&amp;_x_tr_tl=en">${path}</a>`
+        ).join("")), { headers: { "content-type": "text/html" } });
+      }
+      const sku = cards.get(url.pathname);
+      if (!sku) throw new Error(`unexpected ASNA route: ${url.pathname}`);
+      return new Response(asnaCard(`https://www.asna.ru${url.pathname}`, sku, 0), {
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock as unknown as typeof fetch);
+
+    const refs = await adapter.discover("Энтеролактис", { region: "Москва" });
+    expect(refs.map((item) => item.listingId).sort()).toEqual([...cards.values()].sort());
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, { region: "Москва" })));
+    expect(observations).toHaveLength(4);
+    expect(observations.every((item) => item.reviews === 0 && item.rating === null && item.status === "no_reviews")).toBe(true);
+  });
+
   it("does not publish ASNA's orphan AggregateRating when the feedback list is empty", async () => {
     const card = "https://www.asna.ru/cards/tsereton_400mg_n28_kaps_soteks.html";
     const fetchMock = vi.fn(async () => new Response(asnaCard(card, "20046", 1, false, true), {
@@ -346,6 +453,26 @@ describe("recovered first-party pharmacy adapters", () => {
     }, { region: "Москва" });
 
     expect(result).toMatchObject({ listingId: "20046", reviews: 0, rating: null, status: "no_reviews" });
+  });
+
+  it("accepts ASNA's exact add-review-only product section as an explicit empty state", async () => {
+    const card = "https://www.asna.ru/cards/enterolaktis_plyus_kaps_n15_sofar_spa.html";
+    const title = "Энтеролактис Плюс капсулы 15 шт. Софар С.п.А";
+    const page = translated(card, `<link rel="canonical" href="${card}">
+      <div class="productPage__content product__item" itemscope itemtype="http://schema.org/Product">
+        <h1>${title}</h1><meta itemprop="sku" content="921517892">
+        <div class="product__feedback anchorLink" id="feedBack">
+          <h2 class="product__feedbackTitle product__sectionTitle"><span>Оставить отзыв о</span> ${title}</h2>
+          <div id="product__feedbackBtnWrapper" class="product__feedbackBtnWrapper"></div>
+        </div>
+      </div>`);
+    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(page, {
+      headers: { "content-type": "text/html" }
+    })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "asna.ru", platform: "asna.ru", listingId: "921517892", brand: "Энтеролактис", url: card, metadata: {}
+    }, { region: "Москва" })).resolves.toMatchObject({ reviews: 0, rating: null, status: "no_reviews" });
   });
 
   it("fails closed when a partial ASNA page drops the source-bound feedback section", async () => {
@@ -497,7 +624,7 @@ describe("recovered first-party pharmacy adapters", () => {
       if (url.hostname === "polza-ru.translate.goog" && url.pathname.includes("_53076")) {
         return new Response(translated(polzaProductUrl, `<main itemscope><meta itemprop="sku" content="53076">
           <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="3"><meta itemprop="ratingValue" content="5"></div>
-          ${polzaReviewProof(3)}
+          ${polzaReviewProof(3, "53076")}
         </main>`), { headers: { "content-type": "text/html" } });
       }
       if (url.hostname === "www.asna.ru" && url.pathname.endsWith("sitemap_cards.xml")) {

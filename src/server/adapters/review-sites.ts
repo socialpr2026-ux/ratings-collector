@@ -290,7 +290,7 @@ function microdataMetrics(html: string, pageUrl: string, brand: string, definiti
   const bestRating = numberFrom(uniqueMetric("bestRating")) ?? 5;
   const reviews = integerFrom(uniqueMetric("reviewCount"));
   const text = $.root().text().replace(/\s+/g, " ");
-  const confirmedZero = /(?:отзывов пока нет|нет отзывов|0\s+отзыв)/i.test(text);
+  const confirmedZero = /(?:отзывов пока нет|нет отзывов|(?:^|[^\d])0\s+отзыв)/i.test(text);
   return {
     title: json.title ?? firstText($, ["h1[itemprop='name']", "h1", "meta[property='og:title']"]),
     canonicalUrl: json.canonicalUrl ?? canonicalFromPage($, pageUrl, definition),
@@ -316,7 +316,7 @@ function parseIrecommend(html: string, pageUrl: string, brand: string): ParsedMe
     firstText($, [".read-all-reviews-link .counter"]) ??
     text.match(/Читать\s+все\s+отзывы\s*([\d\s\u00a0]+)/i)?.[1]
   );
-  const confirmedZero = /(?:отзывов пока нет|нет отзывов|0\s+отзыв)/i.test(text);
+  const confirmedZero = /(?:отзывов пока нет|нет отзывов|(?:^|[^\d])0\s+отзыв)/i.test(text);
   const allReviewsHref = $("a").filter((_index, node) => /читать\s+все\s+отзывы/i.test($(node).text())).first().attr("href");
   const definition = REVIEW_SITE_DEFINITIONS.find((item) => item.domain === "irecommend.ru")!;
   const canonicalUrl = absoluteProductUrl(allReviewsHref, pageUrl, definition) ?? canonicalFromPage($, pageUrl, definition);
@@ -344,6 +344,113 @@ function parseOtzovik(html: string, pageUrl: string, brand: string): ParsedMetri
   const $ = load(html);
   const listingId = $("[data-pid]").first().attr("data-pid")?.trim();
   return { ...parsed, listingId: listingId && /^\d+$/.test(listingId) ? listingId : parsed.listingId };
+}
+
+function parseVseotzyvy(html: string, pageUrl: string, brand: string): ParsedMetrics {
+  const definition = REVIEW_SITE_DEFINITIONS.find((item) => item.domain === "vseotzyvy.ru")!;
+  const base = microdataMetrics(html, pageUrl, brand, definition);
+  if (base.reviews !== undefined && (base.reviews === 0 || base.rating !== undefined)) return base;
+
+  const $ = load(html);
+  const text = $.root().text().replace(/\s+/g, " ").trim();
+  const title = firstText($, ["h1"]);
+  const reviews = integerFrom(
+    text.match(/Отзывы\s+покупателей\s+о\s+.+?\(([\d\s\u00a0]+)\s+отзыв/iu)?.[1] ??
+    text.match(/(?:^|\s)([\d\s\u00a0]+)\s+отзыв(?:а|ов)?(?:\s|$)/iu)?.[1]
+  );
+  const rawRating = numberFrom(
+    $("img[alt*='Оценка'][alt*='из 5']").first().attr("alt")
+      ?.match(/Оценка\s+([\d.,]+)\s+из\s+5/iu)?.[1] ??
+    text.match(/(?:^|\s)([\d.,]+)\s*[·•]\s*[\d\s\u00a0]+\s+оцен/iu)?.[1]
+  );
+  const canonicalUrl = canonicalFromPage($, pageUrl, definition) ?? canonicalizeUrl(pageUrl);
+  const listingId = definition.idFromUrl(new URL(canonicalUrl));
+  return {
+    title,
+    canonicalUrl,
+    listingId,
+    reviews,
+    rating: reviews === 0 ? undefined : rawRating,
+    ratingCount: reviews,
+    rawRating,
+    rawRatingScale: 5,
+    source: "vseotzyvy-visible-aggregate"
+  };
+}
+
+function otzyvruOrganizationMetrics(html: string, pageUrl: string, brand: string): ParsedMetrics | undefined {
+  const $ = load(html);
+  const page = canonicalizeUrl(pageUrl);
+  const candidates: ParsedMetrics[] = [];
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const node = value as Record<string, unknown>;
+    visit(node["@graph"]);
+    const types = Array.isArray(node["@type"]) ? node["@type"] : [node["@type"]];
+    if (!types.some((type) => String(type).toLocaleLowerCase("en-US") === "organization")) return;
+    const name = typeof node.name === "string" ? node.name.normalize("NFKC").replace(/\s+/g, " ").trim() : "";
+    const aggregate = node.aggregateRating;
+    if (!name || !matchesBrand(name, brand) || !aggregate || typeof aggregate !== "object") return;
+    let sourceUrl: string;
+    try { sourceUrl = canonicalizeUrl(new URL(String(node.url ?? ""), pageUrl).toString()); }
+    catch { return; }
+    if (sourceUrl !== page) return;
+    const rating = aggregate as Record<string, unknown>;
+    const reviews = integerFrom(String(rating.reviewCount ?? ""));
+    const ratingCount = integerFrom(String(rating.ratingCount ?? ""));
+    const rawRating = numberFrom(String(rating.ratingValue ?? ""));
+    const scale = numberFrom(String(rating.bestRating ?? "5")) ?? 5;
+    if (reviews === undefined || rawRating === undefined || scale <= 0 || scale > 5 || rawRating <= 0 || rawRating > scale) return;
+    candidates.push({
+      title: name,
+      canonicalUrl: sourceUrl,
+      reviews,
+      rating: normalizeRating(rawRating, scale),
+      ratingCount,
+      rawRating,
+      rawRatingScale: scale,
+      source: "otzyvru-json-ld-organization"
+    });
+  };
+  $("script[type='application/ld+json']").each((_index, node) => {
+    try { visit(JSON.parse($(node).text()) as unknown); }
+    catch { /* malformed unrelated JSON-LD */ }
+  });
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+function parseOtzyvru(html: string, pageUrl: string, brand: string): ParsedMetrics {
+  const definition = REVIEW_SITE_DEFINITIONS.find((item) => item.domain === "otzyvru.com")!;
+  const parsed = microdataMetrics(html, pageUrl, brand, definition);
+  const organization = otzyvruOrganizationMetrics(html, pageUrl, brand);
+  const $ = load(html);
+  const summary = $(".item-card #descr").first();
+  const visibleRating = summary.length === 1 ? numberFrom(summary.find(".rtng_value").first().text()) : undefined;
+  const bestRating = summary.length === 1 ? numberFrom(summary.find(".rtng_best").first().text()) ?? 5 : 5;
+  const visibleReviews = summary.length === 1 ? integerFrom(summary.find(".reviews_count").first().text()) : undefined;
+  if (organization && visibleReviews !== undefined && organization.reviews !== visibleReviews) {
+    throw new ParserChangedError("otzyvru.com: JSON-LD и видимый счетчик отзывов расходятся");
+  }
+  if (organization && visibleRating !== undefined && organization.rating !== normalizeRating(visibleRating, bestRating)) {
+    throw new ParserChangedError("otzyvru.com: JSON-LD и видимый рейтинг расходятся");
+  }
+  const numericId = $("h1[data-id]").first().attr("data-id")?.trim();
+  return {
+    ...parsed,
+    title: organization?.title ?? parsed.title ?? firstText($, ["h1", "#itemname"]),
+    canonicalUrl: organization?.canonicalUrl ?? parsed.canonicalUrl,
+    listingId: numericId && /^\d+$/.test(numericId) ? numericId : parsed.listingId,
+    reviews: organization?.reviews ?? visibleReviews ?? parsed.reviews,
+    rating: organization?.rating ?? (visibleRating === undefined ? parsed.rating : normalizeRating(visibleRating, bestRating)),
+    ratingCount: organization?.ratingCount ?? parsed.ratingCount,
+    rawRating: organization?.rawRating ?? visibleRating ?? parsed.rawRating,
+    rawRatingScale: organization?.rawRatingScale ?? (visibleRating === undefined ? parsed.rawRatingScale : bestRating),
+    source: organization?.source ?? (visibleReviews !== undefined && visibleRating !== undefined ? "otzyvru-visible" : parsed.source)
+  };
 }
 
 function parsePravogolosa(html: string, pageUrl: string, brand: string): ParsedMetrics {
@@ -403,10 +510,15 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
     domain: "vseotzyvy.ru",
     origin: "https://vseotzyvy.ru/",
     rateLimitMs: 700,
-    searchUrl: (brand) => `https://vseotzyvy.ru/category/?search=${encodeURIComponent(brand)}`,
-    isProductUrl: (url) => /^\/item\/\d+\/reviews-[^/]+\/?$/i.test(url.pathname),
-    idFromUrl: (url) => pageId(/^\/item\/(\d+)\//i, url),
-    parse: (html, pageUrl, brand) => microdataMetrics(html, pageUrl, brand, REVIEW_SITE_DEFINITIONS[2])
+    healthCanary: {
+      url: "https://vseotzyvy.ru/otzyvy/kagotsel-49555",
+      brand: "Кагоцел"
+    },
+    searchUrl: (brand) => `https://vseotzyvy.ru/search?q=${encodeURIComponent(brand)}`,
+    isProductUrl: (url) => /^\/item\/\d+\/reviews-[^/]+\/?$/i.test(url.pathname) ||
+      /^\/otzyvy\/[a-z0-9-]+-\d+\/?$/i.test(url.pathname),
+    idFromUrl: (url) => pageId(/^\/item\/(\d+)\//i, url) ?? pageId(/-(\d+)\/?$/i, url),
+    parse: parseVseotzyvy
   },
   {
     domain: "otzyvru.com",
@@ -415,11 +527,7 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
     searchUrl: (brand) => `https://www.otzyvru.com/search/?q=${encodeURIComponent(brand)}`,
     isProductUrl: (url) => /^\/[a-z0-9][a-z0-9-]*\/?$/i.test(url.pathname) && !/^\/(?:search|login|register|about|contact-us)\/?$/i.test(url.pathname),
     idFromUrl: (url) => pageId(/\/(?:amp\/)?([a-z0-9][a-z0-9-]*)\/?$/i, url),
-    parse: (html, pageUrl, brand) => {
-      const parsed = microdataMetrics(html, pageUrl, brand, REVIEW_SITE_DEFINITIONS[3]);
-      const numericId = html.match(/<h1\b[^>]*\bdata-id=["'](\d+)["']/i)?.[1];
-      return { ...parsed, listingId: numericId ?? parsed.listingId };
-    }
+    parse: parseOtzyvru
   },
   {
     domain: "uteka.ru",
@@ -483,18 +591,22 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
       url: "https://ru.otzyv.com/kagotsel",
       brand: "Кагоцел"
     },
-    searchUrl: (brand) => `https://ru.otzyv.com/${brandSlugs(brand)[0] ?? ""}`,
+    // The live search route applies a case-sensitive access rule to Cyrillic
+    // queries: its own lowercase form is stable while title-case can return
+    // 403 for the same exact brand.
+    searchUrl: (brand) => `https://ru.otzyv.com/search/?q=${encodeURIComponent(brand.toLocaleLowerCase("ru-RU"))}`,
     isProductUrl: (url) => /^\/[a-z0-9][a-z0-9-]*\/?$/i.test(url.pathname) && !/^\/(?:login|register|meditsina|search)\/?$/i.test(url.pathname),
     idFromUrl: (url) => pageId(/^\/([a-z0-9][a-z0-9-]*)\/?$/i, url),
     parse: (html, pageUrl, brand) => microdataMetrics(html, pageUrl, brand, REVIEW_SITE_DEFINITIONS[8])
   }
 ];
 
-// These sites cannot currently provide a product-bound review aggregate:
-// Medum blocks the free paths, while Eapteka and Polza removed product reviews.
+// These sites cannot currently provide a product-bound public review aggregate:
+// Medum blocks the free paths, while Magnit and eTabl expose only hidden
+// aggregates without a proven customer-visible block.
 // Keep every path explicit and fail closed instead of publishing zeroes.
-export const BLOCKED_FREE_MODE_DOMAINS = ["medum.ru", "eapteka.ru", "polza.ru"] as const;
-export const UNPROVEN_AGGREGATE_DOMAINS = [] as const;
+export const BLOCKED_FREE_MODE_DOMAINS = ["medum.ru"] as const;
+export const UNPROVEN_AGGREGATE_DOMAINS = ["apteka.magnit.ru", "etabl.ru"] as const;
 const PRAVOGOLOSA_HEALTH_CANARY = "ratingscollector-healthcheck-7f4c2a";
 
 function paginationCandidates($: CheerioAPI, pageUrl: string, definition: ReviewSiteDefinition): string[] {
@@ -517,12 +629,19 @@ function hasExplicitSearchNoResults($: CheerioAPI, brand: string, domain: string
   const text = $.root().text().replace(/\s+/g, " ").trim();
   if (domain === "otzyv.pro") return /Ничего не найдено!/iu.test(text);
   if (domain === "vseotzyvy.ru") {
-    return matchesBrand(text, brand) &&
-      /(?:Ничего не найдено|По вашему запросу ничего не найдено|Подходящих объектов не найдено)/iu.test(text);
+    const query = $("input[name='q'], input[type='search']").first().attr("value")?.replace(/\s+/g, " ").trim();
+    return matchesBrand(query || text, brand) &&
+      /(?:Ничего не найдено|По вашему запросу ничего не найдено|Подходящих объектов не найдено|Найдено\s+0\s+результат)/iu.test(text);
   }
   if (domain === "irecommend.ru") {
     const heading = $("h1").first().text().replace(/\s+/g, " ").trim();
     return matchesBrand(heading, brand) && /Не нашли\?\s*Попробуйте поиск по сайту/iu.test(text);
+  }
+  if (domain === "otzyvru.com" || domain === "ru.otzyv.com") {
+    const query = $("input[name='q']").first().attr("value")?.replace(/\s+/g, " ").trim();
+    const heading = $("h1").first().text().replace(/\s+/g, " ").trim();
+    return matchesBrand(query || heading, brand) &&
+      /(?:найдено\s+результатов\s*:\s*0|найдено\s*:\s*0\s+результат)/iu.test(text);
   }
   return false;
 }
@@ -531,16 +650,34 @@ async function readHtml(
   url: string,
   context: AdapterContext,
   fallbackFetch: typeof fetch | undefined,
-  dynamicBrowser = false
-): Promise<{ html: string; status: number }> {
+  dynamicBrowser = false,
+  captureUnsafeRedirect = false
+): Promise<{ html: string; status: number; redirectLocation?: string }> {
   const response = await safeFetch(url, {
     signal: context.signal,
     headers: dynamicBrowser
       ? { "x-ratings-browser": "1", "x-ratings-scroll": "1" }
       : undefined
-  }, context.fetch ?? fallbackFetch, 4, dynamicBrowser ? 90_000 : 45_000);
+  }, context.fetch ?? fallbackFetch, 4, dynamicBrowser ? 90_000 : 45_000, {
+    returnUnsafeRedirectResponse: captureUnsafeRedirect
+  });
   const html = await readTextBounded(response, 12_000_000, 60_000);
-  return { html, status: response.status };
+  return {
+    html,
+    status: response.status,
+    redirectLocation: response.headers.get("location") ?? undefined
+  };
+}
+
+function isRetiredVseotzyvyRedirect(requestedUrl: string, location: string | undefined): boolean {
+  if (!location) return false;
+  try {
+    const target = new URL(location, requestedUrl);
+    return target.protocol === "http:" && sameSite(target, "vseotzyvy.ru") &&
+      target.pathname === "/" && !target.search && !target.hash;
+  } catch {
+    return false;
+  }
 }
 
 export class ReviewSiteAdapter implements SiteAdapter {
@@ -566,9 +703,9 @@ export class ReviewSiteAdapter implements SiteAdapter {
     this.nextRequestAt = Date.now() + this.rateLimitMs;
   }
 
-  private async request(url: string, context: AdapterContext) {
+  private async request(url: string, context: AdapterContext, captureUnsafeRedirect = false) {
     await this.throttle();
-    return readHtml(url, context, this.fallbackFetch, this.definition.dynamicBrowser);
+    return readHtml(url, context, this.fallbackFetch, this.definition.dynamicBrowser, captureUnsafeRedirect);
   }
 
   private async requestJson(url: string, context: AdapterContext): Promise<{ payload: unknown; status: number }> {
@@ -813,6 +950,7 @@ export class ReviewSiteAdapter implements SiteAdapter {
   private async discoverDirectBrandPage(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = new Map<string, ProductRef>();
     let provedMissing = 0;
+    let provedNoResults = false;
     const slugs = this.definition.domain === "ru.otzyv.com" ? ruOtzyvBrandSlugs(brand) : brandSlugs(brand);
     for (const slug of slugs) {
       const url = canonicalizeUrl(new URL(slug, this.definition.origin).toString());
@@ -831,48 +969,122 @@ export class ReviewSiteAdapter implements SiteAdapter {
       }
       refs.set(url, this.refFor(url, brand, title));
     }
+    if (!refs.size && provedMissing === slugs.length) {
+      const searchUrl = canonicalizeUrl(this.definition.searchUrl(brand, context));
+      const { html, status } = await this.request(searchUrl, context);
+      if (status < 200 || status >= 300 || isBlockPage(html)) {
+        throw new AdapterBlockedError(`${this.definition.domain} не отдал поиск карточки бренда: HTTP ${status}`);
+      }
+      const $ = load(html);
+      $("a[href]").each((_index, node) => {
+        const title = $(node).text().normalize("NFKC").replace(/\s+/g, " ").trim();
+        if (!title || !matchesBrand(title, brand)) return;
+        const productUrl = absoluteProductUrl($(node).attr("href"), searchUrl, this.definition);
+        if (!productUrl) return;
+        refs.set(productUrl, this.refFor(productUrl, brand, title));
+      });
+      provedNoResults = hasExplicitSearchNoResults($, brand, this.definition.domain);
+      if (!refs.size && !provedNoResults) {
+        throw new AdapterBlockedError(`${this.definition.domain}: поиск не доказал ни карточку бренда, ни отсутствие результатов`);
+      }
+    }
     this.appendHistorical(refs, brand, context);
-    if (!refs.size && provedMissing === slugs.length) return [];
+    if (!refs.size && provedNoResults) return [];
     if (!refs.size) throw new AdapterBlockedError(`${this.definition.domain}: отсутствие карточки бренда не доказано`);
     return [...refs.values()];
   }
 
   private async discoverPravogolosa(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const searchUrl = canonicalizeUrl(this.definition.searchUrl(brand, context));
-    const { html, status } = await this.request(searchUrl, context);
-    if (status < 200 || status >= 300 || isBlockPage(html)) {
-      throw new AdapterBlockedError(`Поиск pravogolosa.net недоступен: HTTP ${status}`);
-    }
-    const $ = load(html);
-    const text = $.root().text().replace(/\s+/g, " ");
-    const count = integerFrom(text.match(/По вашему запросу\s*[«"]?[^»"]+[»"]?\s*всего найдено отзывов\s*:\s*([\d\s\u00a0]+)/iu)?.[1]);
-    if (count === 0) return [];
-    // The live site uses this second, equally conclusive empty-result copy for
-    // some queries. It is a proved no_results, not an access block.
-    if (/По запросу\s*[«"]?[^»"]+[»"]?\s*ничего не нашлось/iu.test(text)) return [];
-    if (count !== undefined) {
-      const refs = new Map<string, ProductRef>();
-      const candidates = new Map<string, { listingId: string; reviewCount: number }>();
+    const normalizeQuery = (value: string) => value.normalize("NFKC").replace(/\s+/g, " ").trim().toLocaleLowerCase("ru-RU");
+    const queue = [searchUrl];
+    const queued = new Set(queue);
+    const visited = new Set<string>();
+    const individualIds = new Set<string>();
+    const candidates = new Map<string, { listingId: string; reviewCount: number }>();
+    let advertisedCount: number | undefined;
+
+    while (queue.length && visited.size < MAX_SEARCH_PAGES) {
+      const pageUrl = queue.shift()!;
+      if (visited.has(pageUrl)) continue;
+      visited.add(pageUrl);
+      const { html, status } = await this.request(pageUrl, context);
+      if (status < 200 || status >= 300 || isBlockPage(html)) {
+        throw new AdapterBlockedError(`Поиск pravogolosa.net недоступен: HTTP ${status}`);
+      }
+      const $ = load(html);
+      const text = $.root().text().replace(/\s+/g, " ");
+      const result = text.match(/По вашему запросу\s*[«"]?\s*([^»"]+?)\s*[»"]?\s*всего найдено отзывов\s*:\s*([\d\s\u00a0]+)/iu);
+      const resultBrand = result?.[1];
+      const count = integerFrom(result?.[2]);
+      const empty = text.match(/По запросу\s*[«"]?\s*([^»"]+?)\s*[»"]?\s*ничего не нашлось/iu);
+      if (empty && normalizeQuery(empty[1]) === normalizeQuery(brand) && visited.size === 1) return [];
+      if (count === undefined || !resultBrand || normalizeQuery(resultBrand) !== normalizeQuery(brand)) {
+        throw new ParserChangedError("pravogolosa.net не связал результаты с точным поисковым запросом");
+      }
+      if (count === 0 && visited.size === 1) return [];
+      if (advertisedCount === undefined) advertisedCount = count;
+      if (count !== advertisedCount) {
+        throw new ParserChangedError("pravogolosa.net изменил число результатов между страницами поиска");
+      }
+
+      let conflictingCategoryCount = false;
       $("a[href]").each((_index, node) => {
         const href = $(node).attr("href");
         if (!href) return;
         try {
           const target = new URL(href, searchUrl);
-          if (!sameSite(target, "pravogolosa.net") || !this.definition.isProductUrl(target)) return;
-          const categoryReviews = integerFrom($(node).text().match(/(?:все|читать\s+все)\s+отзывы\s*\(?([\d\s\u00a0]+)\)?/iu)?.[1]);
-          if (categoryReviews === undefined || categoryReviews <= 0 || categoryReviews !== count) return;
-          target.protocol = "https:";
-          target.search = "";
-          target.searchParams.set("page", "show_category");
-          target.searchParams.set("catid", new URL(href, searchUrl).searchParams.get("catid")!);
-          target.searchParams.set("order", "0");
-          target.searchParams.set("expand", "0");
-          const canonical = canonicalizeUrl(target.toString());
-          const listingId = this.definition.idFromUrl(new URL(canonical));
-          if (listingId) candidates.set(canonical, { listingId, reviewCount: categoryReviews });
+          if (!sameSite(target, "pravogolosa.net") || target.pathname !== "/otzyvcategory") return;
+          if (target.searchParams.get("page") === "show_ad" && /^\d+$/.test(target.searchParams.get("adid") ?? "")) {
+            individualIds.add(target.searchParams.get("adid")!);
+          }
+          if (this.definition.isProductUrl(target)) {
+            const categoryReviews = integerFrom($(node).text().match(/(?:все|читать\s+все)\s+отзывы\s*\(?([\d\s\u00a0]+)\)?/iu)?.[1]);
+            // Search totals count every matching review body and may mix the
+            // requested medicine with analogues. The linked category has its
+            // own aggregate, verified below against the category H1 and count.
+            if (categoryReviews === undefined || categoryReviews <= 0) return;
+            target.protocol = "https:";
+            target.search = "";
+            target.searchParams.set("page", "show_category");
+            target.searchParams.set("catid", new URL(href, pageUrl).searchParams.get("catid")!);
+            target.searchParams.set("order", "0");
+            target.searchParams.set("expand", "0");
+            const canonical = canonicalizeUrl(target.toString());
+            const listingId = this.definition.idFromUrl(new URL(canonical));
+            const previous = candidates.get(canonical);
+            if (previous && previous.reviewCount !== categoryReviews) {
+              conflictingCategoryCount = true;
+              return;
+            }
+            if (listingId) candidates.set(canonical, { listingId, reviewCount: categoryReviews });
+          }
+          if (target.searchParams.get("page") === "search" && /^\d+$/.test(target.searchParams.get("start") ?? "")) {
+            const query = target.searchParams.get("text_search");
+            if (query && normalizeQuery(query) !== normalizeQuery(brand)) return;
+            target.protocol = "https:";
+            const next = canonicalizeUrl(target.toString());
+            if (!visited.has(next) && !queued.has(next)) {
+              queued.add(next);
+              queue.push(next);
+            }
+          }
         } catch { /* malformed category link */ }
       });
+      if (conflictingCategoryCount) {
+        throw new ParserChangedError("pravogolosa.net показал противоречивые итоги категории");
+      }
+    }
 
+    if (queue.length) {
+      throw new AdapterBlockedError(`Поиск pravogolosa.net достиг лимита ${MAX_SEARCH_PAGES} страниц без доказанного окончания`);
+    }
+    if (advertisedCount === undefined || individualIds.size !== advertisedCount) {
+      throw new ParserChangedError("pravogolosa.net не отдал полный набор заявленных результатов поиска");
+    }
+
+    if (advertisedCount > 0) {
+      const refs = new Map<string, ProductRef>();
       let provedNonMatchingCategories = 0;
       for (const [canonical, candidate] of candidates) {
         const category = await this.request(canonical, context);
@@ -1158,7 +1370,30 @@ export class ReviewSiteAdapter implements SiteAdapter {
         source: "irecommend-search"
       };
     }
-    const { html, status } = await this.request(ref.url, context);
+    const { html, status, redirectLocation } = await this.request(
+      ref.url,
+      context,
+      this.definition.domain === "vseotzyvy.ru"
+    );
+    if (
+      this.definition.domain === "vseotzyvy.ru" &&
+      [301, 302, 303, 307, 308].includes(status) &&
+      isRetiredVseotzyvyRedirect(ref.url, redirectLocation)
+    ) {
+      return {
+        domain: this.definition.domain,
+        platform: this.definition.domain,
+        listingId: ref.listingId,
+        brand: ref.brand,
+        canonicalUrl: canonicalizeUrl(ref.url),
+        product: ref.title ?? ref.brand,
+        reviews: null,
+        rating: null,
+        status: "not_found",
+        capturedAt,
+        source: "review_site_missing_candidate"
+      };
+    }
     if (status === 404 || status === 410) {
       return {
         domain: this.definition.domain,
@@ -1313,7 +1548,7 @@ export class UnprovenAggregateAdapter implements SiteAdapter {
   }
 
   private message(): string {
-    return `unsupported_aggregate: ${this.domain} показывает отдельные тексты отзывов, но не доказан полный reviewCount и рейтинг; no_results не выводится`;
+    return `blocked: unsupported_aggregate: ${this.domain} не показывает рейтинг и отзывы на карточке товара; скрытые API-агрегаты не публикуются; no_results не выводится`;
   }
 
   async healthCheck(_context: AdapterContext): Promise<AdapterHealth> {
