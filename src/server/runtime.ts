@@ -75,7 +75,7 @@ export async function createCollectorRuntime(options: {
     fetch: options.fetch,
     yandexTranslateEnabled: false,
     googleComposerEnabled: true,
-    detailConcurrency: 1,
+    detailConcurrency: 2,
     detailDelayMs: 350,
     detailRetryDelayMs: 750
   });

@@ -23,6 +23,53 @@ function urlOf(input: RequestInfo | URL): URL {
   return new URL(input instanceof Request ? input.url : input.toString());
 }
 
+function ozonTile(sku: number, title: string, rating = "", reviews = "") {
+  return {
+    sku,
+    action: { link: `/product/product-${sku}/?from=search` },
+    mainState: [
+      { id: "name", textDS: { text: title } },
+      {
+        id: "rating",
+        labelListV2: {
+          icon: "ic_s_star",
+          items: [
+            { type: "text", text: { text: rating } },
+            { type: "text", text: { text: reviews } }
+          ]
+        }
+      }
+    ]
+  };
+}
+
+function ozonSearchPage(items: unknown[]) {
+  return {
+    widgetStates: { "tileGridDesktop-1-default-1": JSON.stringify({ items }) },
+    shared: JSON.stringify({ catalog: { totalPages: 1 } })
+  };
+}
+
+function ozonProductPage(sku: string, title: string, rating: number, reviews: number) {
+  return {
+    widgetStates: {
+      "webProductHeading-1-default-1": JSON.stringify({ title }),
+      "webGallery-1-default-1": JSON.stringify({ sku }),
+      "webReviewProductScore-1-default-1": JSON.stringify({
+        itemId: Number(sku),
+        url: `/product/product-${sku}/reviews/`,
+        reviewsCount: reviews,
+        totalScore: rating,
+        isHidden: false
+      }),
+      "webSingleProductScore-1-default-1": JSON.stringify({
+        link: `/product/product-${sku}/reviews/`,
+        text: `${rating} • ${reviews} отзывов`
+      })
+    }
+  };
+}
+
 function marketplaceFetch(usageUsd: number) {
   let activePaidCalls = 0;
   let maximumPaidCalls = 0;
@@ -105,6 +152,91 @@ describe("collector runtime fallback integration", () => {
     for (const value of [undefined, "", "false", "TRUE", " true ", "1"]) {
       expect(apifyFallbackEnabled(value)).toBe(false);
     }
+  });
+
+  it("prefetches exact Ozon cards with production concurrency two", async () => {
+    let activeDetails = 0;
+    let maximumActiveDetails = 0;
+    const items = Array.from({ length: 4 }, (_value, index) => {
+      const sku = 910001 + index;
+      return ozonTile(sku, `Бактоблис таблетки №${index + 10}`);
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const endpoint = urlOf(input);
+      const nested = new URL(endpoint.searchParams.get("url")!, "https://www.ozon.ru");
+      if (nested.pathname === "/search/") return json(ozonSearchPage(items));
+
+      const sku = nested.pathname.match(/-(\d+)\/$/)?.[1];
+      if (!sku) throw new Error(`Unexpected Ozon request: ${endpoint}`);
+      activeDetails += 1;
+      maximumActiveDetails = Math.max(maximumActiveDetails, activeDetails);
+      // Production intentionally spaces detail starts by 350 ms. Keep each
+      // fake response alive beyond that gap so the configured two-card window
+      // is observed deterministically instead of only on a busy test runner.
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      activeDetails -= 1;
+      return json(ozonProductPage(sku, `Бактоблис таблетки №${Number(sku) - 909991}`, 4.9, 10));
+    }) as unknown as typeof fetch;
+    const runtime = await createCollectorRuntime({
+      repository: new MemoryRepository(),
+      evidence: new MemoryEvidenceStore(),
+      fetch: fetchMock
+    });
+
+    const run = await runtime.service.executeRun((await runtime.service.createRun({
+      ...request,
+      domains: ["ozon.ru"],
+      brands: ["Бактоблис"]
+    })).id);
+
+    expect(maximumActiveDetails).toBe(2);
+    expect(run.partitions).toMatchObject([
+      { domain: "ozon.ru", brand: "Бактоблис", status: "complete", discovered: 4, collected: 4 }
+    ]);
+    expect(run.observations).toHaveLength(4);
+    expect(run.observations.every((item) => item.status === "ok" && item.reviews === 10)).toBe(true);
+  });
+
+  it("keeps an incomplete concurrent Ozon proof blocked instead of publishing a zero", async () => {
+    const blockedSku = "920001";
+    const items = [
+      ozonTile(Number(blockedSku), "Бактоблис таблетки №10"),
+      ozonTile(920002, "Бактоблис таблетки №20")
+    ];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const endpoint = urlOf(input);
+      const nestedValue = endpoint.searchParams.get("url");
+      const source = nestedValue
+        ? new URL(nestedValue, "https://www.ozon.ru")
+        : new URL(endpoint.pathname, "https://www.ozon.ru");
+      if (source.pathname === "/search/") return json(ozonSearchPage(items));
+
+      const sku = source.pathname.match(/-(\d+)\/$/)?.[1];
+      if (sku === blockedSku) return new Response("temporary gateway failure", { status: 502 });
+      if (!sku) throw new Error(`Unexpected Ozon request: ${endpoint}`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return json(ozonProductPage(sku, "Бактоблис таблетки №20", 4.9, 20));
+    }) as unknown as typeof fetch;
+    const runtime = await createCollectorRuntime({
+      repository: new MemoryRepository(),
+      evidence: new MemoryEvidenceStore(),
+      fetch: fetchMock
+    });
+
+    const run = await runtime.service.executeRun((await runtime.service.createRun({
+      ...request,
+      domains: ["ozon.ru"],
+      brands: ["Бактоблис"]
+    })).id);
+
+    expect(run.partitions).toMatchObject([{
+      domain: "ozon.ru",
+      brand: "Бактоблис",
+      status: "blocked",
+      message: expect.stringMatching(/exact product proof is unavailable|HTTP 502/i)
+    }]);
+    expect(run.observations.some((item) => item.listingId === blockedSku)).toBe(false);
+    expect(run.observations.some((item) => item.reviews === 0 || item.status === "no_reviews")).toBe(false);
   });
 
   it("uses one capped 0.25 USD Ozon batch reservation and ignores stale v2 reservations", async () => {
