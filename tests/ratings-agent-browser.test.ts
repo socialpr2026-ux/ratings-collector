@@ -94,6 +94,29 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("routes Vseotzyvy search and product proof through fixed egress without Sandbox", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("compact Vseotzyvy proof"));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const targets = [
+      "https://vseotzyvy.ru/search?q=Кагоцел",
+      "https://vseotzyvy.ru/otzyvy/kagotsel-49555"
+    ];
+
+    for (const target of targets) {
+      const response = await routedFetch(target);
+      expect(await response.text()).toBe("compact Vseotzyvy proof");
+      const call = directFetch.mock.calls.at(-1)!;
+      expect(call[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+      expect(JSON.parse(String((call[1] as RequestInit).body))).toEqual({ url: new URL(target).toString() });
+    }
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("routes Pravogolosa through the static function egress without acquiring Sandbox", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (_input: RequestInfo | URL) => new Response("proved empty result"));

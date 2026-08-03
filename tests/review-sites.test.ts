@@ -940,6 +940,22 @@ describe("first-party review-site adapters", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("health-checks Vseotzyvy on a source-bound aggregate card instead of the challenged homepage", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      expect(url.pathname).toBe("/otzyvy/kagotsel-49555");
+      return new Response(
+        `<link rel="canonical" href="https://vseotzyvy.ru/otzyvy/kagotsel-49555">` +
+        `<h1>Кагоцел отзывы</h1><img alt="Оценка 5 из 5">` +
+        `<div>5 · 72 оценки</div><h2>Отзывы покупателей о Кагоцел (72 отзыва)</h2>`
+      );
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("vseotzyvy.ru", fetchMock);
+
+    await expect(adapter.healthCheck(context)).resolves.toMatchObject({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("uses direct brand pages on both Otzyv domains and never replaces their slug identity", async () => {
     for (const domain of ["otzyvru.com", "ru.otzyv.com"]) {
       const origin = domain === "otzyvru.com" ? "https://www.otzyvru.com" : "https://ru.otzyv.com";

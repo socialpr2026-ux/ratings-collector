@@ -498,6 +498,74 @@ describe("static iRecommend gateway", () => {
   });
 });
 
+describe("static Vseotzyvy reader gateway", () => {
+  const token = "x".repeat(32);
+  const callGateway = (url: string) => staticReviewFetch(
+    new Request("https://ratings.example/api/internal/static-review-fetch", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ url })
+    }),
+    { INTERNAL_AGENT_TOKEN: token }
+  );
+
+  it("compacts a complete exact search and product aggregate from the source-bound reader", async () => {
+    const search = "https://vseotzyvy.ru/search?q=%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB";
+    const product = "https://vseotzyvy.ru/otzyvy/kagotsel-49555";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+      if (url.includes("/search?")) return new Response(`Title: Поиск: Кагоцел
+
+URL Source: ${search}
+
+Markdown Content:
+# Поиск
+Найдено 2 результата
+[Image 1: Кагоцел](https://vseotzyvy.ru/otzyvy/kagotsel-49555)
+[Кагоцел](https://vseotzyvy.ru/otzyvy/kagotsel-49555)
+[Другой товар](https://vseotzyvy.ru/otzyvy/drugoy-tovar-70001)`);
+      return new Response(`Title: Отзывы на Кагоцел
+
+URL Source: ${product}
+
+Markdown Content:
+## Кагоцел отзывы
+5.0 · 72 оценки 72 отзыва 99% рекомендуют
+## Отзывы покупателей о Кагоцел (72 отзыва)`);
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const searchResponse = await callGateway(search);
+    const searchProof = await searchResponse.text();
+    const productResponse = await callGateway(product);
+    const productProof = await productResponse.text();
+
+    expect(searchResponse.status).toBe(200);
+    expect(searchResponse.headers.get("x-ratings-source")).toBe("vseotzyvy-reader-compact");
+    expect(searchProof).toContain('name="q" value="Кагоцел"');
+    expect(searchProof.match(/<article>/g)).toHaveLength(2);
+    expect(productResponse.status).toBe(200);
+    expect(productProof).toContain('<link rel="canonical" href="https://vseotzyvy.ru/otzyvy/kagotsel-49555">');
+    expect(productProof).toContain("Отзывы покупателей о Кагоцел (72 отзывов)");
+    expect(productProof).toContain("Оценка 5 из 5");
+  });
+
+  it("fails closed when the reader source or declared result set is incomplete", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`Title: Поиск: Кагоцел
+
+URL Source: https://vseotzyvy.ru/search?q=Другой
+
+Markdown Content:
+Найдено 2 результата
+[Кагоцел](https://vseotzyvy.ru/otzyvy/kagotsel-49555)`)));
+
+    const response = await callGateway("https://vseotzyvy.ru/search?q=%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB");
+
+    expect(response.status).toBe(502);
+    expect(await response.text()).toContain("did not prove the exact source");
+  });
+});
+
 describe("static Otzovik product gateway", () => {
   const token = "x".repeat(32);
   const callGateway = (url: string) => staticReviewFetch(
@@ -532,6 +600,29 @@ describe("static Otzovik product gateway", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("x-ratings-source")).toBe("google-translate-ssr");
     expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it("retries an incomplete translated product through the exact no-cache SSR variant", async () => {
+    const source = "https://otzovik.com/reviews/tabletki_arbidol_otc_pharm/";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(input.toString());
+      if (!url.searchParams.has("_x_tr_pto")) {
+        return new Response(`<html><head><base href="${source}"></head><body>temporary incomplete shell</body></html>`);
+      }
+      expect(url.searchParams.get("_x_tr_pto")).toBe("wapp");
+      return new Response(`<html><head><base href="${source}"></head><body>
+        <main itemscope itemtype="http://schema.org/Product"><link itemprop="url" href="${source}">
+        <div itemprop="aggregateRating"><meta itemprop="ratingValue" content="4.97">
+        <meta itemprop="reviewCount" content="34"></div></main></body></html>`);
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(source);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-ssr-fallback");
+    expect(await response.text()).toContain('itemprop="reviewCount" content="34"');
+    expect(upstream).toHaveBeenCalledTimes(2);
   });
 
   it("accepts an exact Otzovik Product URL when the translated page omits canonical", async () => {

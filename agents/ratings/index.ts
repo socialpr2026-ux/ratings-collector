@@ -658,6 +658,7 @@ export function browserFetch(
       host === "megapteka.ru" ||
       host === "irecommend.ru" ||
       host === "otzovik.com" ||
+      host === "vseotzyvy.ru" ||
       host === "pravogolosa.net" ||
       host === "ru.otzyv.com" ||
       host === "med-otzyv.ru"

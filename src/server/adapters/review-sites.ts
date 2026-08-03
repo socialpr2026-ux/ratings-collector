@@ -510,6 +510,10 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
     domain: "vseotzyvy.ru",
     origin: "https://vseotzyvy.ru/",
     rateLimitMs: 700,
+    healthCanary: {
+      url: "https://vseotzyvy.ru/otzyvy/kagotsel-49555",
+      brand: "Кагоцел"
+    },
     searchUrl: (brand) => `https://vseotzyvy.ru/search?q=${encodeURIComponent(brand)}`,
     isProductUrl: (url) => /^\/item\/\d+\/reviews-[^/]+\/?$/i.test(url.pathname) ||
       /^\/otzyvy\/[a-z0-9-]+-\d+\/?$/i.test(url.pathname),

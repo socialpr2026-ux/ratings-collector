@@ -100,6 +100,16 @@ type IrecommendTarget = {
   brand?: string;
 };
 
+type VseotzyvyTarget = {
+  kind: "search";
+  source: URL;
+  brand: string;
+} | {
+  kind: "product";
+  source: URL;
+  listingId: string;
+};
+
 type RuOtzyvTarget = {
   kind: "product";
   source: URL;
@@ -1543,6 +1553,37 @@ function compactOtzovikSearchHtml(html: string, requested: URL, brand: string): 
     .map(([url, title]) => `<a class="result__a" href="${escapeHtml(url)}">${escapeHtml(title)}</a>`).join("\n")}</body></html>`;
 }
 
+function validOtzovikProductProof(html: string, requested: URL): boolean {
+  const sourceMatches = (value: string | undefined): boolean => {
+    if (!value) return false;
+    try {
+      const source = new URL(value);
+      return source.protocol === "https:" && source.hostname === "otzovik.com" &&
+        source.pathname === requested.pathname && !source.search && !source.hash;
+    } catch {
+      return false;
+    }
+  };
+  const attribute = (tag: string, name: string): string | undefined =>
+    tag.match(new RegExp(`\\b${name}=["']([^"']+)["']`, "i"))?.[1];
+  const baseTag = html.match(/<base\b[^>]*>/i)?.[0];
+  const canonicalTag = [...html.matchAll(/<link\b[^>]*>/gi)]
+    .find((match) => /\brel=["'][^"']*\bcanonical\b[^"']*["']/i.test(match[0]))?.[0];
+  const canonicalMatches = Boolean(canonicalTag && sourceMatches(attribute(canonicalTag, "href")));
+  const $ = load(html);
+  const productAggregate = $("[itemscope][itemtype$='/Product']").toArray().some((node) => {
+    const product = $(node);
+    const productUrl = product.find("link[itemprop='url'][href], a[itemprop='url'][href]").first().attr("href");
+    const aggregate = product.find("[itemprop='aggregateRating']").first();
+    const rating = aggregate.find("[itemprop='ratingValue']").first().attr("content");
+    const reviews = aggregate.find("[itemprop='reviewCount']").first().attr("content");
+    return (sourceMatches(productUrl) || !productUrl && canonicalMatches) && /^\d(?:[.,]\d+)?$/.test(rating ?? "") &&
+      /^\d[\d\s\u00a0]*$/.test(reviews ?? "");
+  });
+  return sourceMatches(baseTag ? attribute(baseTag, "href") : undefined) &&
+    (!canonicalTag || canonicalMatches) && productAggregate;
+}
+
 function compactRuOtzyvTranslateHtml(html: string, requested: RuOtzyvTarget): string | undefined {
   if (requested.kind !== "product") return undefined;
   if (!/(?:<\/html>|<\/body>)\s*$/i.test(html)) return undefined;
@@ -1679,6 +1720,63 @@ function exactIrecommendReaderSource(markdown: string, expected: URL): boolean {
   } catch {
     return false;
   }
+}
+
+function compactVseotzyvyReaderProof(markdown: string, target: VseotzyvyTarget): string | undefined {
+  const sourceValue = markdown.match(/^URL Source:\s*(https:\/\/[^\s]+)\s*$/mi)?.[1];
+  try {
+    if (!sourceValue || exactUrlSignature(new URL(sourceValue)) !== exactUrlSignature(target.source)) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  if (target.kind === "search") {
+    const declaredText = markdown.match(/^Найдено\s+([\d\s\u00a0]+)\s+результат(?:а|ов)?\s*$/mi)?.[1];
+    const declared = Number(declaredText?.replace(/[\s\u00a0]+/g, ""));
+    if (!Number.isSafeInteger(declared) || declared < 0 || declared > 500) return undefined;
+    const results = new Map<string, string>();
+    const linkPattern = /\[([^\]\n]+)\]\((https:\/\/vseotzyvy\.ru\/otzyvy\/[a-z0-9-]+-(\d+)\/?)\)/giu;
+    for (const match of markdown.matchAll(linkPattern)) {
+      let title = match[1]!.normalize("NFKC").replace(/\s+/g, " ").trim();
+      title = title.replace(/^Image\s+\d+\s*:\s*/iu, "").trim();
+      if (!title) return undefined;
+      const url = new URL(match[2]!);
+      url.search = "";
+      url.hash = "";
+      const canonical = url.toString().replace(/\/$/, "");
+      const existing = results.get(canonical);
+      if (existing && existing !== title) return undefined;
+      results.set(canonical, title);
+    }
+    if (results.size !== declared) return undefined;
+    const cards = [...results].map(([url, title]) =>
+      `<article><h2><a href="${escapeHtml(url)}">${escapeHtml(title)}</a></h2></article>`
+    ).join("");
+    return `<html><head><link rel="canonical" href="${escapeHtml(target.source.toString())}"></head><body>` +
+      `<main><h1>Поиск</h1><input type="search" name="q" value="${escapeHtml(target.brand)}">` +
+      `<p>Найдено ${declared} результатов</p>${cards}</main></body></html>`;
+  }
+
+  const productTitle = markdown.match(/^#{1,2}\s+(.+?)\s+отзывы\s*$/mi)?.[1]
+    ?.normalize("NFKC").replace(/\s+/g, " ").trim();
+  const aggregate = markdown.match(/^\s*([0-5](?:[.,]\d+)?)\s*[·•]\s*([\d\s\u00a0]+)\s+оцен(?:ка|ки|ок)\s+([\d\s\u00a0]+)\s+отзыв(?:а|ов)?(?:\s|$)/mi);
+  const reviewHeading = markdown.match(/^##\s+Отзывы покупателей о\s+(.+?)\s*\(\s*([\d\s\u00a0]+)\s+отзыв(?:а|ов)?\s*\)\s*$/mi);
+  const rating = Number(aggregate?.[1]?.replace(",", "."));
+  const ratingCount = Number(aggregate?.[2]?.replace(/[\s\u00a0]+/g, ""));
+  const reviews = Number(aggregate?.[3]?.replace(/[\s\u00a0]+/g, ""));
+  const headingReviews = Number(reviewHeading?.[2]?.replace(/[\s\u00a0]+/g, ""));
+  const headingTitle = reviewHeading?.[1]?.normalize("NFKC").replace(/\s+/g, " ").trim();
+  if (!productTitle || !headingTitle || productTitle.toLocaleLowerCase("ru-RU") !== headingTitle.toLocaleLowerCase("ru-RU") ||
+    !Number.isSafeInteger(ratingCount) || ratingCount < 0 || !Number.isSafeInteger(reviews) || reviews < 0 ||
+    reviews !== headingReviews || ratingCount < reviews ||
+    reviews > 0 && (!Number.isFinite(rating) || rating <= 0 || rating > 5) ||
+    reviews === 0 && Number.isFinite(rating) && rating !== 0) return undefined;
+  const ratingProof = reviews > 0
+    ? `<img alt="Оценка ${rating} из 5"><div>${rating} · ${ratingCount} оценки</div>`
+    : `<div>0 оценок</div>`;
+  return `<html><head><link rel="canonical" href="${escapeHtml(target.source.toString())}"></head><body><main>` +
+    `<h1>${escapeHtml(productTitle)} отзывы</h1>${ratingProof}` +
+    `<h2>Отзывы покупателей о ${escapeHtml(productTitle)} (${reviews} отзывов)</h2></main></body></html>`;
 }
 
 function compactIrecommendReaderSearch(
@@ -2094,6 +2192,23 @@ function yandexProductSlug(input: string): string | undefined {
     .trim();
 }
 
+function parseVseotzyvyTarget(target: URL): VseotzyvyTarget | undefined {
+  if (target.protocol !== "https:" || target.hostname !== "vseotzyvy.ru" || target.port ||
+    target.username || target.password || target.hash) return undefined;
+  if (target.pathname === "/search") {
+    if ([...target.searchParams.keys()].some((key) => key !== "q") || target.searchParams.getAll("q").length !== 1) {
+      return undefined;
+    }
+    const brand = target.searchParams.get("q")?.normalize("NFKC").trim() ?? "";
+    return brand.length >= 2 && brand.length <= 160
+      ? { kind: "search", source: new URL(target.toString()), brand }
+      : undefined;
+  }
+  if (target.search) return undefined;
+  const product = target.pathname.match(/^\/otzyvy\/[a-z0-9-]+-(\d+)\/?$/i);
+  return product ? { kind: "product", source: new URL(target.toString()), listingId: product[1] } : undefined;
+}
+
 function yandexProductMatchScore(slug: string, tokens: PreparedYandexBrand["tokens"]): number {
   let best = -1;
   const paddedSlug = ` ${slug} `;
@@ -2448,6 +2563,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
   if (yandexBatchTarget && !yandexBatch) return json({ error: "Invalid Yandex batch proof request" }, 400);
   const host = target.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
   const irecommendTarget = parseIrecommendTarget(target);
+  const vseotzyvyTarget = parseVseotzyvyTarget(target);
   const ruOtzyvTarget = parseRuOtzyvTarget(target);
   const utekaReviewsTarget = parseUtekaReviewsTarget(target);
   const utekaSitemapTarget = target.protocol === "https:" && target.hostname === "uteka.ru" &&
@@ -2466,7 +2582,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     "megapteka.ru",
     "otzovik.com",
     "pravogolosa.net"
-  ]).has(host) || Boolean(irecommendTarget) || Boolean(ruOtzyvTarget) || Boolean(utekaReviewsTarget) || utekaSitemapTarget;
+  ]).has(host) || Boolean(irecommendTarget) || Boolean(vseotzyvyTarget) || Boolean(ruOtzyvTarget) || Boolean(utekaReviewsTarget) || utekaSitemapTarget;
   const medOtzyvSearchTarget = target.protocol === "https:" && host === "med-otzyv.ru" &&
     target.pathname === "/__external_search__" && !target.port && !target.username && !target.password && !target.hash &&
     [...target.searchParams.keys()].every((key) => key === "brand") && target.searchParams.getAll("brand").length === 1 &&
@@ -3196,6 +3312,26 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       }
     });
   }
+  if (vseotzyvyTarget) {
+    const reader = await safeFetch(readerProxyUrl(vseotzyvyTarget.source).toString(), {
+      method: "GET",
+      redirect: "follow",
+      headers: { accept: "text/plain; charset=utf-8", "x-return-format": "markdown", dnt: "1" }
+    });
+    const markdown = await readTextBounded(reader, 12_000_000, 60_000);
+    const compact = reader.ok ? compactVseotzyvyReaderProof(markdown, vseotzyvyTarget) : undefined;
+    if (!compact || compact.length > 500_000) {
+      return json({ error: "Vseotzyvy reader did not prove the exact source and complete aggregate" }, 502);
+    }
+    return new Response(compact, {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "vseotzyvy-reader-compact"
+      }
+    });
+  }
   if (irecommendTarget) {
     try {
       const direct = await safeFetch(target.toString(), {
@@ -3290,49 +3426,32 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     translated.searchParams.set("_x_tr_sl", "ru");
     translated.searchParams.set("_x_tr_tl", "en");
     translated.searchParams.set("_x_tr_hl", "en");
-    const upstream = await safeFetch(translated.toString(), {
-      method: "GET",
-      redirect: "follow",
-      headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
-    });
-    const html = await readTextBounded(upstream, 12_000_000, 60_000);
-    if (!upstream.ok) return new Response(html, { status: upstream.status, headers: { "content-type": "text/html; charset=utf-8" } });
-    const sourceMatches = (value: string | undefined): boolean => {
-      if (!value) return false;
-      try {
-        const source = new URL(value);
-        return source.protocol === "https:" && source.hostname === "otzovik.com" &&
-          source.pathname === target.pathname && !source.search && !source.hash;
-      } catch { return false; }
-    };
-    const attribute = (tag: string, name: string): string | undefined =>
-      tag.match(new RegExp(`\\b${name}=["']([^"']+)["']`, "i"))?.[1];
-    const baseTag = html.match(/<base\b[^>]*>/i)?.[0];
-    const canonicalTag = [...html.matchAll(/<link\b[^>]*>/gi)]
-      .find((match) => /\brel=["'][^"']*\bcanonical\b[^"']*["']/i.test(match[0]))?.[0];
-    const canonicalMatches = Boolean(canonicalTag && sourceMatches(attribute(canonicalTag, "href")));
-    const $ = load(html);
-    const productAggregate = $("[itemscope][itemtype$='/Product']").toArray().some((node) => {
-      const product = $(node);
-      const productUrl = product.find("link[itemprop='url'][href], a[itemprop='url'][href]").first().attr("href");
-      const aggregate = product.find("[itemprop='aggregateRating']").first();
-      const rating = aggregate.find("[itemprop='ratingValue']").first().attr("content");
-      const reviews = aggregate.find("[itemprop='reviewCount']").first().attr("content");
-      return (sourceMatches(productUrl) || !productUrl && canonicalMatches) && /^\d(?:[.,]\d+)?$/.test(rating ?? "") &&
-        /^\d[\d\s\u00a0]*$/.test(reviews ?? "");
-    });
-    if (!sourceMatches(baseTag ? attribute(baseTag, "href") : undefined) ||
-      (canonicalTag && !canonicalMatches) || !productAggregate) {
-      return json({ error: "Otzovik translated page did not prove the requested product aggregate" }, 502);
+    const translatedAttempts = [translated, new URL(translated.toString())];
+    translatedAttempts[1]!.searchParams.set("_x_tr_pto", "wapp");
+    for (const attempt of translatedAttempts) {
+      const upstream = await safeFetch(attempt.toString(), {
+        method: "GET",
+        redirect: "follow",
+        headers: {
+          accept: "text/html,application/xhtml+xml",
+          "accept-language": "ru-RU,ru;q=0.9",
+          ...(attempt.searchParams.has("_x_tr_pto") ? { "cache-control": "no-cache" } : {})
+        }
+      });
+      const html = await readTextBounded(upstream, 12_000_000, 60_000);
+      if (!upstream.ok || !validOtzovikProductProof(html, target)) continue;
+      return new Response(html, {
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "x-ratings-source": attempt.searchParams.has("_x_tr_pto")
+            ? "google-translate-ssr-fallback"
+            : "google-translate-ssr"
+        }
+      });
     }
-    return new Response(html, {
-      status: 200,
-      headers: {
-        "content-type": "text/html; charset=utf-8",
-        "cache-control": "no-store",
-        "x-ratings-source": "google-translate-ssr"
-      }
-    });
+    return json({ error: "Otzovik translated page did not prove the requested product aggregate" }, 502);
   }
   if (host === "megapteka.ru" || host === "otzovik.com") {
     let readerTarget = target;
