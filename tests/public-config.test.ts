@@ -625,6 +625,29 @@ describe("static Otzovik product gateway", () => {
     expect(upstream).toHaveBeenCalledTimes(2);
   });
 
+  it("recovers the exact translated aggregate from reader HTML after both regional SSR variants are incomplete", async () => {
+    const source = "https://otzovik.com/reviews/tabletki_arbidol_otc_pharm/";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(input.toString());
+      if (url.hostname !== "r.jina.ai") {
+        return new Response(`<html><head><base href="${source}"></head><body>regional shell</body></html>`);
+      }
+      expect(url.pathname).toContain("otzovik-com.translate.goog/reviews/tabletki_arbidol_otc_pharm/");
+      return new Response(`<html><head><base href="${source}"></head><body>
+        <main itemscope itemtype="http://schema.org/Product"><link itemprop="url" href="${source}">
+        <div itemprop="aggregateRating"><meta itemprop="ratingValue" content="4.97">
+        <meta itemprop="reviewCount" content="34"></div></main></body></html>`);
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(source);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("otzovik-translated-reader-html");
+    expect(await response.text()).toContain('itemprop="reviewCount" content="34"');
+    expect(upstream).toHaveBeenCalledTimes(3);
+  });
+
   it("accepts an exact Otzovik Product URL when the translated page omits canonical", async () => {
     const source = "https://otzovik.com/reviews/tabletki_arbidol_otc_pharm/";
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`

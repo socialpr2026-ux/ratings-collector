@@ -3451,6 +3451,22 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         }
       });
     }
+    const reader = await safeFetch(readerProxyUrl(translatedAttempts[1]!).toString(), {
+      method: "GET",
+      redirect: "follow",
+      headers: { accept: "text/plain; charset=utf-8", "x-return-format": "html", dnt: "1" }
+    });
+    const readerHtml = await readTextBounded(reader, 12_000_000, 60_000);
+    if (reader.ok && validOtzovikProductProof(readerHtml, target)) {
+      return new Response(readerHtml, {
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "x-ratings-source": "otzovik-translated-reader-html"
+        }
+      });
+    }
     return json({ error: "Otzovik translated page did not prove the requested product aggregate" }, 502);
   }
   if (host === "megapteka.ru" || host === "otzovik.com") {
