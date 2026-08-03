@@ -524,6 +524,123 @@ describe("run orchestration and fail-closed QA", () => {
     expect(await repository.listProducts("test_sheet")).toHaveLength(1); expect(Object.keys((await repository.getSnapshots("test_sheet"))["2026-07"])).toEqual(["example.com:1"]);
   });
 
+  it("reuses an exact published identity only for the same unchanged partial card", async () => {
+    const repository = new MemoryRepository();
+    await repository.saveProducts("test_sheet", [{
+      key: "example.com:1", domain: "example.com", listingId: "1", brand: "БРЕНД",
+      canonicalUrl: "https://example.com/p/1", product: "БРЕНД   таблетки", platform: "fake",
+      productIdentity: {
+        label: "таблетки 100 мг №10", granularity: "variant", confidence: "exact", missing: [], reasons: []
+      },
+      firstSeenMonth: "2026-06", lastSeenMonth: "2026-06"
+    }]);
+    const service = new RatingsService(repository, async () => ({
+      id: "published-identity", supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        return [{ domain: "example.com", platform: "fake", listingId: "1", brand, url: "https://example.com/p/1", metadata: {} }];
+      },
+      async collect(ref) {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: "Бренд таблетки", reviews: 5, rating: 4.8,
+          status: "ok" as const, capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    expect(run.qa).toMatchObject({ ok: true, blockers: [] });
+    expect(run.observations[0]).toMatchObject({
+      status: "ok",
+      productIdentity: {
+        label: "таблетки 100 мг №10",
+        granularity: "variant",
+        confidence: "exact",
+        reasons: [expect.stringContaining("переиспользовано из опубликованной карточки")]
+      }
+    });
+  });
+
+  it.each([
+    ["changed URL", "Бренд таблетки", "https://example.com/p/changed", "Бренд", "ok"],
+    ["changed raw title", "Бренд капсулы", "https://example.com/p/1", "Бренд", "ok"],
+    ["changed brand", "Бренд таблетки", "https://example.com/p/1", "Другой бренд", "ok"],
+    ["adapter review status", "Бренд таблетки", "https://example.com/p/1", "Бренд", "needs_review"]
+  ])("does not reuse a published identity for %s", async (_case, product, canonicalUrl, previousBrand, status) => {
+    const repository = new MemoryRepository();
+    await repository.saveProducts("test_sheet", [{
+      key: "example.com:1", domain: "example.com", listingId: "1", brand: previousBrand,
+      canonicalUrl: "https://example.com/p/1", product: "Бренд таблетки", platform: "fake",
+      productIdentity: {
+        label: "таблетки 100 мг №10", granularity: "variant", confidence: "exact", missing: [], reasons: []
+      },
+      firstSeenMonth: "2026-06", lastSeenMonth: "2026-06"
+    }]);
+    const service = new RatingsService(repository, async () => ({
+      id: "published-identity-negative", supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        return [{ domain: "example.com", platform: "fake", listingId: "1", brand, url: canonicalUrl, metadata: {} }];
+      },
+      async collect(ref): Promise<Observation> {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product, reviews: 5, rating: 4.8,
+          status: status as Observation["status"], capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    expect(run.observations[0]?.status).toBe("needs_review");
+    expect(run.observations[0]?.productIdentity?.reasons.join(" ")).not.toContain("переиспользовано");
+  });
+
+  it("does not hide ambiguous current evidence behind a published identity", async () => {
+    const repository = new MemoryRepository();
+    const product = "Бренд таблетки 100 мг №10";
+    await repository.saveProducts("test_sheet", [{
+      key: "example.com:1", domain: "example.com", listingId: "1", brand: "Бренд",
+      canonicalUrl: "https://example.com/p/1", product, platform: "fake",
+      productIdentity: {
+        label: "таблетки 100 мг №10", granularity: "variant", confidence: "exact", missing: [], reasons: []
+      },
+      firstSeenMonth: "2026-06", lastSeenMonth: "2026-06"
+    }]);
+    const service = new RatingsService(repository, async () => ({
+      id: "published-identity-conflict", supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        return [{ domain: "example.com", platform: "fake", listingId: "1", brand, url: "https://example.com/p/1", metadata: {} }];
+      },
+      async collect(ref): Promise<Observation> {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product, reviews: 5, rating: 4.8, status: "ok",
+          capturedAt: new Date().toISOString(),
+          productEvidence: {
+            scope: "listing",
+            signals: [
+              { source: "title", text: product },
+              { source: "variant", text: "Бренд таблетки 200 мг №10" }
+            ],
+            variants: ["Бренд таблетки 200 мг №10"], identifiers: [], imageUrls: [], instructionUrls: []
+          }
+        };
+      }
+    }));
+
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    expect(run.observations[0]).toMatchObject({
+      status: "needs_review",
+      productIdentity: { granularity: "unresolved", confidence: "ambiguous" }
+    });
+  });
+
   it("keeps correct first and last seen bounds when an older month is published later", async () => {
     const repository = new MemoryRepository();
     await repository.saveProducts("test_sheet", [{

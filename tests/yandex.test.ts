@@ -1223,6 +1223,44 @@ describe("YandexAdapter collection", () => {
     });
   });
 
+  it("rejects an incompatible same-form reasonToTrust when the Yandex model title is already exact", async () => {
+    const listingId = "1321891876";
+    const url = `https://reviews.yandex.ru/product/baktoblis-bez-sakhara-tabletki-dlia-rassasyvaniia-massoi-810-mg-30-sht--${listingId}`;
+    const modelTitle = "Бактоблис без сахара таблетки для рассасывания массой 810 мг 30 шт";
+    const incompatibleReviewedTitle = "БактоБЛИС+ таблетки для рассасывания 950 мг, 30шт";
+    const html = productHtml({
+      canonical: url,
+      product: {
+        "@type": "Product",
+        name: modelTitle,
+        brand: "БактоБЛИС",
+        aggregateRating: { "@type": "AggregateRating", reviewCount: 4, ratingCount: 6, ratingValue: 5 }
+      }
+    }).replace("</body>", `
+      <div class="Review-ReasonToTrustText">Товар — ${incompatibleReviewedTitle}</div>
+    </body>`);
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }) });
+
+    const observation = await adapter.collect(ref({ listingId, brand: "Бактоблис", url }), context());
+    const identity = analyzeProductIdentity({
+      brand: observation.brand,
+      product: observation.product,
+      url: observation.canonicalUrl,
+      evidence: observation.productEvidence
+    });
+
+    expect(observation.productEvidence).toMatchObject({ scope: "listing", variants: [] });
+    expect(observation.productEvidence?.signals).not.toContainEqual({
+      source: "variant",
+      text: incompatibleReviewedTitle
+    });
+    expect(identity).toMatchObject({
+      label: "без сахара таблетки для рассасывания 810 мг №30",
+      granularity: "variant",
+      confidence: "exact"
+    });
+  });
+
   it("uses source-bound reviewed product titles to resolve one exact Khondrofen variant", async () => {
     const listingId = "5829843760";
     const url = `https://reviews.yandex.ru/product/khondrofen-maz-d-nar-prim--${listingId}`;

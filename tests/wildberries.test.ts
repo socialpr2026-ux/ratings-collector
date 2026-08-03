@@ -887,6 +887,112 @@ describe("WildberriesAdapter.collect", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    {
+      listingId: "430159965",
+      host: "basket-24.wbbasket.ru",
+      path: "/vol4301/part430159/430159965/info/ru/card.json",
+      currentTitle: "без сахара, таблетки для рассасывания",
+      payload: {
+        nm_id: 430159965,
+        imt_name: "БактоБЛИС без сахара, таблетки для рассасывания",
+        options: [
+          { name: "Количество капсул/таблеток", value: "30 шт." },
+          { name: "Форма выпуска", value: "таблетки" }
+        ]
+      },
+      expectedLabel: "без сахара таблетки для рассасывания №30"
+    },
+    {
+      listingId: "485107441",
+      host: "basket-26.wbbasket.ru",
+      path: "/vol4851/part485107/485107441/info/ru/card.json",
+      currentTitle: "БактоБЛИСбезсахаратаблд рассасх30",
+      payload: {
+        nm_id: 485107441,
+        imt_name: "БактоБЛИСбезсахаратаблд/рассасх30",
+        options: [
+          { name: "Количество капсул/таблеток", value: "30 шт." },
+          { name: "Форма выпуска", value: "таблетки" },
+          {
+            name: "Торговое наименование",
+            value: "Биологически активная добавка к пище «БактоБЛИС без сахара» / «Bactoblis sugar free», таблетки массой 810 мг."
+          }
+        ]
+      },
+      expectedLabel: "без сахара таблетки 810 мг №30"
+    }
+  ])("uses exact first-party card options for Baktoblis nmId $listingId", async ({
+    listingId, host, path, currentTitle, payload, expectedLabel
+  }) => {
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      expect(url.hostname).toBe(host);
+      expect(url.pathname).toBe(path);
+      return jsonResponse(payload);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock, { productInfoFetch: fetchMock });
+
+    const observation = await adapter.collect(productRef({
+      listingId,
+      brand: "Бактоблис",
+      url: `https://www.wildberries.ru/catalog/${listingId}/detail.aspx`,
+      title: currentTitle,
+      metadata: {
+        source: "wildberries-search-v18",
+        sourceBrand: "БактоБЛИС",
+        nmReviewRating: 5,
+        nmFeedbacks: 1
+      }
+    }), context());
+    const identity = analyzeProductIdentity({
+      brand: observation.brand,
+      product: observation.product,
+      url: observation.canonicalUrl
+    });
+
+    expect(observation).toMatchObject({ reviews: 1, rating: 5, status: "ok" });
+    expect(identity).toMatchObject({
+      label: expectedLabel,
+      granularity: "variant",
+      confidence: "exact"
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a same-nm Baktoblis card review-only when first-party data has no pack count", async () => {
+    const listingId = "613426833";
+    const fetchMock = vi.fn(async () => jsonResponse({
+      nm_id: Number(listingId),
+      imt_name: "БактоБЛИС без сахара таблетки для рассасывания массой 810 мг",
+      options: [{ name: "Срок годности", value: "1 год" }]
+    })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock, { productInfoFetch: fetchMock });
+
+    const observation = await adapter.collect(productRef({
+      listingId,
+      brand: "Бактоблис",
+      url: `https://www.wildberries.ru/catalog/${listingId}/detail.aspx`,
+      title: "БактоБЛИС без сахара таблетки для рассасывания массой 810 мг",
+      metadata: {
+        source: "wildberries-search-v18",
+        nmReviewRating: 5,
+        nmFeedbacks: 1
+      }
+    }), context());
+    const identity = analyzeProductIdentity({
+      brand: observation.brand,
+      product: observation.product,
+      url: observation.canonicalUrl
+    });
+
+    expect(identity).toMatchObject({
+      granularity: "unresolved",
+      confidence: "partial",
+      missing: ["pack"]
+    });
+  });
+
   it("never borrows a package count from basket metadata for another nmId", async () => {
     const fetchMock = vi.fn(async () => jsonResponse({
       nm_id: 822665270,
