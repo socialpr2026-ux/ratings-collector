@@ -1099,6 +1099,77 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("retries one strict Yandex search proof miss through fixed egress before acquiring Sandbox", async () => {
+    const run = vi.fn(async () => undefined);
+    const exactHtml = `<script type="application/ld+json">${JSON.stringify({
+      "@type": "ItemList",
+      name: "Бактоблис — купить на Яндекс Маркете",
+      itemListElement: [{
+        item: {
+          "@type": "Product",
+          name: "Бактоблис Плюс таблетки для рассасывания 950 мг 30 шт",
+          url: "https://market.yandex.ru/card/baktoblis-plyus-tabletki/103259424620",
+          sku: "103259424620",
+          aggregateRating: { ratingValue: 4.9, ratingCount: 41 }
+        }
+      }]
+    })}</script>`;
+    const directFetch = vi.fn()
+      .mockResolvedValueOnce(new Response("<html><body>unhydrated search shell</body></html>", {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      }))
+      .mockResolvedValueOnce(new Response(exactHtml, {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const url = `https://market.yandex.ru/search?text=${encodeURIComponent("Бактоблис")}`;
+
+    const response = await routedFetch(url, {
+      headers: { "x-ratings-browser": "1", "x-ratings-browser-mode": "yandex-market-proof" }
+    });
+
+    await expect(response.json()).resolves.toMatchObject({
+      query: "Бактоблис",
+      page: 1,
+      hasNext: false,
+      products: [{ id: "103259424620", ratingCount: 41, rating: 4.9 }]
+    });
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(directFetch.mock.calls.every(([input]) =>
+      input === "https://ratings.example/api/internal/static-review-fetch")).toBe(true);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("keeps two unproven fixed Yandex search responses fail-closed and falls back to Sandbox", async () => {
+    const run = vi.fn(async () => {
+      throw new Error("test Sandbox unavailable");
+    });
+    const directFetch = vi.fn(async () => new Response(
+      "<html><body>search markup without exact ItemList proof</body></html>",
+      { headers: { "content-type": "text/html; charset=utf-8" } }
+    ));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const url = `https://market.yandex.ru/search?text=${encodeURIComponent("Бактоблис")}`;
+
+    await expect(routedFetch(url, {
+      headers: { "x-ratings-browser": "1", "x-ratings-browser-mode": "yandex-market-proof" }
+    })).rejects.toSatisfy((error: unknown) =>
+      error instanceof AdapterBlockedError &&
+      error.message.includes("EdgeOne Sandbox is unavailable")
+    );
+
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).toHaveBeenCalledOnce();
+  });
+
   it("classifies an exhausted EdgeOne monthly GB-s allowance as quota", async () => {
     const run = vi.fn(async () => {
       throw new Error("EdgeOne Sandbox monthly GB-s quota exceeded; requestId=test-request");
