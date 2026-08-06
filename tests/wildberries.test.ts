@@ -709,6 +709,46 @@ describe("WildberriesAdapter.discover", () => {
     expect(feedbackRequests).toBe(1);
   });
 
+  it("proves an exact zero when every root feedback is source-bound and excluded from rating", async () => {
+    const product = {
+      id: 238923898,
+      root: 214718282,
+      brand: "Labomar S.p.a.",
+      name: "Максилак Бэби Синбиотик N10 Пор Пакет-саше По 1,5г"
+    };
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 1, products: [product] });
+      if (url.hostname === "card.wb.ru") return jsonResponse({ products: [product] });
+      if (url.hostname === "feedbacks1.wb.ru") {
+        return jsonResponse({
+          feedbackCount: 1,
+          valuation: "",
+          valuationDistribution: { "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 },
+          nmValuationDistribution: null,
+          feedbacks: [{
+            id: "R2ZdTs8sgj50IhlAp4yb",
+            nmId: 238923898,
+            productValuation: 1,
+            excludedFromRating: { isExcluded: true, reasons: ["notProduct"] }
+          }]
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const [ref] = await adapter.discover("Максилак", context({ runId: "maxilac-excluded-feedback" }));
+
+    await expect(adapter.collect(ref!, context())).resolves.toMatchObject({
+      listingId: "238923898",
+      reviews: 0,
+      rating: null,
+      status: "no_reviews",
+      aggregateGroupId: "wildberries:root:214718282",
+      source: "wildberries-root-explicit-zero"
+    });
+  });
+
   it("accepts a source-bound root zero when Wildberries has not calculated rating distributions", async () => {
     const searchProduct = {
       id: 393735497,

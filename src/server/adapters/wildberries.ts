@@ -182,8 +182,9 @@ function distributionMetrics(value: unknown): DistributionMetrics | undefined {
   };
 }
 
-function provesExplicitRootZero(payload: JsonObject): boolean {
-  if (asNonnegativeInteger(payload.feedbackCount) !== 0) return false;
+function provesExplicitRootZero(payload: JsonObject, members: ProductRef[]): boolean {
+  const feedbackCount = asNonnegativeInteger(payload.feedbackCount);
+  if (feedbackCount === undefined) return false;
   const valuation = asFiniteNumber(payload.valuation);
   if (valuation !== undefined && valuation !== 0) return false;
 
@@ -196,8 +197,25 @@ function provesExplicitRootZero(payload: JsonObject): boolean {
   }
 
   const nmDistributions = payload.nmValuationDistribution;
-  return nmDistributions === undefined || nmDistributions === null ||
-    (Array.isArray(nmDistributions) && nmDistributions.length === 0);
+  if (!(nmDistributions === undefined || nmDistributions === null ||
+    (Array.isArray(nmDistributions) && nmDistributions.length === 0))) return false;
+  if (feedbackCount === 0) return true;
+
+  // WB can retain a moderation record while excluding it from the product
+  // rating and all storefront counters. Treat that as an exact zero only when
+  // the root response enumerates every record, binds every one to this exact
+  // discovered family and explicitly marks every one excluded from rating.
+  // A partial page, foreign nmId or unclassified feedback remains blocked.
+  if (!Array.isArray(payload.feedbacks) || payload.feedbacks.length !== feedbackCount) return false;
+  const memberIds = new Set(members.map(({ listingId }) => listingId));
+  return payload.feedbacks.every((feedback) => {
+    if (!isObject(feedback)) return false;
+    const listingId = firstDefinedId(feedback, ["nmId", "nmID", "nm"]);
+    if (!listingId || !memberIds.has(listingId)) return false;
+    const exclusion = isObject(feedback.excludedFromRating) ? feedback.excludedFromRating : undefined;
+    return exclusion?.isExcluded === true && Array.isArray(exclusion.reasons) &&
+      exclusion.reasons.length > 0 && exclusion.reasons.every((reason) => asNonemptyString(reason) !== undefined);
+  });
 }
 
 function applyExplicitRootZero(
@@ -206,7 +224,7 @@ function applyExplicitRootZero(
   payload: JsonObject,
   evidenceUrl: string
 ): boolean {
-  if (!provesExplicitRootZero(payload)) return false;
+  if (!provesExplicitRootZero(payload, members)) return false;
   for (const member of members) {
     member.metadata.resolvedFeedbackCount = 0;
     member.metadata.writtenReviewCount = 0;
