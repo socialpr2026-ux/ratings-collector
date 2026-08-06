@@ -2,6 +2,22 @@
 
 Изменения проекта публикуются автоматически через Release Please на основе Conventional Commits.
 
+## [1.6.0](https://github.com/socialpr2026-ux/ratings-collector/compare/v1.5.0...v1.6.0) (2026-08-06)
+
+
+### Features
+
+* add 009 pharmacy collector ([4471c57](https://github.com/socialpr2026-ux/ratings-collector/commit/4471c5797b6a4feb985b15a2230bf1cbb908867c))
+* add 009 pharmacy collector ([2c8d43a](https://github.com/socialpr2026-ux/ratings-collector/commit/2c8d43ae54e5b73ebf7df2018e418c5c6cd3b502))
+
+
+### Bug Fixes
+
+* retry Yandex search proof before Sandbox ([da0de41](https://github.com/socialpr2026-ux/ratings-collector/commit/da0de411e5bb33859e3a2fab658048a024d47780))
+* reuse proven product identities ([b08e256](https://github.com/socialpr2026-ux/ratings-collector/commit/b08e25696c6870b237d4cd73061b5e1cd83a85a0))
+* speed up Baktoblis marketplace collection ([1e2d02d](https://github.com/socialpr2026-ux/ratings-collector/commit/1e2d02d4f023d3d0df81f7847e91ed38cf9dddb7))
+* speed up Ozon exact collection ([a07ce62](https://github.com/socialpr2026-ux/ratings-collector/commit/a07ce62611fb775a59fcdc6ca38e278a8d214e42))
+
 ## [1.5.0](https://github.com/socialpr2026-ux/ratings-collector/compare/v1.0.0...v1.5.0) (2026-08-03)
 
 
