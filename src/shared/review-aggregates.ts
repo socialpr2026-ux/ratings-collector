@@ -8,6 +8,7 @@ const REVIEW_AGGREGATE_DOMAINS = new Set([
   "otzyvru.com",
   "pravogolosa.net",
   "ru.otzyv.com",
+  "009.xn--p1ai",
   "uteka.ru",
   "megapteka.ru",
   "ozerki.ru",

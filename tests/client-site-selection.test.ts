@@ -28,6 +28,7 @@ describe("site picker catalog", () => {
       "otzyvru.com",
       "pravogolosa.net",
       "ru.otzyv.com",
+      "009.xn--p1ai",
       "uteka.ru",
       "megapteka.ru",
       "vapteke.ru",
@@ -51,7 +52,7 @@ describe("site picker catalog", () => {
     });
     expect(SELECTABLE_CATALOG_DOMAINS).toEqual(expect.arrayContaining([
       "apteka.ru", "nfapteka.ru", "budzdorov.ru", "eapteka.ru", "vapteke.ru",
-      "maksavit.ru", "vitaexpress.ru", "polza.ru"
+      "maksavit.ru", "vitaexpress.ru", "polza.ru", "009.xn--p1ai"
     ]));
     expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("apteka-april.ru");
     expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("apteka.magnit.ru");
@@ -66,25 +67,27 @@ describe("site picker catalog", () => {
     });
     expect(SITE_CATALOG.flatMap((group) => group.sites).find((site) => site.domain === "polza.ru"))
       .toEqual({ domain: "polza.ru", label: "POLZAru" });
+    expect(SITE_CATALOG.flatMap((group) => group.sites).find((site) => site.domain === "009.xn--p1ai"))
+      .toEqual({ domain: "009.xn--p1ai", label: "009.рф" });
   });
 
   it("selects every runnable catalog site in a new collection by default", () => {
     expect(INITIAL_DOMAINS).toEqual(SELECTABLE_CATALOG_DOMAINS);
-    expect(INITIAL_DOMAINS).toHaveLength(28);
+    expect(INITIAL_DOMAINS).toHaveLength(29);
   });
 
   it("shows the complete requested pharmacy list alongside additional connected pharmacies", () => {
     const pharmacyDomains = SITE_CATALOG.find((group) => group.id === "pharmacies")!.sites.map((site) => site.domain);
     expect(pharmacyDomains).toEqual(expect.arrayContaining([
-      "aptekaplus.ru", "megapteka.ru", "redapteka.ru", "maksavit.ru", "vapteke.ru", "polza.ru",
+      "009.xn--p1ai", "aptekaplus.ru", "megapteka.ru", "redapteka.ru", "maksavit.ru", "vapteke.ru", "polza.ru",
       "expero.ru", "rigla.ru", "gorzdrav.org", "366.ru", "stolichki.ru", "neopharm.ru", "ozerki.ru",
       "stoletov.ru", "apteka-april.ru", "farmlend.ru", "planetazdorovo.ru", "budzdorov.ru",
       "samson-pharma.ru", "zdesapteka.ru", "apteka.magnit.ru", "superapteka.ru", "vitaexpress.ru",
       "zhivika.ru", "aptekasalve.ru", "zdorov.ru", "tabletka.ru", "pharmeconom.ru", "aptstore.ru",
       "newapteka.ru", "ovita.ru"
     ]));
-    expect(pharmacyDomains).toHaveLength(40);
-    expect(CATALOG_DOMAINS).toHaveLength(53);
+    expect(pharmacyDomains).toHaveLength(41);
+    expect(CATALOG_DOMAINS).toHaveLength(54);
   });
 
   it("normalizes pasted URLs for the run without duplicating a site", () => {
@@ -92,8 +95,9 @@ describe("site picker catalog", () => {
       "https://www.ozon.ru/",
       "ozon.ru",
       "https://market.yandex.ru/search?text=test",
+      "https://009.рф/kupit-lirika/otzyvy",
       "custom.example/path"
-    ].join("\n"))).toEqual(["ozon.ru", "market.yandex.ru", "custom.example"]);
+    ].join("\n"))).toEqual(["ozon.ru", "market.yandex.ru", "009.xn--p1ai", "custom.example"]);
   });
 
   it("keeps a manually pasted unavailable site visible but excludes it from the runnable set", () => {

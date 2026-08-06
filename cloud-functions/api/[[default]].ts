@@ -125,6 +125,11 @@ type UtekaReviewsTarget = {
   source: URL;
 };
 
+type Pharmacy009Target = {
+  kind: "index" | "shard" | "family-reviews";
+  source: URL;
+};
+
 type YandexMarketTranslateTarget = {
   source: URL;
   listingId: string;
@@ -1553,6 +1558,20 @@ function compactOtzovikSearchHtml(html: string, requested: URL, brand: string): 
     .map(([url, title]) => `<a class="result__a" href="${escapeHtml(url)}">${escapeHtml(title)}</a>`).join("\n")}</body></html>`;
 }
 
+function parsePharmacy009Target(target: URL): Pharmacy009Target | undefined {
+  if (target.protocol !== "https:" || target.hostname !== "009.xn--p1ai" || target.port ||
+    target.username || target.password || target.search || target.hash) return undefined;
+  if (target.pathname === "/sitemap.xml") return { kind: "index", source: new URL(target.toString()) };
+  const shard = target.pathname.match(/^\/sitemap_([0-9]|1[0-9]|2[0-3])\.xml$/u)?.[1];
+  if (shard !== undefined) {
+    return { kind: "shard", source: new URL(target.toString()) };
+  }
+  if (/^\/kupit-[a-z0-9][a-z0-9_-]*\/otzyvy\/?$/u.test(target.pathname)) {
+    return { kind: "family-reviews", source: new URL(target.toString()) };
+  }
+  return undefined;
+}
+
 function validOtzovikProductProof(html: string, requested: URL): boolean {
   const sourceMatches = (value: string | undefined): boolean => {
     if (!value) return false;
@@ -2566,6 +2585,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
   const vseotzyvyTarget = parseVseotzyvyTarget(target);
   const ruOtzyvTarget = parseRuOtzyvTarget(target);
   const utekaReviewsTarget = parseUtekaReviewsTarget(target);
+  const pharmacy009Target = parsePharmacy009Target(target);
   const utekaSitemapTarget = target.protocol === "https:" && target.hostname === "uteka.ru" &&
     !target.port && !target.username && !target.password && !target.search && !target.hash &&
     target.pathname === "/sitemaps/sitemap-reviews.xml";
@@ -2582,7 +2602,8 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     "megapteka.ru",
     "otzovik.com",
     "pravogolosa.net"
-  ]).has(host) || Boolean(irecommendTarget) || Boolean(vseotzyvyTarget) || Boolean(ruOtzyvTarget) || Boolean(utekaReviewsTarget) || utekaSitemapTarget;
+  ]).has(host) || Boolean(irecommendTarget) || Boolean(vseotzyvyTarget) || Boolean(ruOtzyvTarget) ||
+    Boolean(utekaReviewsTarget) || utekaSitemapTarget || Boolean(pharmacy009Target);
   const medOtzyvSearchTarget = target.protocol === "https:" && host === "med-otzyv.ru" &&
     target.pathname === "/__external_search__" && !target.port && !target.username && !target.password && !target.hash &&
     [...target.searchParams.keys()].every((key) => key === "brand") && target.searchParams.getAll("brand").length === 1 &&
@@ -3523,7 +3544,8 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     headers: {
       accept: wildberriesTarget || ozonTarget || ozonTranslatedComposerTarget
         ? "application/json, text/plain, */*"
-        : yandexTarget && target.pathname.startsWith("/ugcpub/")
+        : (yandexTarget && target.pathname.startsWith("/ugcpub/") ||
+            Boolean(pharmacy009Target && pharmacy009Target.kind !== "family-reviews"))
           ? "application/xml,text/xml"
           : "text/html,application/xhtml+xml",
       "accept-language": "ru-RU,ru;q=0.9",
@@ -3556,7 +3578,12 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     headers: {
       "content-type": upstream.headers.get("content-type") ?? "text/html; charset=utf-8",
       "cache-control": "no-store",
-      ...(ozonTranslatedComposerTarget ? { "x-ratings-source": "google-translate-ozon-composer" } : {})
+      ...(ozonTranslatedComposerTarget ? { "x-ratings-source": "google-translate-ozon-composer" } : {}),
+      ...(pharmacy009Target ? {
+        "x-ratings-source": pharmacy009Target.kind === "family-reviews"
+          ? "009-first-party-family-reviews"
+          : "009-first-party-sitemap"
+      } : {})
     }
   });
 }

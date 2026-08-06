@@ -16,6 +16,7 @@ import { VitaExpressAdapter } from "./adapters/vitaexpress.js";
 import { AsnaAdapter, PolzaAdapter } from "./adapters/pharmacy-recovery.js";
 import { createPharmacyAdapters } from "./adapters/pharmacies.js";
 import { createAdditionalPharmacyAdapters } from "./adapters/additional-pharmacies.js";
+import { Pharmacy009Adapter } from "./adapters/pharmacy009.js";
 import { MedOtzyvAdapter } from "./adapters/med-otzyv.js";
 import { MegamarketAdapter } from "./adapters/megamarket.js";
 import { FileEvidenceStore, type EvidenceStore } from "./evidence.js";
@@ -180,6 +181,7 @@ export async function createCollectorRuntime(options: {
     new VitaExpressAdapter(evidence, options.fetch),
     new PolzaAdapter(evidence, options.fetch),
     new AsnaAdapter(evidence, options.fetch),
+    new Pharmacy009Adapter(evidence, options.fetch),
     ...createPharmacyAdapters(evidence, options.fetch),
     ...createAdditionalPharmacyAdapters(evidence, options.fetch),
     ...createReviewSiteAdapters(evidence, options.fetch)
