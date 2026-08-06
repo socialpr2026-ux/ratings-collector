@@ -2624,12 +2624,19 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       (!target.searchParams.has("page") || target.searchParams.getAll("page").length === 1 &&
         /^\d+$/.test(target.searchParams.get("page") ?? "") && Number(target.searchParams.get("page")) >= 2 && Number(target.searchParams.get("page")) <= 20)
     ));
+  const wildberriesFeedbackTarget = target.protocol === "https:" &&
+    target.hostname === "feedbacks1.wb.ru" && !target.port && !target.username && !target.password && !target.hash &&
+    /^\/feedbacks\/v2\/\d+$/.test(target.pathname) &&
+    target.searchParams.getAll("appType").length === 1 &&
+    ["1", "32", "64"].includes(target.searchParams.get("appType") ?? "") &&
+    [...target.searchParams.keys()].every((key) => key === "appType");
   const wildberriesTarget = (
     target.hostname === "search.wb.ru" && [
       "/exactmatch/ru/common/v14/search",
       "/exactmatch/ru/common/v18/search"
     ].includes(target.pathname) ||
-    target.hostname === "card.wb.ru" && target.pathname === "/cards/v4/detail"
+    target.hostname === "card.wb.ru" && target.pathname === "/cards/v4/detail" ||
+    wildberriesFeedbackTarget
   );
   const yandexTarget = target.protocol === "https:" && target.hostname === "reviews.yandex.ru" &&
     !target.port && !target.username && !target.password && !target.hash && !target.search && (

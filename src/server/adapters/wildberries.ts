@@ -60,6 +60,7 @@ type SearchProductPage = ProductPage & { evidenceUrl: string };
 type DiscoveryBatchPlan = {
   refs: ProductRef[];
   promise?: Promise<void>;
+  signal?: AbortSignal;
 };
 
 type DistributionMetrics = {
@@ -746,24 +747,29 @@ export class WildberriesAdapter implements SiteAdapter {
     if (!plan) {
       throw new ParserChangedError(`Wildberries card-verification batch ${batchKey} is unavailable`);
     }
+    // Every ref from one discovery batch shares the same exact-card proof.
+    // Retain both success and failure for the current collection attempt so a
+    // malformed root response is not fetched again for every sibling nmId.
+    // A selective retry receives a new attempt AbortSignal and may therefore
+    // re-check the upstream proof instead of inheriting an old failure.
+    if (plan.promise && plan.signal !== context.signal) {
+      plan.promise = undefined;
+      plan.signal = undefined;
+    }
     const verification = plan.promise ?? this.verifyDiscoveredCards(plan.refs, context);
     plan.promise = verification;
-    try {
-      await verification;
-      // Product refs can cross a repository/checkpoint boundary between
-      // discovery and collection. Rehydrate the verified source-bound fields
-      // from the retained batch instead of assuming object identity.
-      const verified = plan.refs.find((item) => item.listingId === ref.listingId);
-      if (!verified || verified.metadata.cardBatchVerified !== true) {
-        throw new ParserChangedError(`Wildberries card-verification batch ${batchKey} did not verify ${ref.listingId}`);
-      }
-      ref.title = verified.title;
-      ref.url = verified.url;
-      ref.metadata = { ...ref.metadata, ...verified.metadata };
-    } catch (error) {
-      if (plan.promise === verification) plan.promise = undefined;
-      throw error;
+    plan.signal = context.signal;
+    await verification;
+    // Product refs can cross a repository/checkpoint boundary between
+    // discovery and collection. Rehydrate the verified source-bound fields
+    // from the retained batch instead of assuming object identity.
+    const verified = plan.refs.find((item) => item.listingId === ref.listingId);
+    if (!verified || verified.metadata.cardBatchVerified !== true) {
+      throw new ParserChangedError(`Wildberries card-verification batch ${batchKey} did not verify ${ref.listingId}`);
     }
+    ref.title = verified.title;
+    ref.url = verified.url;
+    ref.metadata = { ...ref.metadata, ...verified.metadata };
   }
 
   private async verifyDiscoveredCards(refs: ProductRef[], context: AdapterContext): Promise<void> {

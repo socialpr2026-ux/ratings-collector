@@ -17,7 +17,14 @@ export function reconcileStaleCollectionCheckpoint(
 ): boolean {
   if (run.status !== "queued" && run.status !== "running") return false;
   const updatedAt = Date.parse(run.updatedAt);
-  if (!Number.isFinite(updatedAt) || now.getTime() - updatedAt < STALE_COLLECTION_CHECKPOINT_MS) return false;
+  const oldestActiveStartedAt = Math.min(...(run.activity?.active ?? [])
+    .map((item) => Date.parse(item.startedAt))
+    .filter(Number.isFinite));
+  const staleByCheckpoint = Number.isFinite(updatedAt) &&
+    now.getTime() - updatedAt >= STALE_COLLECTION_CHECKPOINT_MS;
+  const staleByActiveAttempt = Number.isFinite(oldestActiveStartedAt) &&
+    now.getTime() - oldestActiveStartedAt >= STALE_COLLECTION_CHECKPOINT_MS;
+  if (!staleByCheckpoint && !staleByActiveAttempt) return false;
 
   const nowIso = now.toISOString();
   const activeIds = new Set(run.activity?.active.map((item) => item.id) ?? []);
@@ -35,7 +42,9 @@ export function reconcileStaleCollectionCheckpoint(
   );
   run.errors.push({
     partition: "orchestrator",
-    message: `${STALE_COLLECTION_CHECKPOINT_ERROR}: no progress since ${new Date(updatedAt).toISOString()}; retry starts a new Agent execution`
+    message: `${STALE_COLLECTION_CHECKPOINT_ERROR}: collection attempt stopped before ${new Date(
+      staleByActiveAttempt ? oldestActiveStartedAt : updatedAt
+    ).toISOString()}; retry starts a new Agent execution`
   });
   return true;
 }

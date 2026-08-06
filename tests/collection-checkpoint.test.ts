@@ -48,6 +48,20 @@ function runningCheckpoint(updatedAt: string): RunState {
 }
 
 describe("stale collection checkpoint reconciliation", () => {
+  it("makes an over-deadline active attempt retryable even when its last checkpoint is newer", () => {
+    const checkpoint = runningCheckpoint(new Date(now.getTime() - 5 * 60 * 1000).toISOString());
+    checkpoint.activity!.active[0]!.startedAt = new Date(
+      now.getTime() - STALE_COLLECTION_CHECKPOINT_MS
+    ).toISOString();
+
+    expect(reconcileStaleCollectionCheckpoint(checkpoint, now)).toBe(true);
+    expect(checkpoint.status).toBe("failed");
+    expect(checkpoint.errors.at(-1)).toMatchObject({
+      partition: "orchestrator",
+      message: expect.stringContaining("collection attempt stopped before")
+    });
+  });
+
   it("makes an expired running checkpoint retryable and executes a new adapter pass", async () => {
     const fresh = runningCheckpoint(new Date(now.getTime() - STALE_COLLECTION_CHECKPOINT_MS + 1).toISOString());
     expect(reconcileStaleCollectionCheckpoint(fresh, now)).toBe(false);

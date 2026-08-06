@@ -599,6 +599,53 @@ describe("WildberriesAdapter.discover", () => {
     );
   });
 
+  it("does not repeat one failed root proof for every sibling card in the same collection attempt", async () => {
+    const products = [822679848, 822684678, 695568503].map((id) => ({
+      id,
+      root: 214718282,
+      brand: "Максилак",
+      name: `Максилак капсулы ${id}`
+    }));
+    let cardRequests = 0;
+    let feedbackRequests = 0;
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: products.length, products });
+      if (url.hostname === "card.wb.ru") {
+        cardRequests += 1;
+        return jsonResponse({ products });
+      }
+      if (url.hostname === "feedbacks1.wb.ru") {
+        feedbackRequests += 1;
+        return jsonResponse({
+          feedbackCount: 5,
+          valuation: 0,
+          nmValuationDistribution: []
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("Максилак", context({ runId: "maxilac-root-proof" }));
+    const firstAttempt = new AbortController();
+
+    for (const ref of refs) {
+      await expect(adapter.collect(ref, context({ signal: firstAttempt.signal }))).rejects.toThrow(
+        /Wildberries root 214718282 has no exact nm distribution/
+      );
+    }
+
+    expect(cardRequests).toBe(1);
+    expect(feedbackRequests).toBe(1);
+
+    const selectiveRetry = new AbortController();
+    await expect(adapter.collect(refs[0]!, context({ signal: selectiveRetry.signal }))).rejects.toThrow(
+      /Wildberries root 214718282 has no exact nm distribution/
+    );
+    expect(cardRequests).toBe(2);
+    expect(feedbackRequests).toBe(2);
+  });
+
   it("accepts a source-bound root zero when Wildberries has not calculated rating distributions", async () => {
     const searchProduct = {
       id: 393735497,

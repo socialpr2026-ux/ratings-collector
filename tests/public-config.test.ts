@@ -50,6 +50,30 @@ describe("new static collector gateways", () => {
     { INTERNAL_AGENT_TOKEN: token }
   );
 
+  it("proxies only one exact Wildberries root-feedback route", async () => {
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe("https://feedbacks1.wb.ru/feedbacks/v2/214718282?appType=1");
+      return new Response('{"feedbackCount":5,"valuation":0}', {
+        headers: { "content-type": "application/json" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const exact = await callGateway("https://feedbacks1.wb.ru/feedbacks/v2/214718282?appType=1");
+    expect(exact.status).toBe(200);
+    await expect(exact.json()).resolves.toMatchObject({ feedbackCount: 5, valuation: 0 });
+
+    for (const unsafe of [
+      "https://feedbacks1.wb.ru/feedbacks/v2/not-a-root?appType=1",
+      "https://feedbacks1.wb.ru/feedbacks/v2/214718282",
+      "https://feedbacks1.wb.ru/feedbacks/v2/214718282?appType=2",
+      "https://feedbacks1.wb.ru/feedbacks/v2/214718282?appType=1&next=https://evil.example"
+    ]) {
+      expect((await callGateway(unsafe)).status).toBe(400);
+    }
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
   it("proxies only exact 009.рф sitemap and family-review routes", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));

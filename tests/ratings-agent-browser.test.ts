@@ -541,6 +541,25 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("keeps exact Wildberries root feedback off the shared Sandbox queue", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn().mockResolvedValueOnce(new Response('{"feedbackCount":5}'));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const url = "https://feedbacks1.wb.ru/feedbacks/v2/214718282?appType=1";
+
+    const response = await routedFetch(url);
+
+    expect(await response.text()).toBe('{"feedbackCount":5}');
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(directFetch.mock.calls[0]?.[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+    expect(JSON.parse(String((directFetch.mock.calls[0]?.[1] as RequestInit).body))).toEqual({ url });
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("routes only bounded ASNA card sitemaps through fixed function egress", async () => {
     const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       new Response("<urlset></urlset>", { headers: { "content-type": "application/xml" } })
