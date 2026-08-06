@@ -646,6 +646,69 @@ describe("WildberriesAdapter.discover", () => {
     expect(feedbackRequests).toBe(2);
   });
 
+  it("keeps healthy roots collectable when one root proof is incomplete", async () => {
+    const products = [
+      {
+        id: 238923898,
+        root: 214718282,
+        brand: "Labomar S.p.a.",
+        name: "Максилак Бэби Синбиотик N10 Пор Пакет-саше По 1,5г"
+      },
+      {
+        id: 822679848,
+        root: 907244572,
+        brand: "Максилак",
+        name: "Максилак Бэби синбиотик порошок 10 саше",
+        nmFeedbacks: 40,
+        nmReviewRating: 5
+      },
+      {
+        id: 822684678,
+        root: 907249402,
+        brand: "Максилак",
+        name: "Максилак синбиотик 10 капсул",
+        nmFeedbacks: 26,
+        nmReviewRating: 4.9
+      }
+    ];
+    let feedbackRequests = 0;
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: products.length, products });
+      if (url.hostname === "card.wb.ru") return jsonResponse({ products });
+      if (url.hostname === "feedbacks1.wb.ru") {
+        feedbackRequests += 1;
+        return jsonResponse({
+          feedbackCount: 1,
+          valuation: "",
+          valuationDistribution: { "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 },
+          nmValuationDistribution: null
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("Максилак", context({ runId: "maxilac-isolated-roots" }));
+
+    await expect(adapter.collect(refs[0]!, context())).rejects.toThrow(
+      /Wildberries root 214718282 has no exact nm distribution/
+    );
+    await expect(adapter.collect(refs[1]!, context())).resolves.toMatchObject({
+      listingId: "822679848",
+      reviews: 40,
+      rating: 5,
+      status: "ok"
+    });
+    await expect(adapter.collect(refs[2]!, context())).resolves.toMatchObject({
+      listingId: "822684678",
+      reviews: 26,
+      rating: 4.9,
+      status: "ok"
+    });
+
+    expect(feedbackRequests).toBe(1);
+  });
+
   it("accepts a source-bound root zero when Wildberries has not calculated rating distributions", async () => {
     const searchProduct = {
       id: 393735497,

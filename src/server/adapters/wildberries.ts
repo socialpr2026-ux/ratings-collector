@@ -59,7 +59,8 @@ type SearchProductPage = ProductPage & { evidenceUrl: string };
 
 type DiscoveryBatchPlan = {
   refs: ProductRef[];
-  promise?: Promise<void>;
+  promise?: Promise<Map<string, unknown>>;
+  failures?: Map<string, unknown>;
   signal?: AbortSignal;
 };
 
@@ -754,12 +755,15 @@ export class WildberriesAdapter implements SiteAdapter {
     // re-check the upstream proof instead of inheriting an old failure.
     if (plan.promise && plan.signal !== context.signal) {
       plan.promise = undefined;
+      plan.failures = undefined;
       plan.signal = undefined;
     }
     const verification = plan.promise ?? this.verifyDiscoveredCards(plan.refs, context);
     plan.promise = verification;
     plan.signal = context.signal;
-    await verification;
+    plan.failures = await verification;
+    const failure = plan.failures.get(ref.listingId);
+    if (failure !== undefined) throw failure;
     // Product refs can cross a repository/checkpoint boundary between
     // discovery and collection. Rehydrate the verified source-bound fields
     // from the retained batch instead of assuming object identity.
@@ -772,7 +776,55 @@ export class WildberriesAdapter implements SiteAdapter {
     ref.metadata = { ...ref.metadata, ...verified.metadata };
   }
 
-  private async verifyDiscoveredCards(refs: ProductRef[], context: AdapterContext): Promise<void> {
+  private async verifyDiscoveredCards(
+    refs: ProductRef[],
+    context: AdapterContext
+  ): Promise<Map<string, unknown>> {
+    const operationId = `wildberries-card-verification:${context.runId ?? "adhoc"}:${refs[0]?.brand ?? "unknown"}`;
+    await context.activity?.({
+      operationId,
+      stage: "collection",
+      status: "active",
+      label: "Проверка карточек Wildberries",
+      detail: `Проверяем точные рейтинги: ${refs.length} карточек`
+    });
+    try {
+      const failures = await this.verifyDiscoveredCardsUnreported(refs, context, async (done, total) => {
+        await context.activity?.({
+          operationId,
+          stage: "collection",
+          status: "active",
+          label: "Проверка карточек Wildberries",
+          detail: `Проверено групп товаров: ${done} из ${total}`
+        });
+      });
+      await context.activity?.({
+        operationId,
+        stage: "collection",
+        status: failures.size > 0 ? "warning" : "complete",
+        label: "Проверка карточек Wildberries",
+        detail: failures.size > 0
+          ? `Доказано карточек: ${refs.length - failures.size}; требуют внимания: ${failures.size}`
+          : `Доказано карточек: ${refs.length}`
+      });
+      return failures;
+    } catch (error) {
+      await context.activity?.({
+        operationId,
+        stage: "collection",
+        status: "warning",
+        label: "Проверка карточек Wildberries",
+        detail: errorMessage(error)
+      });
+      throw error;
+    }
+  }
+
+  private async verifyDiscoveredCardsUnreported(
+    refs: ProductRef[],
+    context: AdapterContext,
+    reportRootProgress: (done: number, total: number) => Promise<void>
+  ): Promise<Map<string, unknown>> {
     const cards = new Map<string, { product: JsonObject; evidenceRef: string }>();
     for (let offset = 0; offset < refs.length; offset += MAX_CARD_BATCH_SIZE) {
       const chunk = refs.slice(offset, offset + MAX_CARD_BATCH_SIZE);
@@ -876,30 +928,47 @@ export class WildberriesAdapter implements SiteAdapter {
       }
     }
 
+    const failures = new Map<string, unknown>();
+    let verifiedRoots = 0;
     for (const [rootId, members] of refsByRoot) {
-      const missingNmMetrics = missingNmMetricsByRoot.get(rootId);
-      if (missingNmMetrics?.length) {
-        await this.resolveRequiredRootNmMetrics(rootId, members, missingNmMetrics, context);
+      try {
+        const missingNmMetrics = missingNmMetricsByRoot.get(rootId);
+        if (missingNmMetrics?.length) {
+          await this.resolveRequiredRootNmMetrics(rootId, members, missingNmMetrics, context);
+        }
+        const byFingerprint = new Map<string, ProductRef[]>();
+        for (const member of members) {
+          const feedbackCount = metadataInteger(member.metadata, "nmFeedbacks");
+          const rating = metadataNumber(member.metadata, "nmReviewRating");
+          if (feedbackCount === undefined || feedbackCount === 0 || rating === undefined) continue;
+          const fingerprint = `${feedbackCount}:${rating}`;
+          const duplicates = byFingerprint.get(fingerprint) ?? [];
+          duplicates.push(member);
+          byFingerprint.set(fingerprint, duplicates);
+        }
+        const duplicatedMembers = [...new Set(
+          [...byFingerprint.values()].filter((items) => items.length > 1).flat()
+        )];
+        if (duplicatedMembers.length > 1) {
+          await this.resolveRootMetrics(rootId, members, duplicatedMembers, context);
+        }
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        // One malformed or incomplete family proof must block only that exact
+        // root. The remaining roots in a large discovery batch still have
+        // independent first-party evidence and must stay collectable.
+        for (const member of members) failures.set(member.listingId, error);
       }
-      const byFingerprint = new Map<string, ProductRef[]>();
-      for (const member of members) {
-        const feedbackCount = metadataInteger(member.metadata, "nmFeedbacks");
-        const rating = metadataNumber(member.metadata, "nmReviewRating");
-        if (feedbackCount === undefined || feedbackCount === 0 || rating === undefined) continue;
-        const fingerprint = `${feedbackCount}:${rating}`;
-        const duplicates = byFingerprint.get(fingerprint) ?? [];
-        duplicates.push(member);
-        byFingerprint.set(fingerprint, duplicates);
-      }
-      const duplicatedMembers = [...new Set(
-        [...byFingerprint.values()].filter((items) => items.length > 1).flat()
-      )];
-      if (duplicatedMembers.length > 1) {
-        await this.resolveRootMetrics(rootId, members, duplicatedMembers, context);
+      verifiedRoots += 1;
+      if (verifiedRoots === refsByRoot.size || verifiedRoots % 10 === 0) {
+        await reportRootProgress(verifiedRoots, refsByRoot.size);
       }
     }
 
-    for (const ref of refs) ref.metadata.cardBatchVerified = true;
+    for (const ref of refs) {
+      if (!failures.has(ref.listingId)) ref.metadata.cardBatchVerified = true;
+    }
+    return failures;
   }
 
   private async resolveRequiredRootNmMetrics(
