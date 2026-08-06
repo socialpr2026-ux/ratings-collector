@@ -48,6 +48,7 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
     label: "Аптеки",
     description: "Карточки препаратов в аптечных каталогах",
     sites: [
+      { domain: "009.xn--p1ai", label: "009.рф" },
       { domain: "aptekaplus.ru", label: "Аптека Плюс", availability: "temporarily_blocked", note: "Сборщик ещё не подключён" },
       { domain: "megapteka.ru", label: "Мегаптека" },
       { domain: "redapteka.ru", label: "REDapteka", availability: "temporarily_blocked", note: "Сборщик ещё не подключён" },

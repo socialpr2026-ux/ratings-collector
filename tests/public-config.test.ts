@@ -50,6 +50,36 @@ describe("new static collector gateways", () => {
     { INTERNAL_AGENT_TOKEN: token }
   );
 
+  it("proxies only exact 009.рф sitemap and family-review routes", async () => {
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      return new Response(url.pathname.endsWith(".xml")
+        ? "<urlset><url><loc>https://009.xn--p1ai/kupit-lirika/otzyvy</loc></url></urlset>"
+        : "<html><h1 class='reviewsPage__h1'>ЛИРИКА ОТЗЫВЫ</h1></html>", {
+        headers: { "content-type": url.pathname.endsWith(".xml") ? "application/xml" : "text/html; charset=utf-8" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const index = await callGateway("https://009.xn--p1ai/sitemap.xml");
+    const shard = await callGateway("https://009.xn--p1ai/sitemap_7.xml");
+    const family = await callGateway("https://009.xn--p1ai/kupit-lirika/otzyvy");
+    expect(index.status).toBe(200);
+    expect(shard.headers.get("x-ratings-source")).toBe("009-first-party-sitemap");
+    expect(family.headers.get("x-ratings-source")).toBe("009-first-party-family-reviews");
+    expect(await family.text()).toContain("ЛИРИКА ОТЗЫВЫ");
+
+    for (const unsafe of [
+      "https://009.xn--p1ai/sitemap_24.xml",
+      "https://009.xn--p1ai/sitemap_00.xml",
+      "https://009.xn--p1ai/kupit-lirika/analogs",
+      "https://009.xn--p1ai/kupit-lirika/otzyvy?next=https://evil.example"
+    ]) {
+      expect((await callGateway(unsafe)).status).toBe(400);
+    }
+    expect(upstream).toHaveBeenCalledTimes(3);
+  });
+
   it("proxies only bounded exact Vapteke autocomplete and product routes", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));

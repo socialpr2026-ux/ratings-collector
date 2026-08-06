@@ -28,6 +28,22 @@ describe("run orchestration and fail-closed QA", () => {
     expect(hasDeterministicAggregateProof(observation)).toBe(true);
   });
 
+  it("accepts 009.рф as one deterministic source-bound family aggregate", () => {
+    const observation: Observation = {
+      domain: "009.xn--p1ai", platform: "009.xn--p1ai", listingId: "family-lirika", brand: "Лирика",
+      canonicalUrl: "https://009.xn--p1ai/kupit-lirika/otzyvy", product: "ЛИРИКА",
+      reviews: 19, rating: 4.4, status: "ok", capturedAt: "2026-08-06T00:00:00.000Z",
+      evidenceRef: "evidence:009", source: "009-family-review-jsonld",
+      productEvidence: {
+        scope: "product_family", signals: [{ source: "url", text: "https://009.xn--p1ai/kupit-lirika/otzyvy" }],
+        variants: [], identifiers: [{ type: "product_id", value: "family-lirika" }], imageUrls: [], instructionUrls: []
+      },
+      productIdentity: { label: "ЛИРИКА", granularity: "family", confidence: "exact", missing: [], reasons: [] }
+    };
+    expect(isKnownReviewAggregateDomain("009.xn--p1ai")).toBe(true);
+    expect(hasDeterministicAggregateProof(observation)).toBe(true);
+  });
+
   it("keeps an explicit transient health-check access failure blocked instead of parser_changed", async () => {
     const service = new RatingsService(new MemoryRepository(), async () => ({
       id: "transient-health",

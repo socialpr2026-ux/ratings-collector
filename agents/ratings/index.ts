@@ -551,6 +551,12 @@ export function browserFetch(
         /^\/g_[a-z0-9-]+\/$/i.test(url.pathname) ||
         /^\/p_[a-z0-9][a-z0-9-]*-\d+\.html$/i.test(url.pathname)
       );
+    const fixedPharmacy009Target = url.protocol === "https:" && url.hostname === "009.xn--p1ai" &&
+      !url.port && !url.username && !url.password && !url.hash && !url.search && (
+        url.pathname === "/sitemap.xml" ||
+        /^\/sitemap_(?:[0-9]|1[0-9]|2[0-3])\.xml$/i.test(url.pathname) ||
+        /^\/kupit-[a-z0-9][a-z0-9_-]*\/otzyvy\/?$/i.test(url.pathname)
+      );
     const fixedAptekaTarget = url.protocol === "https:" && url.hostname === "apteka.ru" &&
       !url.port && !url.username && !url.password && !url.hash && (
         !url.search && (
@@ -622,6 +628,9 @@ export function browserFetch(
     if (staticProxy && fixedAsnaSitemapTarget) {
       // ASNA serves multi-megabyte card maps. Keep their bounded brand-filtered
       // route on the same fixed egress as the proven translated product card.
+      return fetchViaStaticProxy(url, request.signal);
+    }
+    if (staticProxy && fixedPharmacy009Target) {
       return fetchViaStaticProxy(url, request.signal);
     }
     if (staticProxy && fixedWildberriesTarget) {

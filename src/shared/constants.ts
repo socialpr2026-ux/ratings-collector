@@ -11,6 +11,7 @@ export const INITIAL_DOMAINS = [
   "otzyvru.com",
   "pravogolosa.net",
   "ru.otzyv.com",
+  "009.xn--p1ai",
   "megapteka.ru",
   "maksavit.ru",
   "vapteke.ru",

@@ -84,7 +84,7 @@ const MARKETPLACE_DOMAINS = new Set([
 ]);
 
 const PHARMACY_DOMAINS = new Set([
-  "aptekaplus.ru", "megapteka.ru", "redapteka.ru", "maksavit.ru", "vapteke.ru", "polza.ru",
+  "009.xn--p1ai", "aptekaplus.ru", "megapteka.ru", "redapteka.ru", "maksavit.ru", "vapteke.ru", "polza.ru",
   "expero.ru", "rigla.ru", "gorzdrav.org", "366.ru", "stolichki.ru", "neopharm.ru", "ozerki.ru",
   "stoletov.ru", "apteka-april.ru", "farmlend.ru", "planetazdorovo.ru", "budzdorov.ru",
   "samson-pharma.ru", "zdesapteka.ru", "apteka.magnit.ru", "superapteka.ru", "vitaexpress.ru",
@@ -106,6 +106,7 @@ const PLATFORM_LABELS: Readonly<Record<string, string>> = {
   "otzyvru.com": "ОтзывРу",
   "pravogolosa.net": "Право голоса",
   "ru.otzyv.com": "Otzyv.com",
+  "009.xn--p1ai": "009.рф",
   "aptekaplus.ru": "Аптека Плюс",
   "redapteka.ru": "REDapteka",
   "maksavit.ru": "Максавит",

@@ -516,6 +516,31 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(directFetch.mock.calls.every(([input]) => input === "https://ratings.example/api/internal/static-review-fetch")).toBe(true);
   });
 
+  it("routes exact 009.рф sitemap and family-review pages through fixed function egress", async () => {
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const requested = JSON.parse(String(init?.body)) as { url: string };
+      return new Response(requested.url.endsWith(".xml") ? "<urlset></urlset>" : "<html>family proof</html>");
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const run = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "t".repeat(32)
+    });
+
+    for (const target of [
+      "https://009.xn--p1ai/sitemap.xml",
+      "https://009.xn--p1ai/sitemap_6.xml",
+      "https://009.xn--p1ai/kupit-lirika/otzyvy"
+    ]) {
+      await routedFetch(target);
+      const call = directFetch.mock.calls.at(-1)!;
+      expect(call[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
+      expect(JSON.parse(String((call[1] as RequestInit).body))).toEqual({ url: target });
+    }
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("routes only bounded ASNA card sitemaps through fixed function egress", async () => {
     const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       new Response("<urlset></urlset>", { headers: { "content-type": "application/xml" } })

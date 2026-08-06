@@ -476,7 +476,7 @@ describe("Google Sheets model", () => {
   });
 
   it("keeps every connected or requested pharmacy out of the review-sites section", () => {
-    const domains = ["vapteke.ru", "maksavit.ru", "vitaexpress.ru", "apteka.magnit.ru", "superapteka.ru"];
+    const domains = ["009.xn--p1ai", "vapteke.ru", "maksavit.ru", "vitaexpress.ru", "apteka.magnit.ru", "superapteka.ru"];
     const records: ProductRecord[] = domains.map((domain) => ({
       key: `${domain}:card`, domain, listingId: "card", brand: "Кагоцел", platform: domain,
       canonicalUrl: `https://${domain}/product/card`, product: "Кагоцел таблетки №10",
@@ -491,7 +491,7 @@ describe("Google Sheets model", () => {
       .map((row) => row[0]);
 
     expect(sections).toEqual(["Аптеки"]);
-    expect(labels).toEqual(["ВАптеке", "Максавит", "Аптека Вита", "Магнит Аптека", "СуперАптека"]);
+    expect(labels).toEqual(["009.рф", "ВАптеке", "Максавит", "Аптека Вита", "Магнит Аптека", "СуперАптека"]);
   });
 
   it("classifies 4.9, 4.5, 4.4, rating zero, no reviews and blank errors without overlap", () => {

@@ -734,6 +734,57 @@ describe("collector runtime fallback integration", () => {
     ]);
   });
 
+  it("routes 009.рф through its complete family sitemap adapter instead of a generic profile", async () => {
+    const origin = "https://009.xn--p1ai";
+    const family = `${origin}/kupit-hondrogard/otzyvy`;
+    const requested: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      requested.push(url.pathname);
+      if (url.pathname === "/sitemap.xml") {
+        return new Response(`<sitemapindex><sitemap><loc>${origin}/sitemap_0.xml</loc><lastmod>2026-08-02</lastmod></sitemap></sitemapindex>`);
+      }
+      if (url.pathname === "/sitemap_0.xml") {
+        return new Response(`<urlset><url><loc>${family}</loc></url><url><loc>${family}</loc></url></urlset>`);
+      }
+      if (url.pathname === "/kupit-hondrogard/otzyvy") {
+        return new Response(`<!doctype html><html><head><title>ХОНДРОГАРД отзывы</title><link rel="canonical" href="${family}"></head><body>
+          <h1 class="reviewsPage__h1">ХОНДРОГАРД ОТЗЫВЫ</h1><section class="drugReviews">
+            <script type="application/ld+json">{"@type":"Product","name":"ХОНДРОГАРД","brand":{"name":"ХОНДРОГАРД"},"aggregateRating":{"@type":"AggregateRating","ratingValue":4.4,"bestRating":5,"ratingCount":5,"reviewCount":5}}</script>
+            <div class="drugReviews__ratingValue">4,4</div><div class="drugReviews__count">Основано на 5 отзывах</div>
+            <a class="reviewsList__drugName" href="/product/hondrogard_rastvor_100_mg_ml_2_ml_n25">ХОНДРОГАРД РАСТВОР ДЛЯ ВНУТРИМЫШЕЧНОГО ВВЕДЕНИЯ 100 МГ/МЛ 2 МЛ №25</a>
+            <a class="reviewsList__drugName" href="/product/hondrogard_rastvor_100_mg_ml_1_ml_n10">ХОНДРОГАРД РАСТВОР ДЛЯ ВНУТРИМЫШЕЧНОГО ВВЕДЕНИЯ 100 МГ/МЛ 1 МЛ №10</a>
+          </section></body></html>`);
+      }
+      throw new Error(`unexpected 009 request ${url}`);
+    }) as unknown as typeof fetch;
+    const runtime = await createCollectorRuntime({
+      repository: new MemoryRepository(),
+      evidence: new MemoryEvidenceStore(),
+      fetch: fetchMock
+    });
+
+    const run = await runtime.service.executeRun((await runtime.service.createRun({
+      ...request,
+      domains: ["009.xn--p1ai"],
+      brands: ["Хондрогард р-р"]
+    })).id);
+
+    expect(run.partitions).toMatchObject([
+      { domain: "009.xn--p1ai", status: "complete", discovered: 1, collected: 1 }
+    ]);
+    expect(run.observations).toMatchObject([{
+      domain: "009.xn--p1ai", listingId: "family-hondrogard", brand: "Хондрогард р-р",
+      product: "Хондрогард р-р", reviews: 5, rating: 4.4, status: "ok", source: "009-family-review-jsonld",
+      productEvidence: { scope: "product_family", variants: expect.arrayContaining([
+        "ХОНДРОГАРД РАСТВОР ДЛЯ ВНУТРИМЫШЕЧНОГО ВВЕДЕНИЯ 100 МГ/МЛ 2 МЛ №25"
+      ]) }
+    }]);
+    expect(run.qa).toMatchObject({ ok: true, blockers: [] });
+    expect(requested.filter((path) => path === "/sitemap.xml")).toHaveLength(1);
+    expect(requested.filter((path) => path === "/sitemap_0.xml")).toHaveLength(1);
+  });
+
   it.each([
     ["Magnit Pharmacy", "apteka.magnit.ru"],
     ["eTabl", "etabl.ru"]
