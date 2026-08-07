@@ -648,6 +648,21 @@ export class RatingsService {
               await saveProgress();
               return;
             }
+            if (domain === "market.yandex.ru" && !partialFailure) {
+              const discoveredAt = new Date().toISOString();
+              // A complete exact Yandex discovery is expensive. Persist every
+              // proven model before reading the first product so a dead Agent
+              // execution can retry the cards without rescanning 330 shards.
+              await this.repository.saveSourceCards(spreadsheetId, discovered.map((ref) => ({
+                key: productKey(domain, ref.listingId),
+                domain,
+                listingId: ref.listingId,
+                brand,
+                canonicalUrl: ref.url,
+                firstSeenAt: discoveredAt,
+                lastSeenAt: discoveredAt
+              })));
+            }
             const previousById = new Map(previousRecords.map((item) => [item.listingId, item]));
             for (const ref of discovered) {
               deadline.signal.throwIfAborted();

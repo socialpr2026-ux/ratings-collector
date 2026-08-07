@@ -136,7 +136,6 @@ async function fetchWithDeadline(
     () => deadline.abort(new AdapterBlockedError(`${label} exceeded ${timeoutMs}ms`)),
     timeoutMs
   );
-  timer.unref?.();
   try {
     // Edge runtimes do not all settle fetch() when its signal is aborted. The
     // explicit race guarantees that the adapter still returns control while

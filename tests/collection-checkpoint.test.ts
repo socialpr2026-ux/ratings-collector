@@ -3,6 +3,7 @@ import type { Observation, ProductRef, RunState, SiteAdapter } from "../src/shar
 import {
   STALE_COLLECTION_CHECKPOINT_ERROR,
   STALE_COLLECTION_CHECKPOINT_MS,
+  STALE_PRODUCT_COLLECTION_CHECKPOINT_MS,
   STALE_PUBLICATION_CHECKPOINT_ERROR,
   STALE_PUBLICATION_CHECKPOINT_MS,
   reconcileStalePublicationCheckpoint,
@@ -48,6 +49,33 @@ function runningCheckpoint(updatedAt: string): RunState {
 }
 
 describe("stale collection checkpoint reconciliation", () => {
+  it("makes one abandoned product request retryable without expiring an active long discovery", () => {
+    const checkpoint = runningCheckpoint(new Date(now.getTime() - 30_000).toISOString());
+    checkpoint.activity!.active[0] = {
+      ...checkpoint.activity!.active[0]!,
+      stage: "collection",
+      label: "Чтение карточки",
+      listingId: "1441119989",
+      startedAt: new Date(now.getTime() - STALE_PRODUCT_COLLECTION_CHECKPOINT_MS).toISOString()
+    };
+
+    expect(reconcileStaleCollectionCheckpoint(checkpoint, now)).toBe(true);
+    expect(checkpoint).toMatchObject({
+      status: "failed",
+      errors: [{
+        partition: "orchestrator",
+        message: expect.stringContaining(STALE_COLLECTION_CHECKPOINT_ERROR)
+      }]
+    });
+
+    const discovery = runningCheckpoint(new Date(now.getTime() - 30_000).toISOString());
+    discovery.activity!.active[0]!.startedAt = new Date(
+      now.getTime() - STALE_PRODUCT_COLLECTION_CHECKPOINT_MS
+    ).toISOString();
+    expect(reconcileStaleCollectionCheckpoint(discovery, now)).toBe(false);
+    expect(discovery.status).toBe("running");
+  });
+
   it("makes an over-deadline active attempt retryable even when its last checkpoint is newer", () => {
     const checkpoint = runningCheckpoint(new Date(now.getTime() - 5 * 60 * 1000).toISOString());
     checkpoint.activity!.active[0]!.startedAt = new Date(

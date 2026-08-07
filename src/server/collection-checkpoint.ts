@@ -5,6 +5,11 @@ import { RunActivityTracker } from "./runtime-activity.js";
 // long scans. Four extra minutes let the abort/final checkpoint settle while
 // keeping an interrupted employee retry from being locked for an hour.
 export const STALE_COLLECTION_CHECKPOINT_MS = 30 * 60 * 1000;
+// One product may use several bounded collector routes, but none of those
+// routes can legitimately keep the same collection/normalization activity
+// open for five minutes. Recover that narrow dead execution promptly without
+// treating a long, still-checkpointing sitemap discovery as abandoned.
+export const STALE_PRODUCT_COLLECTION_CHECKPOINT_MS = 5 * 60 * 1000;
 export const STALE_COLLECTION_CHECKPOINT_ERROR = "collection_checkpoint_stale";
 // Sheet publication uses a five-minute lease. Reconcile only after that lease
 // has certainly expired so an active writer is never mistaken for a dead one.
@@ -20,11 +25,17 @@ export function reconcileStaleCollectionCheckpoint(
   const oldestActiveStartedAt = Math.min(...(run.activity?.active ?? [])
     .map((item) => Date.parse(item.startedAt))
     .filter(Number.isFinite));
+  const oldestActiveProductStartedAt = Math.min(...(run.activity?.active ?? [])
+    .filter((item) => item.stage === "collection" || item.stage === "normalization")
+    .map((item) => Date.parse(item.startedAt))
+    .filter(Number.isFinite));
   const staleByCheckpoint = Number.isFinite(updatedAt) &&
     now.getTime() - updatedAt >= STALE_COLLECTION_CHECKPOINT_MS;
   const staleByActiveAttempt = Number.isFinite(oldestActiveStartedAt) &&
     now.getTime() - oldestActiveStartedAt >= STALE_COLLECTION_CHECKPOINT_MS;
-  if (!staleByCheckpoint && !staleByActiveAttempt) return false;
+  const staleByActiveProduct = Number.isFinite(oldestActiveProductStartedAt) &&
+    now.getTime() - oldestActiveProductStartedAt >= STALE_PRODUCT_COLLECTION_CHECKPOINT_MS;
+  if (!staleByCheckpoint && !staleByActiveAttempt && !staleByActiveProduct) return false;
 
   const nowIso = now.toISOString();
   const activeIds = new Set(run.activity?.active.map((item) => item.id) ?? []);
@@ -43,7 +54,11 @@ export function reconcileStaleCollectionCheckpoint(
   run.errors.push({
     partition: "orchestrator",
     message: `${STALE_COLLECTION_CHECKPOINT_ERROR}: collection attempt stopped before ${new Date(
-      staleByActiveAttempt ? oldestActiveStartedAt : updatedAt
+      staleByActiveProduct
+        ? oldestActiveProductStartedAt
+        : staleByActiveAttempt
+          ? oldestActiveStartedAt
+          : updatedAt
     ).toISOString()}; retry starts a new Agent execution`
   });
   return true;

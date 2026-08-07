@@ -1585,4 +1585,50 @@ describe("run orchestration and fail-closed QA", () => {
       durationMs: expect.any(Number)
     });
   });
+
+  it("checkpoints every exact Yandex discovery before a later product collection fails", async () => {
+    const repository = new MemoryRepository();
+    const discoveryContexts: AdapterContext[] = [];
+    let firstAttempt = true;
+    const adapter: SiteAdapter = {
+      id: "market.yandex.ru:discovery-checkpoint",
+      supportedDomains: ["market.yandex.ru"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand, context) {
+        discoveryContexts.push(context);
+        return ["1426906540", "1441119989"].map((listingId) => ({
+          domain: "market.yandex.ru", platform: "yandex", listingId, brand,
+          url: `https://reviews.yandex.ru/product/${listingId}`, metadata: {}
+        }));
+      },
+      async collect(ref) {
+        if (firstAttempt && ref.listingId === "1441119989") {
+          throw new AdapterBlockedError("product request exceeded its deadline");
+        }
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: `${ref.brand} раствор 1 мг 0,5 мл №4`, reviews: 12, rating: 4.8,
+          status: "ok", capturedAt: new Date().toISOString(), source: "yandex_reviews_direct"
+        };
+      }
+    };
+    const service = new RatingsService(repository, async () => adapter);
+    const created = await service.createRun({
+      ...request,
+      domains: ["market.yandex.ru"],
+      brands: ["Велгия Эко"]
+    });
+
+    const failed = await service.executeRun(created.id);
+    expect(failed.partitions).toMatchObject([{ status: "blocked", discovered: 2, collected: 1 }]);
+    expect((await repository.listSourceCards("test_sheet")).map((item) => item.listingId).sort()).toEqual([
+      "1426906540",
+      "1441119989"
+    ]);
+
+    firstAttempt = false;
+    const retried = await service.executeRun(created.id);
+    expect(discoveryContexts[1]?.previousIds?.sort()).toEqual(["1426906540", "1441119989"]);
+    expect(retried.partitions).toMatchObject([{ status: "complete", discovered: 2, collected: 2 }]);
+  });
 });
