@@ -541,6 +541,53 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("falls back to direct egress for a transient Vseotzyvy reader failure without accepting a failed route", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (input: RequestInfo | URL) => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        return new Response("reader unavailable", { status: 502 });
+      }
+      expect(new Request(input).url).toBe("https://vseotzyvy.ru/otzyvy/velgiya-eko-111962");
+      return new Response("exact public aggregate");
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch("https://vseotzyvy.ru/otzyvy/velgiya-eko-111962");
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("exact public aggregate");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("falls back to direct egress for a transient Pravogolosa reader failure", async () => {
+    const run = vi.fn(async () => undefined);
+    const target = "https://pravogolosa.net/otzyvcategory?catid=92997&page=show_category";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        return new Response("reader unavailable", { status: 502 });
+      }
+      expect(new Request(input).url).toBe(target);
+      return new Response("exact category aggregate");
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("exact category aggregate");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("keeps exact Wildberries root feedback off the shared Sandbox queue", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn().mockResolvedValueOnce(new Response('{"feedbackCount":5}'));

@@ -696,7 +696,28 @@ export function browserFetch(
       host === "ru.otzyv.com" ||
       host === "med-otzyv.ru"
     )) {
-      return fetchViaStaticProxy(url, request.signal);
+      const proxied = await fetchViaStaticProxy(url, request.signal);
+      // The fixed reader is normally the most reliable route for review
+      // sites. Vseotzyvy and Pravogolosa are exceptions: their public pages
+      // can remain healthy while that Function's upstream receives a
+      // transient 5xx. Retry their same bounded, exact URL through the
+      // Agent's ordinary egress before declaring the product uncollectable.
+      // A failed fallback never becomes a zero or a successful observation.
+      if (
+        !["vseotzyvy.ru", "pravogolosa.net"].includes(host) ||
+        !TRANSIENT_STATIC_PROXY_STATUSES.has(proxied.status)
+      ) return proxied;
+      try {
+        const direct = await fetch(request);
+        if (direct.ok) {
+          await proxied.body?.cancel().catch(() => undefined);
+          return direct;
+        }
+        await direct.body?.cancel().catch(() => undefined);
+      } catch {
+        request.signal.throwIfAborted();
+      }
+      return proxied;
     }
     if (!shouldUseHardenedBrowser(request)) {
       return fetch(request);
