@@ -308,24 +308,30 @@ export class RatingsService {
 
   /**
    * Converts a worker-level persistence interruption into an ordinary partial
-   * result. Successful checkpoints stay intact; every request partition that
-   * never reached durable storage becomes an explicit blocked partition. This
-   * keeps both completed-only publication and failed-only retry available.
+   * result. It also finishes the narrow terminal checkpoint where the worker
+   * durably saved every partition but was interrupted before writing its
+   * review/QA state. Successful checkpoints stay intact; every request
+   * partition that never reached durable storage becomes an explicit blocked
+   * partition. This keeps completed-only publication and failed-only retry
+   * available without treating an access failure as a zero.
    */
   async reconcileInterruptedRun(run: RunState): Promise<RunState> {
     const orchestratorErrors = run.errors.filter((error) => error.partition === "orchestrator");
-    if (run.status !== "failed" || orchestratorErrors.length === 0) return run;
-
     const expectedPartitions = run.request.domains.flatMap((domain) =>
       run.request.brands.map((brand) => ({ domain, brand, key: partitionKey(domain, brand) }))
     );
+    const terminalCheckpoint = run.status === "running" &&
+      run.partitions.length === expectedPartitions.length &&
+      (run.activity?.active.length ?? 0) === 0;
+    if ((run.status !== "failed" || orchestratorErrors.length === 0) && !terminalCheckpoint) return run;
+
     const existing = new Set(run.partitions.map((partition) => partitionKey(partition.domain, partition.brand)));
     const missing = expectedPartitions.filter(({ key }) => !existing.has(key));
     const interruption = orchestratorErrors.map((error) => error.message).join("; ");
     const recoveredAt = new Date().toISOString();
 
     new RunActivityTracker(run, () => recoveredAt);
-    run.errors = run.errors.filter((error) => error.partition !== "orchestrator");
+    if (orchestratorErrors.length) run.errors = run.errors.filter((error) => error.partition !== "orchestrator");
     for (const { domain, brand } of missing) {
       const message = `Сбор прерван до сохранения результата: ${interruption}`;
       run.partitions.push({ domain, brand, status: "blocked", discovered: 0, collected: 0, message });

@@ -476,6 +476,25 @@ describe("run orchestration and fail-closed QA", () => {
     expect(recovered.qa).toMatchObject({ ok: true, blockers: [] });
   });
 
+  it("finalizes a fully checkpointed running retry when no collection operation remains active", async () => {
+    const repository = new MemoryRepository();
+    const service = new RatingsService(repository, async () => new FakeAdapter());
+    const completed = await service.executeRun((await service.createRun(request)).id);
+    completed.status = "running";
+    completed.payloadHash = undefined;
+    completed.qa = undefined;
+    completed.collectionFinishedAt = undefined;
+    completed.activity = { sequence: 1, active: [], recent: [] };
+    await repository.saveRun(completed);
+
+    const recovered = await service.reconcileInterruptedRun(completed);
+
+    expect(recovered.status).toBe("review");
+    expect(recovered.collectionFinishedAt).toBeTruthy();
+    expect(recovered.payloadHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(recovered.qa).toMatchObject({ ok: true, blockers: [] });
+  });
+
   it("restores partial publication and failed-only retry after a checkpoint RPC interruption", async () => {
     const repository = new MemoryRepository();
     const service = new RatingsService(repository, async () => new FakeAdapter());
