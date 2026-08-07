@@ -551,6 +551,33 @@ describe("run orchestration and fail-closed QA", () => {
     }]);
   });
 
+  it("reopens a legacy published partial result before excluding its failed partitions", async () => {
+    const repository = new MemoryRepository();
+    const service = new RatingsService(repository, async () => new FakeAdapter());
+    const created = await service.createRun({
+      ...request,
+      domains: ["example.com", "blocked.example"]
+    });
+    created.status = "published";
+    created.progress = { totalPartitions: 2, completedPartitions: 2 };
+    created.partitions = [
+      { domain: "example.com", brand: "Бренд", status: "complete", discovered: 1, collected: 1 },
+      { domain: "blocked.example", brand: "Бренд", status: "blocked", discovered: 0, collected: 0, message: "HTTP 502" }
+    ];
+    created.observations = [{
+      domain: "example.com", platform: "example", listingId: "1", brand: "Бренд",
+      canonicalUrl: "https://example.com/product/1", product: "Бренд таблетки 100 мг №10",
+      reviews: 12, rating: 4.8, status: "ok", capturedAt: "2026-07-31T14:53:04.804Z"
+    }];
+    await repository.saveRun(created);
+
+    const scoped = await service.excludeFailedPartitionsFromPublication(created.id);
+
+    expect(scoped.status).toBe("review");
+    expect(scoped.publicationExclusions).toMatchObject([{ domain: "blocked.example", brand: "Бренд" }]);
+    expect(scoped.qa).toMatchObject({ ok: true, blockers: [] });
+  });
+
   it("collects all partitions and only commits history after explicit publication step", async () => {
     const repository = new MemoryRepository(); const service = new RatingsService(repository, async () => new FakeAdapter());
     const created = await service.createRun(request); const run = await service.executeRun(created.id);

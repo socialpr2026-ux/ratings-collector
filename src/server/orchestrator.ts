@@ -1098,12 +1098,18 @@ export class RatingsService {
 
   async excludeFailedPartitionsFromPublication(id: string): Promise<RunState> {
     const run = await this.requireRun(id);
-    if (!(["review", "failed"] as RunState["status"][]).includes(run.status)) {
-      throw new Error(`Нельзя изменить состав публикации из статуса ${run.status}`);
-    }
     const failed = run.partitions.filter((partition) =>
       !SUCCESSFUL_PARTITION_STATUSES.has(partition.status)
     );
+    // A retry can recover data after a prior partial write. Older readback
+    // reconciliation may restore its old marker as `published` although
+    // failed partitions remain. Reopen only this narrow state so the employee
+    // can create a new explicit partial publication; a complete publication
+    // remains immutable.
+    if (!(["review", "failed"] as RunState["status"][]).includes(run.status) &&
+      !(run.status === "published" && failed.length > 0)) {
+      throw new Error(`Нельзя изменить состав публикации из статуса ${run.status}`);
+    }
     const successful = run.partitions.filter((partition) =>
       SUCCESSFUL_PARTITION_STATUSES.has(partition.status)
     );
