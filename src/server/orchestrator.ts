@@ -3,6 +3,7 @@ import type {
   AdapterActivityEvent,
   Observation,
   ProductRecord,
+  ProductIdentity,
   ProductRef,
   RunHistoryItem,
   RunRequest,
@@ -42,6 +43,37 @@ function domainOnly(input: string): string {
   // Yandex Reviews is the collection origin, while the stable public contract
   // and row identity use the marketplace domain.
   return hostname === "reviews.yandex.ru" ? "market.yandex.ru" : hostname;
+}
+
+function resolveYandexFamilyOverride(item: Observation, value: string): ProductIdentity | undefined {
+  const label = normalizeProductOverride(value);
+  if (
+    item.domain !== "market.yandex.ru" ||
+    normalizeText(label) !== normalizeText(item.brand) ||
+    item.productEvidence?.scope !== "listing" ||
+    !/^yandex_reviews_/i.test(item.source ?? "") ||
+    !item.productEvidence.identifiers.some((identifier) =>
+      identifier.type === "model_id" && identifier.value === item.listingId
+    )
+  ) return undefined;
+  let url: URL;
+  try { url = new URL(item.canonicalUrl); }
+  catch { return undefined; }
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== "reviews.yandex.ru" ||
+    !(
+      url.pathname === `/product/${item.listingId}` ||
+      url.pathname.startsWith("/product/") && url.pathname.endsWith(`--${item.listingId}`)
+    )
+  ) return undefined;
+  return {
+    label: item.brand,
+    granularity: "family",
+    confidence: "exact",
+    missing: [],
+    reasons: ["Точная семейная карточка Yandex подтверждена оператором"]
+  };
 }
 
 function stableHash(value: unknown): string {
@@ -953,7 +985,8 @@ export class RatingsService {
       const key = productKey(item.domain, item.listingId);
       const productLabel = productLabels[key];
       if (productLabel !== undefined) {
-        const manualIdentity = resolveProductOverride(item, productLabel);
+        const manualIdentity = resolveProductOverride(item, productLabel) ??
+          resolveYandexFamilyOverride(item, productLabel);
         if (!manualIdentity) {
           throw new Error(`Уточните форму, дозировку или упаковку товара для карточки ${key}`);
         }

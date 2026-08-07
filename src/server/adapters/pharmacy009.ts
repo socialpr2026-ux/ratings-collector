@@ -264,28 +264,17 @@ async function mapWithConcurrency<T, R>(
   worker: (item: T, index: number) => Promise<R>
 ): Promise<R[]> {
   const result = new Array<R>(items.length);
-  let cursor = 0;
-  let stopped = false;
-  let failed = false;
-  let firstFailure: unknown;
-  const runners = Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => {
-    for (;;) {
-      if (stopped) return;
-      const index = cursor;
-      cursor += 1;
-      if (index >= items.length) return;
-      try {
-        result[index] = await worker(items[index]!, index);
-      } catch (error) {
-        stopped = true;
-        if (!failed) firstFailure = error;
-        failed = true;
-        return;
-      }
+  const batchSize = Math.max(1, concurrency);
+  for (let offset = 0; offset < items.length; offset += batchSize) {
+    const settled = await Promise.allSettled(items.slice(offset, offset + batchSize).map(
+      (item, batchIndex) => worker(item, offset + batchIndex)
+    ));
+    const failure = settled.find((item): item is PromiseRejectedResult => item.status === "rejected");
+    if (failure) throw failure.reason;
+    for (let batchIndex = 0; batchIndex < settled.length; batchIndex += 1) {
+      result[offset + batchIndex] = (settled[batchIndex] as PromiseFulfilledResult<R>).value;
     }
-  });
-  await Promise.all(runners);
-  if (failed) throw firstFailure;
+  }
   return result;
 }
 

@@ -917,6 +917,50 @@ describe("run orchestration and fail-closed QA", () => {
       .resolves.toMatchObject({ observations: [{ status: "ok", productIdentity: { granularity: "family" } }] });
   });
 
+  it("normalizes a human-confirmed exact Yandex family without inventing a variant", async () => {
+    const repository = new MemoryRepository();
+    const service = new RatingsService(repository, async () => ({
+      id: "yandex-family-normalization",
+      supportedDomains: ["market.yandex.ru"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand: string) {
+        return [{
+          domain: "market.yandex.ru", platform: "yandex", listingId: "704207830", brand,
+          url: "https://reviews.yandex.ru/product/semavik--704207830", metadata: {}
+        }];
+      },
+      async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: "Сeмавик", reviews: 41, rating: 4.8,
+          status: "needs_review", capturedAt: new Date().toISOString(), source: "yandex_reviews_json_ld",
+          productEvidence: {
+            scope: "listing", signals: [{ source: "title", text: "Сeмавик" }], variants: [],
+            identifiers: [{ type: "model_id", value: ref.listingId }], imageUrls: [], instructionUrls: []
+          }
+        };
+      }
+    }));
+    const run = await service.executeRun((await service.createRun({
+      ...request,
+      domains: ["market.yandex.ru"],
+      brands: ["Семавик"]
+    })).id);
+
+    const approved = await service.approveObservations(
+      run.id,
+      ["market.yandex.ru:704207830"],
+      { "market.yandex.ru:704207830": "Семавик" }
+    );
+
+    expect(approved.observations[0]).toMatchObject({
+      product: "Сeмавик",
+      productOverride: "Семавик",
+      status: "ok",
+      productIdentity: { label: "Семавик", granularity: "family", confidence: "exact" }
+    });
+  });
+
   it("does not gate a dedicated review-site observation on a stale generic profile", async () => {
     const repository = new MemoryRepository();
     await repository.saveProfile({
