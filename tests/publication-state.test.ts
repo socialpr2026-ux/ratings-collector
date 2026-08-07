@@ -7,7 +7,8 @@ import {
   completeBrowserPublication,
   failBrowserPublication,
   prepareBrowserPublication,
-  reconcileBrowserPublication
+  reconcileBrowserPublication,
+  shouldScopeFailedPublication
 } from "../src/server/sheets/publication-state.js";
 
 function run(): RunState {
@@ -40,6 +41,23 @@ function service(repository: MemoryRepository) {
 }
 
 describe("anonymous browser publication state", () => {
+  it("recovers a legacy published partial write when the optional scope flag is unavailable", () => {
+    const partial = run();
+    partial.status = "published";
+    partial.partitions.push({
+      domain: "blocked.example",
+      brand: "Brand",
+      status: "blocked",
+      discovered: 0,
+      collected: 0,
+      message: "external access block"
+    });
+
+    expect(shouldScopeFailedPublication(partial, false)).toBe(true);
+    expect(shouldScopeFailedPublication(run(), false)).toBe(false);
+    expect(shouldScopeFailedPublication(run(), true)).toBe(true);
+  });
+
   it("publishes successful partitions while preserving failed-partition cards for recovery", async () => {
     const repository = new MemoryRepository();
     const ratings = service(repository);

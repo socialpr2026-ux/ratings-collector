@@ -12,7 +12,11 @@ import {
 } from "../../src/server/collection-checkpoint.js";
 import { RatingsService } from "../../src/server/orchestrator.js";
 import type { RepositoryRpc } from "../../src/server/remote-repository.js";
-import { prepareBrowserPublication, reconcileBrowserPublication } from "../../src/server/sheets/publication-state.js";
+import {
+  prepareBrowserPublication,
+  reconcileBrowserPublication,
+  shouldScopeFailedPublication
+} from "../../src/server/sheets/publication-state.js";
 import { safeErrorMessage } from "../../src/server/utils/error-message.js";
 import { matchesBrand } from "../../src/server/utils/normalize.js";
 import { assertSafePublicDestination, readTextBounded, safeFetch } from "../../src/server/utils/safe-fetch.js";
@@ -3673,7 +3677,7 @@ export default async function onRequest(context: Context): Promise<Response> {
       assertOwner(run, user);
       run = await service.reconcileInterruptedRun(run);
       const body = await context.request.json().catch(() => ({})) as { excludeFailedPartitions?: boolean };
-      if (body.excludeFailedPartitions === true) {
+      if (shouldScopeFailedPublication(run, body.excludeFailedPartitions === true)) {
         run = await service.excludeFailedPartitionsFromPublication(run.id);
       }
       const intent = await prepareBrowserPublication(repository, service, run);

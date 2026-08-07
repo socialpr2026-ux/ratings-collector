@@ -35,6 +35,22 @@ function publicationStatus(run: RunState): RunState["status"] {
   return (run.publicationExclusions?.length ?? 0) > 0 ? "review" : "published";
 }
 
+/**
+ * Legacy partial publications could be stored as `published` before their
+ * failed partitions were scoped out.  The employee's next write action must
+ * recover that checkpoint even when an Edge runtime loses the optional JSON
+ * body that asks to exclude failures.
+ */
+export function shouldScopeFailedPublication(
+  run: Pick<RunState, "status" | "partitions">,
+  explicitlyRequested: boolean
+): boolean {
+  return explicitlyRequested || (
+    run.status === "published" &&
+    run.partitions.some((partition) => partition.status !== "complete" && partition.status !== "no_results")
+  );
+}
+
 export class PublicationCommitUncertainError extends Error {
   constructor(readonly saveError: unknown, readonly verificationError: unknown) {
     super("Маркер публикации мог быть сохранён, но его состояние не удалось подтвердить");
