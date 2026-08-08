@@ -1077,25 +1077,9 @@ export function canonicalProductVariants(items: readonly ProductNameInput[]): Ca
     for (const index of indices) result[index] = { label, variantKey: key };
   }
 
-  // Review sites often publish a brand-wide aggregate without pack details.
-  // When every exact marketplace/pharmacy card in the same snapshot resolves
-  // to one semantic product, attach those aggregates to that one product. If
-  // even two different variants are present, keep the aggregate explicit.
-  const exactVariantsByBrand = new Map<string, Map<string, string>>();
-  result.forEach((variant, index) => {
-    if (identities[index].granularity !== "variant" || !variant.variantKey) return;
-    const brand = normalizeText(items[index].brand);
-    const variants = exactVariantsByBrand.get(brand) ?? new Map<string, string>();
-    variants.set(variant.variantKey, variant.label);
-    exactVariantsByBrand.set(brand, variants);
-  });
-  identities.forEach((identity, index) => {
-    if (identity.granularity !== "family" || (identity.variantCount ?? 0) > 1) return;
-    const variants = exactVariantsByBrand.get(normalizeText(items[index].brand));
-    if (variants?.size !== 1) return;
-    const [variantKey, label] = variants.entries().next().value!;
-    result[index] = { label, variantKey };
-  });
+  // A brand-wide aggregate is not proof that the one variant observed in this
+  // snapshot is the brand's complete real catalog. Keep the aggregate explicit
+  // unless the source itself names its member variants.
   return result;
 }
 

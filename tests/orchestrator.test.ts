@@ -15,6 +15,113 @@ class FakeAdapter implements SiteAdapter {
 }
 
 describe("run orchestration and fail-closed QA", () => {
+  it("propagates the run deadline instead of publishing it as an ordinary partition failure", async () => {
+    const repository = new MemoryRepository();
+    const service = new RatingsService(repository, async () => ({
+      id: "deadline",
+      supportedDomains: ["example.com"],
+      async healthCheck(adapterContext) {
+        await new Promise<never>((_resolve, reject) => {
+          const abort = () => reject(adapterContext.signal?.reason ?? new Error("aborted"));
+          if (adapterContext.signal?.aborted) abort();
+          else adapterContext.signal?.addEventListener("abort", abort, { once: true });
+        });
+        return { ok: true, checkedAt: new Date().toISOString() };
+      },
+      async discover() { throw new Error("deadline must stop before discovery"); },
+      async collect() { throw new Error("deadline must stop before collection"); }
+    }), { runDeadlineMs: 5 });
+    const created = await service.createRun(request);
+
+    await expect(service.executeRun(created.id)).rejects.toThrow("run_deadline_exceeded");
+    const checkpoint = await repository.getRun(created.id);
+    expect(checkpoint?.status).toBe("running");
+    expect(checkpoint?.partitions).toEqual([]);
+  });
+
+  it("drains an already-started sibling brand before propagating the deadline", async () => {
+    const repository = new MemoryRepository();
+    let releaseSibling!: () => void;
+    const siblingReleased = new Promise<void>((resolve) => { releaseSibling = resolve; });
+    let markSiblingStarted!: () => void;
+    const siblingStarted = new Promise<void>((resolve) => { markSiblingStarted = resolve; });
+    const service = new RatingsService(repository, async () => ({
+      id: "drain",
+      supportedDomains: ["wildberries.ru"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand, adapterContext) {
+        if (brand === "Бренд Б") {
+          markSiblingStarted();
+          await siblingReleased;
+          return [];
+        }
+        await new Promise<never>((_resolve, reject) => {
+          const abort = () => reject(adapterContext.signal?.reason ?? new Error("aborted"));
+          if (adapterContext.signal?.aborted) abort();
+          else adapterContext.signal?.addEventListener("abort", abort, { once: true });
+        });
+        return [];
+      },
+      async collect() { throw new Error("not reached"); }
+    }), { runDeadlineMs: 5 });
+    const created = await service.createRun({
+      ...request,
+      domains: ["wildberries.ru"],
+      brands: ["Бренд А", "Бренд Б"]
+    });
+    const execution = service.executeRun(created.id);
+    let settled = false;
+    void execution.then(() => { settled = true; }, () => { settled = true; });
+
+    await siblingStarted;
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    expect(settled).toBe(false);
+
+    releaseSibling();
+    await expect(execution).rejects.toThrow("run_deadline_exceeded");
+  });
+
+  it("isolates a busy Ozon lane without delaying the other requested domains", async () => {
+    const repository = new MemoryRepository();
+    const adapterCalls: string[] = [];
+    const service = new RatingsService(repository, async (domain) => ({
+      id: domain,
+      supportedDomains: [domain],
+      async healthCheck() {
+        adapterCalls.push(`${domain}:health`);
+        return { ok: true, checkedAt: new Date().toISOString() };
+      },
+      async discover(brand) {
+        adapterCalls.push(`${domain}:discover`);
+        return [{ domain, platform: domain, listingId: "1", brand, url: `https://${domain}/product/1`, metadata: {} }];
+      },
+      async collect(ref) {
+        adapterCalls.push(`${domain}:collect`);
+        return {
+          domain, platform: domain, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: `${ref.brand} таблетки 100 мг №10`,
+          reviews: 5, rating: 4.5, status: "ok", capturedAt: new Date().toISOString()
+        };
+      }
+    }), {
+      domainExclusive: async (domain, operation) => {
+        if (domain === "ozon.ru") throw new AdapterBlockedError("Ozon collection is busy (HTTP 429)");
+        return operation();
+      }
+    });
+    const created = await service.createRun({ ...request, domains: ["ozon.ru", "example.com"] });
+
+    const run = await service.executeRun(created.id);
+
+    expect(run.partitions).toMatchObject([
+      { domain: "ozon.ru", status: "blocked", message: expect.stringContaining("HTTP 429") },
+      { domain: "example.com", status: "complete" }
+    ]);
+    expect(run.observations).toHaveLength(1);
+    expect(run.observations[0]?.domain).toBe("example.com");
+    expect(adapterCalls).toEqual(["example.com:health", "example.com:discover", "example.com:collect"]);
+  });
+
   it("accepts Ozerki as a deterministic source-bound family aggregate", () => {
     const observation: Observation = {
       domain: "ozerki.ru", platform: "ozerki.ru", listingId: "family-akvaoptik", brand: "АкваОптик",
@@ -909,7 +1016,13 @@ describe("run orchestration and fail-closed QA", () => {
       status: "ok",
       product: "Бренд капсулы",
       productOverride: "капсулы 100 мг №20",
-      productIdentity: { granularity: "variant", confidence: "exact", label: "капсулы 100 мг №20" }
+      productIdentity: {
+        granularity: "variant",
+        confidence: "exact",
+        label: "капсулы 100 мг №20",
+        canonicalVariantId: expect.stringMatching(/^variant:v1:/),
+        resolutionMethod: "operator_override"
+      }
     });
 
     const aggregateService = makeService("Бренд отзывы", {
@@ -1004,6 +1117,47 @@ describe("run orchestration and fail-closed QA", () => {
       productOverride: "Семавик",
       status: "ok",
       productIdentity: { label: "Семавик", granularity: "family", confidence: "exact" }
+    });
+  });
+
+  it("uses an operator-confirmed catalog alias across sources before deciding review status", async () => {
+    const repository = new MemoryRepository();
+    await repository.saveProducts("test_sheet", [{
+      key: "old.example:old", domain: "old.example", listingId: "old", brand: "Бренд",
+      canonicalUrl: "https://old.example/p/old", product: "Бренд таблетки", platform: "old",
+      productIdentity: {
+        label: "таблетки 100 мг №10", granularity: "variant", confidence: "exact",
+        missing: [], reasons: [], canonicalVariantId: "variant:v1:confirmed",
+        variantKeyVersion: 1, resolutionMethod: "operator_override"
+      },
+      productOverride: "таблетки 100 мг №10",
+      firstSeenMonth: "2026-06", lastSeenMonth: "2026-06"
+    }]);
+    const service = new RatingsService(repository, async () => ({
+      id: "catalog-alias", supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        return [{ domain: "example.com", platform: "new", listingId: "new", brand, url: "https://example.com/p/new", metadata: {} }];
+      },
+      async collect(ref) {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
+          canonicalUrl: ref.url, product: "Бренд таблетки", reviews: 8, rating: 4.9,
+          status: "ok" as const, capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    expect(run.observations[0]).toMatchObject({
+      status: "ok",
+      product: "Бренд таблетки",
+      productIdentity: {
+        label: "таблетки 100 мг №10",
+        canonicalVariantId: "variant:v1:confirmed",
+        resolutionMethod: "catalog_alias"
+      }
     });
   });
 

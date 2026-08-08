@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AdapterContext, Observation, ProductRef, SiteAdapter } from "../src/shared/types.js";
 import { BudgetedAdapter } from "../src/server/adapters/budgeted.js";
-import { AdapterBlockedError, ParserChangedError } from "../src/server/adapters/errors.js";
+import { AdapterBlockedError, AdapterQuotaError, ParserChangedError } from "../src/server/adapters/errors.js";
 import { OzonBrowserAdapter } from "../src/server/adapters/ozon-browser.js";
 import { ResilientOzonAdapter } from "../src/server/adapters/ozon-resilient.js";
 
@@ -315,6 +315,32 @@ describe("Ozon browser collector", () => {
     await expect(adapter.discover("Baktoblis", { ...context, brands: ["Baktoblis"] }))
       .rejects.toThrow(/exact product proof is unavailable/i);
     expect(touchedProducts).not.toContain("820002");
+  });
+
+  it("preserves a proven Sandbox quota through failed exact-product fallbacks", async () => {
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      const endpoint = new URL(String(input));
+      const nested = endpoint.searchParams.get("url");
+      const source = nested ? new URL(nested, "https://www.ozon.ru") : sourceUrlFromTranslate(endpoint);
+      if (source.pathname === "/search/") {
+        return new Response(JSON.stringify(page([
+          tile(820010, "Baktoblis tablets 10", "", "")
+        ], 1)), { headers: { "content-type": "application/json" } });
+      }
+      if (endpoint.hostname === "www.ozon.ru") {
+        throw new AdapterQuotaError("EdgeOne Sandbox monthly GB-s quota exceeded");
+      }
+      return new Response("temporary gateway failure", { status: 502, headers: { "content-type": "text/plain" } });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({
+      fetch,
+      googleComposerEnabled: true,
+      detailDelayMs: 0,
+      detailRetryDelayMs: 0
+    });
+
+    await expect(adapter.discover("Baktoblis", { ...context, brands: ["Baktoblis"] }))
+      .rejects.toBeInstanceOf(AdapterQuotaError);
   });
 
   it("keeps exact review count when Ozon has not calculated an aggregate rating", async () => {

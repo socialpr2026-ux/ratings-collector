@@ -1,0 +1,190 @@
+import { describe, expect, it } from "vitest";
+import type { Observation, ProductRecord } from "../src/shared/types.js";
+import { analyzeProductIdentity, canonicalProductVariants } from "../src/server/utils/product-name.js";
+import { reconcileProductCatalog } from "../src/server/utils/product-catalog.js";
+
+function observation(listingId: string, product: string, brand = "Оциллококцинум"): Observation {
+  return {
+    domain: `${listingId}.example`, platform: "test", listingId, brand,
+    canonicalUrl: `https://${listingId}.example/product/${listingId}`,
+    product, reviews: 1, rating: 5, status: "ok", capturedAt: "2026-08-08T00:00:00.000Z",
+    productIdentity: analyzeProductIdentity({ brand, product })
+  };
+}
+
+describe("persistent product catalog", () => {
+  it("assigns one stable variant to equivalent real products across sources", () => {
+    const source = [
+      observation("one", "Оциллококцинум гранулы гомеопатические 1 г №30"),
+      observation("two", "Оциллококцинум гранулы №30"),
+      observation("three", "Оциллококцинум 30 доз гранулы гомеопатические")
+    ];
+    const resolved = reconcileProductCatalog(source);
+
+    expect(new Set(resolved.map((item) => item.productIdentity?.canonicalVariantId)).size).toBe(1);
+    expect(new Set(resolved.map((item) => item.productIdentity?.label))).toEqual(new Set(["гранулы №30"]));
+    expect(resolved.map((item) => item.product)).toEqual(source.map((item) => item.product));
+  });
+
+  it("keeps real strength and pack differences as distinct variants", () => {
+    const resolved = reconcileProductCatalog([
+      observation("a", "Анвифен капсулы 50 мг №20", "Анвифен"),
+      observation("b", "Анвифен капсулы 250 мг №20", "Анвифен"),
+      observation("c", "Анвифен капсулы 50 мг №10", "Анвифен")
+    ]);
+
+    expect(new Set(resolved.map((item) => item.productIdentity?.canonicalVariantId)).size).toBe(3);
+  });
+
+  it("reuses an operator-confirmed alias on another source", () => {
+    const brand = "Анвифен";
+    const raw = "Анвифен капсулы";
+    const manual = observation("old", raw, brand);
+    manual.productOverride = "капсулы 100 мг №20";
+    manual.productIdentity = analyzeProductIdentity({ brand, product: `${brand} ${manual.productOverride}` });
+    const catalogued = reconcileProductCatalog([manual])[0]!;
+    const prior: ProductRecord = {
+      key: "old.example:old", domain: "old.example", listingId: "old", brand,
+      canonicalUrl: manual.canonicalUrl, product: raw, platform: "test",
+      productIdentity: catalogued.productIdentity, productOverride: manual.productOverride,
+      firstSeenMonth: "2026-07", lastSeenMonth: "2026-07"
+    };
+    const next = observation("new", raw, brand);
+
+    const resolved = reconcileProductCatalog([next], [prior])[0]!;
+
+    expect(resolved.productIdentity).toMatchObject({
+      canonicalVariantId: catalogued.productIdentity?.canonicalVariantId,
+      label: "капсулы 100 мг №20",
+      resolutionMethod: "catalog_alias"
+    });
+    expect(resolved.product).toBe(raw);
+  });
+
+  it("keeps the published ID when a later snapshot adds a shorter equivalent spelling", () => {
+    const long = observation("old", "Оциллококцинум гранулы гомеопатические 1 г №30");
+    const publishedObservation = reconcileProductCatalog([long])[0]!;
+    const prior: ProductRecord = {
+      key: "old.example:old", domain: "old.example", listingId: "old", brand: long.brand,
+      canonicalUrl: long.canonicalUrl, product: long.product, platform: "test",
+      productIdentity: publishedObservation.productIdentity,
+      firstSeenMonth: "2026-07", lastSeenMonth: "2026-07"
+    };
+
+    const resolved = reconcileProductCatalog([
+      observation("new", "Оциллококцинум гранулы №30")
+    ], [prior]);
+
+    expect(new Set(resolved.map((item) => item.productIdentity?.canonicalVariantId))).toEqual(
+      new Set([publishedObservation.productIdentity?.canonicalVariantId])
+    );
+  });
+
+  it("does not reuse an operator alias when fresh exact facts contradict it", () => {
+    const brand = "Анвифен";
+    const raw = "Анвифен капсулы";
+    const manual = observation("old", raw, brand);
+    manual.productOverride = "капсулы 100 мг №20";
+    manual.productIdentity = analyzeProductIdentity({ brand, product: `${brand} ${manual.productOverride}` });
+    const catalogued = reconcileProductCatalog([manual])[0]!;
+    const prior: ProductRecord = {
+      key: "old.example:old", domain: "old.example", listingId: "old", brand,
+      canonicalUrl: manual.canonicalUrl, product: raw, platform: "test",
+      productIdentity: catalogued.productIdentity, productOverride: manual.productOverride,
+      firstSeenMonth: "2026-07", lastSeenMonth: "2026-07"
+    };
+    const current = observation("new", raw, brand);
+    current.productEvidence = {
+      scope: "listing", signals: [], variants: [`${brand} капсулы 250 мг №20`],
+      identifiers: [], imageUrls: [], instructionUrls: []
+    };
+    current.productIdentity = analyzeProductIdentity({ brand, product: raw, evidence: current.productEvidence });
+
+    const resolved = reconcileProductCatalog([current], [prior])[0]!;
+
+    expect(resolved.productIdentity).toMatchObject({ label: "капсулы 250 мг №20", granularity: "variant" });
+    expect(resolved.productIdentity?.canonicalVariantId).not.toBe(catalogued.productIdentity?.canonicalVariantId);
+  });
+
+  it("does not promote an evidence-only generic title to a global alias", () => {
+    const brand = "Анвифен";
+    const raw = "Анвифен капсулы";
+    const source = observation("old", raw, brand);
+    source.productEvidence = {
+      scope: "listing", signals: [], variants: [`${brand} капсулы 100 мг №20`],
+      identifiers: [], imageUrls: [], instructionUrls: []
+    };
+    source.productIdentity = analyzeProductIdentity({ brand, product: raw, evidence: source.productEvidence });
+    const catalogued = reconcileProductCatalog([source])[0]!;
+    const prior: ProductRecord = {
+      key: "old.example:old", domain: "old.example", listingId: "old", brand,
+      canonicalUrl: source.canonicalUrl, product: raw, platform: "test",
+      productIdentity: catalogued.productIdentity, productEvidence: source.productEvidence,
+      firstSeenMonth: "2026-07", lastSeenMonth: "2026-07"
+    };
+
+    const resolved = reconcileProductCatalog([observation("new", raw, brand)], [prior])[0]!;
+
+    expect(resolved.productIdentity).toMatchObject({ granularity: "unresolved", confidence: "partial" });
+    expect(resolved.productIdentity?.canonicalVariantId).toBeUndefined();
+  });
+
+  it("scopes validated GTINs by brand", () => {
+    const first = observation("old", "Анвифен капсулы 100 мг №20", "Анвифен");
+    first.productEvidence = {
+      scope: "listing", signals: [], variants: [],
+      identifiers: [{ type: "gtin", value: "4006381333931" }], imageUrls: [], instructionUrls: []
+    };
+    const catalogued = reconcileProductCatalog([first])[0]!;
+    const prior: ProductRecord = {
+      key: "old.example:old", domain: "old.example", listingId: "old", brand: first.brand,
+      canonicalUrl: first.canonicalUrl, product: first.product, platform: "test",
+      productIdentity: catalogued.productIdentity, productEvidence: first.productEvidence,
+      firstSeenMonth: "2026-07", lastSeenMonth: "2026-07"
+    };
+    const otherBrand = observation("new", "Другой бренд капсулы", "Другой бренд");
+    otherBrand.productEvidence = {
+      scope: "listing", signals: [], variants: [],
+      identifiers: [{ type: "gtin", value: "4006381333931" }], imageUrls: [], instructionUrls: []
+    };
+
+    const resolved = reconcileProductCatalog([otherBrand], [prior])[0]!;
+
+    expect(resolved.productIdentity?.canonicalVariantId).toBeUndefined();
+  });
+
+  it("fails closed when historical records assign two IDs to one semantic variant", () => {
+    const current = observation("new", "Анвифен капсулы 100 мг №20", "Анвифен");
+    const prior = ["variant:v1:first", "variant:v1:second"].map((canonicalVariantId, index): ProductRecord => ({
+      key: `old.example:${index}`, domain: "old.example", listingId: String(index), brand: current.brand,
+      canonicalUrl: `https://old.example/${index}`, product: current.product, platform: "test",
+      productIdentity: { ...current.productIdentity!, canonicalVariantId },
+      firstSeenMonth: "2026-07", lastSeenMonth: "2026-07"
+    }));
+
+    const resolved = reconcileProductCatalog([current], prior)[0]!;
+
+    expect(resolved.productIdentity).toMatchObject({ granularity: "unresolved", confidence: "ambiguous" });
+    expect(resolved.productIdentity?.canonicalVariantId).toBeUndefined();
+  });
+
+  it("does not attach an aggregate to the only variant seen in a partial snapshot", () => {
+    const brand = "Хондрофен";
+    const family = observation("family", "Хондрофен", brand);
+    family.productIdentity = {
+      label: "Общий рейтинг бренда", granularity: "family", confidence: "partial",
+      missing: [], reasons: ["source aggregate"]
+    };
+    const exact = observation("exact", "Хондрофен мазь 30 г", brand);
+
+    const variants = canonicalProductVariants([
+      { brand, product: family.product, productIdentity: family.productIdentity },
+      { brand, product: exact.product, productIdentity: exact.productIdentity }
+    ]);
+    const resolved = reconcileProductCatalog([family, exact]);
+
+    expect(variants[0]).toEqual({ label: "Общий рейтинг бренда" });
+    expect(resolved[0]!.productIdentity?.canonicalVariantId).toBeUndefined();
+    expect(resolved[1]!.productIdentity?.canonicalVariantId).toBeTruthy();
+  });
+});

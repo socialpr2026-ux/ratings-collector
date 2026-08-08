@@ -30,19 +30,25 @@ export function shouldAutoRetryInitialCollection(
   initialStatus: "queued" | "running" | "review" | "publishing" | "published" | "failed",
   partitions: Array<{ status: string; message?: string }>
 ): boolean {
-  if (initialStatus !== "queued" || partitions.length > 50) return false;
+  if (initialStatus !== "queued") return false;
   const failures = partitions.filter(({ status }) => status !== "complete" && status !== "no_results");
   if (failures.length === 0 || failures.length > 10) return false;
   return failures.every(({ status, message = "" }) =>
     (status === "blocked" || status === "error") &&
     !/^(?:quota_exceeded|parser_changed)\s*:/i.test(message.trim()) &&
-    !/Ozon exact product proof is unavailable/i.test(message) &&
-    !/Ozon[^\n]*HTTP\s+502/i.test(message) &&
+    !/\bquota\b|квот|monthly[^.]{0,80}GB-s|лимит[^.]{0,80}(?:исчерпан|превышен)|limit[^.]{0,80}(?:exceeded|reached)/i.test(message) &&
     /\bcaptcha\b|капч|HTTP\s+(?:408|425|429|498|499|5\d{2})\b/i.test(message)
   );
 }
 
-export const MAX_INITIAL_TRANSIENT_RECOVERY_PASSES = 3;
+export function shouldReuseRuntimeForTransientRecovery(
+  partitions: Array<{ domain?: string; status: string }>
+): boolean {
+  const failures = partitions.filter(({ status }) => status !== "complete" && status !== "no_results");
+  return failures.length > 0 && failures.every(({ domain }) => domain === "ozon.ru");
+}
+
+export const MAX_INITIAL_TRANSIENT_RECOVERY_PASSES = 1;
 export const STATIC_PROXY_REQUEST_TIMEOUT_MS = 55_000;
 
 export function transientRecoveryDelayMs(
@@ -133,16 +139,22 @@ async function abortableDelay(milliseconds: number, signal: AbortSignal): Promis
 
 export function createLazySandboxAcquire(sandbox: Pick<SandboxApi, "commands">): () => Promise<void> {
   let acquisition: Promise<void> | undefined;
-  return () => acquisition ??= Promise.resolve()
-    .then(() => sandbox.commands.run("true"))
-    .then(() => undefined)
-    .catch((error) => {
-      const message = safeErrorMessage(error);
-      if (/quota|monthly[^.]{0,80}GB-s|limit[^.]{0,80}(?:exceeded|reached)|лимит[^.]{0,80}(?:исчерпан|превышен)/i.test(message)) {
-        throw new AdapterQuotaError(`EdgeOne Sandbox quota is exhausted: ${message}`);
-      }
-      throw new AdapterBlockedError(`EdgeOne Sandbox is unavailable: ${message}`);
-    });
+  return () => {
+    if (!acquisition) {
+      acquisition = Promise.resolve()
+        .then(() => sandbox.commands.run("true"))
+        .then(() => undefined)
+        .catch((error) => {
+          const message = safeErrorMessage(error);
+          if (/quota|monthly[^.]{0,80}GB-s|limit[^.]{0,80}(?:exceeded|reached)|лимит[^.]{0,80}(?:исчерпан|превышен)/i.test(message)) {
+            throw new AdapterQuotaError(`EdgeOne Sandbox quota is exhausted: ${message}`);
+          }
+          acquisition = undefined;
+          throw new AdapterBlockedError(`EdgeOne Sandbox is unavailable: ${message}`);
+        });
+    }
+    return acquisition;
+  };
 }
 
 export function hasExplicitYandexMarketNoResults(bodyText: string, query: string): boolean {
@@ -424,12 +436,21 @@ export function browserFetch(
     return fetchViaStaticProxy(url, signal);
   };
   const acquireSandbox = createLazySandboxAcquire(sandbox);
-  const getBrowser = () => connected ??= acquireSandbox()
-    .then(() => loadPlaywright())
-    .then(({ chromium }) => chromium.connectOverCDP(playwrightCdpBaseUrl(sandbox.browser.cdpUrl), {
-      headers: { "X-Access-Token": sandbox.envdAccessToken },
-      timeout: 60_000
-    }));
+  const getBrowser = () => {
+    if (!connected) {
+      connected = acquireSandbox()
+        .then(() => loadPlaywright())
+        .then(({ chromium }) => chromium.connectOverCDP(playwrightCdpBaseUrl(sandbox.browser.cdpUrl), {
+          headers: { "X-Access-Token": sandbox.envdAccessToken },
+          timeout: 60_000
+        }))
+        .catch((error) => {
+          connected = undefined;
+          throw error;
+        });
+    }
+    return connected;
+  };
   const getContext = (key: "trusted-yandex" | "trusted-yandex-market" | "trusted-irecommend" | "trusted-ozon" | "trusted-wildberries" | "untrusted-static") => {
     const trustedDynamic = key !== "untrusted-static";
     let context = hardenedContexts.get(key);
@@ -438,7 +459,10 @@ export function browserFetch(
         locale: "ru-RU",
         serviceWorkers: "block",
         javaScriptEnabled: trustedDynamic
-      }));
+      })).catch((error) => {
+        hardenedContexts.delete(key);
+        throw error;
+      });
       hardenedContexts.set(key, context);
     }
     return context;
@@ -1253,10 +1277,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
       const run = await repository.getRun(body.runId);
       if (!run) throw new Error("Запуск не найден");
       if (run.ownerEmail && run.ownerEmail !== user.email) throw new Error("Этот запуск принадлежит другому сотруднику");
-      const ozonLease = run.request.domains.includes("ozon.ru")
-        ? await repository.acquireLease("collection:ozon", 3_700_000)
-        : undefined;
-      try {
+      {
         const localApifyExclusive = createSerialExecutor();
         const apifyExclusive = <T>(operation: () => Promise<T>) => localApifyExclusive(async () => {
           let apifyLease: { token: string; keys: string[] };
@@ -1271,6 +1292,25 @@ export async function onRequest(context: AgentContext): Promise<Response> {
             await repository.releaseLease(apifyLease).catch(() => undefined);
           }
         });
+        const localOzonExclusive = createSerialExecutor();
+        const domainExclusive = <T>(domain: string, operation: () => Promise<T>): Promise<T> => {
+          if (domain !== "ozon.ru") return operation();
+          return localOzonExclusive(async () => {
+            let ozonLease: { token: string; keys: string[] };
+            try {
+              ozonLease = await repository.acquireLease("collection:ozon", 3_700_000);
+            } catch (error) {
+              throw new AdapterBlockedError(
+                `Ozon collection is busy in another run (HTTP 429): ${safeErrorMessage(error)}`
+              );
+            }
+            try {
+              return await operation();
+            } finally {
+              await repository.releaseLease(ozonLease).catch(() => undefined);
+            }
+          });
+        };
         const runtimeOptions = () => ({
           repository,
           evidence: new RemoteEvidenceStore(repository),
@@ -1279,7 +1319,8 @@ export async function onRequest(context: AgentContext): Promise<Response> {
             token: context.env.INTERNAL_AGENT_TOKEN ?? ""
           }),
           env: context.env,
-          apifyExclusive
+          apifyExclusive,
+          domainExclusive
         });
         let runtime = await createCollectorRuntime(runtimeOptions());
         try {
@@ -1290,17 +1331,20 @@ export async function onRequest(context: AgentContext): Promise<Response> {
               shouldAutoRetryInitialCollection(run.status, completed.partitions);
             recoveryPass += 1
           ) {
-            // A fresh runtime clears per-adapter cooldowns and transient route
-            // state. Successful partitions are checkpointed, so the second
-            // through fourth passes touch only failed domain/brand pairs and cannot create
-            // duplicate observations.
+            // Successful partitions are checkpointed, so later passes touch
+            // only failed domain/brand pairs. Keep the same runtime for an
+            // Ozon-only failure: its adapter retains exact-card proofs and
+            // retries only the blocked SKU. Other sites still receive a fresh
+            // runtime to clear route cooldowns and transient state.
             const recoveryDelay = transientRecoveryDelayMs(completed.partitions, recoveryPass);
             if (recoveryDelay > 0) {
               context.request.signal.throwIfAborted();
               await new Promise((resolve) => setTimeout(resolve, recoveryDelay));
               context.request.signal.throwIfAborted();
             }
-            runtime = await createCollectorRuntime(runtimeOptions());
+            if (!shouldReuseRuntimeForTransientRecovery(completed.partitions)) {
+              runtime = await createCollectorRuntime(runtimeOptions());
+            }
             completed = await runtime.service.executeRun(run.id);
           }
           return json({ id: completed.id, status: completed.status });
@@ -1314,8 +1358,6 @@ export async function onRequest(context: AgentContext): Promise<Response> {
           }
           throw error;
         }
-      } finally {
-        if (ozonLease) await repository.releaseLease(ozonLease);
       }
     } finally {
       await repository.releaseLease(lease);

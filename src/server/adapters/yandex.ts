@@ -237,6 +237,8 @@ export class YandexAdapter implements SiteAdapter {
    * Raw multi-megabyte sitemap XML is deliberately never cached here.
    */
   private readonly discoveryBatches = new Map<string, CachedDiscoveryBatch>();
+  /** A failed rendered Market route is shared by every brand in one run. */
+  private readonly unavailableMarketRuns = new Set<string>();
 
   constructor(options: YandexAdapterOptions = {}) {
     this.fallbackFetch = options.fetch ?? globalThis.fetch;
@@ -328,7 +330,8 @@ export class YandexAdapter implements SiteAdapter {
     }
 
     const fetcher = (context.fetch ?? this.fallbackFetch) as YandexCapableFetch;
-    if (fetcher.yandexMarketBrowserEndpoint) {
+    const marketRunKey = context.runId?.trim();
+    if (fetcher.yandexMarketBrowserEndpoint && (!marketRunKey || !this.unavailableMarketRuns.has(marketRunKey))) {
       try {
         for (const ref of await this.discoverMarketCards(
           fetcher.yandexMarketBrowserEndpoint,
@@ -350,6 +353,14 @@ export class YandexAdapter implements SiteAdapter {
         if (!(error instanceof AdapterBlockedError) && !(error instanceof AdapterQuotaError) &&
           !(error instanceof ParserChangedError)) throw error;
         if (context.signal?.aborted) throw error;
+        if (marketRunKey) {
+          this.unavailableMarketRuns.add(marketRunKey);
+          while (this.unavailableMarketRuns.size > 8) {
+            const oldest = this.unavailableMarketRuns.values().next().value as string | undefined;
+            if (!oldest) break;
+            this.unavailableMarketRuns.delete(oldest);
+          }
+        }
         await reportActivity(context, {
           operationId: "yandex:market-to-reviews-fallback",
           stage: "discovery",
@@ -363,9 +374,20 @@ export class YandexAdapter implements SiteAdapter {
 
     const brands = uniqueDiscoveryBrands(brand, context.brands ?? []);
     const batchKey = discoveryBatchKey(context.runId, brands);
-    const discoveredByBrand = batchKey
-      ? await this.loadDiscoveryBatch(batchKey, brands, brand, context)
-      : await this.scanDiscoveryBatch(brands, context);
+    let discoveredByBrand: DiscoveryBatch;
+    try {
+      discoveredByBrand = batchKey
+        ? await this.loadDiscoveryBatch(batchKey, brands, brand, context)
+        : await this.scanDiscoveryBatch(brands, context);
+    } catch (error) {
+      // Keep one failed Market proof suppressed while every brand consumes the
+      // shared Reviews failure. Once that failed batch is released, a later
+      // selective retry may probe a recovered Market route again.
+      if (marketRunKey && (!batchKey || !this.discoveryBatches.has(batchKey))) {
+        this.unavailableMarketRuns.delete(marketRunKey);
+      }
+      throw error;
+    }
     const discovered = discoveredByBrand.get(brandKey(brand));
     if (discovered instanceof AdapterBlockedError) throw discovered;
     for (const ref of discovered ?? []) {
@@ -2255,7 +2277,7 @@ function optionalFiniteNumber(value: unknown, listingId: string, field: string):
   return parsed;
 }
 
-async function mapWithConcurrency<T, R>(
+export async function mapWithConcurrency<T, R>(
   values: T[],
   concurrency: number,
   mapper: (value: T) => Promise<R>
@@ -2275,7 +2297,8 @@ async function mapWithConcurrency<T, R>(
       }
     }
   });
-  await Promise.all(workers);
+  await Promise.allSettled(workers);
+  if (failure !== undefined) throw failure;
   return results;
 }
 

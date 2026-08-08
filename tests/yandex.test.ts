@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { AdapterActivityEvent, AdapterContext, ProductRef } from "../src/shared/types.js";
 import { AdapterBlockedError, ParserChangedError } from "../src/server/adapters/errors.js";
-import { YandexAdapter } from "../src/server/adapters/yandex.js";
+import { mapWithConcurrency, YandexAdapter } from "../src/server/adapters/yandex.js";
 import { analyzeProductIdentity } from "../src/server/utils/product-name.js";
 import { hasDeterministicAggregateProof } from "../src/shared/review-aggregates.js";
 
@@ -172,6 +172,87 @@ describe("YandexAdapter discovery", () => {
       operationId: "yandex:market-to-reviews-fallback",
       status: "warning"
     }));
+  });
+
+  it("opens the unavailable Market route only once for every brand in the same run", async () => {
+    let marketCalls = 0;
+    let sitemapCalls = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url.startsWith("https://market.yandex.ru/search?")) {
+        marketCalls += 1;
+        throw new AdapterBlockedError("Market browser is unavailable: HTTP 502");
+      }
+      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A]));
+      if (url === MAP_A) {
+        sitemapCalls += 1;
+        return xmlResponse(modelSitemap([
+          "https://reviews.yandex.ru/product/enterolaktis-plyus--111",
+          "https://reviews.yandex.ru/product/kagotsel-tabletki--222"
+        ]));
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexMarketBrowserEndpoint?: string };
+    fetch.yandexMarketBrowserEndpoint = "https://market.yandex.ru/search";
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 2 });
+    const shared = { runId: "run-market-circuit", brands: ["Энтеролактис", "Кагоцел"] };
+
+    const enterolactis = await adapter.discover("Энтеролактис", context(shared));
+    const kagocel = await adapter.discover("Кагоцел", context(shared));
+
+    expect(enterolactis.map(({ listingId }) => listingId)).toEqual(["111"]);
+    expect(kagocel.map(({ listingId }) => listingId)).toEqual(["222"]);
+    expect(marketCalls).toBe(1);
+    expect(sitemapCalls).toBe(1);
+  });
+
+  it("probes Market again after every brand consumes a failed shared Reviews batch", async () => {
+    let marketCalls = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url.startsWith("https://market.yandex.ru/search?")) {
+        marketCalls += 1;
+        throw new AdapterBlockedError("Market browser is unavailable: HTTP 502");
+      }
+      if (url === INDEX) throw new AdapterBlockedError("Reviews index is unavailable: HTTP 502");
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexMarketBrowserEndpoint?: string };
+    fetch.yandexMarketBrowserEndpoint = "https://market.yandex.ru/search";
+    const adapter = new YandexAdapter({ fetch, maxSitemaps: 2 });
+    const shared = { runId: "run-market-reprobe", brands: ["Энтеролактис", "Кагоцел"] };
+
+    await expect(adapter.discover("Энтеролактис", context(shared))).rejects.toThrow(/Reviews index/);
+    await expect(adapter.discover("Кагоцел", context(shared))).rejects.toThrow(/Reviews index/);
+    await expect(adapter.discover("Энтеролактис", context(shared))).rejects.toThrow(/Reviews index/);
+
+    expect(marketCalls).toBe(2);
+  });
+
+  it("drains an already-started sitemap worker before surfacing its sibling failure", async () => {
+    let releaseSecond!: () => void;
+    const secondReleased = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    let markSecondStarted!: () => void;
+    const secondStarted = new Promise<void>((resolve) => { markSecondStarted = resolve; });
+    const work = mapWithConcurrency(["first", "second"], 2, async (value) => {
+      if (value === "second") {
+        markSecondStarted();
+        await secondReleased;
+        return value;
+      }
+      await secondStarted;
+      throw new Error("first sitemap failed");
+    });
+    let settled = false;
+    void work.then(() => { settled = true; }, () => { settled = true; });
+
+    await secondStarted;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+
+    releaseSecond();
+    await expect(work).rejects.toThrow("first sitemap failed");
   });
 
   it("discovers model cards by Cyrillic brand transliteration and deduplicates modelId", async () => {

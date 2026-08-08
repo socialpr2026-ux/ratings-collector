@@ -1037,6 +1037,57 @@ describe("WildberriesAdapter.collect", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps source-bound metrics when optional title enrichment does not settle", async () => {
+    const never = vi.fn(() => new Promise<Response>(() => undefined)) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(vi.fn(async () => {
+      throw new Error("no buyer fallback is needed");
+    }) as unknown as typeof globalThis.fetch, {
+      productInfoFetch: never,
+      productInfoTimeoutMs: 5
+    });
+    const input = productRef({
+      listingId: "822665269",
+      brand: "Тромболикс Про",
+      title: "Тромболикс Про раствор 2 мл…",
+      metadata: {
+        source: "wildberries-search-v18",
+        nmFeedbacks: 17,
+        nmReviewRating: 4.8
+      }
+    });
+
+    const first = await adapter.collect(input, context({ runId: "run-title-timeout" }));
+    const second = await adapter.collect(input, context({ runId: "run-title-timeout" }));
+
+    expect(first).toMatchObject({ product: input.title, reviews: 17, rating: 4.8 });
+    expect(second).toMatchObject({ product: input.title, reviews: 17, rating: 4.8 });
+    expect(never).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds a product-info response whose body never finishes", async () => {
+    const stalledBody = vi.fn(async () => new Response(new ReadableStream({ start() {} }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(vi.fn(async () => {
+      throw new Error("no buyer fallback is needed");
+    }) as unknown as typeof globalThis.fetch, {
+      productInfoFetch: stalledBody,
+      productInfoTimeoutMs: 5
+    });
+    const input = productRef({
+      listingId: "822665270",
+      brand: "Тромболикс Про",
+      title: "Тромболикс Про раствор 2 мл…",
+      metadata: { source: "wildberries-search-v18", nmFeedbacks: 11, nmReviewRating: 4.7 }
+    });
+
+    const result = await adapter.collect(input, context({ runId: "run-body-timeout" }));
+
+    expect(result).toMatchObject({ product: input.title, reviews: 11, rating: 4.7 });
+    expect(stalledBody).toHaveBeenCalledOnce();
+  });
+
   it.each([
     {
       listingId: "430159965",

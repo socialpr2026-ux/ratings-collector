@@ -29,10 +29,16 @@ import { titleProductEvidence } from "./utils/product-evidence.js";
 import { normalizeObservationFeedback } from "./feedback-count.js";
 import { RunActivityTracker, runtimeSignals } from "./runtime-activity.js";
 import { normalizeProductOverride, resolveProductOverride } from "./utils/product-override.js";
+import { compactProductCatalogEvidence, reconcileProductCatalog } from "./utils/product-catalog.js";
 
 const RUN_SOFT_DEADLINE_MS = 26 * 60 * 1000;
 
 export type AdapterResolver = (domain: string, request: RunRequest) => Promise<SiteAdapter>;
+export type DomainExclusive = <T>(domain: string, operation: () => Promise<T>) => Promise<T>;
+export type RatingsServiceOptions = {
+  runDeadlineMs?: number;
+  domainExclusive?: DomainExclusive;
+};
 
 function domainOnly(input: string): string {
   const candidate = /^https?:\/\//i.test(input) ? input : `https://${input}`;
@@ -208,7 +214,9 @@ async function forEachWithConcurrency<T>(
       }
     }
   );
-  await Promise.all(runners);
+  const settled = await Promise.allSettled(runners);
+  const rejected = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (rejected) throw rejected.reason;
 }
 
 function brandConcurrency(domain: string): number {
@@ -286,8 +294,20 @@ function reusablePublishedProductIdentity(
 
 export class RatingsService {
   private active = new Set<string>();
+  private readonly runDeadlineMs: number;
+  private readonly domainExclusive: DomainExclusive;
 
-  constructor(private readonly repository: Repository, private readonly resolveAdapter: AdapterResolver) {}
+  constructor(
+    private readonly repository: Repository,
+    private readonly resolveAdapter: AdapterResolver,
+    options: RatingsServiceOptions = {}
+  ) {
+    this.runDeadlineMs = options.runDeadlineMs ?? RUN_SOFT_DEADLINE_MS;
+    this.domainExclusive = options.domainExclusive ?? ((_domain, operation) => operation());
+    if (!Number.isFinite(this.runDeadlineMs) || this.runDeadlineMs < 1) {
+      throw new RangeError("runDeadlineMs must be a positive finite number");
+    }
+  }
 
   async createRun(input: unknown, ownerEmail?: string): Promise<RunState> {
     const request = runRequestSchema.parse(input);
@@ -455,7 +475,7 @@ export class RatingsService {
     const deadline = new AbortController();
     const deadlineTimer = setTimeout(
       () => deadline.abort(new Error("run_deadline_exceeded")),
-      RUN_SOFT_DEADLINE_MS
+      this.runDeadlineMs
     );
     // Keep the deadline referenced for the lifetime of the collection. Some
     // edge transports do not themselves keep Node's event loop referenced;
@@ -466,6 +486,8 @@ export class RatingsService {
         this.repository.listProducts(spreadsheetId),
         this.repository.listSourceCards(spreadsheetId)
       ]);
+      const requestedBrandKeys = new Set(run.request.brands.map(normalizeText));
+      const catalogProducts = products.filter((product) => requestedBrandKeys.has(normalizeText(product.brand)));
       const productsByKey = new Map(products.map((product) => [product.key, product]));
       const seen = new Map(run.observations.map((observation) => [
         productKey(observation.domain, observation.listingId),
@@ -473,6 +495,7 @@ export class RatingsService {
       ]));
       let progressWrites = Promise.resolve();
       let lastActivityWrite = 0;
+      let firstNestedActivityPersisted = false;
       const saveProgress = async () => {
         // Persist observations together with their completed partition. This
         // makes a checkpoint self-contained if the Agent is interrupted before
@@ -518,7 +541,9 @@ export class RatingsService {
               // Persist the first active nested operation immediately. Parallel
               // product checks then share the same snapshot without flooding
               // the repository with one write per request.
-              await saveActivityProgress(activeOperations.size === 1);
+              const force = !firstNestedActivityPersisted;
+              firstNestedActivityPersisted = true;
+              await saveActivityProgress(force);
               return;
             }
             if (existing) {
@@ -545,9 +570,13 @@ export class RatingsService {
         brands.push(brand);
         retryBrandsByDomain.set(domain, brands);
       }
-      await Promise.all(run.request.domains.filter((domain) => retryBrandsByDomain.has(domain)).map(async (domain) => {
+      const domainResults = await Promise.allSettled(run.request.domains
+        .filter((domain) => retryBrandsByDomain.has(domain)).map(async (domain) => {
         const retryBrands = retryBrandsByDomain.get(domain)!;
         const retryBrandKeys = new Set(retryBrands.map(normalizeText));
+        let domainStarted = false;
+        const executeDomain = async () => {
+        domainStarted = true;
         const previousDomainRecords = [
           ...sourceCards.filter((item) => item.domain === domain && retryBrandKeys.has(normalizeText(item.brand)))
             .map((item) => ({ listingId: item.listingId, url: item.canonicalUrl })),
@@ -599,6 +628,7 @@ export class RatingsService {
             detail: health.message ?? "Контрольная проверка пройдена"
           });
         } catch (error) {
+          deadline.signal.throwIfAborted();
           const kind = errorStatus(error);
           const message = safeErrorMessage(error);
           healthReporter.warnActive(message);
@@ -746,6 +776,8 @@ export class RatingsService {
                   observation.canonicalUrl = historical.canonicalUrl;
                   observation.product = historical.product;
                   observation.productIdentity = historical.productIdentity;
+                  observation.productEvidence = historical.productEvidence;
+                  observation.productOverride = historical.productOverride;
                   observation.brand = historical.brand;
                 } else if ([
                   "yandex_reviews_missing_candidate",
@@ -788,22 +820,6 @@ export class RatingsService {
                   analyzedIdentity,
                   productsByKey.get(productKey(observation.domain, observation.listingId))
                 ) ?? analyzedIdentity;
-                const collapsedDistinctProducts = collapsesDistinctProductPages(
-                  observation.productIdentity,
-                  observation.productEvidence,
-                  discovered.length,
-                  observation.brand,
-                  observation.product
-                );
-                const autoAcceptedReviewAggregate = canAutoAcceptDedicatedReviewAggregate(observation);
-                if (
-                  ["ok", "no_reviews"].includes(observation.status) &&
-                  ((collapsedDistinctProducts && !autoAcceptedReviewAggregate) ||
-                    observation.productIdentity.granularity !== "variant" &&
-                    !autoAcceptedReviewAggregate)
-                ) {
-                  observation.status = "needs_review";
-                }
               }
               const key = productKey(observation.domain, observation.listingId);
               const existing = seen.get(key);
@@ -838,7 +854,7 @@ export class RatingsService {
               });
               activeNormalization = undefined;
               } catch (error) {
-                if (deadline.signal.aborted) throw error;
+                deadline.signal.throwIfAborted();
                 const kind = errorStatus(error);
                 const message = safeErrorMessage(error);
                 collectionFailures.push({ listingId: ref.listingId, kind, message });
@@ -888,6 +904,7 @@ export class RatingsService {
               await this.repository.saveSourceCards(spreadsheetId, retainedSourceCards);
             }
           } catch (error) {
+            deadline.signal.throwIfAborted();
             const kind = errorStatus(error);
             const message = safeErrorMessage(error);
             adapterReporter.warnActive(message);
@@ -910,7 +927,32 @@ export class RatingsService {
           }
           await saveProgress();
         });
+        };
+        try {
+          await this.domainExclusive(domain, executeDomain);
+        } catch (error) {
+          deadline.signal.throwIfAborted();
+          if (domainStarted) throw error;
+          const kind = errorStatus(error);
+          const message = safeErrorMessage(error);
+          for (const brand of retryBrands) {
+            this.addPartition(
+              run,
+              domain,
+              brand,
+              kind === "error" ? "error" : "blocked",
+              0,
+              0,
+              `${kind}: ${message}`
+            );
+          }
+          await saveProgress();
+        }
       }));
+      const rejectedDomain = domainResults.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected"
+      );
+      if (rejectedDomain) throw rejectedDomain.reason;
       await progressWrites;
       run.partitions.sort((a, b) =>
         run.request.domains.indexOf(a.domain) - run.request.domains.indexOf(b.domain) ||
@@ -921,6 +963,27 @@ export class RatingsService {
         run.request.brands.indexOf(a.brand) - run.request.brands.indexOf(b.brand) ||
         a.product.localeCompare(b.product, "ru") || a.listingId.localeCompare(b.listingId)
       );
+      run.observations = reconcileProductCatalog(run.observations, catalogProducts);
+      for (const observation of run.observations) {
+        if (!["ok", "no_reviews"].includes(observation.status)) continue;
+        const partition = run.partitions.find((item) =>
+          item.domain === observation.domain && normalizeText(item.brand) === normalizeText(observation.brand)
+        );
+        const collapsedDistinctProducts = collapsesDistinctProductPages(
+          observation.productIdentity,
+          observation.productEvidence,
+          partition?.discovered ?? 1,
+          observation.brand,
+          observation.product
+        );
+        const autoAcceptedReviewAggregate = canAutoAcceptDedicatedReviewAggregate(observation);
+        if (
+          (collapsedDistinctProducts && !autoAcceptedReviewAggregate) ||
+          (observation.productIdentity?.granularity !== "variant" && !autoAcceptedReviewAggregate)
+        ) {
+          observation.status = "needs_review";
+        }
+      }
       delete run.progress.current;
       await this.refreshDraftProfileExamples(run);
       run.payloadHash = stableHash({ request: run.request, observations: run.observations });
@@ -1030,6 +1093,13 @@ export class RatingsService {
       partition.discovered = Math.max(0, partition.discovered - rejectedCount);
       partition.collected = Math.max(0, partition.collected - rejectedCount);
     }
+    const spreadsheetId = extractSpreadsheetId(run.request.sheetUrl);
+    const requestedBrandKeys = new Set(run.request.brands.map(normalizeText));
+    run.observations = reconcileProductCatalog(
+      run.observations,
+      (await this.repository.listProducts(spreadsheetId))
+        .filter((product) => requestedBrandKeys.has(normalizeText(product.brand)))
+    );
     run.qa = validateRun(run);
     run.payloadHash = stableHash({ request: run.request, observations: run.observations });
     await this.touch(run);
@@ -1084,6 +1154,8 @@ export class RatingsService {
       groupId: item.groupId,
       aggregateGroupId: item.aggregateGroupId,
       productIdentity: item.productIdentity,
+      productEvidence: compactProductCatalogEvidence(item.productEvidence),
+      productOverride: item.productOverride,
       firstSeenMonth: earlierMonth(
         existing.get(productKey(item.domain, item.listingId))?.firstSeenMonth,
         run.request.month

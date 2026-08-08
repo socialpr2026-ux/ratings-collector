@@ -20,7 +20,7 @@ import { Pharmacy009Adapter } from "./adapters/pharmacy009.js";
 import { MedOtzyvAdapter } from "./adapters/med-otzyv.js";
 import { MegamarketAdapter } from "./adapters/megamarket.js";
 import { FileEvidenceStore, type EvidenceStore } from "./evidence.js";
-import { createAdapterResolver, RatingsService } from "./orchestrator.js";
+import { createAdapterResolver, RatingsService, type DomainExclusive } from "./orchestrator.js";
 import { FileRepository, type Repository } from "./repository.js";
 import { readTextBounded, safeFetch } from "./utils/safe-fetch.js";
 
@@ -67,6 +67,7 @@ export async function createCollectorRuntime(options: {
   reviewsFetch?: typeof fetch;
   env?: Record<string, string | undefined>;
   apifyExclusive?: AsyncExclusive;
+  domainExclusive?: DomainExclusive;
 } = {}): Promise<CollectorRuntime> {
   const env = options.env ?? process.env;
   const repository = options.repository ?? await FileRepository.open();
@@ -186,7 +187,11 @@ export async function createCollectorRuntime(options: {
     ...createAdditionalPharmacyAdapters(evidence, options.fetch),
     ...createReviewSiteAdapters(evidence, options.fetch)
   ];
-  const service = new RatingsService(repository, createAdapterResolver(known, repository, evidence, options.fetch));
+  const service = new RatingsService(
+    repository,
+    createAdapterResolver(known, repository, evidence, options.fetch),
+    { domainExclusive: options.domainExclusive }
+  );
   return { repository, service };
 }
 
@@ -195,6 +200,7 @@ export async function createRuntime(options: {
   reviewsFetch?: typeof fetch;
   env?: Record<string, string | undefined>;
   apifyExclusive?: AsyncExclusive;
+  domainExclusive?: DomainExclusive;
 } = {}): Promise<Runtime> {
   return createCollectorRuntime(options);
 }

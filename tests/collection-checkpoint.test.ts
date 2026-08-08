@@ -3,7 +3,6 @@ import type { Observation, ProductRef, RunState, SiteAdapter } from "../src/shar
 import {
   STALE_COLLECTION_CHECKPOINT_ERROR,
   STALE_COLLECTION_CHECKPOINT_MS,
-  STALE_PRODUCT_COLLECTION_CHECKPOINT_MS,
   STALE_PUBLICATION_CHECKPOINT_ERROR,
   STALE_PUBLICATION_CHECKPOINT_MS,
   reconcileStalePublicationCheckpoint,
@@ -49,28 +48,29 @@ function runningCheckpoint(updatedAt: string): RunState {
 }
 
 describe("stale collection checkpoint reconciliation", () => {
-  it("makes one abandoned product request retryable without expiring an active long discovery", () => {
-    const checkpoint = runningCheckpoint(new Date(now.getTime() - 30_000).toISOString());
-    checkpoint.activity!.active[0] = {
-      ...checkpoint.activity!.active[0]!,
+  it("does not let a five-minute product timer race a live Agent execution", () => {
+    const fiveMinutes = 5 * 60 * 1000;
+    const live = runningCheckpoint(new Date(now.getTime() - 30_000).toISOString());
+    live.activity!.active[0] = {
+      ...live.activity!.active[0]!,
       stage: "collection",
       label: "Чтение карточки",
       listingId: "1441119989",
-      startedAt: new Date(now.getTime() - STALE_PRODUCT_COLLECTION_CHECKPOINT_MS).toISOString()
+      startedAt: new Date(now.getTime() - fiveMinutes).toISOString()
     };
 
-    expect(reconcileStaleCollectionCheckpoint(checkpoint, now)).toBe(true);
-    expect(checkpoint).toMatchObject({
-      status: "failed",
-      errors: [{
-        partition: "orchestrator",
-        message: expect.stringContaining(STALE_COLLECTION_CHECKPOINT_ERROR)
-      }]
-    });
+    expect(reconcileStaleCollectionCheckpoint(live, now)).toBe(false);
+    expect(live.status).toBe("running");
+
+    const checkpoint = structuredClone(live);
+    checkpoint.updatedAt = new Date(now.getTime() - fiveMinutes).toISOString();
+
+    expect(reconcileStaleCollectionCheckpoint(checkpoint, now)).toBe(false);
+    expect(checkpoint.status).toBe("running");
 
     const discovery = runningCheckpoint(new Date(now.getTime() - 30_000).toISOString());
     discovery.activity!.active[0]!.startedAt = new Date(
-      now.getTime() - STALE_PRODUCT_COLLECTION_CHECKPOINT_MS
+      now.getTime() - fiveMinutes
     ).toISOString();
     expect(reconcileStaleCollectionCheckpoint(discovery, now)).toBe(false);
     expect(discovery.status).toBe("running");

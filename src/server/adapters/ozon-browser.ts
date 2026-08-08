@@ -984,13 +984,16 @@ export class OzonBrowserAdapter implements SiteAdapter {
                   exact = await this.fetchExactComposerProduct(ref, product.listingId, context);
                 } catch (browserComposerError) {
                   const message = `translated composer: ${secondaryComposerError instanceof Error ? secondaryComposerError.message : String(secondaryComposerError)}; browser composer: ${browserComposerError instanceof Error ? browserComposerError.message : String(browserComposerError)}`;
-                  composerError = secondaryComposerError instanceof ParserChangedError || browserComposerError instanceof ParserChangedError
-                    ? new ParserChangedError(message)
-                    : new AdapterBlockedError(message);
+                  composerError = secondaryComposerError instanceof AdapterQuotaError || browserComposerError instanceof AdapterQuotaError
+                    ? new AdapterQuotaError(message)
+                    : secondaryComposerError instanceof ParserChangedError || browserComposerError instanceof ParserChangedError
+                      ? new ParserChangedError(message)
+                      : new AdapterBlockedError(message);
                 }
               }
             }
             if (composerError) {
+              if (composerError instanceof AdapterQuotaError) throw composerError;
               const message = `primary composer: ${primaryError.message}; translated detail: ${translateError.message}; product composer: ${composerError instanceof Error ? composerError.message : String(composerError)}`;
               if (this.googleComposerEnabled && /HTTP\s+502|request failed|non-JSON/i.test(message)) {
                 throw new AdapterBlockedError(`Ozon exact product proof is unavailable: ${message}`);
@@ -1206,7 +1209,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
         signal: context.signal
       });
     } catch (error) {
-      if (context.signal?.aborted) throw error;
+      if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
       throw new AdapterBlockedError(`Ozon translated product request failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     const declaredLength = Number(response.headers.get("content-length"));
@@ -1245,7 +1248,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
       try {
         return await this.fetchExactTranslatedProduct(ref, listingId, context);
       } catch (error) {
-        if (context.signal?.aborted) throw error;
+        if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
         if (
           !(error instanceof AdapterBlockedError) || attempt === MAX_DETAIL_ATTEMPTS ||
           /returned HTTP 502/i.test(error.message)
@@ -1303,7 +1306,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
           signal: context.signal
         });
       } catch (error) {
-        if (context.signal?.aborted) throw error;
+        if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
         throw new AdapterBlockedError(`Ozon product composer request failed: ${error instanceof Error ? error.message : String(error)}`);
       }
       const declaredLength = Number(response.headers.get("content-length"));
@@ -1369,7 +1372,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
           signal: context.signal
         });
       } catch (error) {
-        if (context.signal?.aborted) throw error;
+        if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
         throw new AdapterBlockedError(`Ozon Yandex product composer request failed: ${error instanceof Error ? error.message : String(error)}`);
       }
       const declaredLength = Number(response.headers.get("content-length"));
@@ -1438,7 +1441,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
           signal: context.signal
         });
       } catch (error) {
-        if (context.signal?.aborted) throw error;
+        if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
         throw new AdapterBlockedError(`Ozon translated composer request failed: ${error instanceof Error ? error.message : String(error)}`);
       }
       const declaredLength = Number(response.headers.get("content-length"));
@@ -1523,7 +1526,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
         if (stage === "health_check") this.searchPageCache.set(cacheKey, composer);
         return composer;
       } catch (error) {
-        if (context.signal?.aborted) throw error;
+        if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
         googleComposerFailure = error instanceof ParserChangedError || error instanceof AdapterBlockedError
           ? error
           : new ParserChangedError(`Ozon Google composer search failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
@@ -1536,7 +1539,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
         if (stage === "health_check") this.searchPageCache.set(cacheKey, yandex);
         return yandex;
       } catch (error) {
-        if (context.signal?.aborted) throw error;
+        if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
         yandexFailure = error instanceof ParserChangedError || error instanceof AdapterBlockedError
           ? error
           : new ParserChangedError(`Ozon Yandex search failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
@@ -1550,7 +1553,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
         if (stage === "health_check") this.searchPageCache.set(cacheKey, translated);
         return translated;
       } catch (error) {
-        if (context.signal?.aborted) throw error;
+        if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
         translateFailure = error instanceof ParserChangedError || error instanceof AdapterBlockedError
           ? error
           : new ParserChangedError(`Ozon translated search failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
@@ -1562,6 +1565,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
       if (stage === "health_check") this.searchPageCache.set(cacheKey, composer);
       return composer;
     } catch (composerFailure) {
+      if (composerFailure instanceof AdapterQuotaError) throw composerFailure;
       if (!translateFailure && !yandexFailure && !googleComposerFailure) throw composerFailure;
       const message = `Ozon Google composer: ${googleComposerFailure?.message ?? "disabled"}; Yandex composer: ${yandexFailure?.message ?? "disabled"}; Google translated search: ${translateFailure?.message ?? "disabled"}; composer browser: ${composerFailure instanceof Error ? composerFailure.message : String(composerFailure)}`;
       if (googleComposerFailure instanceof ParserChangedError || yandexFailure instanceof ParserChangedError || translateFailure instanceof ParserChangedError || composerFailure instanceof ParserChangedError) {
@@ -1601,7 +1605,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
           signal: context.signal
         });
       } catch (error) {
-        if (context.signal?.aborted) throw error;
+        if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
         throw new AdapterBlockedError(`Ozon Google composer request failed: ${error instanceof Error ? error.message : String(error)}`);
       }
       const declaredLength = Number(response.headers.get("content-length"));
@@ -1664,7 +1668,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
           signal: context.signal
         });
       } catch (error) {
-        if (context.signal?.aborted) throw error;
+        if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
         throw new AdapterBlockedError(`Ozon Yandex composer request failed: ${error instanceof Error ? error.message : String(error)}`);
       }
       const declaredLength = Number(response.headers.get("content-length"));
@@ -1732,7 +1736,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
           signal: context.signal
         });
       } catch (error) {
-        if (context.signal?.aborted) throw error;
+        if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
         throw new AdapterBlockedError(`Ozon translated search request failed: ${error instanceof Error ? error.message : String(error)}`);
       }
       const declaredLength = Number(response.headers.get("content-length"));
@@ -1805,7 +1809,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
         signal: context.signal
       });
     } catch (error) {
-      if (context.signal?.aborted) throw error;
+      if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
       throw new AdapterBlockedError(`Ozon browser request failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     const declaredLength = Number(response.headers.get("content-length"));

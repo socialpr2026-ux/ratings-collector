@@ -14,6 +14,23 @@ function webHeaders(request: FastifyRequest): Headers {
   return headers;
 }
 
+export async function executeRunWithFailureCheckpoint(runtime: Runtime, runId: string) {
+  try {
+    return await runtime.service.executeRun(runId);
+  } catch (error) {
+    const failed = await runtime.service.getRun(runId);
+    if (failed && (failed.status === "queued" || failed.status === "running")) {
+      const message = safeErrorMessage(error);
+      failed.status = "failed";
+      failed.updatedAt = new Date().toISOString();
+      failed.errors = failed.errors.filter((item) => item.partition !== "orchestrator");
+      failed.errors.push({ partition: "orchestrator", message });
+      await runtime.repository.saveRun(failed);
+    }
+    throw error;
+  }
+}
+
 export async function registerApi(server: FastifyInstance, runtime: Runtime) {
   server.get("/api/config", async () => ({
     domains: INITIAL_DOMAINS, brands: INITIAL_BRANDS, companyBrands: COMPANY_BRANDS,
@@ -29,13 +46,7 @@ export async function registerApi(server: FastifyInstance, runtime: Runtime) {
   server.get("/api/health", async () => ({ ok: true, service: "ratings-collector", now: new Date().toISOString() }));
   server.post("/api/runs", async (request, reply) => {
     const run = await runtime.service.createRun(request.body);
-    void runtime.service.executeRun(run.id).catch(async (error) => {
-      const failed = await runtime.service.getRun(run.id);
-      if (!failed) return;
-      failed.status = "failed"; failed.updatedAt = new Date().toISOString();
-      failed.errors.push({ partition: "orchestrator", message: safeErrorMessage(error) });
-      await runtime.repository.saveRun(failed);
-    });
+    void executeRunWithFailureCheckpoint(runtime, run.id).catch(() => undefined);
     return reply.code(202).send(run);
   });
   server.get<{ Querystring: { limit?: string } }>("/api/runs", async (request) => {
@@ -51,7 +62,7 @@ export async function registerApi(server: FastifyInstance, runtime: Runtime) {
     if (!run) return reply.code(404).send({ error: "Run not found" });
     // Local development has no long-lived Agent endpoint. Await the same
     // selective executeRun path so retry semantics match production exactly.
-    return runtime.service.executeRun(run.id);
+    return executeRunWithFailureCheckpoint(runtime, run.id);
   });
   server.post<{ Params: { runId: string }; Body: { acceptedKeys?: string[]; rejectedKeys?: string[]; productLabels?: Record<string, string> } }>("/api/runs/:runId/review", async (request) =>
     runtime.service.approveObservations(

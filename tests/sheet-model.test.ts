@@ -13,7 +13,7 @@ const observation = (listingId: string, monthReviews = 100): Observation => ({
 });
 
 describe("Google Sheets model", () => {
-  it("writes one Khondrofen product for brand aggregates when only one variant is proven", () => {
+  it("keeps brand aggregates explicit when only one variant happens to be observed", () => {
     const familyIdentity: NonNullable<Observation["productIdentity"]> = {
       label: "Общий рейтинг бренда",
       granularity: "family" as const,
@@ -49,9 +49,9 @@ describe("Google Sheets model", () => {
       .filter((_row, index) => document.rowKinds[index] === "product")
       .map((row) => [row[2], row[0]]))
       .toEqual([
-        ["мазь 30 г", "iRecommend"],
-        ["мазь 30 г", "Мед-отзыв"],
-        ["мазь 30 г", "review.example"],
+        ["Общий рейтинг бренда", "iRecommend"],
+        ["Общий рейтинг бренда", "Мед-отзыв"],
+        ["Общий рейтинг бренда", "review.example"],
         ["мазь 30 г", "Wildberries"]
       ]);
   });

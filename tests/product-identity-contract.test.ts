@@ -34,7 +34,7 @@ describe("cross-site product identity contract", () => {
     expect(identity.label).not.toContain("№30");
   });
 
-  it("migrates a stored bare-counter aggregate from the real source title", () => {
+  it("migrates a stored bare-counter only when its own source title proves the variant", () => {
     const [recovered, unknown] = canonicalProductDescriptors([
       {
         brand: "Оциллококцинум",
@@ -61,7 +61,7 @@ describe("cross-site product identity contract", () => {
     ]);
 
     expect(recovered).toBe("гранулы №30");
-    expect(unknown).toBe("гранулы №30");
+    expect(unknown).toBe("Общий рейтинг бренда");
   });
 
   it("treats one exact pack on an aggregate review domain as that product, not a brand aggregate", () => {
@@ -116,7 +116,7 @@ describe("cross-site product identity contract", () => {
     expect(new Set(labels).size).toBe(4);
   });
 
-  it("attaches brand aggregates to one proven product but not to competing variants", () => {
+  it("keeps brand aggregates explicit even when one product happens to be observed", () => {
     const familyIdentity = {
       label: "Общий рейтинг бренда",
       granularity: "family" as const,
@@ -146,7 +146,12 @@ describe("cross-site product identity contract", () => {
       { brand: "Хондрофен", product: "Хондрофен", productIdentity: familyIdentity }
     ]);
 
-    expect(oneProduct).toEqual(["мазь 30 г", "мазь 30 г", "мазь 30 г", "мазь 30 г"]);
+    expect(oneProduct).toEqual([
+      "мазь 30 г",
+      "Общий рейтинг бренда",
+      "Общий рейтинг бренда",
+      "Общий рейтинг бренда"
+    ]);
 
     const competingVariants = canonicalProductDescriptors([
       { brand: "Хондрофен", product: "Хондрофен мазь 30 г", productIdentity: exactIdentity("мазь 30 г") },

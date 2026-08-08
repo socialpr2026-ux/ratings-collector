@@ -364,6 +364,8 @@ export function buildSheetDocument(
         platform: observation.platform, groupId: observation.groupId,
         aggregateGroupId: observation.aggregateGroupId,
         productIdentity: observation.productIdentity,
+        productEvidence: observation.productEvidence,
+        productOverride: observation.productOverride,
         firstSeenMonth: previous ? [previous.firstSeenMonth, month].sort()[0] : month,
         lastSeenMonth: previous ? [previous.lastSeenMonth, month].sort().at(-1)! : month,
         metrics: { ...(previous?.metrics ?? {}), [month]: { reviews: observation.reviews, rating: observation.rating } }
@@ -386,9 +388,25 @@ export function buildSheetDocument(
     brand: item.brand,
     product: item.product,
     url: item.canonicalUrl,
+    evidence: item.productEvidence,
     productIdentity: item.productIdentity
   })));
-  deduplicated.forEach((item, index) => { item.product = variants[index].label; });
+  const canonicalLabelsById = new Map<string, string>();
+  deduplicated.forEach((item, index) => {
+    const id = item.productIdentity?.canonicalVariantId;
+    if (!id) return;
+    const label = variants[index].label;
+    const previous = canonicalLabelsById.get(id);
+    if (!previous || label.length < previous.length ||
+      (label.length === previous.length && label.localeCompare(previous, "ru") < 0)) {
+      canonicalLabelsById.set(id, label);
+    }
+  });
+  deduplicated.forEach((item, index) => {
+    item.product = item.productIdentity?.canonicalVariantId
+      ? canonicalLabelsById.get(item.productIdentity.canonicalVariantId) ?? variants[index].label
+      : variants[index].label;
+  });
   const domainOrder = [...new Set([...request.domains, ...deduplicated.map((item) => item.domain).filter((domain) => !request.domains.includes(domain)).sort()])];
   const brandOrder = [...new Set([...request.brands, ...deduplicated.map((item) => item.brand).filter((brand) => !request.brands.includes(brand)).sort((a, b) => a.localeCompare(b, "ru"))])];
   const ordered = collapseSharedAggregateRows(deduplicated.sort((a, b) =>

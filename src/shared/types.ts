@@ -44,7 +44,16 @@ export const productIdentitySchema = z.object({
   confidence: z.enum(["exact", "partial", "ambiguous"]),
   missing: z.array(z.enum(["form", "strength_or_detail", "pack"])).max(3).default([]),
   reasons: z.array(z.string().trim().min(1).max(500)).max(10).default([]),
-  variantCount: z.number().int().positive().optional()
+  variantCount: z.number().int().positive().optional(),
+  /** Stable semantic identity of one real product variant across sources. */
+  canonicalVariantId: z.string().trim().min(1).max(96).optional(),
+  variantKeyVersion: z.number().int().positive().optional(),
+  resolutionMethod: z.enum([
+    "source_facts",
+    "catalog_alias",
+    "operator_override",
+    "source_aggregate"
+  ]).optional()
 });
 
 export type ProductIdentity = z.infer<typeof productIdentitySchema>;
@@ -202,6 +211,9 @@ export type ProductRecord = {
   groupId?: string;
   aggregateGroupId?: string;
   productIdentity?: ProductIdentity;
+  productEvidence?: ProductEvidence;
+  /** Confirmed human alias; raw source title remains in `product`. */
+  productOverride?: string;
   firstSeenMonth: string;
   lastSeenMonth: string;
 };

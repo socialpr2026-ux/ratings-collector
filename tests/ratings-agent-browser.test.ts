@@ -6,6 +6,7 @@ import {
   hasExplicitWildberriesNoResults,
   hasExplicitYandexMarketNoResults,
   shouldAutoRetryInitialCollection,
+  shouldReuseRuntimeForTransientRecovery,
   STATIC_PROXY_REQUEST_TIMEOUT_MS,
   transientRecoveryDelayMs,
   YANDEX_BATCH_GATEWAY_TIMEOUT_MS
@@ -1026,6 +1027,18 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).toHaveBeenCalledOnce();
   });
 
+  it("does not memoize a rejected Sandbox acquisition across a transient recovery pass", async () => {
+    const run = vi.fn()
+      .mockRejectedValueOnce(new Error("temporary Sandbox HTTP 502"))
+      .mockResolvedValue(undefined);
+    const acquire = createLazySandboxAcquire(sandbox(run));
+
+    await expect(acquire()).rejects.toBeInstanceOf(AdapterBlockedError);
+    await expect(acquire()).resolves.toBeUndefined();
+
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
   it("exposes only the fixed Yandex Market browser-search capability", async () => {
     const run = vi.fn(async () => undefined);
     const routedFetch = browserFetch(sandbox(run)) as typeof fetch & { yandexMarketBrowserEndpoint?: string };
@@ -1271,6 +1284,8 @@ describe("ratings Agent lazy Sandbox routing", () => {
       code: "quota_exceeded",
       message: expect.stringMatching(/monthly GB-s quota exceeded/)
     });
+    await expect(acquire()).rejects.toMatchObject({ code: "quota_exceeded" });
+    expect(run).toHaveBeenCalledOnce();
   });
 });
 
@@ -1322,6 +1337,9 @@ describe("ratings Agent initial recovery pass", () => {
     ])).toBe(false);
     expect(shouldAutoRetryInitialCollection("queued", [
       { status: "blocked", message: "Ozon exact product proof is unavailable: translated detail HTTP 502" }
+    ])).toBe(true);
+    expect(shouldAutoRetryInitialCollection("queued", [
+      { status: "blocked", message: "Ozon exact proof: EdgeOne Sandbox monthly GB-s quota exceeded; fallback HTTP 502" }
     ])).toBe(false);
     expect(shouldAutoRetryInitialCollection("review", [
       { status: "error", message: "HTTP 502" }
@@ -1336,13 +1354,23 @@ describe("ratings Agent initial recovery pass", () => {
   });
 
   it("bounds automatic recovery by run and failure size", () => {
-    const complete = Array.from({ length: 40 }, () => ({ status: "complete" }));
+    const complete = Array.from({ length: 102 }, () => ({ status: "complete" }));
     const failures = Array.from({ length: 10 }, () => ({ status: "blocked", message: "blocked: HTTP 502" }));
     expect(shouldAutoRetryInitialCollection("queued", [...complete, ...failures])).toBe(true);
-    expect(shouldAutoRetryInitialCollection("queued", [...complete, ...failures, { status: "complete" }])).toBe(false);
     expect(shouldAutoRetryInitialCollection("queued", [
       ...failures,
       { status: "blocked", message: "blocked: HTTP 502" }
+    ])).toBe(false);
+  });
+
+  it("reuses adapter caches only for an Ozon-only recovery pass", () => {
+    expect(shouldReuseRuntimeForTransientRecovery([
+      { domain: "ozon.ru", status: "complete" },
+      { domain: "ozon.ru", status: "blocked" }
+    ])).toBe(true);
+    expect(shouldReuseRuntimeForTransientRecovery([
+      { domain: "ozon.ru", status: "blocked" },
+      { domain: "market.yandex.ru", status: "blocked" }
     ])).toBe(false);
   });
 });

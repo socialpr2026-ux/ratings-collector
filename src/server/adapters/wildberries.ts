@@ -31,6 +31,7 @@ const MAX_BLOCKED_RETRY_DELAY_MS = 150;
 const MAX_BLOCKED_RETRY_TOTAL_MS = 1_200;
 const MAX_CARD_INFO_BYTES = 256_000;
 const MAX_CARD_BATCH_SIZE = 100;
+const DEFAULT_PRODUCT_INFO_TIMEOUT_MS = 4_000;
 const TRANSIENT_BLOCK_STATUSES = new Set([403, 407, 423, 429, 498, 502, 503, 504]);
 
 // Wildberries stores the nm-specific product description on its public basket
@@ -73,6 +74,8 @@ export type WildberriesAdapterOptions = {
   fetch?: typeof globalThis.fetch;
   /** Test/embedding override. `false` disables optional title enrichment. */
   productInfoFetch?: typeof globalThis.fetch | false;
+  /** Optional title enrichment must never own the run-wide deadline. */
+  productInfoTimeoutMs?: number;
   maxPages?: number;
   requestIntervalMs?: number;
   searchEndpoint?: string;
@@ -533,6 +536,7 @@ export class WildberriesAdapter implements SiteAdapter {
 
   private readonly injectedFetch?: typeof globalThis.fetch;
   private readonly productInfoFetchOverride?: typeof globalThis.fetch | false;
+  private readonly productInfoTimeoutMs: number;
   private readonly maxPages: number;
   private readonly requestIntervalMs: number;
   private readonly searchEndpoints: readonly string[];
@@ -551,6 +555,7 @@ export class WildberriesAdapter implements SiteAdapter {
   private hasMadeRequest = false;
   private readonly discoveryCache = new Map<string, Promise<ProductRef[]>>();
   private readonly discoveryBatchPlans = new Map<string, DiscoveryBatchPlan>();
+  private readonly productInfoTitleCache = new Map<string, Promise<string | undefined>>();
   private nextDiscoveryBatchId = 0;
 
   constructor(options: WildberriesAdapterOptions = {}) {
@@ -583,9 +588,14 @@ export class WildberriesAdapter implements SiteAdapter {
     if (!Number.isFinite(blockedCooldownMs) || blockedCooldownMs < 0 || blockedCooldownMs > 300_000) {
       throw new Error("Wildberries blockedCooldownMs must be between 0 and 300000");
     }
+    const productInfoTimeoutMs = options.productInfoTimeoutMs ?? DEFAULT_PRODUCT_INFO_TIMEOUT_MS;
+    if (!Number.isFinite(productInfoTimeoutMs) || productInfoTimeoutMs < 1 || productInfoTimeoutMs > 30_000) {
+      throw new Error("Wildberries productInfoTimeoutMs must be between 1 and 30000");
+    }
 
     this.injectedFetch = options.fetch;
     this.productInfoFetchOverride = options.productInfoFetch;
+    this.productInfoTimeoutMs = productInfoTimeoutMs;
     this.maxPages = maxPages;
     this.requestIntervalMs = options.requestIntervalMs ?? DEFAULT_REQUEST_INTERVAL_MS;
     // An explicitly injected endpoint keeps fixtures/local overrides isolated.
@@ -1206,10 +1216,51 @@ export class WildberriesAdapter implements SiteAdapter {
     const fetchImplementation = this.productInfoFetchOverride ?? context.fetch ?? this.injectedFetch ?? globalThis.fetch;
     if (typeof fetchImplementation !== "function") return currentTitle;
 
+    const cacheKey = `${context.runId?.trim() ?? "request"}\u001e${listingId}\u001e${normalizeText(brand)}`;
+    let exactTitle = this.productInfoTitleCache.get(cacheKey);
+    if (!exactTitle) {
+      exactTitle = this.fetchExactProductInfoTitle(listingId, brand, context, fetchImplementation);
+      this.productInfoTitleCache.set(cacheKey, exactTitle);
+      while (this.productInfoTitleCache.size > 512) {
+        const oldest = this.productInfoTitleCache.keys().next().value as string | undefined;
+        if (!oldest) break;
+        this.productInfoTitleCache.delete(oldest);
+      }
+    }
+    try {
+      const enriched = await exactTitle;
+      return enriched ? preferProductTitle(currentTitle, enriched) : currentTitle;
+    } catch (error) {
+      if (this.productInfoTitleCache.get(cacheKey) === exactTitle) this.productInfoTitleCache.delete(cacheKey);
+      if (context.signal?.aborted) throw error;
+      return currentTitle;
+    }
+  }
+
+  private async fetchExactProductInfoTitle(
+    listingId: string,
+    brand: string,
+    context: AdapterContext,
+    fetchImplementation: typeof globalThis.fetch
+  ): Promise<string | undefined> {
+
     for (const url of cardInfoUrls(listingId)) {
-      let response: Response;
+      const deadline = new AbortController();
+      const signal = context.signal
+        ? AbortSignal.any([context.signal, deadline.signal])
+        : deadline.signal;
+      let abortListener: (() => void) | undefined;
+      const interrupted = new Promise<never>((_resolve, reject) => {
+        abortListener = () => reject(signal.reason ?? new DOMException("aborted", "AbortError"));
+        if (signal.aborted) abortListener();
+        else signal.addEventListener("abort", abortListener, { once: true });
+      });
+      const timer = setTimeout(
+        () => deadline.abort(new AdapterBlockedError(`Wildberries optional title enrichment exceeded ${this.productInfoTimeoutMs}ms`)),
+        this.productInfoTimeoutMs
+      );
       try {
-        response = await fetchImplementation(url, {
+        const response = await Promise.race([fetchImplementation(url, {
           method: "GET",
           redirect: "error",
           headers: {
@@ -1219,24 +1270,26 @@ export class WildberriesAdapter implements SiteAdapter {
             "user-agent":
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36"
           },
-          signal: context.signal
-        });
+          signal
+        }), interrupted]);
+        if (response.status === 404) continue;
+        if (!response.ok) return undefined;
+        const body = await Promise.race([response.text(), interrupted]);
+        if (body.length > MAX_CARD_INFO_BYTES) return undefined;
+        try {
+          return exactCardInfoTitle(JSON.parse(body) as unknown, listingId, brand);
+        } catch {
+          return undefined;
+        }
       } catch (error) {
         if (context.signal?.aborted) throw error;
-        return currentTitle;
-      }
-      if (response.status === 404) continue;
-      if (!response.ok) return currentTitle;
-      const body = await response.text();
-      if (body.length > MAX_CARD_INFO_BYTES) return currentTitle;
-      try {
-        const enriched = exactCardInfoTitle(JSON.parse(body) as unknown, listingId, brand);
-        return enriched ? preferProductTitle(currentTitle, enriched) : currentTitle;
-      } catch {
-        return currentTitle;
+        return undefined;
+      } finally {
+        clearTimeout(timer);
+        if (abortListener) signal.removeEventListener("abort", abortListener);
       }
     }
-    return currentTitle;
+    return undefined;
   }
 
   private async fetchSearchPage(
