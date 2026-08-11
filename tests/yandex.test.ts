@@ -3,6 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { AdapterActivityEvent, AdapterContext, ProductRef } from "../src/shared/types.js";
 import { AdapterBlockedError, ParserChangedError } from "../src/server/adapters/errors.js";
 import { mapWithConcurrency, YandexAdapter } from "../src/server/adapters/yandex.js";
+import {
+  InMemoryYandexShardProofStore,
+  YandexShardScanCoordinator,
+  type YandexShardProof
+} from "../src/server/adapters/yandex-shard-proof.js";
 import { analyzeProductIdentity } from "../src/server/utils/product-name.js";
 import { hasDeterministicAggregateProof } from "../src/shared/review-aggregates.js";
 
@@ -491,7 +496,7 @@ describe("YandexAdapter discovery", () => {
         verifiedSitemaps: request.sitemaps,
         matches: [{
           brand: request.brands[0]!.brand,
-          url: "https://reviews.yandex.ru/product/baktoblis--170000001",
+          url: "https://reviews.yandex.ru/product/baktoblis--1700001",
           sitemap: request.sitemaps[0]
         }]
       }), { headers: { "content-type": "application/json" } });
@@ -507,7 +512,7 @@ describe("YandexAdapter discovery", () => {
     });
 
     await expect(adapter.discover("baktoblis", context())).resolves.toMatchObject([
-      { listingId: "170000001", brand: "baktoblis" }
+      { listingId: "1700001", brand: "baktoblis" }
     ]);
     expect(batchAttempts).toBe(2);
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST").map(([, init]) => init?.body))
@@ -536,7 +541,7 @@ describe("YandexAdapter discovery", () => {
         verifiedSitemaps: request.sitemaps,
         matches: [{
           brand: request.brands[0]!.brand,
-          url: "https://reviews.yandex.ru/product/baktoblis--170000001",
+          url: "https://reviews.yandex.ru/product/baktoblis--1700001",
           sitemap: request.sitemaps[0]
         }]
       }), { headers: { "content-type": "application/json" } });
@@ -552,7 +557,7 @@ describe("YandexAdapter discovery", () => {
     });
 
     await expect(adapter.discover("baktoblis", context())).resolves.toMatchObject([
-      { listingId: "170000001", brand: "baktoblis" }
+      { listingId: "1700001", brand: "baktoblis" }
     ]);
     expect(batchAttempts).toBe(2);
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST").map(([, init]) => init?.body))
@@ -943,7 +948,7 @@ describe("YandexAdapter discovery", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
-  it("fails the whole brand batch closed and retries it after one unreadable shard", async () => {
+  it("fails the whole brand batch closed and retries only the unreadable shard", async () => {
     let mapARequests = 0;
     let mapBRequests = 0;
     const fetch = vi.fn(async (input: string | URL | Request) => {
@@ -972,8 +977,139 @@ describe("YandexAdapter discovery", () => {
       { listingId: "265000112", brand: "ingavirin" }
     ]);
 
-    expect(mapARequests).toBe(2);
+    expect(mapARequests).toBe(1);
     expect(mapBRequests).toBe(2);
+  });
+
+  it("continues after a crash from the first durable shard boundary without re-reading that shard", async () => {
+    const firstController = new AbortController();
+    class CrashAfterFirstProofStore extends InMemoryYandexShardProofStore {
+      writes = 0;
+      override async put(jobKey: string, proof: YandexShardProof): Promise<void> {
+        await super.put(jobKey, proof);
+        this.writes += 1;
+        if (this.writes === 1) firstController.abort(new Error("simulated shard crash"));
+      }
+    }
+    const proofStore = new CrashAfterFirstProofStore();
+    const modelRequests: string[] = [];
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A, MAP_B, MAP_C]));
+      init?.signal?.throwIfAborted();
+      modelRequests.push(url);
+      if (url === MAP_A) return xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/kagotsel--111"]));
+      if (url === MAP_B) return xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/kagotsel--265000111"]));
+      if (url === MAP_C) return xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/kagotsel--505000111"]));
+      throw new Error(`Unexpected URL: ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const shared = { runId: "crash-after-shard", brands: ["Кагоцел"] } as const;
+    const first = new YandexAdapter({
+      fetch,
+      maxSitemaps: 3,
+      sitemapConcurrency: 1,
+      sitemapRetryAttempts: 1,
+      shardProofStore: proofStore,
+      shardScanCoordinator: new YandexShardScanCoordinator()
+    });
+
+    await expect(first.discover("Кагоцел", context({ ...shared, signal: firstController.signal })))
+      .rejects.toThrow("simulated shard crash");
+    expect(modelRequests).toEqual([MAP_A]);
+
+    const resumed = new YandexAdapter({
+      fetch,
+      maxSitemaps: 3,
+      sitemapConcurrency: 1,
+      sitemapRetryAttempts: 1,
+      shardProofStore: proofStore,
+      shardScanCoordinator: new YandexShardScanCoordinator()
+    });
+    await expect(resumed.discover("Кагоцел", context(shared))).resolves.toMatchObject([
+      { listingId: "111", brand: "Кагоцел" },
+      { listingId: "265000111", brand: "Кагоцел" },
+      { listingId: "505000111", brand: "Кагоцел" }
+    ]);
+    expect(modelRequests).toEqual([MAP_A, MAP_B, MAP_C]);
+  });
+
+  it("rescans only a changed and a newly added manifest shard", async () => {
+    const proofStore = new InMemoryYandexShardProofStore();
+    let manifestVersion = 1;
+    const modelRequests: string[] = [];
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) {
+        return xmlResponse(manifestVersion === 1
+          ? sitemapIndexWithLastmod([[MAP_A, "2026-08-10"], [MAP_B, "2026-08-10"]])
+          : sitemapIndexWithLastmod([
+              [MAP_A, "2026-08-10"],
+              [MAP_B, "2026-08-11"],
+              [MAP_C, "2026-08-11"]
+            ]));
+      }
+      modelRequests.push(url);
+      if (url === MAP_A) return xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/kagotsel--111"]));
+      if (url === MAP_B) return xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/kagotsel--265000111"]));
+      if (url === MAP_C) return xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/kagotsel--505000111"]));
+      throw new Error(`Unexpected URL: ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const options = {
+      fetch,
+      maxSitemaps: 3,
+      sitemapConcurrency: 1,
+      shardProofStore: proofStore
+    };
+    const shared = { runId: "manifest-shard-change", brands: ["Кагоцел"] } as const;
+
+    await expect(new YandexAdapter(options).discover("Кагоцел", context(shared))).resolves.toHaveLength(2);
+    manifestVersion = 2;
+    await expect(new YandexAdapter(options).discover("Кагоцел", context(shared))).resolves.toHaveLength(3);
+
+    expect(modelRequests).toEqual([MAP_A, MAP_B, MAP_B, MAP_C]);
+  });
+
+  it("single-flights one manifest and brand-set scan across adapter instances", async () => {
+    const proofStore = new InMemoryYandexShardProofStore();
+    const coordinator = new YandexShardScanCoordinator();
+    let indexRequests = 0;
+    let modelRequests = 0;
+    let releaseModel!: () => void;
+    const modelGate = new Promise<void>((resolve) => { releaseModel = resolve; });
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) {
+        indexRequests += 1;
+        return xmlResponse(sitemapIndex([MAP_A]));
+      }
+      if (url === MAP_A) {
+        modelRequests += 1;
+        await modelGate;
+        return xmlResponse(modelSitemap(["https://reviews.yandex.ru/product/kagotsel--111"]));
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const options = {
+      fetch,
+      maxSitemaps: 1,
+      sitemapConcurrency: 1,
+      shardProofStore: proofStore,
+      shardScanCoordinator: coordinator
+    };
+    const first = new YandexAdapter(options);
+    const second = new YandexAdapter(options);
+    const shared = { runId: "cross-adapter-single-flight", brands: ["Кагоцел"] } as const;
+
+    const firstDiscovery = first.discover("Кагоцел", context(shared));
+    const secondDiscovery = second.discover("Кагоцел", context(shared));
+    await vi.waitFor(() => expect(indexRequests).toBe(2));
+    releaseModel();
+
+    await expect(Promise.all([firstDiscovery, secondDiscovery])).resolves.toMatchObject([
+      [{ listingId: "111" }],
+      [{ listingId: "111" }]
+    ]);
+    expect(modelRequests).toBe(1);
   });
 
   it("shares one failed full scan across sequential brands before allowing a later retry", async () => {
@@ -2052,6 +2188,12 @@ function htmlResponse(body: string): Response {
 
 function sitemapIndex(urls: string[]): string {
   return `<?xml version="1.0"?><sitemapindex>${urls.map((url) => `<sitemap><loc>${url}</loc></sitemap>`).join("")}</sitemapindex>`;
+}
+
+function sitemapIndexWithLastmod(entries: Array<[url: string, lastmod: string]>): string {
+  return `<?xml version="1.0"?><sitemapindex>${entries.map(([url, lastmod]) =>
+    `<sitemap><loc>${url}</loc><lastmod>${lastmod}</lastmod></sitemap>`
+  ).join("")}</sitemapindex>`;
 }
 
 function modelSitemap(urls: string[]): string {

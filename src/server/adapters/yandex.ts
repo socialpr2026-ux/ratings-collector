@@ -13,6 +13,21 @@ import { canonicalizeUrl } from "../utils/urls.js";
 import { extractPageProductEvidence, titleProvesProductVariant } from "../utils/product-evidence.js";
 import { analyzeProductIdentity } from "../utils/product-name.js";
 import { AdapterBlockedError, AdapterQuotaError, ParserChangedError } from "./errors.js";
+import {
+  createYandexShardProof,
+  hashYandexBrandSet,
+  planYandexShardProofs,
+  sharedYandexShardProofStore,
+  sharedYandexShardScanCoordinator,
+  validateAndHashYandexManifest,
+  YandexManifestValidationError,
+  YandexShardScanCoordinator,
+  yandexShardJobKey,
+  type YandexManifestEntry,
+  type YandexShardProofStore,
+  type YandexSitemapManifest,
+  type YandexStoredShardMatch
+} from "./yandex-shard-proof.js";
 
 const DEFAULT_SITEMAP_INDEX = "https://reviews.yandex.ru/ugcpub/sitemap.xml";
 const REVIEWS_ORIGIN = "https://reviews.yandex.ru";
@@ -25,16 +40,6 @@ const MARKET_TRANSLATE_SOURCE = "yandex_market_json_ld_google_translate";
 const MARKET_BROWSER_SOURCE = "yandex_market_json_ld_browser";
 const MARKET_SEARCH_SOURCE = "yandex_market_json_ld_search";
 const MODEL_SITEMAP_PATH = /^\/ugcpub\/sitemap_model_\d+-\d+-\d+\.xml$/i;
-const SHOP_SITEMAP_PATH = /^\/ugcpub\/sitemap_shop_((?:[0-9a-z]|%[0-9a-f]{2})-(?:[0-9a-z]|%[0-9a-f]{2}))-\d+\.xml$/i;
-const SHOP_SITEMAP_RANGES = new Set([
-  "%25-%26",
-  ...Array.from({ length: 10 }, (_value, index) => `${index}-${index === 9 ? "%3a" : index + 1}`),
-  ...Array.from({ length: 26 }, (_value, index) => {
-    const start = String.fromCharCode("a".charCodeAt(0) + index);
-    const end = index === 25 ? "%7b" : String.fromCharCode("a".charCodeAt(0) + index + 1);
-    return `${start}-${end}`;
-  })
-]);
 const MODEL_ID_AT_END = /--(\d+)(?:[/?#]|$)/;
 // Four concurrent singleton calls are the proven stable EdgeOne boundary for
 // multi-megabyte Yandex maps. Two shards per Function multiplied that into
@@ -168,6 +173,10 @@ export type YandexAdapterOptions = {
   maxMarketPages?: number;
   now?: () => Date;
   sleep?: (milliseconds: number) => Promise<void>;
+  /** Per-shard proof persistence. A durable implementation can be injected without coupling the adapter to a repository. */
+  shardProofStore?: YandexShardProofStore;
+  /** Coalesces one exact manifest + brand-set scan across compatible adapter callers. */
+  shardScanCoordinator?: YandexShardScanCoordinator;
 };
 
 const CYRILLIC_TO_YANDEX_LATIN: Record<string, string> = {
@@ -230,7 +239,9 @@ export class YandexAdapter implements SiteAdapter {
   private readonly maxMarketPages: number;
   private readonly now: () => Date;
   private readonly sleep: (milliseconds: number) => Promise<void>;
-  private indexCache?: Cached<string[]>;
+  private readonly shardProofStore: YandexShardProofStore;
+  private readonly shardScanCoordinator: YandexShardScanCoordinator;
+  private indexCache?: Cached<YandexSitemapManifest>;
   /**
    * One Yandex run asks for every brand concurrently. Coalesce those calls into
    * one exhaustive sitemap pass and keep only the small matched-ref index.
@@ -277,6 +288,13 @@ export class YandexAdapter implements SiteAdapter {
     this.maxMarketPages = boundedInteger(options.maxMarketPages, 50, 1, 50);
     this.now = options.now ?? (() => new Date());
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    this.shardProofStore = options.shardProofStore ?? sharedYandexShardProofStore;
+    // A custom store is isolated unless its caller deliberately shares a
+    // coordinator too; otherwise a global job could finish without writing to
+    // the custom durability boundary that requested it.
+    this.shardScanCoordinator = options.shardScanCoordinator ?? (
+      options.shardProofStore ? new YandexShardScanCoordinator() : sharedYandexShardScanCoordinator
+    );
   }
 
   async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
@@ -290,14 +308,14 @@ export class YandexAdapter implements SiteAdapter {
       };
     }
     try {
-      const sitemaps = await this.loadSitemapIndex(context);
-      if (sitemaps.length === 0) {
+      const manifest = await this.loadSitemapIndex(context);
+      if (manifest.modelEntries.length === 0) {
         return { ok: false, checkedAt, message: "Yandex sitemap index contains no model sitemaps" };
       }
       return {
         ok: true,
         checkedAt,
-        message: `Yandex Reviews sitemap index is available (${sitemaps.length} model maps)`
+        message: `Yandex Reviews sitemap index is available (${manifest.modelEntries.length} model maps)`
       };
     } catch (error) {
       return {
@@ -540,52 +558,113 @@ export class YandexAdapter implements SiteAdapter {
     brands: string[],
     context: AdapterContext
   ): Promise<DiscoveryBatch> {
-    const sitemapUrls = await this.loadSitemapIndex(context);
-    if (sitemapUrls.length > this.maxSitemaps) {
+    const manifest = await this.loadSitemapIndex(context);
+    if (manifest.modelEntries.length > this.maxSitemaps) {
       throw new AdapterBlockedError(
-        `Yandex sitemap index contains ${sitemapUrls.length} model maps, above the complete-scan limit ${this.maxSitemaps}`
+        `Yandex sitemap index contains ${manifest.modelEntries.length} model maps, above the complete-scan limit ${this.maxSitemaps}`
       );
     }
-    const selected = prioritizeSitemaps(sitemapUrls, context.previousIds ?? []);
-    const batchEndpoint = ((context.fetch ?? this.fallbackFetch) as YandexCapableFetch).yandexBatchEndpoint;
-    if (batchEndpoint) return this.scanDiscoveryBatchViaGateway(batchEndpoint, selected, brands, context);
-    const discoveries = new Map<string, BrandDiscovery>(brands.map((candidate) => [
-      brandKey(candidate),
-      { brand: candidate, refs: new Map() }
-    ]));
-    await mapWithConcurrency(
-      selected,
-      this.sitemapConcurrency,
-      async (sitemapUrl) => {
-        const xml = await this.fetchModelSitemap(sitemapUrl, context);
-        // Parse each large document once for the complete run brand set. `xml`
-        // and its loc array become unreachable when this worker iteration ends.
-        for (const url of parseXmlLocs(xml)) {
-          if (!isAllowedProductUrl(url)) continue;
-          const listingId = extractModelId(url);
-          if (!listingId) continue;
-          const matched = [...discoveries.values()]
-            .map((discovery) => ({ discovery, score: yandexBrandMatchScore(url, discovery.brand) }))
-            .filter(({ score }) => score >= 0);
-          const bestScore = Math.max(-1, ...matched.map(({ score }) => score));
-          for (const { discovery, score } of matched) {
-            // When requested brands overlap (for example, "Видора" and
-            // "Видора Микро"), assign the model to the most specific exact
-            // brand only instead of duplicating it under the shorter prefix.
-            if (score !== bestScore) continue;
-            if (discovery.error) continue;
-            discovery.refs.set(listingId, productRefFromSitemap(listingId, url, discovery.brand, sitemapUrl));
-            if (discovery.refs.size > this.maxCandidates) {
-              discovery.error = new AdapterBlockedError(
-                `Yandex discovery for ${discovery.brand} found more than ${this.maxCandidates} distinct models`
-              );
-              discovery.refs.clear();
-            }
-          }
-        }
-      }
-    );
+    const selected = prioritizeManifestEntries(manifest.modelEntries, context.previousIds ?? []);
+    const brandSetHash = await hashYandexBrandSet(brands.map(brandKey));
+    const proofJobKey = yandexShardJobKey(context.runId, brandSetHash);
+    const scanKey = `${proofJobKey ?? `adhoc:${brandSetHash}`}:${manifest.manifestHash}`;
+    return this.shardScanCoordinator.run(scanKey, async () => {
+      const stored = proofJobKey ? await this.shardProofStore.load(proofJobKey) : [];
+      const plan = await planYandexShardProofs({
+        manifest,
+        selectedEntries: selected,
+        brandSetHash,
+        brandKeys: new Set(brands.map(brandKey)),
+        stored,
+        normalizeBrand: brandKey,
+        isAllowedProductUrl
+      });
+      const discoveries = new Map<string, BrandDiscovery>(brands.map((candidate) => [
+        brandKey(candidate),
+        { brand: candidate, refs: new Map() }
+      ]));
+      for (const proof of plan.reusable) this.applyShardMatches(discoveries, proof.matches);
+      const pendingEntries = plan.pending.map(({ entry }) => entry);
+      if (pendingEntries.length === 0) return this.finalizeDiscoveries(discoveries);
 
+      const batchEndpoint = ((context.fetch ?? this.fallbackFetch) as YandexCapableFetch).yandexBatchEndpoint;
+      if (batchEndpoint) {
+        return this.scanDiscoveryBatchViaGateway(
+          batchEndpoint,
+          pendingEntries,
+          brands,
+          context,
+          {
+            manifest,
+            brandSetHash,
+            proofJobKey,
+            discoveries,
+            completedSitemaps: plan.reusable.length,
+            totalSitemaps: selected.length
+          }
+        );
+      }
+
+      await mapWithConcurrency(
+        pendingEntries,
+        this.sitemapConcurrency,
+        async (entry) => {
+          context.signal?.throwIfAborted();
+          const xml = await this.fetchModelSitemap(entry.url, context);
+          const matches = this.extractShardMatches(xml, brands, entry.url);
+          const proof = await createYandexShardProof({
+            manifest,
+            entry,
+            brandSetHash,
+            status: "verified",
+            matches,
+            completedAt: this.now().toISOString()
+          });
+          if (proofJobKey) await this.shardProofStore.put(proofJobKey, proof);
+          this.applyShardMatches(discoveries, matches);
+        }
+      );
+      return this.finalizeDiscoveries(discoveries);
+    });
+  }
+
+  private extractShardMatches(xml: string, brands: string[], sitemapUrl: string): YandexStoredShardMatch[] {
+    const matches: YandexStoredShardMatch[] = [];
+    // Parse each large document once for the complete run brand set. `xml`
+    // and its loc array become unreachable when this worker iteration ends.
+    for (const url of parseXmlLocs(xml)) {
+      if (!isAllowedProductUrl(url)) continue;
+      const matched = brands
+        .map((brand) => ({ brand, score: yandexBrandMatchScore(url, brand) }))
+        .filter(({ score }) => score >= 0);
+      const bestScore = Math.max(-1, ...matched.map(({ score }) => score));
+      for (const { brand, score } of matched) {
+        // Overlapping brands belong only to the most specific exact match.
+        if (score === bestScore) matches.push({ brand, url, sitemap: sitemapUrl });
+      }
+    }
+    return matches;
+  }
+
+  private applyShardMatches(
+    discoveries: Map<string, BrandDiscovery>,
+    matches: readonly YandexStoredShardMatch[]
+  ): void {
+    for (const match of matches) {
+      const discovery = discoveries.get(brandKey(match.brand));
+      const listingId = extractModelId(match.url);
+      if (!discovery || !listingId || discovery.error) continue;
+      discovery.refs.set(listingId, productRefFromSitemap(listingId, match.url, discovery.brand, match.sitemap));
+      if (discovery.refs.size > this.maxCandidates) {
+        discovery.error = new AdapterBlockedError(
+          `Yandex discovery for ${discovery.brand} found more than ${this.maxCandidates} distinct models`
+        );
+        discovery.refs.clear();
+      }
+    }
+  }
+
+  private finalizeDiscoveries(discoveries: Map<string, BrandDiscovery>): DiscoveryBatch {
     return new Map([...discoveries].map(([key, discovery]) => [
       key,
       discovery.error ?? [...discovery.refs.values()].sort((a, b) =>
@@ -596,17 +675,24 @@ export class YandexAdapter implements SiteAdapter {
 
   private async scanDiscoveryBatchViaGateway(
     endpoint: string,
-    sitemapUrls: string[],
+    sitemapEntries: YandexManifestEntry[],
     brands: string[],
-    context: AdapterContext
+    context: AdapterContext,
+    resume: {
+      manifest: YandexSitemapManifest;
+      brandSetHash: string;
+      proofJobKey?: string;
+      discoveries: Map<string, BrandDiscovery>;
+      completedSitemaps: number;
+      totalSitemaps: number;
+    }
   ): Promise<DiscoveryBatch> {
     const fetcher = context.fetch ?? this.fallbackFetch;
     const directRecoverySupported = (fetcher as YandexCapableFetch).yandexDirectRecovery === true;
+    const sitemapUrls = sitemapEntries.map(({ url }) => url);
+    const entriesByUrl = new Map(sitemapEntries.map((entry) => [entry.url, entry]));
     const chunks = chunked(sitemapUrls, YANDEX_BATCH_CHUNK_SIZE);
-    const discoveries = new Map<string, BrandDiscovery>(brands.map((brand) => [
-      brandKey(brand),
-      { brand, refs: new Map() }
-    ]));
+    const discoveries = resume.discoveries;
     // Complete the healthy singleton proofs even when one transport route
     // stalls. Only failed shards enter the serial recovery round; no partial
     // discovery is returned until every index member is proven.
@@ -618,8 +704,8 @@ export class YandexAdapter implements SiteAdapter {
     };
     if (context.signal?.aborted) relayAbort();
     else context.signal?.addEventListener("abort", relayAbort, { once: true });
-    let completedSitemaps = 0;
-    let reportedSitemaps = 0;
+    let completedSitemaps = resume.completedSitemaps;
+    let reportedSitemaps = completedSitemaps;
     let failure: unknown;
     const tombstonedSitemaps = new Set<string>();
 
@@ -676,40 +762,38 @@ export class YandexAdapter implements SiteAdapter {
         throw new AdapterBlockedError("Yandex batch proof is incomplete or source-unbound");
       }
       for (const sitemap of proof.tombstonedSitemaps ?? []) tombstonedSitemaps.add(sitemap);
-      for (const match of proof.matches) {
-        const discovery = discoveries.get(brandKey(match.brand))!;
-        const listingId = extractModelId(match.url)!;
-        discovery.refs.set(listingId, productRefFromSitemap(listingId, match.url, discovery.brand, match.sitemap));
-        if (discovery.refs.size > this.maxCandidates) {
-          discovery.error = new AdapterBlockedError(
-            `Yandex discovery for ${discovery.brand} found more than ${this.maxCandidates} distinct models`
-          );
-          discovery.refs.clear();
-        }
-      }
+      const entry = entriesByUrl.get(sitemaps[0]!);
+      if (!entry) throw new AdapterBlockedError("Yandex batch proof is not bound to a pending manifest shard");
+      const shardMatches = proof.matches.filter(({ sitemap }) => sitemap === entry.url);
+      const storedProof = await createYandexShardProof({
+        manifest: resume.manifest,
+        entry,
+        brandSetHash: resume.brandSetHash,
+        status: proof.tombstonedSitemaps?.includes(entry.url) ? "tombstoned" : "verified",
+        matches: shardMatches,
+        completedAt: this.now().toISOString()
+      });
+      if (resume.proofJobKey) await this.shardProofStore.put(resume.proofJobKey, storedProof);
+      this.applyShardMatches(discoveries, shardMatches);
     };
 
     const processDirectRecovery = async (sitemapUrl: string): Promise<void> => {
       const xml = await this.fetchModelSitemap(sitemapUrl, context, true);
-      for (const url of parseXmlLocs(xml)) {
-        if (!isAllowedProductUrl(url)) continue;
-        const listingId = extractModelId(url);
-        if (!listingId) continue;
-        const matched = [...discoveries.values()]
-          .map((discovery) => ({ discovery, score: yandexBrandMatchScore(url, discovery.brand) }))
-          .filter(({ score }) => score >= 0);
-        const bestScore = Math.max(-1, ...matched.map(({ score }) => score));
-        for (const { discovery, score } of matched) {
-          if (score !== bestScore || discovery.error) continue;
-          discovery.refs.set(listingId, productRefFromSitemap(listingId, url, discovery.brand, sitemapUrl));
-          if (discovery.refs.size > this.maxCandidates) {
-            discovery.error = new AdapterBlockedError(
-              `Yandex discovery for ${discovery.brand} found more than ${this.maxCandidates} distinct models`
-            );
-            discovery.refs.clear();
-          }
-        }
-      }
+      const entry = entriesByUrl.get(sitemapUrl);
+      if (!entry) throw new AdapterBlockedError("Yandex direct recovery is not bound to a pending manifest shard");
+      const matches = this.extractShardMatches(xml, brands, sitemapUrl);
+      const tombstoned = isKnownYandexIndexTombstoneSitemap(sitemapUrl) && parseXmlLocs(xml).length === 0;
+      const proof = await createYandexShardProof({
+        manifest: resume.manifest,
+        entry,
+        brandSetHash: resume.brandSetHash,
+        status: tombstoned ? "tombstoned" : "verified",
+        matches,
+        completedAt: this.now().toISOString()
+      });
+      if (resume.proofJobKey) await this.shardProofStore.put(resume.proofJobKey, proof);
+      if (tombstoned) tombstonedSitemaps.add(sitemapUrl);
+      this.applyShardMatches(discoveries, matches);
     };
 
     type PendingGatewayChunk = { index: number; sitemaps: string[]; error?: unknown };
@@ -730,17 +814,17 @@ export class YandexAdapter implements SiteAdapter {
             await processChunk(item.sitemaps);
             completedSitemaps += item.sitemaps.length;
             if (
-              completedSitemaps === sitemapUrls.length ||
+              completedSitemaps === resume.totalSitemaps ||
               completedSitemaps - reportedSitemaps >= YANDEX_PROGRESS_SITEMAP_INTERVAL
             ) {
               reportedSitemaps = completedSitemaps;
               await reportActivity(context, {
                 operationId: "yandex:gateway-progress",
                 stage: "discovery",
-                status: completedSitemaps === sitemapUrls.length ? "complete" : "active",
+                status: completedSitemaps === resume.totalSitemaps ? "complete" : "active",
                 label: "Полный поиск карточек Yandex",
                 channels: ["gateway"],
-                detail: `Проверено карт индекса: ${completedSitemaps} из ${sitemapUrls.length}`
+                detail: `Проверено карт индекса: ${completedSitemaps} из ${resume.totalSitemaps}`
               });
             }
           } catch (error) {
@@ -801,17 +885,17 @@ export class YandexAdapter implements SiteAdapter {
                 await processDirectRecovery(item.sitemaps[0]!);
                 completedSitemaps += 1;
                 if (
-                  completedSitemaps === sitemapUrls.length ||
+                  completedSitemaps === resume.totalSitemaps ||
                   completedSitemaps - reportedSitemaps >= YANDEX_PROGRESS_SITEMAP_INTERVAL
                 ) {
                   reportedSitemaps = completedSitemaps;
                   await reportActivity(context, {
                     operationId: "yandex:gateway-progress",
                     stage: "discovery",
-                    status: completedSitemaps === sitemapUrls.length ? "complete" : "active",
+                    status: completedSitemaps === resume.totalSitemaps ? "complete" : "active",
                     label: "Полный поиск карточек Yandex",
                     channels: ["browser"],
-                    detail: `Проверено карт индекса: ${completedSitemaps} из ${sitemapUrls.length}`
+                    detail: `Проверено карт индекса: ${completedSitemaps} из ${resume.totalSitemaps}`
                   });
                 }
               } catch (error) {
@@ -873,12 +957,7 @@ export class YandexAdapter implements SiteAdapter {
     } finally {
       context.signal?.removeEventListener("abort", relayAbort);
     }
-    return new Map([...discoveries].map(([key, discovery]) => [
-      key,
-      discovery.error ?? [...discovery.refs.values()].sort((a, b) =>
-        (a.title ?? "").localeCompare(b.title ?? "", "ru") || compareIds(a.listingId, b.listingId)
-      )
-    ]));
+    return this.finalizeDiscoveries(discoveries);
   }
 
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
@@ -1281,7 +1360,7 @@ export class YandexAdapter implements SiteAdapter {
     };
   }
 
-  private async loadSitemapIndex(context: AdapterContext): Promise<string[]> {
+  private async loadSitemapIndex(context: AdapterContext): Promise<YandexSitemapManifest> {
     if (this.indexCache && this.indexCache.expiresAt >= Date.now()) return this.indexCache.value;
 
     const value = this.fetchSitemapIndex(context);
@@ -1292,23 +1371,20 @@ export class YandexAdapter implements SiteAdapter {
     return value;
   }
 
-  private async fetchSitemapIndex(context: AdapterContext): Promise<string[]> {
+  private async fetchSitemapIndex(context: AdapterContext): Promise<YandexSitemapManifest> {
     const xml = await this.fetchSitemapDocument(this.sitemapIndexUrl, context, "index");
     if (looksBlocked(xml)) throw new AdapterBlockedError("Yandex blocked sitemap index access");
-    if (!/<sitemapindex\b/i.test(xml)) throw new ParserChangedError("Yandex sitemap index XML shape changed");
-
-    const locations = parseXmlLocs(xml);
-    const declared = xml.match(/<sitemap\b/gi)?.length ?? 0;
-    const modelLocations = locations.filter(isAllowedModelSitemap);
-    if (declared === 0 || locations.length !== declared || modelLocations.length === 0 ||
-      locations.some((location) => !isAllowedModelSitemap(location) && !isAllowedShopSitemap(location)) ||
-      new Set(locations).size !== locations.length) {
-      throw new ParserChangedError("Yandex sitemap index is incomplete or contains an unknown map shape");
+    try {
+      // The validator hashes the exact bounded XML and every model entry
+      // revision. Shop maps remain part of the completeness proof but are not
+      // scheduled as product-card shards.
+      return await validateAndHashYandexManifest(xml, this.sitemapIndexUrl);
+    } catch (error) {
+      if (error instanceof YandexManifestValidationError) {
+        throw new ParserChangedError(error.message);
+      }
+      throw error;
     }
-    // The root index also advertises shop-review maps. They are part of the
-    // index completeness proof, but cannot contain exact Market product model
-    // cards and must not consume the product discovery scan budget.
-    return modelLocations;
   }
 
   private async fetchModelSitemap(
@@ -1564,16 +1640,6 @@ function isAllowedModelSitemap(input: string): boolean {
   }
 }
 
-function isAllowedShopSitemap(input: string): boolean {
-  try {
-    const url = new URL(input);
-    const range = url.pathname.match(SHOP_SITEMAP_PATH)?.[1]?.toLowerCase();
-    return isAllowedYandexSitemapUrl(url) && Boolean(range && SHOP_SITEMAP_RANGES.has(range));
-  } catch {
-    return false;
-  }
-}
-
 function isAllowedYandexSitemapUrl(url: URL): boolean {
   return url.protocol === "https:" && url.hostname === "reviews.yandex.ru" && !url.port &&
     !url.username && !url.password && !url.search && !url.hash;
@@ -1584,7 +1650,7 @@ function assertCompleteModelSitemap(xml: string, sitemap: string): void {
   const range = requested.pathname.match(/sitemap_model_(\d+)-(\d+)-\d+\.xml/i);
   const locations = parseXmlLocs(xml);
   const declared = xml.match(/<url\b/gi)?.length ?? 0;
-  if (!range || locations.length !== declared) {
+  if (!range || locations.length !== declared || new Set(locations).size !== locations.length) {
     throw new ParserChangedError(`Yandex model sitemap is incomplete: ${sitemap}`);
   }
   const minimumId = BigInt(range[1]!);
@@ -1738,14 +1804,17 @@ function discoveryBatchKey(runId: string | undefined, brands: readonly string[])
   return `${scope}\u001e${brands.map(brandKey).sort().join("\u001f")}`;
 }
 
-function prioritizeSitemaps(sitemaps: string[], previousIds: string[]): string[] {
+function prioritizeManifestEntries(
+  entries: YandexManifestEntry[],
+  previousIds: string[]
+): YandexManifestEntry[] {
   const ids = previousModelIds(previousIds).map(Number).filter(Number.isSafeInteger);
-  if (ids.length === 0) return sitemaps;
+  if (ids.length === 0) return entries;
 
-  return sitemaps
-    .map((url, index) => ({ url, index, priority: sitemapContainsAnyId(url, ids) ? 0 : 1 }))
+  return entries
+    .map((entry, index) => ({ entry, index, priority: sitemapContainsAnyId(entry.url, ids) ? 0 : 1 }))
     .sort((a, b) => a.priority - b.priority || a.index - b.index)
-    .map(({ url }) => url);
+    .map(({ entry }) => entry);
 }
 
 function sitemapContainsAnyId(url: string, ids: number[]): boolean {
