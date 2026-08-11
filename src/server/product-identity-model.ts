@@ -4,7 +4,9 @@ import type {
   ProductIdentityModelProvider,
   ProductIdentityModelResult
 } from "./product-master.js";
-import { safeFetch } from "./utils/safe-fetch.js";
+import { readTextBounded, safeFetch } from "./utils/safe-fetch.js";
+
+const MAX_MODEL_RESPONSE_BYTES = 256 * 1024;
 
 const responseSchema = z.object({
   results: z.array(z.object({
@@ -61,7 +63,8 @@ export class HttpProductIdentityModelProvider implements ProductIdentityModelPro
       })
     }, this.fetchImpl, 0, this.timeoutMs);
     if (!response.ok) throw new Error(`Product identity model returned HTTP ${response.status}`);
-    const parsed = responseSchema.parse(await response.json());
+    const body = await readTextBounded(response, MAX_MODEL_RESPONSE_BYTES, this.timeoutMs);
+    const parsed = responseSchema.parse(JSON.parse(body) as unknown);
     const allowed = new Set(candidateVariantIds);
     if (parsed.results.some((result) => !allowed.has(result.candidateVariantId))) {
       throw new Error("Product identity model returned an unknown candidate ID");

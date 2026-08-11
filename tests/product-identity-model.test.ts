@@ -58,6 +58,21 @@ describe("external product identity ranker boundary", () => {
       .rejects.toThrow("unknown candidate ID");
   });
 
+  it("cancels an oversized model response before JSON parsing", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      results: [],
+      padding: "x".repeat(256 * 1024)
+    }), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+    const provider = new HttpProductIdentityModelProvider({
+      endpoint: "https://example.com/rank",
+      token: "token",
+      fetchImpl
+    });
+
+    await expect(provider.rank({ normalizedTitle: "товар", facts: [], candidateVariantIds: [candidate] }))
+      .rejects.toThrow("превышает лимит 262144 байт");
+  });
+
   it("does not call the external provider when deterministic blocking found no candidates", async () => {
     const fetchImpl = vi.fn() as unknown as typeof fetch;
     const provider = new HttpProductIdentityModelProvider({ endpoint: "https://example.com/rank", token: "token", fetchImpl });
