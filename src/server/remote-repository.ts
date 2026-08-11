@@ -64,6 +64,7 @@ const RETRYABLE_ACTIONS = new Set<RepositoryRpc["action"]>([
   "commitPartition",
   "loadYandexShardProofs",
   "saveYandexShardProof",
+  "renewLease",
   "getProfile",
   "saveProfile",
   "listProducts",

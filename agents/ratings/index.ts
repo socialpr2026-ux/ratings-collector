@@ -3,6 +3,7 @@ import { authenticate, authConfig } from "../../src/server/auth.js";
 import { AdapterBlockedError, AdapterQuotaError } from "../../src/server/adapters/errors.js";
 import { createSerialExecutor } from "../../src/server/adapters/budgeted.js";
 import { RemoteEvidenceStore, RemoteRepository } from "../../src/server/remote-repository.js";
+import type { RepositoryLease } from "../../src/server/repository.js";
 import { createCollectorRuntime } from "../../src/server/runtime.js";
 import { shouldUseHardenedBrowser } from "../../src/server/utils/agent-browser-routing.js";
 import { readAgentJson } from "../../src/server/utils/agent-request.js";
@@ -28,6 +29,8 @@ type AgentContext = {
 };
 
 export const STATIC_PROXY_REQUEST_TIMEOUT_MS = 55_000;
+export const OZON_LEASE_MS = 120_000;
+export const OZON_LEASE_HEARTBEAT_MS = 40_000;
 
 const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);
 const YANDEX_BATCH_ENDPOINT = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
@@ -89,6 +92,44 @@ export function createBrowserLaneScheduler(maxConcurrent = 3): <T>(
       if (laneTails.get(lane) === tail) laneTails.delete(lane);
     }
   };
+}
+
+export async function runWithRenewableLease<T>(
+  repository: Pick<RemoteRepository, "renewLease" | "releaseLease">,
+  initialLease: RepositoryLease,
+  operation: () => Promise<T>,
+  leaseMs = OZON_LEASE_MS,
+  heartbeatMs = OZON_LEASE_HEARTBEAT_MS
+): Promise<T> {
+  if (!Number.isFinite(leaseMs) || leaseMs < 1_000 || !Number.isFinite(heartbeatMs) ||
+    heartbeatMs < 1_000 || heartbeatMs >= leaseMs) {
+    throw new RangeError("Invalid renewable lease timing");
+  }
+  let lease = initialLease;
+  let renewalError: unknown;
+  let renewal = Promise.resolve();
+  const timer = setInterval(() => {
+    renewal = renewal.then(async () => {
+      if (renewalError) return;
+      try {
+        lease = await repository.renewLease(lease, leaseMs);
+      } catch (error) {
+        renewalError = error;
+      }
+    });
+  }, heartbeatMs);
+  try {
+    const result = await operation();
+    await renewal;
+    if (renewalError) {
+      throw new AdapterBlockedError(`Renewable lease heartbeat failed: ${safeErrorMessage(renewalError)}`);
+    }
+    return result;
+  } finally {
+    clearInterval(timer);
+    await renewal.catch(() => undefined);
+    await repository.releaseLease(lease).catch(() => undefined);
+  }
 }
 
 function json(value: unknown, status = 200) {
@@ -1328,19 +1369,15 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         const domainExclusive = <T>(domain: string, operation: () => Promise<T>): Promise<T> => {
           if (domain !== "ozon.ru") return operation();
           return localOzonExclusive(async () => {
-            let ozonLease: { token: string; keys: string[] };
+            let ozonLease: RepositoryLease;
             try {
-              ozonLease = await repository.acquireLease("collection:ozon", 3_700_000);
+              ozonLease = await repository.acquireLease("collection:ozon", OZON_LEASE_MS);
             } catch (error) {
               throw new AdapterBlockedError(
                 `Ozon collection is busy in another run (HTTP 429): ${safeErrorMessage(error)}`
               );
             }
-            try {
-              return await operation();
-            } finally {
-              await repository.releaseLease(ozonLease).catch(() => undefined);
-            }
+            return runWithRenewableLease(repository, ozonLease, operation);
           });
         };
         const collectorFetch = browserFetch(context.sandbox, {

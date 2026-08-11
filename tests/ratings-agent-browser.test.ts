@@ -6,6 +6,9 @@ import {
   extractYandexMarketSearchHtmlProof,
   hasExplicitWildberriesNoResults,
   hasExplicitYandexMarketNoResults,
+  OZON_LEASE_HEARTBEAT_MS,
+  OZON_LEASE_MS,
+  runWithRenewableLease,
   STATIC_PROXY_REQUEST_TIMEOUT_MS,
   YANDEX_BATCH_GATEWAY_TIMEOUT_MS
 } from "../agents/ratings/index.js";
@@ -33,6 +36,31 @@ describe("ratings Agent lazy Sandbox routing", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("renews the short Ozon lease and releases the latest fenced handle", async () => {
+    vi.useFakeTimers();
+    let finish!: () => void;
+    const operation = new Promise<void>((resolve) => { finish = resolve; });
+    const repository = {
+      renewLease: vi.fn(async (lease: { token: string; keys: string[]; scope?: string }) => ({
+        ...lease,
+        keys: [...lease.keys, "locks/renewed.json"]
+      })),
+      releaseLease: vi.fn(async () => undefined)
+    };
+    const pending = runWithRenewableLease(repository as never, {
+      token: "lease", keys: ["locks/original.json"], scope: "collection:ozon"
+    }, () => operation);
+
+    await vi.advanceTimersByTimeAsync(OZON_LEASE_HEARTBEAT_MS + 1);
+    expect(repository.renewLease).toHaveBeenCalledWith(expect.objectContaining({ token: "lease" }), OZON_LEASE_MS);
+    finish();
+    await pending;
+
+    expect(repository.releaseLease).toHaveBeenCalledWith(expect.objectContaining({
+      keys: ["locks/original.json", "locks/renewed.json"]
+    }));
   });
 
   it("bounds a stalled Ozon translated static-proxy request before the Agent loses the partition checkpoint", async () => {
