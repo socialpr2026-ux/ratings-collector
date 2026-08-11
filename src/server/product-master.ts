@@ -23,7 +23,6 @@ function factsByField(facts: readonly ProductFact[]): Map<ProductFact["field"], 
   }
   return result;
 }
-
 /** Missing facts are unknown, never equality. Only explicitly incompatible
  * facts produce a hard conflict; the resolver may ask for review or create a
  * separate provisional variant when either side is incomplete. */
@@ -88,4 +87,3 @@ export type ProductIdentityModelResult = {
 export interface ProductIdentityModelProvider {
   rank(input: ProductIdentityModelInput): Promise<ProductIdentityModelResult[]>;
 }
-

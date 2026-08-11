@@ -36,7 +36,6 @@ function statusFromMessage(message: string): number | undefined {
   const status = Number(match[1]);
   return Number.isSafeInteger(status) ? status : undefined;
 }
-
 /**
  * Converts adapter/runtime failures into one retry policy contract. Quota and
  * deterministic proof/parser failures win over incidental HTTP text, so a
@@ -81,4 +80,3 @@ export function failureEnvelope(error: unknown, context: FailureContext = {}): F
   }
   return { ...base, category: "unknown", retryable: false, scope: "request" };
 }
-

@@ -72,4 +72,3 @@ export class HttpProductIdentityModelProvider implements ProductIdentityModelPro
     return parsed.results.sort((left, right) => right.probability - left.probability);
   }
 }
-

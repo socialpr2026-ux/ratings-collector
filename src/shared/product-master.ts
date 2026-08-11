@@ -186,4 +186,3 @@ export type RatingAggregate = z.infer<typeof ratingAggregateSchema>;
 export type ResolutionDecision = z.infer<typeof resolutionDecisionSchema>;
 export type LegacyVariantIdMap = z.infer<typeof legacyVariantIdMapSchema>;
 export type ProductMasterCatalog = z.infer<typeof productMasterCatalogSchema>;
-
