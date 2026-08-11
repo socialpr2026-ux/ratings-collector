@@ -26,6 +26,40 @@ function run(id: string, brand: string, updatedAt: string): RunState {
 }
 
 describe("BlobRepository run lookup", () => {
+  it("reads progress from the compact shadow object without loading the full run", async () => {
+    const summary = {
+      version: 2, revision: 4, id: "compact", ownerEmail: "operator@example.com", status: "running",
+      createdAt: "2026-08-11T09:00:00.000Z", updatedAt: "2026-08-11T09:01:00.000Z",
+      progress: { completedPartitions: 1, totalPartitions: 2 }, observationCount: 30,
+      partitionCounts: { pending: 0, complete: 1, no_results: 0, blocked: 0, error: 0 }, errorCount: 0
+    } as const;
+    const store = {
+      get: vi.fn(async (key: string) => key === "run-summaries/compact.json" ? summary : null)
+    } as unknown as Store;
+
+    await expect(new BlobRepository(store).getRunSummary("compact")).resolves.toEqual(summary);
+    expect(store.get).toHaveBeenCalledOnce();
+    expect(store.get).not.toHaveBeenCalledWith(expect.stringMatching(/^runs\//), expect.anything());
+  });
+
+  it("advances the compact shadow only after the full run checkpoint is durable", async () => {
+    const writes: string[] = [];
+    const store = {
+      get: vi.fn(async () => null),
+      setJSON: vi.fn(async (key: string) => { writes.push(key); })
+    } as unknown as Store;
+    const repository = new BlobRepository(store);
+    vi.spyOn(repository, "acquireLease").mockResolvedValue({ token: "lease", keys: [] });
+    vi.spyOn(repository, "releaseLease").mockResolvedValue();
+
+    await repository.saveRun(run("shadow", "Максилак", "2026-08-11T09:00:00.000Z"));
+
+    expect(writes).toEqual(["runs/shadow.json", "run-summaries/shadow.json"]);
+    expect(store.setJSON).toHaveBeenNthCalledWith(2, "run-summaries/shadow.json", expect.objectContaining({
+      version: 2, revision: 1, id: "shadow", observationCount: 0
+    }));
+  });
+
   it("returns only the newest exact-brand checkpoints without observations", async () => {
     const values = new Map<string, RunState>([
       ["runs/old.json", run("old", "Акваоптик", "2026-07-22T08:00:00.000Z")],

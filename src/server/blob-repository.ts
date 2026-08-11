@@ -3,8 +3,8 @@ import { gzip } from "node:zlib";
 import { promisify } from "node:util";
 import { getStore, PreconditionFailedError, type Store } from "@edgeone/pages-blob";
 import type { EvidenceStore } from "./evidence.js";
-import type { Observation, ProductRecord, PublicationRecord, RunHistoryItem, RunState, SiteProfile, SourceCardRecord } from "../shared/types.js";
-import { productKey, runHistoryItem, type Repository } from "./repository.js";
+import type { Observation, ProductRecord, PublicationRecord, RunHistoryItem, RunState, RunSummaryV2, SiteProfile, SourceCardRecord } from "../shared/types.js";
+import { nextRunSummaryV2, productKey, runHistoryItem, type Repository } from "./repository.js";
 
 const gzipAsync = promisify(gzip);
 const strongJson = { type: "json" as const, consistency: "strong" as const };
@@ -53,6 +53,10 @@ export class BlobRepository implements Repository {
     return (await this.store.get(`runs/${segment(id)}.json`, strongJson) as RunState | null) ?? undefined;
   }
 
+  async getRunSummary(id: string): Promise<RunSummaryV2 | undefined> {
+    return (await this.store.get(`run-summaries/${segment(id)}.json`, strongJson) as RunSummaryV2 | null) ?? undefined;
+  }
+
   async listRecentRuns(ownerEmail?: string, limit = 8): Promise<RunHistoryItem[]> {
     const boundedLimit = Math.max(1, Math.min(20, Math.trunc(limit) || 8));
     const { blobs } = await this.store.list({ prefix: "run-history/", consistency: "strong" });
@@ -66,7 +70,13 @@ export class BlobRepository implements Repository {
 
   async saveRun(run: RunState): Promise<void> {
     await this.withLease(`run:${run.id}`, 20_000, async () => {
+      const summaryPath = `run-summaries/${segment(run.id)}.json`;
+      const previousSummary = await this.store.get(summaryPath, strongJson) as RunSummaryV2 | null;
+      const summary = nextRunSummaryV2(run, previousSummary ?? undefined);
       await this.store.setJSON(`runs/${segment(run.id)}.json`, run);
+      // The compact projection advances only after the full checkpoint is
+      // durable, so a terminal summary can never point at an older RunState.
+      await this.store.setJSON(summaryPath, summary);
       if (run.collectionFinishedAt) {
         await this.store.setJSON(`run-history/${segment(run.id)}.json`, {
           ...runHistoryItem(run),

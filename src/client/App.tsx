@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { MAX_RUN_PARTITIONS, type Observation, type RunActivityStage, type RunHistoryItem, type RunState, type SiteProfile } from "../shared/types.js";
+import { MAX_RUN_PARTITIONS, type Observation, type RunActivityStage, type RunHistoryItem, type RunState, type RunSummaryV2, type SiteProfile } from "../shared/types.js";
 import type { OzonCompanionResult, OzonCompanionSession } from "../shared/companion.js";
 import { formatRatingValue } from "../shared/rating.js";
 import { analyzeProductIdentity, canonicalProductVariants } from "../server/utils/product-name.js";
@@ -36,6 +36,11 @@ import {
   type AutomaticContinuationNotice
 } from "./checkpoint-resume.js";
 import { completedCollectionHistory, formatCollectionDuration, historyBrandLabel } from "./run-history.js";
+import {
+  applyRunSummary,
+  MIN_PROGRESS_POLL_MS,
+  nextProgressPollDelay
+} from "./progress.js";
 
 type Config = {
   domains: readonly string[];
@@ -283,7 +288,9 @@ export function App() {
   const [error, setError] = useState("");
   const [companionState, setCompanionState] = useState<CompanionState>({ status: "idle" });
   const [runHistory, setRunHistory] = useState<RunHistoryItem[]>([]);
+  const [runSummary, setRunSummary] = useState<RunSummaryV2>();
   const formRef = useRef<HTMLFormElement>(null);
+  const progressConditions = useRef<Record<string, { revision: number; etag?: string }>>({});
 
   useEffect(() => {
     const controller = new AbortController();
@@ -330,10 +337,13 @@ export function App() {
         setRegion(restored.request.region);
         setDomains(restored.request.domains.join("\n"));
         setBrands(restored.request.brands.join("\n"));
+        let pollDelay = MIN_PROGRESS_POLL_MS;
         while (!cancelled && pendingStatuses.has(restored.status)) {
-          await new Promise((resolve) => setTimeout(resolve, 2500));
+          await new Promise((resolve) => setTimeout(resolve, pollDelay));
           if (cancelled) return;
-          restored = await fetchRun(id);
+          const checkpoint = await fetchRunCheckpoint(id, restored);
+          restored = checkpoint.run;
+          pollDelay = nextProgressPollDelay(pollDelay, checkpoint.changed);
           if (!cancelled) setRun(restored);
         }
       } catch (caught) {
@@ -417,6 +427,38 @@ export function App() {
     );
   }
 
+  async function fetchRunCheckpoint(id: string, current: RunState): Promise<{ run: RunState; changed: boolean }> {
+    const condition = progressConditions.current[id];
+    const query = condition ? `?sinceRevision=${condition.revision}` : "";
+    const response = await fetch(`/api/runs/${encodeURIComponent(id)}/progress${query}`, {
+      headers: {
+        ...headers(),
+        ...(condition?.etag ? { "if-none-match": condition.etag } : {})
+      }
+    });
+    if (response.status === 304) return { run: current, changed: false };
+    const contentType = response.headers.get("content-type") ?? "";
+    const payload = contentType.includes("application/json")
+      ? await response.json() as RunSummaryV2 & { error?: string }
+      : { error: await response.text() } as { error?: string };
+    if (!response.ok || !("version" in payload) || payload.version !== 2) {
+      throw new Error(payload.error || "Сервис временно недоступен");
+    }
+    const summary = payload as RunSummaryV2;
+    const changed = condition?.revision !== summary.revision;
+    progressConditions.current[id] = {
+      revision: summary.revision,
+      etag: response.headers.get("etag") ?? undefined
+    };
+    setRunSummary(summary);
+    if (!pendingStatuses.has(summary.status)) {
+      const terminal = await fetchRun(id);
+      setRunSummary(undefined);
+      return { run: terminal, changed: true };
+    }
+    return { run: applyRunSummary(current, summary), changed };
+  }
+
   async function refreshRunHistory() {
     try {
       const items = await api("/api/runs?limit=8") as RunHistoryItem[];
@@ -427,13 +469,18 @@ export function App() {
   }
 
   async function poll(id: string, triggerError?: () => Error | undefined) {
+    let current = run?.id === id ? run : await fetchRun(id);
+    let pollDelay = MIN_PROGRESS_POLL_MS;
     for (;;) {
       const failure = triggerError?.();
       if (failure) throw failure;
-      const next = await fetchRun(id);
+      const checkpoint = await fetchRunCheckpoint(id, current);
+      const next = checkpoint.run;
+      current = next;
       setRun(next);
       if (!pendingStatuses.has(next.status)) return next;
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+      pollDelay = nextProgressPollDelay(pollDelay, checkpoint.changed);
+      await new Promise((resolve) => setTimeout(resolve, pollDelay));
     }
   }
 
@@ -443,12 +490,20 @@ export function App() {
     triggerError: () => Error | undefined,
     triggerFinished: () => boolean
   ) {
+    let current = checkpoint;
+    let pollDelay = MIN_PROGRESS_POLL_MS;
     return pollSavedCollectionAttempt({
       checkpoint,
-      readCheckpoint: () => fetchRun(id),
+      readCheckpoint: async () => {
+        const result = await fetchRunCheckpoint(id, current);
+        current = result.run;
+        pollDelay = nextProgressPollDelay(pollDelay, result.changed);
+        return current;
+      },
       triggerError,
       triggerFinished,
-      onCheckpoint: setRun
+      onCheckpoint: setRun,
+      wait: () => new Promise((resolve) => setTimeout(resolve, pollDelay))
     });
   }
 
@@ -853,6 +908,9 @@ export function App() {
   const progress = run
     ? Math.round(100 * run.progress.completedPartitions / Math.max(1, run.progress.totalPartitions))
     : 0;
+  const visibleObservationCount = run && pendingStatuses.has(run.status) && runSummary?.id === run.id
+    ? runSummary.observationCount
+    : run?.observations.length ?? 0;
   const orderedSiteGroups = (["review-sites", "pharmacies", "marketplaces"] as const).map((groupId) => SITE_CATALOG.find((item) => item.id === groupId)!);
   const activityEvents = [...(run?.activity?.recent ?? []), ...(run?.activity?.active ?? [])].sort((left, right) => left.sequence - right.sequence);
   const liveActivity = [...(run?.activity?.active ?? [])].sort((left, right) => left.sequence - right.sequence).slice(-1)[0];
@@ -1205,7 +1263,7 @@ export function App() {
           <p><strong>Продолжение {automaticContinuation.attempt} из {automaticContinuation.maxAttempts}</strong><small>Ни одна завершённая проверка не запускается повторно.</small></p>
         </div>}
         {run && <div className="metrics metrics-compact">
-          <article><strong>{run.observations.length.toLocaleString("ru-RU")}</strong><span>карточек найдено</span></article>
+          <article><strong>{visibleObservationCount.toLocaleString("ru-RU")}</strong><span>карточек найдено</span></article>
           <article><strong>{run.progress.completedPartitions} / {run.progress.totalPartitions}</strong><span>проверок завершено</span></article>
           <article className={(partitionSummary?.failed ?? 0) > 0 ? "metric-warning" : ""}><strong>{partitionSummary?.failed ?? 0}</strong><span>требуют внимания</span></article>
         </div>}

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { COMPANY_BRANDS, INITIAL_BRANDS, INITIAL_DOMAINS } from "../shared/constants.js";
 import { authenticate, authConfig } from "./auth.js";
 import type { Runtime } from "./runtime.js";
+import { createRunSummaryV2, isRunSummaryUnchanged, runSummaryEtag } from "./repository.js";
 import { safeErrorMessage } from "./utils/error-message.js";
 import { importOzonCompanionResult, issueOzonCompanionSession } from "./companion-import.js";
 
@@ -57,6 +58,23 @@ export async function registerApi(server: FastifyInstance, runtime: Runtime) {
     const run = await runtime.service.getRun(request.params.runId);
     return run ?? reply.code(404).send({ error: "Запуск не найден" });
   });
+  server.get<{ Params: { runId: string }; Querystring: { sinceRevision?: string } }>(
+    "/api/runs/:runId/progress",
+    async (request, reply) => {
+      const summary = await runtime.repository.getRunSummary(request.params.runId);
+      const compatible = summary ?? await runtime.repository.getRun(request.params.runId).then((run) =>
+        run ? createRunSummaryV2(run, 1) : undefined
+      );
+      if (!compatible) return reply.code(404).send({ error: "Запуск не найден" });
+      const etag = runSummaryEtag(compatible);
+      reply.header("cache-control", "no-store").header("etag", etag);
+      if (isRunSummaryUnchanged(compatible, {
+        etag: request.headers["if-none-match"],
+        sinceRevision: request.query.sinceRevision
+      })) return reply.code(304).send();
+      return compatible;
+    }
+  );
   server.post<{ Params: { runId: string } }>("/api/runs/:runId/retry", async (request, reply) => {
     const run = await runtime.service.getRun(request.params.runId);
     if (!run) return reply.code(404).send({ error: "Run not found" });

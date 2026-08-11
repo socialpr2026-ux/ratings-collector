@@ -319,6 +319,30 @@ export type RunActivityTrace = {
   recent: RunActivity[];
 };
 
+export type RunPartitionCounts = Record<PartitionResult["status"], number>;
+
+/**
+ * Compact, observation-free projection used by the employee progress screen.
+ * The full RunState remains the compatibility and terminal-result contract.
+ */
+export type RunSummaryV2 = {
+  version: 2;
+  revision: number;
+  id: string;
+  ownerEmail?: string;
+  status: RunState["status"];
+  createdAt: string;
+  updatedAt: string;
+  collectionStartedAt?: string;
+  collectionFinishedAt?: string;
+  progress: RunProgress;
+  observationCount: number;
+  partitionCounts: RunPartitionCounts;
+  errorCount: number;
+  /** Bounded live trace; full evidence remains in RunState. */
+  activity?: RunActivityTrace;
+};
+
 export type RunState = {
   id: string;
   ownerEmail?: string;

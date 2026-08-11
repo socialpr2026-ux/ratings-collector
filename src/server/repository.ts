@@ -5,6 +5,8 @@ import type {
   ProductRecord,
   PublicationRecord,
   RunHistoryItem,
+  RunActivity,
+  RunSummaryV2,
   RunState,
   SourceCardRecord,
   SiteProfile
@@ -13,6 +15,8 @@ import type {
 export type Database = {
   version: 1;
   runs: Record<string, RunState>;
+  /** V2 shadow projection. Optional so existing local databases remain valid. */
+  runSummaries?: Record<string, RunSummaryV2>;
   profiles: Record<string, SiteProfile>;
   products: Record<string, Record<string, ProductRecord>>;
   sourceCards: Record<string, Record<string, SourceCardRecord>>;
@@ -23,6 +27,7 @@ export type Database = {
 
 export interface Repository {
   getRun(id: string): Promise<RunState | undefined>;
+  getRunSummary(id: string): Promise<RunSummaryV2 | undefined>;
   saveRun(run: RunState): Promise<void>;
   listRecentRuns(ownerEmail?: string, limit?: number): Promise<RunHistoryItem[]>;
   getProfile(domain: string): Promise<SiteProfile | undefined>;
@@ -47,6 +52,7 @@ export interface Repository {
 const emptyDatabase = (): Database => ({
   version: 1,
   runs: {},
+  runSummaries: {},
   profiles: {},
   products: {},
   sourceCards: {},
@@ -67,7 +73,21 @@ export class MemoryRepository implements Repository {
   }
 
   async getRun(id: string) { return this.db.runs[id] ? clone(this.db.runs[id]) : undefined; }
-  async saveRun(run: RunState) { this.db.runs[run.id] = clone(run); await this.changed(); }
+  async getRunSummary(id: string) {
+    const stored = this.db.runSummaries?.[id];
+    if (stored) return clone(stored);
+    const legacy = this.db.runs[id];
+    return legacy ? createRunSummaryV2(legacy, 1) : undefined;
+  }
+  async saveRun(run: RunState) {
+    const summaries = this.db.runSummaries ??= {};
+    const previous = summaries[run.id] ?? (this.db.runs[run.id]
+      ? createRunSummaryV2(this.db.runs[run.id], 1)
+      : undefined);
+    this.db.runs[run.id] = clone(run);
+    summaries[run.id] = nextRunSummaryV2(run, previous);
+    await this.changed();
+  }
   async listRecentRuns(ownerEmail?: string, limit = 8): Promise<RunHistoryItem[]> {
     const boundedLimit = Math.max(1, Math.min(20, Math.trunc(limit) || 8));
     return Object.values(this.db.runs)
@@ -193,4 +213,85 @@ export function runHistoryItem(run: RunState): RunHistoryItem {
     collectionFinishedAt: finishedAt,
     durationMs: Number.isFinite(duration) && duration >= 0 ? duration : null
   };
+}
+
+const SUMMARY_ACTIVE_LIMIT = 4;
+const SUMMARY_RECENT_LIMIT = 8;
+
+function bounded(value: string | undefined, maximum: number): string | undefined {
+  if (value === undefined) return undefined;
+  return value.length <= maximum ? value : `${value.slice(0, Math.max(0, maximum - 1))}…`;
+}
+
+function compactActivity(item: RunActivity): RunActivity {
+  return {
+    ...item,
+    label: bounded(item.label, 160) ?? "",
+    domain: bounded(item.domain, 253),
+    brand: bounded(item.brand, 160),
+    listingId: bounded(item.listingId, 96),
+    detail: bounded(item.detail, 240)
+  };
+}
+
+export function createRunSummaryV2(run: RunState, revision: number): RunSummaryV2 {
+  const partitionCounts: RunSummaryV2["partitionCounts"] = {
+    pending: Math.max(0, run.progress.totalPartitions - run.partitions.length),
+    complete: 0,
+    no_results: 0,
+    blocked: 0,
+    error: 0
+  };
+  for (const partition of run.partitions) partitionCounts[partition.status] += 1;
+  const activity = run.activity ? {
+    sequence: run.activity.sequence,
+    active: run.activity.active.slice(-SUMMARY_ACTIVE_LIMIT).map(compactActivity),
+    recent: run.activity.recent.slice(-SUMMARY_RECENT_LIMIT).map(compactActivity)
+  } : undefined;
+  return {
+    version: 2,
+    revision,
+    id: run.id,
+    ownerEmail: run.ownerEmail,
+    status: run.status,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+    collectionStartedAt: run.collectionStartedAt,
+    collectionFinishedAt: run.collectionFinishedAt,
+    progress: {
+      totalPartitions: run.progress.totalPartitions,
+      completedPartitions: run.progress.completedPartitions,
+      current: bounded(run.progress.current, 500)
+    },
+    observationCount: run.observations.length,
+    partitionCounts,
+    errorCount: run.errors.length,
+    activity
+  };
+}
+
+function comparableSummary(summary: RunSummaryV2): Omit<RunSummaryV2, "revision"> {
+  const { revision: _revision, ...comparable } = summary;
+  return comparable;
+}
+
+export function nextRunSummaryV2(run: RunState, previous?: RunSummaryV2): RunSummaryV2 {
+  const candidate = createRunSummaryV2(run, previous?.revision ?? 1);
+  if (!previous || JSON.stringify(comparableSummary(previous)) === JSON.stringify(comparableSummary(candidate))) {
+    return candidate;
+  }
+  return { ...candidate, revision: previous.revision + 1 };
+}
+
+export function runSummaryEtag(summary: Pick<RunSummaryV2, "revision">): string {
+  return `"ratings-progress-v2-${summary.revision}"`;
+}
+
+export function isRunSummaryUnchanged(
+  summary: Pick<RunSummaryV2, "revision">,
+  condition: { etag?: string | null; sinceRevision?: string | null }
+): boolean {
+  if (condition.etag?.split(",").map((value) => value.trim()).includes(runSummaryEtag(summary))) return true;
+  const sinceRevision = condition.sinceRevision?.trim();
+  return Boolean(sinceRevision && /^\d+$/.test(sinceRevision) && Number(sinceRevision) === summary.revision);
 }

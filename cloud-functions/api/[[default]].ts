@@ -2,13 +2,20 @@ import { timingSafeEqual } from "node:crypto";
 import { load } from "cheerio";
 import { Parser } from "htmlparser2";
 import { COMPANY_BRANDS, INITIAL_BRANDS, INITIAL_DOMAINS } from "../../src/shared/constants.js";
-import type { RunState } from "../../src/shared/types.js";
+import type { RunState, RunSummaryV2 } from "../../src/shared/types.js";
 import { isKnownYandexIndexTombstoneSitemap } from "../../src/shared/yandex-sitemaps.js";
 import { authenticate, authConfig, type AuthUser } from "../../src/server/auth.js";
 import { BlobEvidenceStore, BlobRepository } from "../../src/server/blob-repository.js";
 import {
+  createRunSummaryV2,
+  isRunSummaryUnchanged,
+  runSummaryEtag
+} from "../../src/server/repository.js";
+import {
   reconcileStaleCollectionCheckpoint,
-  reconcileStalePublicationCheckpoint
+  reconcileStalePublicationCheckpoint,
+  STALE_COLLECTION_CHECKPOINT_MS,
+  STALE_PUBLICATION_CHECKPOINT_MS
 } from "../../src/server/collection-checkpoint.js";
 import { RatingsService } from "../../src/server/orchestrator.js";
 import type { RepositoryRpc } from "../../src/server/remote-repository.js";
@@ -2516,8 +2523,37 @@ function compactMedOtzyvProductHtml(html: string, requested: URL): string | unde
     `<h1>${escapeHtml(title)}</h1><meta itemprop="reviewCount" content="${reviewCount}"></body></html>`;
 }
 
-function assertOwner(run: RunState, user: AuthUser): void {
+function assertOwner(run: Pick<RunState, "ownerEmail">, user: AuthUser): void {
   if (run.ownerEmail && run.ownerEmail !== user.email) throw new Error("Этот запуск принадлежит другому сотруднику");
+}
+
+export function runProgressResponse(summary: RunSummaryV2, request: Request): Response {
+  const url = new URL(request.url);
+  const etag = runSummaryEtag(summary);
+  const headers = {
+    "cache-control": "no-store",
+    etag
+  };
+  if (isRunSummaryUnchanged(summary, {
+    etag: request.headers.get("if-none-match"),
+    sinceRevision: url.searchParams.get("sinceRevision")
+  })) return new Response(null, { status: 304, headers });
+  return new Response(JSON.stringify(summary), {
+    status: 200,
+    headers: { ...headers, "content-type": "application/json; charset=utf-8" }
+  });
+}
+
+function summaryNeedsFullReconciliation(summary: RunSummaryV2, now = Date.now()): boolean {
+  const updatedAt = Date.parse(summary.updatedAt);
+  if (!Number.isFinite(updatedAt)) return false;
+  if (summary.status === "publishing") return now - updatedAt >= STALE_PUBLICATION_CHECKPOINT_MS;
+  if (summary.status !== "queued" && summary.status !== "running") return false;
+  return now - updatedAt >= STALE_COLLECTION_CHECKPOINT_MS || (
+    summary.status === "running" &&
+    summary.progress.completedPartitions === summary.progress.totalPartitions &&
+    (summary.activity?.active.length ?? 0) === 0
+  );
 }
 
 function pagedRun(
@@ -2544,6 +2580,7 @@ async function repositoryRpc(request: Request, env: Record<string, string | unde
     case "findRuns": result = await repository.findRecentRunsByBrand(body.brand, body.limit); break;
     case "listRuns": result = await repository.listRecentRuns(body.ownerEmail, body.limit); break;
     case "getRun": result = await repository.getRun(body.id); break;
+    case "getRunSummary": result = await repository.getRunSummary(body.id); break;
     case "saveRun": {
       const previous = await repository.getRun(body.run.id);
       if (previous?.ownerEmail && body.run.ownerEmail !== previous.ownerEmail) throw new Error("Нельзя изменить владельца запуска");
@@ -3620,6 +3657,7 @@ export default async function onRequest(context: Context): Promise<Response> {
   try { user = await authenticate(context.request.headers, authConfig(context.env)); }
   catch (error) { return json({ error: safeErrorMessage(error) }, 401); }
   const runMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
+  const progressMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/progress$/);
   const publishMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/publish$/);
   const reviewMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/review$/);
   const companionSessionMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/companion\/ozon\/session$/);
@@ -3655,6 +3693,25 @@ export default async function onRequest(context: Context): Promise<Response> {
     if (context.request.method === "GET" && url.pathname === "/api/runs") {
       const limit = Math.max(1, Math.min(20, Math.trunc(Number(url.searchParams.get("limit") ?? 8)) || 8));
       return json(await service.listRecentRuns(user.email, limit));
+    }
+    if (context.request.method === "GET" && progressMatch) {
+      const runId = decodeURIComponent(progressMatch[1]);
+      let summary = await repository.getRunSummary(runId);
+      let run: RunState | undefined;
+      // Existing runs predate the shadow projection. A pending checkpoint also
+      // needs the legacy reconciliation path only when it can actually be
+      // stale; healthy polls stay on the compact Blob object.
+      if (!summary || summaryNeedsFullReconciliation(summary)) {
+        run = await service.getRun(runId);
+        if (!run) return json({ error: "Запуск не найден" }, 404);
+        assertOwner(run, user);
+        if (reconcileStaleCollectionCheckpoint(run)) await repository.saveRun(run);
+        if (reconcileStalePublicationCheckpoint(run)) await repository.saveRun(run);
+        run = await service.reconcileInterruptedRun(run);
+        summary = await repository.getRunSummary(runId) ?? createRunSummaryV2(run, summary?.revision ?? 1);
+      }
+      assertOwner(summary, user);
+      return runProgressResponse(summary, context.request);
     }
     if (context.request.method === "GET" && runMatch) {
       let run = await service.getRun(decodeURIComponent(runMatch[1]));
