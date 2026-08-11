@@ -365,6 +365,58 @@ describe("YandexAdapter discovery", () => {
     expect(peak).toBe(4);
   });
 
+  it("accepts and checkpoints the current 685-map exact manifest with the bounded default", async () => {
+    class CountingProofStore extends InMemoryYandexShardProofStore {
+      writes = 0;
+      override async put(jobKey: string, proof: YandexShardProof): Promise<void> {
+        await super.put(jobKey, proof);
+        this.writes += 1;
+      }
+    }
+    const maps = modelMaps(685);
+    const proofStore = new CountingProofStore();
+    let modelRequests = 0;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      if (maps.includes(url)) {
+        modelRequests += 1;
+        return xmlResponse(modelSitemap([]));
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new YandexAdapter({
+      fetch,
+      sitemapConcurrency: 12,
+      sitemapRetryAttempts: 1,
+      shardProofStore: proofStore
+    });
+
+    await expect(adapter.discover("Максилак", context({
+      runId: "current-685-model-maps",
+      brands: ["Максилак"]
+    }))).resolves.toEqual([]);
+    expect(modelRequests).toBe(685);
+    expect(proofStore.writes).toBe(685);
+  });
+
+  it("rejects an anomalous 801-map manifest before scanning any shard", async () => {
+    const maps = modelMaps(801);
+    let modelRequests = 0;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      modelRequests += 1;
+      return xmlResponse(modelSitemap([]));
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new YandexAdapter({ fetch });
+
+    await expect(adapter.discover("Максилак", context({ brands: ["Максилак"] })))
+      .rejects.toThrow("Yandex sitemap index contains 801 model maps, above the complete-scan limit 800");
+    expect(modelRequests).toBe(0);
+    expect(() => new YandexAdapter({ fetch, maxSitemaps: 801 })).toThrow(RangeError);
+  });
+
   it("aggregates an exhaustive 319-shard batch proof without handing every shard back to the Agent", async () => {
     const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
     const maps = Array.from({ length: 319 }, (_value, index) =>
@@ -2188,6 +2240,13 @@ function htmlResponse(body: string): Response {
 
 function sitemapIndex(urls: string[]): string {
   return `<?xml version="1.0"?><sitemapindex>${urls.map((url) => `<sitemap><loc>${url}</loc></sitemap>`).join("")}</sitemapindex>`;
+}
+
+function modelMaps(count: number): string[] {
+  return Array.from({ length: count }, (_value, index) => {
+    const start = index * 10_000_000;
+    return `https://reviews.yandex.ru/ugcpub/sitemap_model_${start}-${start + 9_999_999}-0.xml`;
+  });
 }
 
 function sitemapIndexWithLastmod(entries: Array<[url: string, lastmod: string]>): string {

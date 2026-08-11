@@ -55,6 +55,11 @@ const YANDEX_BATCH_RECOVERY_ROUNDS = 2;
 const YANDEX_BATCH_RECOVERY_DELAY_MS = 5_000;
 const YANDEX_PROGRESS_SITEMAP_INTERVAL = 32;
 const YANDEX_GATEWAY_CIRCUIT_FAILURES = 4;
+// The exact live Reviews index currently contains 685 canonical model maps.
+// Keep bounded headroom for normal range growth, but reject a structural jump
+// before any expensive scan. Every accepted entry still passes the strict
+// manifest URL/hash validator and every model remains bound to its numeric map.
+const YANDEX_MODEL_SITEMAP_HARD_LIMIT = 800;
 
 type YandexCapableFetch = typeof globalThis.fetch & {
   yandexBatchEndpoint?: string;
@@ -256,7 +261,12 @@ export class YandexAdapter implements SiteAdapter {
     this.sitemapIndexUrl = options.sitemapIndexUrl ?? DEFAULT_SITEMAP_INDEX;
     // The live index grows over time. The hard ceiling catches a structural
     // jump while the default still scans every currently declared model map.
-    this.maxSitemaps = boundedInteger(options.maxSitemaps, 400, 1, 400);
+    this.maxSitemaps = boundedInteger(
+      options.maxSitemaps,
+      YANDEX_MODEL_SITEMAP_HARD_LIMIT,
+      1,
+      YANDEX_MODEL_SITEMAP_HARD_LIMIT
+    );
     this.maxCandidates = boundedInteger(options.maxCandidates, 300, 1, 2_000);
     this.maxDocumentBytes = boundedInteger(options.maxDocumentBytes, 12_000_000, 10_000, 25_000_000);
     // Edge/cloud egress is throttled when many multi-MB sitemap shards arrive
