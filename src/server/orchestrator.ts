@@ -32,12 +32,16 @@ import { normalizeProductOverride, resolveProductOverride } from "./utils/produc
 import { compactProductCatalogEvidence, reconcileProductCatalog } from "./utils/product-catalog.js";
 
 const RUN_SOFT_DEADLINE_MS = 26 * 60 * 1000;
+export const DEFAULT_DOMAIN_CONCURRENCY = 12;
+export const DEFAULT_ACTIVITY_CHECKPOINT_INTERVAL_MS = 5_000;
 
 export type AdapterResolver = (domain: string, request: RunRequest) => Promise<SiteAdapter>;
 export type DomainExclusive = <T>(domain: string, operation: () => Promise<T>) => Promise<T>;
 export type RatingsServiceOptions = {
   runDeadlineMs?: number;
   domainExclusive?: DomainExclusive;
+  domainConcurrency?: number;
+  activityCheckpointIntervalMs?: number;
 };
 
 function domainOnly(input: string): string {
@@ -296,6 +300,8 @@ export class RatingsService {
   private active = new Set<string>();
   private readonly runDeadlineMs: number;
   private readonly domainExclusive: DomainExclusive;
+  private readonly domainConcurrency: number;
+  private readonly activityCheckpointIntervalMs: number;
 
   constructor(
     private readonly repository: Repository,
@@ -304,8 +310,16 @@ export class RatingsService {
   ) {
     this.runDeadlineMs = options.runDeadlineMs ?? RUN_SOFT_DEADLINE_MS;
     this.domainExclusive = options.domainExclusive ?? ((_domain, operation) => operation());
+    this.domainConcurrency = options.domainConcurrency ?? DEFAULT_DOMAIN_CONCURRENCY;
+    this.activityCheckpointIntervalMs = options.activityCheckpointIntervalMs ?? DEFAULT_ACTIVITY_CHECKPOINT_INTERVAL_MS;
     if (!Number.isFinite(this.runDeadlineMs) || this.runDeadlineMs < 1) {
       throw new RangeError("runDeadlineMs must be a positive finite number");
+    }
+    if (!Number.isSafeInteger(this.domainConcurrency) || this.domainConcurrency < 1) {
+      throw new RangeError("domainConcurrency must be a positive integer");
+    }
+    if (!Number.isFinite(this.activityCheckpointIntervalMs) || this.activityCheckpointIntervalMs < 0) {
+      throw new RangeError("activityCheckpointIntervalMs must be a non-negative finite number");
     }
   }
 
@@ -508,7 +522,7 @@ export class RatingsService {
       };
       const saveActivityProgress = async (force = false) => {
         const now = Date.now();
-        if (!force && now - lastActivityWrite < 750) return;
+        if (!force && now - lastActivityWrite < this.activityCheckpointIntervalMs) return;
         lastActivityWrite = now;
         await saveProgress();
       };
@@ -570,8 +584,10 @@ export class RatingsService {
         brands.push(brand);
         retryBrandsByDomain.set(domain, brands);
       }
-      const domainResults = await Promise.allSettled(run.request.domains
-        .filter((domain) => retryBrandsByDomain.has(domain)).map(async (domain) => {
+      await forEachWithConcurrency(
+        run.request.domains.filter((domain) => retryBrandsByDomain.has(domain)),
+        this.domainConcurrency,
+        async (domain) => {
         const retryBrands = retryBrandsByDomain.get(domain)!;
         const retryBrandKeys = new Set(retryBrands.map(normalizeText));
         let domainStarted = false;
@@ -948,11 +964,8 @@ export class RatingsService {
           }
           await saveProgress();
         }
-      }));
-      const rejectedDomain = domainResults.find(
-        (result): result is PromiseRejectedResult => result.status === "rejected"
+        }
       );
-      if (rejectedDomain) throw rejectedDomain.reason;
       await progressWrites;
       run.partitions.sort((a, b) =>
         run.request.domains.indexOf(a.domain) - run.request.domains.indexOf(b.domain) ||

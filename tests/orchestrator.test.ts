@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AdapterContext, Observation, ProductRef, SiteAdapter } from "../src/shared/types.js";
 import { AdapterBlockedError, AdapterQuotaError } from "../src/server/adapters/errors.js";
-import { RatingsService } from "../src/server/orchestrator.js";
+import { DEFAULT_DOMAIN_CONCURRENCY, RatingsService } from "../src/server/orchestrator.js";
 import { MemoryRepository } from "../src/server/repository.js";
 import { hasDeterministicAggregateProof, isKnownReviewAggregateDomain } from "../src/shared/review-aggregates.js";
 
@@ -120,6 +120,45 @@ describe("run orchestration and fail-closed QA", () => {
     expect(run.observations).toHaveLength(1);
     expect(run.observations[0]?.domain).toBe("example.com");
     expect(adapterCalls).toEqual(["example.com:health", "example.com:discover", "example.com:collect"]);
+  });
+
+  it("bounds domain fan-out instead of bursting every requested host at once", async () => {
+    const repository = new MemoryRepository();
+    const domains = Array.from({ length: DEFAULT_DOMAIN_CONCURRENCY + 8 }, (_, index) => `d${index}.example.com`);
+    let active = 0;
+    let maximumActive = 0;
+    let started = 0;
+    let releaseFirstWave!: () => void;
+    const firstWaveGate = new Promise<void>((resolve) => { releaseFirstWave = resolve; });
+    let markFirstWaveStarted!: () => void;
+    const firstWaveStarted = new Promise<void>((resolve) => { markFirstWaveStarted = resolve; });
+    const service = new RatingsService(repository, async (domain) => ({
+      id: domain,
+      supportedDomains: [domain],
+      async healthCheck() {
+        active += 1;
+        started += 1;
+        maximumActive = Math.max(maximumActive, active);
+        if (started === DEFAULT_DOMAIN_CONCURRENCY) markFirstWaveStarted();
+        if (started <= DEFAULT_DOMAIN_CONCURRENCY) await firstWaveGate;
+        active -= 1;
+        return { ok: true, checkedAt: new Date().toISOString() };
+      },
+      async discover() { return []; },
+      async collect() { throw new Error("no cards expected"); }
+    }));
+    const id = (await service.createRun({ ...request, domains })).id;
+    const execution = service.executeRun(id);
+
+    await firstWaveStarted;
+    expect(started).toBe(DEFAULT_DOMAIN_CONCURRENCY);
+    expect(maximumActive).toBe(DEFAULT_DOMAIN_CONCURRENCY);
+
+    releaseFirstWave();
+    const run = await execution;
+    expect(run.partitions).toHaveLength(domains.length);
+    expect(run.partitions.every((partition) => partition.status === "no_results")).toBe(true);
+    expect(maximumActive).toBeLessThanOrEqual(DEFAULT_DOMAIN_CONCURRENCY);
   });
 
   it("accepts Ozerki as a deterministic source-bound family aggregate", () => {
