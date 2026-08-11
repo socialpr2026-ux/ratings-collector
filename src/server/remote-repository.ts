@@ -1,6 +1,20 @@
 import type { EvidenceStore } from "./evidence.js";
-import type { Observation, ProductRecord, PublicationRecord, RunHistoryItem, RunState, RunSummaryV2, SiteProfile, SourceCardRecord } from "../shared/types.js";
-import type { Repository } from "./repository.js";
+import type {
+  BeginAttemptCommand,
+  CommitPartitionCommand,
+  FinishAttemptCommand,
+  Observation,
+  PartitionCheckpoint,
+  ProductRecord,
+  PublicationRecord,
+  RunAttempt,
+  RunHistoryItem,
+  RunState,
+  RunSummaryV2,
+  SiteProfile,
+  SourceCardRecord
+} from "../shared/types.js";
+import type { Repository, RepositoryLease } from "./repository.js";
 import type { ProductMasterCatalog } from "../shared/product-master.js";
 
 export type RepositoryRpc =
@@ -11,6 +25,11 @@ export type RepositoryRpc =
   | { action: "getProductMaster" }
   | { action: "saveProductMaster"; catalog: ProductMasterCatalog; expectedRevision: number }
   | { action: "saveRun"; run: RunState }
+  | { action: "getRunAttempt"; runId: string }
+  | { action: "getPartitionCheckpoint"; runId: string; fencingToken: number; domain: string; brand: string }
+  | { action: "beginAttempt"; command: BeginAttemptCommand }
+  | { action: "commitPartition"; command: CommitPartitionCommand }
+  | { action: "finishAttempt"; command: FinishAttemptCommand }
   | { action: "getProfile"; domain: string }
   | { action: "saveProfile"; profile: SiteProfile }
   | { action: "listProducts"; spreadsheetId: string }
@@ -26,7 +45,8 @@ export type RepositoryRpc =
   | { action: "reserveUsage"; key: string; amount: number; limit: number }
   | { action: "releaseUsage"; key: string; amount: number }
   | { action: "acquireLease"; scope: string; leaseMs: number }
-  | { action: "releaseLease"; lease: { token: string; keys: string[] } }
+  | { action: "renewLease"; lease: RepositoryLease; leaseMs: number }
+  | { action: "releaseLease"; lease: RepositoryLease }
   | { action: "putEvidence"; payload: unknown };
 
 const RETRYABLE_ACTIONS = new Set<RepositoryRpc["action"]>([
@@ -36,6 +56,9 @@ const RETRYABLE_ACTIONS = new Set<RepositoryRpc["action"]>([
   "getRunSummary",
   "getProductMaster",
   "saveRun",
+  "getRunAttempt",
+  "getPartitionCheckpoint",
+  "commitPartition",
   "getProfile",
   "saveProfile",
   "listProducts",
@@ -47,6 +70,8 @@ const RETRYABLE_ACTIONS = new Set<RepositoryRpc["action"]>([
 
 const transientStatus = (status: number) => status === 429 || status >= 500;
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+class RepositoryRpcRejectedError extends Error {}
 
 export class RemoteRepository implements Repository {
   private readonly token: string;
@@ -93,12 +118,13 @@ export class RemoteRepository implements Repository {
             await this.wait(Math.min(4_000, 200 * 2 ** (attempt - 1)));
             continue;
           }
-          throw new Error(value.error ?? `Repository RPC HTTP ${response.status}`);
+          throw new RepositoryRpcRejectedError(value.error ?? `Repository RPC HTTP ${response.status}`);
         }
         return value.result as T;
       } catch (error) {
         lastError = error;
-        if (attempt >= attempts || error instanceof Error && /^Repository RPC HTTP \d+:/.test(error.message)) throw error;
+        if (attempt >= attempts || error instanceof RepositoryRpcRejectedError ||
+          error instanceof Error && /^Repository RPC HTTP \d+:/.test(error.message)) throw error;
         await this.wait(Math.min(4_000, 200 * 2 ** (attempt - 1)));
       }
     }
@@ -112,6 +138,17 @@ export class RemoteRepository implements Repository {
     await this.call({ action: "saveProductMaster", catalog, expectedRevision });
   }
   async saveRun(run: RunState) { await this.call({ action: "saveRun", run }); }
+  getRunAttempt(runId: string) { return this.call<RunAttempt | undefined>({ action: "getRunAttempt", runId }); }
+  getPartitionCheckpoint(runId: string, fencingToken: number, domain: string, brand: string) {
+    return this.call<PartitionCheckpoint | undefined>({
+      action: "getPartitionCheckpoint", runId, fencingToken, domain, brand
+    });
+  }
+  beginAttempt(command: BeginAttemptCommand) { return this.call<RunAttempt>({ action: "beginAttempt", command }); }
+  commitPartition(command: CommitPartitionCommand) {
+    return this.call<PartitionCheckpoint>({ action: "commitPartition", command });
+  }
+  finishAttempt(command: FinishAttemptCommand) { return this.call<RunAttempt>({ action: "finishAttempt", command }); }
   listRecentRuns(ownerEmail?: string, limit?: number) { return this.call<RunHistoryItem[]>({ action: "listRuns", ownerEmail, limit }); }
   getProfile(domain: string) { return this.call<SiteProfile | undefined>({ action: "getProfile", domain }); }
   async saveProfile(profile: SiteProfile) { await this.call({ action: "saveProfile", profile }); }
@@ -127,8 +164,11 @@ export class RemoteRepository implements Repository {
   async savePublication(key: string, publication: PublicationRecord) { await this.call({ action: "savePublication", key, publication }); }
   reserveUsage(key: string, amount: number, limit: number) { return this.call<number>({ action: "reserveUsage", key, amount, limit }); }
   releaseUsage(key: string, amount: number) { return this.call<number>({ action: "releaseUsage", key, amount }); }
-  acquireLease(scope: string, leaseMs: number) { return this.call<{ token: string; keys: string[] }>({ action: "acquireLease", scope, leaseMs }); }
-  async releaseLease(lease: { token: string; keys: string[] }) { await this.call({ action: "releaseLease", lease }); }
+  acquireLease(scope: string, leaseMs: number) { return this.call<RepositoryLease>({ action: "acquireLease", scope, leaseMs }); }
+  renewLease(lease: RepositoryLease, leaseMs: number) {
+    return this.call<RepositoryLease>({ action: "renewLease", lease, leaseMs });
+  }
+  async releaseLease(lease: RepositoryLease) { await this.call({ action: "releaseLease", lease }); }
 }
 
 export class RemoteEvidenceStore implements EvidenceStore {

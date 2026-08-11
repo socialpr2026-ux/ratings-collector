@@ -3,9 +3,36 @@ import { gzip } from "node:zlib";
 import { promisify } from "node:util";
 import { getStore, PreconditionFailedError, type Store } from "@edgeone/pages-blob";
 import type { EvidenceStore } from "./evidence.js";
-import type { Observation, ProductRecord, PublicationRecord, RunHistoryItem, RunState, RunSummaryV2, SiteProfile, SourceCardRecord } from "../shared/types.js";
+import type {
+  BeginAttemptCommand,
+  CommitPartitionCommand,
+  FinishAttemptCommand,
+  Observation,
+  PartitionCheckpoint,
+  ProductRecord,
+  PublicationRecord,
+  RunAttempt,
+  RunHistoryItem,
+  RunState,
+  RunSummaryV2,
+  SiteProfile,
+  SourceCardRecord
+} from "../shared/types.js";
 import { productMasterCatalogSchema, type ProductMasterCatalog } from "../shared/product-master.js";
-import { assertProductMasterRevision, emptyProductMasterCatalog, nextRunSummaryV2, productKey, runHistoryItem, type Repository } from "./repository.js";
+import {
+  assertProductMasterRevision,
+  attemptPartitionKey,
+  beginAttemptTransition,
+  commitPartitionTransition,
+  emptyProductMasterCatalog,
+  finishAttemptTransition,
+  LeaseConflictError,
+  nextRunSummaryV2,
+  productKey,
+  runHistoryItem,
+  type RepositoryLease,
+  type Repository
+} from "./repository.js";
 
 const gzipAsync = promisify(gzip);
 const strongJson = { type: "json" as const, consistency: "strong" as const };
@@ -68,6 +95,73 @@ export class BlobRepository implements Repository {
       const current = await this.getProductMaster();
       assertProductMasterRevision(catalog, current.revision, expectedRevision);
       await this.store.setJSON("product-master/catalog-v2.json", productMasterCatalogSchema.parse(catalog));
+    });
+  }
+
+  async getRunAttempt(runId: string): Promise<RunAttempt | undefined> {
+    return (await this.store.get(`run-attempt-heads/${segment(runId)}.json`, strongJson) as RunAttempt | null) ?? undefined;
+  }
+
+  async getPartitionCheckpoint(
+    runId: string,
+    fencingToken: number,
+    domain: string,
+    brand: string
+  ): Promise<PartitionCheckpoint | undefined> {
+    const partitionKey = attemptPartitionKey(domain, brand);
+    return (await this.store.get(
+      `run-attempt-partitions/${segment(runId)}/${fencingToken}/${hash(partitionKey)}.json`,
+      strongJson
+    ) as PartitionCheckpoint | null) ?? undefined;
+  }
+
+  async beginAttempt(command: BeginAttemptCommand): Promise<RunAttempt> {
+    return this.withLease(`run-attempt:${command.runId}`, 20_000, async () => {
+      if (!await this.getRun(command.runId)) throw new Error("run_not_found");
+      const current = await this.getRunAttempt(command.runId);
+      const { attempt, superseded } = beginAttemptTransition(current, command);
+      await this.store.setJSON(
+        `run-attempts/${segment(command.runId)}/${attempt.fencingToken}.json`,
+        attempt
+      );
+      await this.store.setJSON(`run-attempt-heads/${segment(command.runId)}.json`, attempt);
+      if (superseded) {
+        await this.store.setJSON(
+          `run-attempts/${segment(command.runId)}/${superseded.fencingToken}.json`,
+          superseded
+        );
+      }
+      return attempt;
+    });
+  }
+
+  async commitPartition(command: CommitPartitionCommand): Promise<PartitionCheckpoint> {
+    return this.withLease(`run-attempt:${command.runId}`, 20_000, async () => {
+      const current = await this.getRunAttempt(command.runId);
+      const partitionKey = attemptPartitionKey(command.partition.domain, command.partition.brand);
+      const checkpointPath = `run-attempt-partitions/${segment(command.runId)}/${command.fencingToken}/${hash(partitionKey)}.json`;
+      const existing = await this.store.get(checkpointPath, strongJson) as PartitionCheckpoint | null;
+      const transition = commitPartitionTransition(current, command, existing ?? undefined);
+      if (!existing) await this.store.setJSON(checkpointPath, transition.checkpoint, { onlyIfNew: true });
+      await this.store.setJSON(
+        `run-attempts/${segment(command.runId)}/${transition.attempt.fencingToken}.json`,
+        transition.attempt
+      );
+      await this.store.setJSON(`run-attempt-heads/${segment(command.runId)}.json`, transition.attempt);
+      return transition.checkpoint;
+    });
+  }
+
+  async finishAttempt(command: FinishAttemptCommand): Promise<RunAttempt> {
+    return this.withLease(`run-attempt:${command.runId}`, 20_000, async () => {
+      const current = await this.getRunAttempt(command.runId);
+      const finished = finishAttemptTransition(current, command);
+      await this.store.setJSON(
+        `run-attempts/${segment(command.runId)}/${finished.fencingToken}.json`,
+        finished
+      );
+      await this.store.setJSON(`run-attempt-heads/${segment(command.runId)}.json`, finished);
+      return finished;
     });
   }
 
@@ -212,7 +306,7 @@ export class BlobRepository implements Repository {
     });
   }
 
-  async acquireLease(scope: string, leaseMs: number, attempts = 30): Promise<{ token: string; keys: string[] }> {
+  async acquireLease(scope: string, leaseMs: number, attempts = 30): Promise<RepositoryLease> {
     if (!Number.isFinite(leaseMs) || leaseMs < 1000 || leaseMs > 3_700_000) throw new Error("Некорректная длительность lease");
     const token = randomUUID();
     const lockPrefix = `locks/${hash(scope)}`;
@@ -225,7 +319,7 @@ export class BlobRepository implements Repository {
           await this.store.setJSON(key, { token, scope, expiresAt: Date.now() + 2 * leaseMs }, { onlyIfNew: true });
           acquired.push(key);
         }
-        return { token, keys };
+        return { token, keys, scope };
       } catch (error) {
         for (const key of acquired) {
           const current = await this.store.get(key, strongJson) as { token?: string } | null;
@@ -238,7 +332,49 @@ export class BlobRepository implements Repository {
     throw new Error(`Ресурс занят другим запуском: ${scope}`);
   }
 
-  async releaseLease(lease: { token: string; keys: string[] }): Promise<void> {
+  async renewLease(lease: RepositoryLease, leaseMs: number): Promise<RepositoryLease> {
+    if (!Number.isFinite(leaseMs) || leaseMs < 1000 || leaseMs > 3_700_000 ||
+      !lease.scope?.trim() || !lease.token.trim() || lease.keys.length === 0) {
+      throw new Error("Некорректное продление lease");
+    }
+    const records = await Promise.all(lease.keys.map((key) => this.store.get(key, strongJson) as Promise<{
+      token?: string;
+      scope?: string;
+    } | null>));
+    if (records.some((record) => record?.token !== lease.token || record.scope !== lease.scope)) {
+      throw new LeaseConflictError();
+    }
+    const lockPrefix = `locks/${hash(lease.scope)}`;
+    const slot = Math.floor(Date.now() / leaseMs);
+    const targetKeys = [`${lockPrefix}/${slot}.json`, `${lockPrefix}/${slot + 1}.json`];
+    const expiresAt = Date.now() + 2 * leaseMs;
+    const newlyAcquired: string[] = [];
+    try {
+      for (const key of targetKeys) {
+        if (lease.keys.includes(key)) continue;
+        try {
+          await this.store.setJSON(key, { token: lease.token, scope: lease.scope, expiresAt }, { onlyIfNew: true });
+          newlyAcquired.push(key);
+        } catch (error) {
+          if (!(error instanceof PreconditionFailedError) && (error as { code?: string }).code !== "PRECONDITION_FAILED") throw error;
+          const current = await this.store.get(key, strongJson) as { token?: string; scope?: string } | null;
+          if (current?.token !== lease.token || current.scope !== lease.scope) throw new LeaseConflictError();
+        }
+      }
+    } catch (error) {
+      for (const key of newlyAcquired) {
+        const current = await this.store.get(key, strongJson) as { token?: string } | null;
+        if (current?.token === lease.token) await this.store.delete(key);
+      }
+      throw error;
+    }
+    // Keep prior slots in the returned handle. That makes a renewal replay
+    // safe when the RPC response is lost: the old handle still proves the
+    // token and can discover the already-created current slots.
+    return { token: lease.token, keys: [...new Set([...lease.keys, ...targetKeys])], scope: lease.scope };
+  }
+
+  async releaseLease(lease: RepositoryLease): Promise<void> {
     for (const key of lease.keys) {
       const current = await this.store.get(key, strongJson) as { token?: string } | null;
       if (current?.token === lease.token) await this.store.delete(key);

@@ -1,11 +1,17 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type {
   Observation,
+  BeginAttemptCommand,
+  CommitPartitionCommand,
+  FinishAttemptCommand,
+  PartitionCheckpoint,
   ProductRecord,
   PublicationRecord,
   RunHistoryItem,
   RunActivity,
+  RunAttempt,
   RunSummaryV2,
   RunState,
   SourceCardRecord,
@@ -20,6 +26,10 @@ export type Database = {
   runSummaries?: Record<string, RunSummaryV2>;
   /** Global cross-sheet Product Master shadow catalog. */
   productMaster?: ProductMasterCatalog;
+  /** Current execution head plus immutable per-token history/checkpoints. */
+  runAttemptHeads?: Record<string, RunAttempt>;
+  runAttempts?: Record<string, Record<string, RunAttempt>>;
+  partitionCheckpoints?: Record<string, PartitionCheckpoint>;
   profiles: Record<string, SiteProfile>;
   products: Record<string, Record<string, ProductRecord>>;
   sourceCards: Record<string, Record<string, SourceCardRecord>>;
@@ -28,12 +38,24 @@ export type Database = {
   usage: Record<string, number>;
 };
 
+export type RepositoryLease = { token: string; keys: string[]; scope?: string };
+
 export interface Repository {
   getRun(id: string): Promise<RunState | undefined>;
   getRunSummary(id: string): Promise<RunSummaryV2 | undefined>;
   getProductMaster(): Promise<ProductMasterCatalog>;
   saveProductMaster(catalog: ProductMasterCatalog, expectedRevision: number): Promise<void>;
   saveRun(run: RunState): Promise<void>;
+  getRunAttempt(runId: string): Promise<RunAttempt | undefined>;
+  getPartitionCheckpoint(
+    runId: string,
+    fencingToken: number,
+    domain: string,
+    brand: string
+  ): Promise<PartitionCheckpoint | undefined>;
+  beginAttempt(command: BeginAttemptCommand): Promise<RunAttempt>;
+  commitPartition(command: CommitPartitionCommand): Promise<PartitionCheckpoint>;
+  finishAttempt(command: FinishAttemptCommand): Promise<RunAttempt>;
   listRecentRuns(ownerEmail?: string, limit?: number): Promise<RunHistoryItem[]>;
   getProfile(domain: string): Promise<SiteProfile | undefined>;
   saveProfile(profile: SiteProfile): Promise<void>;
@@ -50,14 +72,18 @@ export interface Repository {
   reserveUsage(key: string, amount: number, limit: number): Promise<number>;
   releaseUsage(key: string, amount: number): Promise<number>;
   /** Optional cross-instance lock used by short atomic workflows. */
-  acquireLease?(scope: string, leaseMs: number): Promise<{ token: string; keys: string[] }>;
-  releaseLease?(lease: { token: string; keys: string[] }): Promise<void>;
+  acquireLease?(scope: string, leaseMs: number): Promise<RepositoryLease>;
+  renewLease?(lease: RepositoryLease, leaseMs: number): Promise<RepositoryLease>;
+  releaseLease?(lease: RepositoryLease): Promise<void>;
 }
 
 const emptyDatabase = (): Database => ({
   version: 1,
   runs: {},
   runSummaries: {},
+  runAttemptHeads: {},
+  runAttempts: {},
+  partitionCheckpoints: {},
   profiles: {},
   products: {},
   sourceCards: {},
@@ -101,6 +127,53 @@ export class MemoryRepository implements Repository {
     this.db.runs[run.id] = clone(run);
     summaries[run.id] = nextRunSummaryV2(run, previous);
     await this.changed();
+  }
+  async getRunAttempt(runId: string) {
+    const attempt = this.db.runAttemptHeads?.[runId];
+    return attempt ? clone(attempt) : undefined;
+  }
+  async getPartitionCheckpoint(runId: string, fencingToken: number, domain: string, brand: string) {
+    const checkpoint = this.db.partitionCheckpoints?.[attemptCheckpointStorageKey(
+      runId,
+      fencingToken,
+      attemptPartitionKey(domain, brand)
+    )];
+    return checkpoint ? clone(checkpoint) : undefined;
+  }
+  async beginAttempt(command: BeginAttemptCommand): Promise<RunAttempt> {
+    if (!this.db.runs[command.runId]) throw new Error("run_not_found");
+    const heads = this.db.runAttemptHeads ??= {};
+    const attempts = (this.db.runAttempts ??= {})[command.runId] ??= {};
+    const current = heads[command.runId];
+    const { attempt, superseded } = beginAttemptTransition(current, command);
+    if (superseded) attempts[String(superseded.fencingToken)] = clone(superseded);
+    heads[command.runId] = clone(attempt);
+    attempts[String(attempt.fencingToken)] = clone(attempt);
+    await this.changed();
+    return clone(attempt);
+  }
+  async commitPartition(command: CommitPartitionCommand): Promise<PartitionCheckpoint> {
+    const heads = this.db.runAttemptHeads ??= {};
+    const current = heads[command.runId];
+    const partitionKey = attemptPartitionKey(command.partition.domain, command.partition.brand);
+    const storageKey = attemptCheckpointStorageKey(command.runId, command.fencingToken, partitionKey);
+    const checkpoints = this.db.partitionCheckpoints ??= {};
+    const existing = checkpoints[storageKey];
+    const { checkpoint, attempt } = commitPartitionTransition(current, command, existing);
+    checkpoints[storageKey] = clone(checkpoint);
+    heads[command.runId] = clone(attempt);
+    ((this.db.runAttempts ??= {})[checkpoint.runId] ??= {})[String(attempt.fencingToken)] = clone(attempt);
+    await this.changed();
+    return clone(checkpoint);
+  }
+  async finishAttempt(command: FinishAttemptCommand): Promise<RunAttempt> {
+    const heads = this.db.runAttemptHeads ??= {};
+    const current = heads[command.runId];
+    const finished = finishAttemptTransition(current, command);
+    heads[command.runId] = clone(finished);
+    ((this.db.runAttempts ??= {})[command.runId] ??= {})[String(finished.fencingToken)] = clone(finished);
+    await this.changed();
+    return clone(finished);
   }
   async listRecentRuns(ownerEmail?: string, limit = 8): Promise<RunHistoryItem[]> {
     const boundedLimit = Math.max(1, Math.min(20, Math.trunc(limit) || 8));
@@ -341,4 +414,183 @@ export function isRunSummaryUnchanged(
   if (condition.etag?.split(",").map((value) => value.trim()).includes(runSummaryEtag(summary))) return true;
   const sinceRevision = condition.sinceRevision?.trim();
   return Boolean(sinceRevision && /^\d+$/.test(sinceRevision) && Number(sinceRevision) === summary.revision);
+}
+
+export class AttemptConflictError extends Error {
+  readonly code: "attempt_fencing_conflict" | "attempt_revision_conflict" | "attempt_checkpoint_conflict";
+
+  constructor(code: AttemptConflictError["code"]) {
+    super(code);
+    this.name = "AttemptConflictError";
+    this.code = code;
+  }
+}
+
+export class LeaseConflictError extends Error {
+  readonly code = "lease_token_conflict";
+
+  constructor() {
+    super("lease_token_conflict");
+    this.name = "LeaseConflictError";
+  }
+}
+
+function assertNonnegativeInteger(value: number, label: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`invalid_${label}`);
+}
+
+function assertAttemptCommand(runId: string, expectedRevision: number): void {
+  if (!runId.trim() || runId.length > 160) throw new TypeError("invalid_run_id");
+  assertNonnegativeInteger(expectedRevision, "attempt_revision");
+}
+
+function assertAttemptRevision(current: RunAttempt | undefined, expectedRevision: number): void {
+  if ((current?.revision ?? 0) !== expectedRevision) {
+    throw new AttemptConflictError("attempt_revision_conflict");
+  }
+}
+
+function assertCurrentAttempt(
+  current: RunAttempt | undefined,
+  command: Pick<CommitPartitionCommand, "attemptId" | "fencingToken">
+): asserts current is RunAttempt {
+  assertNonnegativeInteger(command.fencingToken, "fencing_token");
+  if (command.fencingToken < 1 || !current || current.status !== "running" || current.attemptId !== command.attemptId ||
+    current.fencingToken !== command.fencingToken) {
+    throw new AttemptConflictError("attempt_fencing_conflict");
+  }
+}
+
+function assertCommitPartitionCommand(command: CommitPartitionCommand): void {
+  assertAttemptCommand(command.runId, command.expectedRevision);
+  if (!command.attemptId.trim() || command.attemptId.length > 160) throw new TypeError("invalid_attempt_id");
+  if (!command.partition.domain.trim() || !command.partition.brand.trim()) throw new TypeError("invalid_partition");
+  for (const observation of command.observations) {
+    if (observation.domain !== command.partition.domain || observation.brand !== command.partition.brand) {
+      throw new TypeError("partition_observation_mismatch");
+    }
+  }
+}
+
+function assertFinishAttemptCommand(command: FinishAttemptCommand): void {
+  assertAttemptCommand(command.runId, command.expectedRevision);
+  if (!command.attemptId.trim() || command.attemptId.length > 160) throw new TypeError("invalid_attempt_id");
+  if (command.status !== "completed" && command.status !== "failed") throw new TypeError("invalid_attempt_status");
+  if (command.message !== undefined && command.message.length > 2_000) throw new TypeError("invalid_attempt_message");
+}
+
+export function attemptPartitionKey(domain: string, brand: string): string {
+  return `${domain.normalize("NFKC").toLocaleLowerCase("en-US").trim()}\u0000${
+    brand.normalize("NFKC").toLocaleLowerCase("ru-RU").trim()
+  }`;
+}
+
+function attemptCheckpointStorageKey(runId: string, fencingToken: number, partitionKey: string): string {
+  return `${runId}\u0000${fencingToken}\u0000${partitionKey}`;
+}
+
+function createRunAttempt(runId: string, current: RunAttempt | undefined, now: string): RunAttempt {
+  return {
+    runId,
+    attemptId: randomUUID(),
+    fencingToken: (current?.fencingToken ?? 0) + 1,
+    revision: (current?.revision ?? 0) + 1,
+    status: "running",
+    startedAt: now,
+    updatedAt: now,
+    committedPartitions: 0
+  };
+}
+
+function createPartitionCheckpoint(command: CommitPartitionCommand, partitionKey: string): PartitionCheckpoint {
+  return {
+    runId: command.runId,
+    attemptId: command.attemptId,
+    fencingToken: command.fencingToken,
+    baseRevision: command.expectedRevision,
+    revision: command.expectedRevision + 1,
+    partitionKey,
+    partition: clone(command.partition),
+    observations: clone(command.observations),
+    committedAt: new Date().toISOString()
+  };
+}
+
+function assertCheckpointReplay(existing: PartitionCheckpoint, command: CommitPartitionCommand): void {
+  if (existing.runId !== command.runId || existing.attemptId !== command.attemptId ||
+    existing.fencingToken !== command.fencingToken || existing.baseRevision !== command.expectedRevision ||
+    JSON.stringify(existing.partition) !== JSON.stringify(command.partition) ||
+    JSON.stringify(existing.observations) !== JSON.stringify(command.observations)) {
+    throw new AttemptConflictError("attempt_checkpoint_conflict");
+  }
+}
+
+function advanceRunAttempt(current: RunAttempt, checkpoint: PartitionCheckpoint): RunAttempt {
+  if (current.revision !== checkpoint.baseRevision) throw new AttemptConflictError("attempt_revision_conflict");
+  return {
+    ...current,
+    revision: checkpoint.revision,
+    updatedAt: checkpoint.committedAt,
+    committedPartitions: current.committedPartitions + 1
+  };
+}
+
+function finishRunAttempt(current: RunAttempt, command: FinishAttemptCommand): RunAttempt {
+  const now = new Date().toISOString();
+  return {
+    ...current,
+    revision: current.revision + 1,
+    status: command.status,
+    updatedAt: now,
+    finishedAt: now,
+    message: command.message
+  };
+}
+
+export function beginAttemptTransition(
+  current: RunAttempt | undefined,
+  command: BeginAttemptCommand,
+  now = new Date().toISOString()
+): { attempt: RunAttempt; superseded?: RunAttempt } {
+  assertAttemptCommand(command.runId, command.expectedRevision);
+  assertAttemptRevision(current, command.expectedRevision);
+  const superseded = current?.status === "running" ? {
+    ...clone(current),
+    status: "superseded" as const,
+    updatedAt: now,
+    finishedAt: now,
+    message: "superseded_by_newer_attempt"
+  } : undefined;
+  return { attempt: createRunAttempt(command.runId, current, now), superseded };
+}
+
+export function commitPartitionTransition(
+  current: RunAttempt | undefined,
+  command: CommitPartitionCommand,
+  existing?: PartitionCheckpoint
+): { checkpoint: PartitionCheckpoint; attempt: RunAttempt } {
+  assertCommitPartitionCommand(command);
+  assertCurrentAttempt(current, command);
+  if (existing) {
+    assertCheckpointReplay(existing, command);
+    if (current.revision === existing.revision) return { checkpoint: existing, attempt: current };
+    if (current.revision !== existing.baseRevision) {
+      throw new AttemptConflictError("attempt_revision_conflict");
+    }
+    return { checkpoint: existing, attempt: advanceRunAttempt(current, existing) };
+  }
+  assertAttemptRevision(current, command.expectedRevision);
+  const partitionKey = attemptPartitionKey(command.partition.domain, command.partition.brand);
+  const checkpoint = createPartitionCheckpoint(command, partitionKey);
+  return { checkpoint, attempt: advanceRunAttempt(current, checkpoint) };
+}
+
+export function finishAttemptTransition(
+  current: RunAttempt | undefined,
+  command: FinishAttemptCommand
+): RunAttempt {
+  assertFinishAttemptCommand(command);
+  assertCurrentAttempt(current, command);
+  assertAttemptRevision(current, command.expectedRevision);
+  return finishRunAttempt(current, command);
 }

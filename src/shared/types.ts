@@ -343,6 +343,60 @@ export type RunSummaryV2 = {
   activity?: RunActivityTrace;
 };
 
+export type RunAttemptStatus = "running" | "completed" | "failed" | "superseded";
+
+/** Current fenced execution head. Revisions are monotonic for the whole run. */
+export type RunAttempt = {
+  runId: string;
+  attemptId: string;
+  fencingToken: number;
+  revision: number;
+  status: RunAttemptStatus;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  committedPartitions: number;
+  message?: string;
+};
+
+/** Immutable partition result owned by exactly one fenced attempt. */
+export type PartitionCheckpoint = {
+  runId: string;
+  attemptId: string;
+  fencingToken: number;
+  /** Head revision produced by this commit. */
+  revision: number;
+  /** Head revision that the worker observed before this commit. */
+  baseRevision: number;
+  partitionKey: string;
+  partition: PartitionResult;
+  observations: Observation[];
+  committedAt: string;
+};
+
+export type BeginAttemptCommand = {
+  runId: string;
+  expectedRevision: number;
+};
+
+export type CommitPartitionCommand = {
+  runId: string;
+  attemptId: string;
+  fencingToken: number;
+  expectedRevision: number;
+  partition: PartitionResult;
+  observations: Observation[];
+};
+
+export type FinishAttemptCommand = {
+  runId: string;
+  attemptId: string;
+  fencingToken: number;
+  expectedRevision: number;
+  status: "completed" | "failed";
+  message?: string;
+};
+
 export type RunState = {
   id: string;
   ownerEmail?: string;

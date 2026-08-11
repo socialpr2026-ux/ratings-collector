@@ -55,4 +55,26 @@ describe("remote repository transient edge failures", () => {
       .rejects.toThrow("Repository RPC HTTP 502: non-JSON response");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it("sends lease renewal once and surfaces a stale-token conflict without retrying", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toEqual({
+        action: "renewLease",
+        lease: { token: "stale", keys: ["locks/one.json"], scope: "collection:ozon" },
+        leaseMs: 120_000
+      });
+      return new Response(JSON.stringify({ error: "lease_token_conflict" }), {
+        status: 409,
+        headers: { "content-type": "application/json" }
+      });
+    });
+    const wait = vi.fn(async () => undefined);
+    const repository = new RemoteRepository(endpoint, token, fetchMock, wait);
+
+    await expect(repository.renewLease({
+      token: "stale", keys: ["locks/one.json"], scope: "collection:ozon"
+    }, 120_000)).rejects.toThrow("lease_token_conflict");
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(wait).not.toHaveBeenCalled();
+  });
 });

@@ -7,8 +7,10 @@ import { isKnownYandexIndexTombstoneSitemap } from "../../src/shared/yandex-site
 import { authenticate, authConfig, type AuthUser } from "../../src/server/auth.js";
 import { BlobEvidenceStore, BlobRepository } from "../../src/server/blob-repository.js";
 import {
+  AttemptConflictError,
   createRunSummaryV2,
   isRunSummaryUnchanged,
+  LeaseConflictError,
   runSummaryEtag
 } from "../../src/server/repository.js";
 import {
@@ -2588,6 +2590,13 @@ async function repositoryRpc(request: Request, env: Record<string, string | unde
       if (previous?.ownerEmail && body.run.ownerEmail !== previous.ownerEmail) throw new Error("Нельзя изменить владельца запуска");
       await repository.saveRun(body.run); result = null; break;
     }
+    case "getRunAttempt": result = await repository.getRunAttempt(body.runId); break;
+    case "getPartitionCheckpoint": result = await repository.getPartitionCheckpoint(
+      body.runId, body.fencingToken, body.domain, body.brand
+    ); break;
+    case "beginAttempt": result = await repository.beginAttempt(body.command); break;
+    case "commitPartition": result = await repository.commitPartition(body.command); break;
+    case "finishAttempt": result = await repository.finishAttempt(body.command); break;
     case "getProfile": result = await repository.getProfile(body.domain); break;
     case "saveProfile": await repository.saveProfile(body.profile); result = null; break;
     case "listProducts": result = await repository.listProducts(body.spreadsheetId); break;
@@ -2603,6 +2612,7 @@ async function repositoryRpc(request: Request, env: Record<string, string | unde
     case "reserveUsage": result = await repository.reserveUsage(body.key, body.amount, body.limit); break;
     case "releaseUsage": result = await repository.releaseUsage(body.key, body.amount); break;
     case "acquireLease": result = await repository.acquireLease(body.scope, body.leaseMs, 1); break;
+    case "renewLease": result = await repository.renewLease(body.lease, body.leaseMs); break;
     case "releaseLease": await repository.releaseLease(body.lease); result = null; break;
     case "putEvidence": result = await new BlobEvidenceStore().put(body.payload); break;
     default: return json({ error: "Unknown repository action" }, 400);
@@ -3649,7 +3659,10 @@ export default async function onRequest(context: Context): Promise<Response> {
   if (url.pathname === "/api/internal/repository" && context.request.method === "POST") {
     const repository = new BlobRepository();
     try { return await repositoryRpc(context.request, context.env, repository); }
-    catch (error) { return json({ error: safeErrorMessage(error) }, 400); }
+    catch (error) {
+      const status = error instanceof AttemptConflictError || error instanceof LeaseConflictError ? 409 : 400;
+      return json({ error: safeErrorMessage(error) }, status);
+    }
   }
   if (url.pathname === "/api/internal/static-review-fetch" && context.request.method === "POST") {
     try { return await staticReviewFetch(context.request, context.env); }
