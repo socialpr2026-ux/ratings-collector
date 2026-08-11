@@ -1159,7 +1159,7 @@ describe("run orchestration and fail-closed QA", () => {
     });
   });
 
-  it("uses an operator-confirmed catalog alias across sources before deciding review status", async () => {
+  it("does not reuse an operator-confirmed generic alias across domains", async () => {
     const repository = new MemoryRepository();
     await repository.saveProducts("test_sheet", [{
       key: "old.example:old", domain: "old.example", listingId: "old", brand: "Бренд",
@@ -1190,14 +1190,14 @@ describe("run orchestration and fail-closed QA", () => {
     const run = await service.executeRun((await service.createRun(request)).id);
 
     expect(run.observations[0]).toMatchObject({
-      status: "ok",
+      status: "needs_review",
       product: "Бренд таблетки",
       productIdentity: {
-        label: "таблетки 100 мг №10",
-        canonicalVariantId: "variant:v1:confirmed",
-        resolutionMethod: "catalog_alias"
+        label: "Общая карточка формы «таблетки»"
       }
     });
+    expect(run.observations[0]?.productIdentity?.canonicalVariantId).toBeUndefined();
+    expect(run.observations[0]?.productIdentity?.resolutionMethod).not.toBe("catalog_alias");
   });
 
   it("does not gate a dedicated review-site observation on a stale generic profile", async () => {
