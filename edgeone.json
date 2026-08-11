@@ -3,7 +3,7 @@
   "buildCommand": "pnpm build",
   "installCommand": "pnpm install --frozen-lockfile --config.node-linker=hoisted",
   "outputDirectory": "dist",
-  "nodeVersion": "20.18.0",
+  "nodeVersion": "24.11.0",
   "agents": {
     "framework": "openai-agents-sdk",
     "dir": "agents",

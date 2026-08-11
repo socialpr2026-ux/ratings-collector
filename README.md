@@ -37,7 +37,7 @@ Apps Script перед изменением:
 
 ## Локальная проверка
 
-Требуется Node.js `20.18.x` и pnpm.
+Требуется Node.js `24.11.x` LTS и pnpm.
 
 ```powershell
 Copy-Item .env.example .env
