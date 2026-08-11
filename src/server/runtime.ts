@@ -82,7 +82,13 @@ export async function createCollectorRuntime(options: {
     detailRetryDelayMs: 750
   });
   const freeWildberries = new WildberriesAdapter({ fetch: options.fetch });
-  const freeYandex = new YandexAdapter({ fetch: options.reviewsFetch ?? options.fetch });
+  const freeYandex = new YandexAdapter({
+    fetch: options.reviewsFetch ?? options.fetch,
+    shardProofStore: {
+      load: (jobKey) => repository.loadYandexShardProofs(jobKey),
+      put: (jobKey, proof) => repository.saveYandexShardProof(jobKey, proof)
+    }
+  });
   let ozon: SiteAdapter = freeOzon;
   let wildberries: SiteAdapter = freeWildberries;
   let yandex: SiteAdapter = freeYandex;

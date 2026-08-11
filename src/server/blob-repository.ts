@@ -19,6 +19,7 @@ import type {
   SourceCardRecord
 } from "../shared/types.js";
 import { productMasterCatalogSchema, type ProductMasterCatalog } from "../shared/product-master.js";
+import type { YandexShardProof } from "./adapters/yandex-shard-proof.js";
 import {
   assertProductMasterRevision,
   assertRunSaveFence,
@@ -164,6 +165,24 @@ export class BlobRepository implements Repository {
       await this.store.setJSON(`run-attempt-heads/${segment(command.runId)}.json`, finished);
       return finished;
     });
+  }
+
+  async loadYandexShardProofs(jobKey: string): Promise<YandexShardProof[]> {
+    const prefix = `yandex-shard-proofs/${segment(jobKey)}/`;
+    const { blobs } = await this.store.list({ prefix, consistency: "strong" });
+    const proofs = await Promise.all(blobs.map((item) =>
+      this.store.get(item.key, strongJson) as Promise<YandexShardProof | null>
+    ));
+    return proofs.filter((proof): proof is YandexShardProof => Boolean(proof));
+  }
+
+  async saveYandexShardProof(jobKey: string, proof: YandexShardProof): Promise<void> {
+    await this.withLease(`yandex-shard-proof:${jobKey}:${proof.shardUrl}`, 20_000, () =>
+      this.store.setJSON(
+        `yandex-shard-proofs/${segment(jobKey)}/${hash(proof.shardUrl)}.json`,
+        proof
+      )
+    );
   }
 
   async listRecentRuns(ownerEmail?: string, limit = 8): Promise<RunHistoryItem[]> {

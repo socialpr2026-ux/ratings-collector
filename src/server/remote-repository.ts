@@ -16,6 +16,7 @@ import type {
 } from "../shared/types.js";
 import type { AttemptFence, Repository, RepositoryLease } from "./repository.js";
 import type { ProductMasterCatalog } from "../shared/product-master.js";
+import type { YandexShardProof } from "./adapters/yandex-shard-proof.js";
 
 export type RepositoryRpc =
   | { action: "findRuns"; brand: string; limit?: number }
@@ -30,6 +31,8 @@ export type RepositoryRpc =
   | { action: "beginAttempt"; command: BeginAttemptCommand }
   | { action: "commitPartition"; command: CommitPartitionCommand }
   | { action: "finishAttempt"; command: FinishAttemptCommand }
+  | { action: "loadYandexShardProofs"; jobKey: string }
+  | { action: "saveYandexShardProof"; jobKey: string; proof: YandexShardProof }
   | { action: "getProfile"; domain: string }
   | { action: "saveProfile"; profile: SiteProfile }
   | { action: "listProducts"; spreadsheetId: string }
@@ -59,6 +62,8 @@ const RETRYABLE_ACTIONS = new Set<RepositoryRpc["action"]>([
   "getRunAttempt",
   "getPartitionCheckpoint",
   "commitPartition",
+  "loadYandexShardProofs",
+  "saveYandexShardProof",
   "getProfile",
   "saveProfile",
   "listProducts",
@@ -156,6 +161,12 @@ export class RemoteRepository implements Repository {
     return this.call<PartitionCheckpoint>({ action: "commitPartition", command });
   }
   finishAttempt(command: FinishAttemptCommand) { return this.call<RunAttempt>({ action: "finishAttempt", command }); }
+  loadYandexShardProofs(jobKey: string) {
+    return this.call<YandexShardProof[]>({ action: "loadYandexShardProofs", jobKey });
+  }
+  async saveYandexShardProof(jobKey: string, proof: YandexShardProof) {
+    await this.call({ action: "saveYandexShardProof", jobKey, proof });
+  }
   listRecentRuns(ownerEmail?: string, limit?: number) { return this.call<RunHistoryItem[]>({ action: "listRuns", ownerEmail, limit }); }
   getProfile(domain: string) { return this.call<SiteProfile | undefined>({ action: "getProfile", domain }); }
   async saveProfile(profile: SiteProfile) { await this.call({ action: "saveProfile", profile }); }

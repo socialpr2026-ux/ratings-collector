@@ -7,6 +7,7 @@ import {
   validateAndHashYandexManifest,
   YandexManifestValidationError
 } from "../src/server/adapters/yandex-shard-proof.js";
+import { MemoryRepository } from "../src/server/repository.js";
 
 const INDEX = "https://reviews.yandex.ru/ugcpub/sitemap.xml";
 const MAP_A = "https://reviews.yandex.ru/ugcpub/sitemap_model_0-9999999-0.xml";
@@ -127,6 +128,30 @@ describe("Yandex shard proof foundation", () => {
 
     expect(plan.reusable).toEqual([]);
     expect(plan.pending).toMatchObject([{ entry: { url: MAP_A }, reason: "invalid" }]);
+  });
+
+  it("persists a completed shard across adapter instances through the run repository", async () => {
+    const repository = new MemoryRepository();
+    const manifest = await validateAndHashYandexManifest(sitemapIndex([
+      { url: MAP_A, lastmod: "2026-08-10" }
+    ]), INDEX);
+    const brandSetHash = await hashYandexBrandSet(["кагоцел"]);
+    const proof = await createYandexShardProof({
+      manifest,
+      entry: manifest.modelEntries[0]!,
+      brandSetHash,
+      status: "verified",
+      matches: [],
+      completedAt: "2026-08-10T12:00:00.000Z"
+    });
+    const jobKey = `yandex-shards:v1:${"a".repeat(36)}:${brandSetHash}`;
+
+    await repository.saveYandexShardProof(jobKey, proof);
+    const restored = await repository.loadYandexShardProofs(jobKey);
+
+    expect(restored).toEqual([proof]);
+    restored[0]!.matches.push({ brand: "tamper", url: MAP_A, sitemap: MAP_A });
+    await expect(repository.loadYandexShardProofs(jobKey)).resolves.toEqual([proof]);
   });
 });
 

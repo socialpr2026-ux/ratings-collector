@@ -2597,6 +2597,8 @@ async function repositoryRpc(request: Request, env: Record<string, string | unde
     case "beginAttempt": result = await repository.beginAttempt(body.command); break;
     case "commitPartition": result = await repository.commitPartition(body.command); break;
     case "finishAttempt": result = await repository.finishAttempt(body.command); break;
+    case "loadYandexShardProofs": result = await repository.loadYandexShardProofs(body.jobKey); break;
+    case "saveYandexShardProof": await repository.saveYandexShardProof(body.jobKey, body.proof); result = null; break;
     case "getProfile": result = await repository.getProfile(body.domain); break;
     case "saveProfile": await repository.saveProfile(body.profile); result = null; break;
     case "listProducts": result = await repository.listProducts(body.spreadsheetId); break;

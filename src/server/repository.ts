@@ -18,6 +18,7 @@ import type {
   SiteProfile
 } from "../shared/types.js";
 import { productMasterCatalogSchema, type ProductMasterCatalog } from "../shared/product-master.js";
+import type { YandexShardProof } from "./adapters/yandex-shard-proof.js";
 
 export type Database = {
   version: 1;
@@ -30,6 +31,8 @@ export type Database = {
   runAttemptHeads?: Record<string, RunAttempt>;
   runAttempts?: Record<string, Record<string, RunAttempt>>;
   partitionCheckpoints?: Record<string, PartitionCheckpoint>;
+  /** Durable source-bound proofs used by failed-only Yandex continuation. */
+  yandexShardProofs?: Record<string, Record<string, YandexShardProof>>;
   profiles: Record<string, SiteProfile>;
   products: Record<string, Record<string, ProductRecord>>;
   sourceCards: Record<string, Record<string, SourceCardRecord>>;
@@ -57,6 +60,8 @@ export interface Repository {
   beginAttempt(command: BeginAttemptCommand): Promise<RunAttempt>;
   commitPartition(command: CommitPartitionCommand): Promise<PartitionCheckpoint>;
   finishAttempt(command: FinishAttemptCommand): Promise<RunAttempt>;
+  loadYandexShardProofs(jobKey: string): Promise<YandexShardProof[]>;
+  saveYandexShardProof(jobKey: string, proof: YandexShardProof): Promise<void>;
   listRecentRuns(ownerEmail?: string, limit?: number): Promise<RunHistoryItem[]>;
   getProfile(domain: string): Promise<SiteProfile | undefined>;
   saveProfile(profile: SiteProfile): Promise<void>;
@@ -85,6 +90,7 @@ const emptyDatabase = (): Database => ({
   runAttemptHeads: {},
   runAttempts: {},
   partitionCheckpoints: {},
+  yandexShardProofs: {},
   profiles: {},
   products: {},
   sourceCards: {},
@@ -176,6 +182,16 @@ export class MemoryRepository implements Repository {
     ((this.db.runAttempts ??= {})[command.runId] ??= {})[String(finished.fencingToken)] = clone(finished);
     await this.changed();
     return clone(finished);
+  }
+  async loadYandexShardProofs(jobKey: string): Promise<YandexShardProof[]> {
+    assertYandexProofJobKey(jobKey);
+    return Object.values(this.db.yandexShardProofs?.[jobKey] ?? {}).map(clone);
+  }
+  async saveYandexShardProof(jobKey: string, proof: YandexShardProof): Promise<void> {
+    assertYandexProofJobKey(jobKey);
+    const jobs = this.db.yandexShardProofs ??= {};
+    (jobs[jobKey] ??= {})[proof.shardUrl] = clone(proof);
+    await this.changed();
   }
   async listRecentRuns(ownerEmail?: string, limit = 8): Promise<RunHistoryItem[]> {
     const boundedLimit = Math.max(1, Math.min(20, Math.trunc(limit) || 8));
@@ -444,6 +460,12 @@ export function assertRunSaveFence(current: RunAttempt | undefined, fence?: Atte
   }
   if (!fence || fence.attemptId !== current.attemptId || fence.fencingToken !== current.fencingToken) {
     throw new AttemptConflictError("attempt_fencing_conflict");
+  }
+}
+
+function assertYandexProofJobKey(jobKey: string): void {
+  if (!jobKey.trim() || jobKey.length > 300 || !jobKey.startsWith("yandex-shards:v1:")) {
+    throw new TypeError("invalid_yandex_shard_job_key");
   }
 }
 
