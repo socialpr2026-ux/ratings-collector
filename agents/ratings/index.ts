@@ -1301,7 +1301,15 @@ export async function onRequest(context: AgentContext): Promise<Response> {
       const run = await repository.getRun(body.runId);
       if (!run) throw new Error("Запуск не найден");
       if (run.ownerEmail && run.ownerEmail !== user.email) throw new Error("Этот запуск принадлежит другому сотруднику");
-      {
+      const currentAttempt = await repository.getRunAttempt(run.id);
+      const attempt = await repository.beginAttempt({
+        runId: run.id,
+        expectedRevision: currentAttempt?.revision ?? 0
+      });
+      repository.bindRunAttempt(attempt);
+      let attemptFinished = false;
+      try {
+        {
         const localApifyExclusive = createSerialExecutor();
         const apifyExclusive = <T>(operation: () => Promise<T>) => localApifyExclusive(async () => {
           let apifyLease: { token: string; keys: string[] };
@@ -1351,6 +1359,18 @@ export async function onRequest(context: AgentContext): Promise<Response> {
           const runtime = await createCollectorRuntime(runtimeOptions());
           try {
             const completed = await runtime.service.executeRun(run.id);
+            const head = await repository.getRunAttempt(run.id);
+            if (!head || head.attemptId !== attempt.attemptId || head.fencingToken !== attempt.fencingToken) {
+              throw new Error("attempt_fencing_conflict");
+            }
+            await repository.finishAttempt({
+              runId: run.id,
+              attemptId: attempt.attemptId,
+              fencingToken: attempt.fencingToken,
+              expectedRevision: head.revision,
+              status: "completed"
+            });
+            attemptFinished = true;
             return json({ id: completed.id, status: completed.status });
           } catch (error) {
             const failed = await runtime.service.getRun(run.id);
@@ -1365,6 +1385,25 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         } finally {
           await collectorFetch.dispose();
         }
+      }
+      } catch (error) {
+        if (!attemptFinished) {
+          const head = await repository.getRunAttempt(run.id).catch(() => undefined);
+          if (head?.status === "running" && head.attemptId === attempt.attemptId &&
+            head.fencingToken === attempt.fencingToken) {
+            await repository.finishAttempt({
+              runId: run.id,
+              attemptId: attempt.attemptId,
+              fencingToken: attempt.fencingToken,
+              expectedRevision: head.revision,
+              status: "failed",
+              message: safeErrorMessage(error)
+            }).catch(() => undefined);
+          }
+        }
+        throw error;
+      } finally {
+        repository.clearRunAttempt();
       }
     } finally {
       await repository.releaseLease(lease);

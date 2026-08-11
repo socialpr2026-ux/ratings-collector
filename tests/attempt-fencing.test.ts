@@ -72,6 +72,15 @@ describe("fenced run attempts", () => {
     expect(await repository.getPartitionCheckpoint(
       legacy.id, first.fencingToken, "ozon.ru", "Максилак"
     )).toBeUndefined();
+    await expect(repository.saveRun(legacy, {
+      attemptId: first.attemptId,
+      fencingToken: first.fencingToken
+    })).rejects.toMatchObject({ code: "attempt_fencing_conflict" });
+    await expect(repository.saveRun(legacy)).rejects.toMatchObject({ code: "attempt_fencing_conflict" });
+    await expect(repository.saveRun(legacy, {
+      attemptId: second.attemptId,
+      fencingToken: second.fencingToken
+    })).resolves.toBeUndefined();
 
     const secondCheckpoint = await repository.commitPartition({
       runId: legacy.id,

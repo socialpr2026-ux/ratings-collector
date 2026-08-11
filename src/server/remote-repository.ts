@@ -14,7 +14,7 @@ import type {
   SiteProfile,
   SourceCardRecord
 } from "../shared/types.js";
-import type { Repository, RepositoryLease } from "./repository.js";
+import type { AttemptFence, Repository, RepositoryLease } from "./repository.js";
 import type { ProductMasterCatalog } from "../shared/product-master.js";
 
 export type RepositoryRpc =
@@ -24,7 +24,7 @@ export type RepositoryRpc =
   | { action: "getRunSummary"; id: string }
   | { action: "getProductMaster" }
   | { action: "saveProductMaster"; catalog: ProductMasterCatalog; expectedRevision: number }
-  | { action: "saveRun"; run: RunState }
+  | { action: "saveRun"; run: RunState; attemptFence?: AttemptFence }
   | { action: "getRunAttempt"; runId: string }
   | { action: "getPartitionCheckpoint"; runId: string; fencingToken: number; domain: string; brand: string }
   | { action: "beginAttempt"; command: BeginAttemptCommand }
@@ -75,6 +75,7 @@ class RepositoryRpcRejectedError extends Error {}
 
 export class RemoteRepository implements Repository {
   private readonly token: string;
+  private attemptFence: AttemptFence | undefined;
 
   constructor(
     private readonly endpoint: string,
@@ -137,7 +138,13 @@ export class RemoteRepository implements Repository {
   async saveProductMaster(catalog: ProductMasterCatalog, expectedRevision: number) {
     await this.call({ action: "saveProductMaster", catalog, expectedRevision });
   }
-  async saveRun(run: RunState) { await this.call({ action: "saveRun", run }); }
+  bindRunAttempt(attempt: RunAttempt): void {
+    this.attemptFence = { attemptId: attempt.attemptId, fencingToken: attempt.fencingToken };
+  }
+  clearRunAttempt(): void { this.attemptFence = undefined; }
+  async saveRun(run: RunState) {
+    await this.call({ action: "saveRun", run, ...(this.attemptFence ? { attemptFence: this.attemptFence } : {}) });
+  }
   getRunAttempt(runId: string) { return this.call<RunAttempt | undefined>({ action: "getRunAttempt", runId }); }
   getPartitionCheckpoint(runId: string, fencingToken: number, domain: string, brand: string) {
     return this.call<PartitionCheckpoint | undefined>({

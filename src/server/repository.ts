@@ -39,13 +39,14 @@ export type Database = {
 };
 
 export type RepositoryLease = { token: string; keys: string[]; scope?: string };
+export type AttemptFence = Pick<RunAttempt, "attemptId" | "fencingToken">;
 
 export interface Repository {
   getRun(id: string): Promise<RunState | undefined>;
   getRunSummary(id: string): Promise<RunSummaryV2 | undefined>;
   getProductMaster(): Promise<ProductMasterCatalog>;
   saveProductMaster(catalog: ProductMasterCatalog, expectedRevision: number): Promise<void>;
-  saveRun(run: RunState): Promise<void>;
+  saveRun(run: RunState, attemptFence?: AttemptFence): Promise<void>;
   getRunAttempt(runId: string): Promise<RunAttempt | undefined>;
   getPartitionCheckpoint(
     runId: string,
@@ -119,7 +120,8 @@ export class MemoryRepository implements Repository {
     this.db.productMaster = clone(productMasterCatalogSchema.parse(catalog));
     await this.changed();
   }
-  async saveRun(run: RunState) {
+  async saveRun(run: RunState, attemptFence?: AttemptFence) {
+    assertRunSaveFence(this.db.runAttemptHeads?.[run.id], attemptFence);
     const summaries = this.db.runSummaries ??= {};
     const previous = summaries[run.id] ?? (this.db.runs[run.id]
       ? createRunSummaryV2(this.db.runs[run.id], 1)
@@ -432,6 +434,16 @@ export class LeaseConflictError extends Error {
   constructor() {
     super("lease_token_conflict");
     this.name = "LeaseConflictError";
+  }
+}
+
+export function assertRunSaveFence(current: RunAttempt | undefined, fence?: AttemptFence): void {
+  if (!current || current.status !== "running") {
+    if (fence) throw new AttemptConflictError("attempt_fencing_conflict");
+    return;
+  }
+  if (!fence || fence.attemptId !== current.attemptId || fence.fencingToken !== current.fencingToken) {
+    throw new AttemptConflictError("attempt_fencing_conflict");
   }
 }
 

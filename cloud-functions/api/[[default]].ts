@@ -2588,7 +2588,7 @@ async function repositoryRpc(request: Request, env: Record<string, string | unde
     case "saveRun": {
       const previous = await repository.getRun(body.run.id);
       if (previous?.ownerEmail && body.run.ownerEmail !== previous.ownerEmail) throw new Error("Нельзя изменить владельца запуска");
-      await repository.saveRun(body.run); result = null; break;
+      await repository.saveRun(body.run, body.attemptFence); result = null; break;
     }
     case "getRunAttempt": result = await repository.getRunAttempt(body.runId); break;
     case "getPartitionCheckpoint": result = await repository.getPartitionCheckpoint(

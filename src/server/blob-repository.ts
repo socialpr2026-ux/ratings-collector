@@ -21,6 +21,7 @@ import type {
 import { productMasterCatalogSchema, type ProductMasterCatalog } from "../shared/product-master.js";
 import {
   assertProductMasterRevision,
+  assertRunSaveFence,
   attemptPartitionKey,
   beginAttemptTransition,
   commitPartitionTransition,
@@ -116,7 +117,7 @@ export class BlobRepository implements Repository {
   }
 
   async beginAttempt(command: BeginAttemptCommand): Promise<RunAttempt> {
-    return this.withLease(`run-attempt:${command.runId}`, 20_000, async () => {
+    return this.withLease(`run:${command.runId}`, 20_000, async () => {
       if (!await this.getRun(command.runId)) throw new Error("run_not_found");
       const current = await this.getRunAttempt(command.runId);
       const { attempt, superseded } = beginAttemptTransition(current, command);
@@ -136,7 +137,7 @@ export class BlobRepository implements Repository {
   }
 
   async commitPartition(command: CommitPartitionCommand): Promise<PartitionCheckpoint> {
-    return this.withLease(`run-attempt:${command.runId}`, 20_000, async () => {
+    return this.withLease(`run:${command.runId}`, 20_000, async () => {
       const current = await this.getRunAttempt(command.runId);
       const partitionKey = attemptPartitionKey(command.partition.domain, command.partition.brand);
       const checkpointPath = `run-attempt-partitions/${segment(command.runId)}/${command.fencingToken}/${hash(partitionKey)}.json`;
@@ -153,7 +154,7 @@ export class BlobRepository implements Repository {
   }
 
   async finishAttempt(command: FinishAttemptCommand): Promise<RunAttempt> {
-    return this.withLease(`run-attempt:${command.runId}`, 20_000, async () => {
+    return this.withLease(`run:${command.runId}`, 20_000, async () => {
       const current = await this.getRunAttempt(command.runId);
       const finished = finishAttemptTransition(current, command);
       await this.store.setJSON(
@@ -176,8 +177,9 @@ export class BlobRepository implements Repository {
       .map(({ ownerEmail: _ownerEmail, ...item }) => item);
   }
 
-  async saveRun(run: RunState): Promise<void> {
+  async saveRun(run: RunState, attemptFence?: import("./repository.js").AttemptFence): Promise<void> {
     await this.withLease(`run:${run.id}`, 20_000, async () => {
+      assertRunSaveFence(await this.getRunAttempt(run.id), attemptFence);
       const summaryPath = `run-summaries/${segment(run.id)}.json`;
       const previousSummary = await this.store.get(summaryPath, strongJson) as RunSummaryV2 | null;
       const summary = nextRunSummaryV2(run, previousSummary ?? undefined);

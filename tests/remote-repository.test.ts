@@ -46,6 +46,23 @@ describe("remote repository transient edge failures", () => {
     expect(wait.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([200, 400, 800, 1_600]);
   });
 
+  it("attaches the active fencing token to every Agent run checkpoint", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toEqual({
+        action: "saveRun",
+        run: { id: "run-1" },
+        attemptFence: { attemptId: "attempt-2", fencingToken: 2 }
+      });
+      return new Response(JSON.stringify({ result: null }), { status: 200 });
+    });
+    const repository = new RemoteRepository(endpoint, token, fetchMock, async () => undefined);
+    repository.bindRunAttempt({ attemptId: "attempt-2", fencingToken: 2 } as never);
+
+    await repository.saveRun({ id: "run-1" } as never);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("does not retry non-idempotent quota reservations", async () => {
     const fetchMock = vi.fn(async () =>
       new Response("<!doctype html><title>Bad Gateway</title>", { status: 502 }));
