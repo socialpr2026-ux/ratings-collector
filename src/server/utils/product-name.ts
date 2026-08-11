@@ -2,6 +2,8 @@ import { aliasesForBrand, normalizeText } from "./normalize.js";
 import type { ProductEvidence, ProductIdentity } from "../../shared/types.js";
 
 type ProductParts = {
+  /** Source-explicit product line text that is not covered by known modifiers. */
+  discriminator?: string;
   modifier?: string;
   form?: string;
   doses: string[];
@@ -56,6 +58,8 @@ const COUNT_UNIT = "(?:шт(?:ук[аи]?)?\\.?|таб(?:л(?:ет(?:ок|ки|�
 const NUMBER = "(\\d{1,4})";
 
 const MODIFIERS: Array<{ value: string; pattern: RegExp }> = [
+  { value: "Синбиотик", pattern: /(?<![\p{L}\p{N}])синбиотик(?![\p{L}\p{N}])/iu },
+  { value: "Премиум", pattern: /(?<![\p{L}\p{N}])премиум(?![\p{L}\p{N}])/iu },
   { value: "Максимум", pattern: /(?<![\p{L}\p{N}])максимум(?![\p{L}\p{N}])/iu },
   { value: "Плюс", pattern: /(?<![\p{L}\p{N}])плюс(?![\p{L}\p{N}])/iu },
   { value: "Дуо", pattern: /(?<![\p{L}\p{N}])дуо(?![\p{L}\p{N}])/iu },
@@ -392,6 +396,46 @@ function productHintFromUrl(url: string | undefined): string {
   }
 }
 
+function sourceBoundDiscriminator(value: string, brand: string): string | undefined {
+  const requested = brand.normalize("NFKC").trim();
+  if (!requested) return undefined;
+  const flexible = escapeRegExp(requested)
+    .replace(/[\s‐‑‒–—−-]+/g, "[\\s‐‑‒–—−-]*");
+  const brandMatch = new RegExp(`(^|[^\\p{L}\\p{N}])${flexible}(?=$|[^\\p{L}\\p{N}])`, "iu").exec(value);
+  if (!brandMatch) return undefined;
+
+  const suffix = value.slice(brandMatch.index + brandMatch[0].length);
+  const factStarts: number[] = [];
+  for (const rule of FORM_RULES) {
+    rule.pattern.lastIndex = 0;
+    const match = rule.pattern.exec(suffix);
+    rule.pattern.lastIndex = 0;
+    if (match?.index !== undefined) factStarts.push(match.index);
+  }
+  for (const pattern of [
+    /\d+(?:[.,]\d+)?\s*(?:мкг|мг|гр?|г|мл|ме|%)(?:\s*\/\s*(?:мл|г|доз(?:а|у)?))?/iu,
+    /(?:№|#|\bN(?:o)?\.?)\s*\d{1,4}\b/iu,
+    new RegExp(`(?<!\\d)${NUMBER}\\s*${COUNT_UNIT}(?![\\p{L}\\p{N}])`, "iu"),
+    /(?:[xх×]\s*|(?<![\p{L}\p{N}]))\d+\s*(?:уп(?:аковк)?\.?|упаков(?:ки|ок|ка))(?![\p{L}\p{N}])/iu
+  ]) {
+    const match = pattern.exec(suffix);
+    if (match?.index !== undefined) factStarts.push(match.index);
+  }
+  if (factStarts.length === 0) return undefined;
+
+  let candidate = suffix.slice(0, Math.min(...factStarts));
+  for (const known of MODIFIERS) candidate = candidate.replace(known.pattern, " ");
+  candidate = candidate
+    .replace(/(?<![\p{L}\p{N}])(?:лекарственн(?:ый|ое)|оригинальн(?:ый|ая|ое)|препарат|средство|бад)(?![\p{L}\p{N}])/giu, " ")
+    .replace(/[+|/\\,:;()\[\]{}]+/gu, " ")
+    .replace(/[‐‑‒–—−-]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (/^(?:для(?:\s|$)|д\s*\/).*?(?:введ|при[её]м)/iu.test(candidate) || /^с\s+вит(?:амин)?/iu.test(candidate)) return undefined;
+  if (!candidate || candidate.length > 64 || candidate.split(/\s+/u).length > 4) return undefined;
+  return candidate;
+}
+
 function parseProduct(brand: string, rawProduct: string, url?: string): ProductParts {
   const withoutLegacyDraft = rawProduct
     .replace(/^\s*Вариант не определён\s*·\s*известно:\s*/iu, "")
@@ -439,12 +483,14 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
     // not prove a product or a separate line.
     .filter((value) => value !== "Плюс" || Boolean(form || doses.length));
   const modifier = modifiers.length ? modifiers.join(" ") : undefined;
+  const discriminator = sourceBoundDiscriminator(sourceWithoutVendor, brand);
   const generic = !form && !count && doses.length === 0 && !modifier;
   const fallbackText = generic ? withoutBrand.replace(/^плюс(?:\s+отзывы?)?$/iu, "").trim() : withoutBrand;
   const genericPage = !fallbackText || /(?:отзыв|инструкц|цен[аы]|аналог|лекарственн|ноотропн|препарат|средство)/iu.test(fallbackText);
   const contentPage = /(?:пародонтолог|стать[яи]|книг[аи]|методическ|исследован|применение\s+.{0,100}\s+в\s+)/iu.test(withoutBrand);
   const unknownModel = /^\s*(?:модель\s*)?\d{5,}\s*$/iu.test(withoutBrand) || /^\s*модель\s+\d+/iu.test(withoutBrand);
   return {
+    discriminator,
     modifier,
     form,
     doses,
@@ -461,16 +507,19 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
 }
 
 function partsKey(parts: ProductParts): string {
-  return [parts.modifier, comparableForm(parts.form), parts.doses.join("+"), canonicalCount(parts), parts.multipack].map((item) => item ?? "").join("|");
+  return [parts.discriminator, parts.modifier, comparableForm(parts.form), parts.doses.join("+"), canonicalCount(parts), parts.multipack].map((item) => item ?? "").join("|");
 }
 
 function specificity(parts: ProductParts): number {
-  return Number(Boolean(parts.modifier)) + Number(Boolean(parts.form)) + parts.doses.length + Number(Boolean(parts.count)) + Number(Boolean(parts.multipack));
+  return Number(Boolean(parts.discriminator)) + Number(Boolean(parts.modifier)) + Number(Boolean(parts.form)) + parts.doses.length + Number(Boolean(parts.count)) + Number(Boolean(parts.multipack));
 }
 
 function render(parts: ProductParts): string {
   if (parts.generic) return parts.fallback ?? "Общая карточка отзывов";
   const chunks: string[] = [];
+  // Preserve unknown source-bound semantics in the key even when a lowercase
+  // adjective is merely catalog wording. Named lines are rendered for humans.
+  if (parts.discriminator && /^\p{Lu}/u.test(parts.discriminator)) chunks.push(parts.discriminator);
   if (parts.modifier) chunks.push(parts.modifier);
   const form = canonicalForm(parts.form);
   if (form) chunks.push(form);
@@ -529,6 +578,7 @@ function partsCompatible(left: ProductParts, right: ProductParts): boolean {
   const rightCount = canonicalCount(right);
   if (leftCount && rightCount && leftCount !== rightCount) return false;
   if (left.multipack && right.multipack && left.multipack !== right.multipack) return false;
+  if (left.discriminator && right.discriminator && normalizeText(left.discriminator) !== normalizeText(right.discriminator)) return false;
   if (left.modifier && right.modifier) {
     const leftModifiers = left.modifier.split(/\s+/u);
     const rightModifiers = right.modifier.split(/\s+/u);
@@ -544,6 +594,7 @@ function partsSubsumes(richer: ProductParts, poorer: ProductParts): boolean {
   const poorerCount = canonicalCount(poorer);
   if (poorerCount && canonicalCount(richer) !== poorerCount) return false;
   if (poorer.multipack && richer.multipack !== poorer.multipack) return false;
+  if (poorer.discriminator && normalizeText(richer.discriminator ?? "") !== normalizeText(poorer.discriminator)) return false;
   if (poorer.modifier && (!richer.modifier || !setIsSubset(poorer.modifier.split(/\s+/u), richer.modifier.split(/\s+/u)))) return false;
   if (!setIsSubset(poorer.doses, richer.doses)) return false;
   return specificity(richer) >= specificity(poorer);
@@ -723,7 +774,7 @@ export function analyzeProductIdentity(item: ProductNameInput): ProductIdentity 
       // the employee-facing label as "Общий рейтинг: №30" when a review
       // control was mistaken for a variant selector.
       if (parts.generic || !parts.form && !parts.doses.length && !parts.modifier) continue;
-      const baseKey = [parts.modifier, comparableForm(parts.form), [...parts.doses].sort().join("+"), canonicalCount(parts), parts.multipack].map((value) => value ?? "").join("|");
+      const baseKey = [parts.discriminator, parts.modifier, comparableForm(parts.form), [...parts.doses].sort().join("+"), canonicalCount(parts), parts.multipack].map((value) => value ?? "").join("|");
       const previous = variantGroups.get(baseKey);
       if (
         !previous
@@ -881,9 +932,13 @@ function exactParts(item: ProductNameInput): ProductParts | undefined {
 }
 
 function variantCoreKey(brand: string, parts: ProductParts): string {
+  const semanticLine = [parts.discriminator, parts.modifier]
+    .filter(Boolean)
+    .map((value) => normalizeText(value!))
+    .join("+");
   return [
     normalizeText(brand),
-    normalizeText(parts.modifier ?? ""),
+    semanticLine,
     normalizeText(canonicalForm(parts.form) ?? ""),
     canonicalCount(parts) ?? "",
     parts.multipack ?? ""
@@ -915,6 +970,7 @@ function oralSolutionCandidate(parts: ProductParts): OralSolutionCandidate | und
   if (!otherDoses.some((dose) => /^\d+(?:[.,]\d+)?\s+мл$/iu.test(dose))) return undefined;
   return {
     key: [
+      normalizeText(parts.discriminator ?? ""),
       normalizeText(parts.modifier ?? ""),
       canonicalCount(parts) ?? "",
       parts.multipack ?? "",
@@ -986,6 +1042,7 @@ function reconcileParenteralSolutionShorthand(
     if (!parts?.form || !forms.has(parts.form)) return;
     const key = [
       normalizeText(items[index].brand),
+      normalizeText(parts.discriminator ?? ""),
       normalizeText(parts.modifier ?? ""),
       canonicalCount(parts) ?? "",
       parts.multipack ?? "",
@@ -1043,7 +1100,11 @@ export function canonicalProductVariants(items: readonly ProductNameInput[]): Ca
   for (const [coreKey, indices] of groups) {
     const doseKeys = new Set(indices.map((index) => doseKey(parsed[index]!)).filter(Boolean));
     const hasShortEquivalent = indices.some((index) => parsed[index]!.doses.length === 0);
-    const omitNonDiscriminatingDose = hasShortEquivalent && doseKeys.size <= 1;
+    const omitNonDiscriminatingDose = hasShortEquivalent
+      && doseKeys.size === 1
+      && normalizeText(items[indices[0]].brand) === "оциллококцинум"
+      && [...doseKeys].every((dose) => dose === "1 г")
+      && indices.every((index) => canonicalForm(parsed[index]!.form) === "гранулы");
 
     for (const index of indices) {
       const parts = parsed[index]!;

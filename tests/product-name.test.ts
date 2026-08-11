@@ -214,7 +214,7 @@ describe("canonical product descriptors", () => {
     expect(new Set(values).size).toBe(3);
   });
 
-  it("uses one short label and semantic key for the same real product across sites", () => {
+  it("uses one short label only for a catalogued dose equivalence", () => {
     const richIdentity = analyzeProductIdentity({
       brand: "Оциллококцинум",
       product: "Оциллококцинум гранулы гомеопатические 1 г №30"
@@ -230,8 +230,27 @@ describe("canonical product descriptors", () => {
       { brand: "Анвифен", product: "Анвифен капсулы 50 мг №20" },
       { brand: "Анвифен", product: "Анвифен капсулы №20" }
     ]);
-    expect(anvifen.map((item) => item.label)).toEqual(["капсулы №20", "капсулы №20"]);
-    expect(new Set(anvifen.map((item) => item.variantKey)).size).toBe(1);
+    expect(anvifen.map((item) => item.label)).toEqual(["капсулы 50 мг №20", "капсулы №20"]);
+    expect(new Set(anvifen.map((item) => item.variantKey)).size).toBe(2);
+  });
+
+  it("keeps source-explicit and unknown product lines in the semantic identity", () => {
+    const variants = canonicalProductVariants([
+      { brand: "Максилак", product: "Максилак Синбиотик капсулы №10" },
+      { brand: "Максилак", product: "Максилак Премиум капсулы №10" },
+      { brand: "Максилак", product: "Максилак НоваяЛиния капсулы №10" },
+      { brand: "Максилак", product: "Максилак капсулы №10" }
+    ]);
+
+    expect(variants.map((item) => item.label)).toEqual([
+      "Синбиотик капсулы №10",
+      "Премиум капсулы №10",
+      "НоваяЛиния капсулы №10",
+      "капсулы №10"
+    ]);
+    expect(new Set(variants.map((item) => item.variantKey)).size).toBe(4);
+    expect(canonicalProductDescriptor("Максилак", variants[0].label)).toBe(variants[0].label);
+    expect(canonicalProductDescriptor("Максилак", variants[1].label)).toBe(variants[1].label);
   });
 
   it("uses the physical pack instead of a per-item dose in marketplace titles", () => {

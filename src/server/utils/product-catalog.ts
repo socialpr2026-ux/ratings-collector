@@ -15,8 +15,23 @@ function variantId(variantKey: string): string {
   return `variant:v${PRODUCT_VARIANT_KEY_VERSION}:${digest.slice(0, 32)}`;
 }
 
-function aliasKey(brand: string, product: string): string {
-  return `${normalizeText(brand)}\u0000${normalizeText(product)}`;
+function aliasKey(brand: string, product: string, domain?: string): string {
+  const scope = domain ? `source:${normalizeText(domain)}` : "global";
+  return `${scope}\u0000${normalizeText(brand)}\u0000${normalizeText(product)}`;
+}
+
+function lookupAliasKeys(item: Pick<Observation, "brand" | "product" | "domain"> | ProductRecord): string[] {
+  return [aliasKey(item.brand, item.product, item.domain), aliasKey(item.brand, item.product)];
+}
+
+function aliasRegistrationKeys(
+  item: Pick<Observation, "brand" | "product" | "productOverride" | "domain"> | ProductRecord
+): string[] {
+  if (item.productOverride?.trim()) return [aliasKey(item.brand, item.product, item.domain)];
+  const rawIdentity = analyzeProductIdentity({ brand: item.brand, product: item.product });
+  return rawIdentity.granularity === "variant" && rawIdentity.confidence === "exact"
+    ? [aliasKey(item.brand, item.product)]
+    : [];
 }
 
 function isValidGtin(value: string): boolean {
@@ -56,12 +71,6 @@ export function compactProductCatalogEvidence(evidence: ProductEvidence | undefi
   };
 }
 
-function isSafeGlobalAlias(item: Pick<Observation, "brand" | "product" | "productOverride"> | ProductRecord): boolean {
-  if (item.productOverride?.trim()) return true;
-  const rawIdentity = analyzeProductIdentity({ brand: item.brand, product: item.product });
-  return rawIdentity.granularity === "variant" && rawIdentity.confidence === "exact";
-}
-
 function addTarget(map: Map<string, Map<string, CatalogTarget>>, key: string, target: CatalogTarget): void {
   const targets = map.get(key) ?? new Map<string, CatalogTarget>();
   targets.set(target.id, target);
@@ -70,12 +79,15 @@ function addTarget(map: Map<string, Map<string, CatalogTarget>>, key: string, ta
 
 function uniqueTarget(
   maps: Array<Map<string, Map<string, CatalogTarget>>>,
-  keys: string[]
+  keys: string[],
+  conflictingTargetIds: ReadonlySet<string>
 ): CatalogTarget | undefined {
   const targets = new Map<string, CatalogTarget>();
   for (const map of maps) {
     for (const key of keys) {
-      for (const target of map.get(key)?.values() ?? []) targets.set(target.id, target);
+      for (const target of map.get(key)?.values() ?? []) {
+        if (!conflictingTargetIds.has(target.id)) targets.set(target.id, target);
+      }
     }
   }
   return targets.size === 1 ? targets.values().next().value : undefined;
@@ -108,7 +120,7 @@ function catalogConflictIdentity(identity: ProductIdentity, label: string): Prod
     granularity: "unresolved",
     confidence: "ambiguous",
     missing: [],
-    reasons: [...new Set([...identity.reasons, "Каталог содержит несколько идентификаторов этого варианта"])],
+    reasons: [...new Set([...identity.reasons, "Каталог содержит конфликтующие идентификаторы или характеристики варианта"])],
     canonicalVariantId: undefined,
     variantKeyVersion: PRODUCT_VARIANT_KEY_VERSION,
     resolutionMethod: undefined
@@ -157,13 +169,16 @@ export function reconcileProductCatalog(
     const variantKey = combinedVariants[index]?.variantKey;
     if (!variantKey) return;
     const target = { id: identity.canonicalVariantId ?? variantId(variantKey), label: identity.label };
-    if (isSafeGlobalAlias(record)) addTarget(aliases, aliasKey(record.brand, record.product), target);
+    for (const key of aliasRegistrationKeys(record)) addTarget(aliases, key, target);
     for (const gtin of gtinKeys(record.brand, record.productEvidence)) addTarget(gtinTargets, gtin, target);
     addTarget(variantTargets, variantKey, target);
     const keys = targetVariantKeys.get(target.id) ?? new Set<string>();
     keys.add(variantKey);
     targetVariantKeys.set(target.id, keys);
   });
+  const conflictingTargetIds = new Set(
+    [...targetVariantKeys].filter(([, keys]) => keys.size > 1).map(([id]) => id)
+  );
 
   result.forEach((item, index) => {
     const identity = item.productIdentity;
@@ -175,6 +190,10 @@ export function reconcileProductCatalog(
         const knownKeys = targetVariantKeys.get(target.id);
         if (!knownKeys || knownKeys.has(variant.variantKey)) compatibleTargets.set(target.id, target);
       }
+    }
+    if ([...compatibleTargets].some(([id]) => conflictingTargetIds.has(id))) {
+      item.productIdentity = catalogConflictIdentity(identity, variant.label);
+      return;
     }
     if (compatibleTargets.size > 1) {
       item.productIdentity = catalogConflictIdentity(identity, variant.label);
@@ -188,7 +207,7 @@ export function reconcileProductCatalog(
       target,
       item.productOverride ? "operator_override" : "source_facts"
     );
-    if (isSafeGlobalAlias(item)) addTarget(aliases, aliasKey(item.brand, item.product), target);
+    for (const key of aliasRegistrationKeys(item)) addTarget(aliases, key, target);
     for (const gtin of gtinKeys(item.brand, item.productEvidence)) addTarget(gtinTargets, gtin, target);
     addTarget(variantTargets, variant.variantKey, target);
   });
@@ -196,9 +215,21 @@ export function reconcileProductCatalog(
   result.forEach((item) => {
     const identity = item.productIdentity;
     if (identity?.granularity !== "unresolved" || identity.confidence !== "partial") return;
+    const lookupKeys = [...lookupAliasKeys(item), ...gtinKeys(item.brand, item.productEvidence)];
+    const candidateTargets = new Map<string, CatalogTarget>();
+    for (const map of [aliases, gtinTargets]) {
+      for (const key of lookupKeys) {
+        for (const target of map.get(key)?.values() ?? []) candidateTargets.set(target.id, target);
+      }
+    }
+    if ([...candidateTargets].some(([id]) => conflictingTargetIds.has(id))) {
+      item.productIdentity = catalogConflictIdentity(identity, identity.label);
+      return;
+    }
     const target = uniqueTarget(
       [aliases, gtinTargets],
-      [aliasKey(item.brand, item.product), ...gtinKeys(item.brand, item.productEvidence)]
+      lookupKeys,
+      conflictingTargetIds
     );
     if (!target) return;
     item.productIdentity = resolvedIdentity(identity, target, "catalog_alias");
