@@ -18,6 +18,7 @@ type SandboxApi = {
   browser: BrowserApi;
   commands: SandboxCommands;
   readonly envdAccessToken: string;
+  kill?(): Promise<unknown> | unknown;
 };
 type AgentContext = {
   request: Request;
@@ -26,41 +27,7 @@ type AgentContext = {
   sandbox: SandboxApi;
 };
 
-export function shouldAutoRetryInitialCollection(
-  initialStatus: "queued" | "running" | "review" | "publishing" | "published" | "failed",
-  partitions: Array<{ status: string; message?: string }>
-): boolean {
-  if (initialStatus !== "queued") return false;
-  const failures = partitions.filter(({ status }) => status !== "complete" && status !== "no_results");
-  if (failures.length === 0 || failures.length > 10) return false;
-  return failures.every(({ status, message = "" }) =>
-    (status === "blocked" || status === "error") &&
-    !/^(?:quota_exceeded|parser_changed)\s*:/i.test(message.trim()) &&
-    !/\bquota\b|квот|monthly[^.]{0,80}GB-s|лимит[^.]{0,80}(?:исчерпан|превышен)|limit[^.]{0,80}(?:exceeded|reached)/i.test(message) &&
-    /\bcaptcha\b|капч|HTTP\s+(?:408|425|429|498|499|5\d{2})\b/i.test(message)
-  );
-}
-
-export function shouldReuseRuntimeForTransientRecovery(
-  partitions: Array<{ domain?: string; status: string }>
-): boolean {
-  const failures = partitions.filter(({ status }) => status !== "complete" && status !== "no_results");
-  return failures.length > 0 && failures.every(({ domain }) => domain === "ozon.ru");
-}
-
-export const MAX_INITIAL_TRANSIENT_RECOVERY_PASSES = 1;
 export const STATIC_PROXY_REQUEST_TIMEOUT_MS = 55_000;
-
-export function transientRecoveryDelayMs(
-  partitions: Array<{ domain?: string; status: string; message?: string }>,
-  recoveryPass: number
-): number {
-  const transientFailure = partitions.some(({ status, message = "" }) =>
-    status !== "complete" && status !== "no_results" &&
-    /\bcaptcha\b|капч|HTTP\s+(?:408|425|429|498|499|5\d{2})\b/i.test(message)
-  );
-  return transientFailure ? Math.min(3_000, 750 * (recoveryPass + 1)) : 0;
-}
 
 const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);
 const YANDEX_BATCH_ENDPOINT = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
@@ -76,6 +43,53 @@ type YandexBatchCapableFetch = typeof fetch & {
   yandexDirectRecovery?: boolean;
 };
 type YandexMarketCapableFetch = YandexBatchCapableFetch & { yandexMarketBrowserEndpoint?: string };
+type ManagedBrowserFetch = YandexMarketCapableFetch & { dispose(): Promise<void> };
+
+export type BrowserLane = "ozon" | "yandex" | "wildberries" | "generic";
+
+export function createBrowserLaneScheduler(maxConcurrent = 3): <T>(
+  lane: BrowserLane,
+  operation: () => Promise<T>
+) => Promise<T> {
+  if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1) {
+    throw new RangeError("Browser scheduler concurrency must be a positive integer");
+  }
+  let active = 0;
+  const waiters: Array<() => void> = [];
+  const laneTails = new Map<BrowserLane, Promise<void>>();
+
+  const acquire = (): Promise<() => void> => new Promise((resolve) => {
+    const enter = () => {
+      active += 1;
+      let released = false;
+      resolve(() => {
+        if (released) return;
+        released = true;
+        active -= 1;
+        waiters.shift()?.();
+      });
+    };
+    if (active < maxConcurrent) enter();
+    else waiters.push(enter);
+  });
+
+  return async <T>(lane: BrowserLane, operation: () => Promise<T>): Promise<T> => {
+    const previous = laneTails.get(lane) ?? Promise.resolve();
+    let releaseLane!: () => void;
+    const current = new Promise<void>((resolve) => { releaseLane = resolve; });
+    const tail = previous.catch(() => undefined).then(() => current);
+    laneTails.set(lane, tail);
+    await previous.catch(() => undefined);
+    const releaseGlobal = await acquire();
+    try {
+      return await operation();
+    } finally {
+      releaseGlobal();
+      releaseLane();
+      if (laneTails.get(lane) === tail) laneTails.delete(lane);
+    }
+  };
+}
 
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
@@ -255,15 +269,13 @@ export function extractYandexMarketSearchHtmlProof(
 export function browserFetch(
   sandbox: SandboxApi,
   staticProxy?: { endpoint: string; token: string }
-): typeof fetch {
-  let queue = Promise.resolve();
+): ManagedBrowserFetch {
+  const runBrowserTask = createBrowserLaneScheduler(3);
   let connected: Promise<Browser> | undefined;
   let ozonPage: Promise<Page> | undefined;
   let wildberriesPage: Promise<Page> | undefined;
-  const ozonResponseChecks: Promise<void>[] = [];
-  let ozonNetworkViolation: Error | undefined;
-  const wildberriesResponseChecks: Promise<void>[] = [];
-  let wildberriesNetworkViolation: Error | undefined;
+  let sandboxAcquired = false;
+  let disposed = false;
   const hardenedContexts = new Map<string, Promise<BrowserContext>>();
   const fetchViaStaticProxy = async (url: URL, signal: AbortSignal) => {
     if (!staticProxy) throw new Error("Static proxy is not configured");
@@ -437,8 +449,10 @@ export function browserFetch(
   };
   const acquireSandbox = createLazySandboxAcquire(sandbox);
   const getBrowser = () => {
+    if (disposed) return Promise.reject(new Error("Browser collector has already been disposed"));
     if (!connected) {
       connected = acquireSandbox()
+        .then(() => { sandboxAcquired = true; })
         .then(() => loadPlaywright())
         .then(({ chromium }) => chromium.connectOverCDP(playwrightCdpBaseUrl(sandbox.browser.cdpUrl), {
           headers: { "X-Access-Token": sandbox.envdAccessToken },
@@ -473,15 +487,29 @@ export function browserFetch(
       throw new Error(`Браузер подключился к запрещённому сетевому адресу: ${address?.ipAddress ?? "не определён"}`);
     }
   };
+  const withPageNetworkGuard = async <T>(page: Page, operation: () => Promise<T>): Promise<T> => {
+    const responseChecks: Promise<void>[] = [];
+    let networkViolation: Error | undefined;
+    const onResponse = (pageResponse: PlaywrightResponse) => {
+      responseChecks.push(assertActualServer(pageResponse).catch((error) => {
+        networkViolation ??= error as Error;
+      }));
+    };
+    page.on("response", onResponse);
+    try {
+      const value = await operation();
+      await Promise.all(responseChecks);
+      if (networkViolation) throw networkViolation;
+      return value;
+    } finally {
+      page.off("response", onResponse);
+      responseChecks.length = 0;
+    }
+  };
   const getOzonPage = () => {
     if (!ozonPage) {
       ozonPage = getContext("trusted-ozon").then(async (context) => {
         const page = await context.newPage();
-        page.on("response", (pageResponse) => {
-          ozonResponseChecks.push(assertActualServer(pageResponse).catch((error) => {
-            ozonNetworkViolation ??= error as Error;
-          }));
-        });
         await page.route("**/*", async (route) => {
           const targetText = route.request().url();
           if (/^(?:data|blob):/i.test(targetText)) return route.continue();
@@ -493,12 +521,12 @@ export function browserFetch(
           }
         });
         const home = await assertSafePublicDestination("https://www.ozon.ru/");
-        const navigation = await page.goto(home.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
-        if (!navigation) throw new Error("Ozon browser canary returned no network response");
-        await assertActualServer(navigation);
-        await page.waitForTimeout(10_000);
-        await Promise.all(ozonResponseChecks);
-        if (ozonNetworkViolation) throw ozonNetworkViolation;
+        await withPageNetworkGuard(page, async () => {
+          const navigation = await page.goto(home.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
+          if (!navigation) throw new Error("Ozon browser canary returned no network response");
+          await assertActualServer(navigation);
+          await page.waitForTimeout(10_000);
+        });
         const title = await page.title();
         if (/captcha|antibot|access denied|доступ (?:ограничен|запрещен)|variti/i.test(title)) {
           throw new Error(`Ozon browser challenge was not passed: ${title.slice(0, 120)}`);
@@ -516,11 +544,6 @@ export function browserFetch(
     if (!wildberriesPage) {
       wildberriesPage = getContext("trusted-wildberries").then(async (context) => {
         const page = await context.newPage();
-        page.on("response", (pageResponse) => {
-          wildberriesResponseChecks.push(assertActualServer(pageResponse).catch((error) => {
-            wildberriesNetworkViolation ??= error as Error;
-          }));
-        });
         await page.route("**/*", async (route) => {
           const targetText = route.request().url();
           if (/^(?:data|blob):/i.test(targetText)) return route.continue();
@@ -532,12 +555,12 @@ export function browserFetch(
           }
         });
         const home = await assertSafePublicDestination("https://www.wildberries.ru/");
-        const navigation = await page.goto(home.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
-        if (!navigation) throw new Error("Wildberries browser canary returned no network response");
-        await assertActualServer(navigation);
-        await page.waitForTimeout(8_000);
-        await Promise.all(wildberriesResponseChecks);
-        if (wildberriesNetworkViolation) throw wildberriesNetworkViolation;
+        await withPageNetworkGuard(page, async () => {
+          const navigation = await page.goto(home.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
+          if (!navigation) throw new Error("Wildberries browser canary returned no network response");
+          await assertActualServer(navigation);
+          await page.waitForTimeout(8_000);
+        });
         const title = await page.title();
         if (/captcha|proof[\s_-]*of[\s_-]*work|access denied|доступ (?:ограничен|запрещен)/i.test(title)) {
           throw new Error(`Wildberries browser challenge was not passed: ${title.slice(0, 120)}`);
@@ -779,31 +802,26 @@ export function browserFetch(
           // Continue to the hardened browser route below.
         }
       }
-      let response!: Response;
-      queue = queue.catch(() => undefined).then(async () => {
+      return runBrowserTask("ozon", async () => {
         request.signal.throwIfAborted();
         await assertSafePublicDestination(url.toString());
         const page = await getOzonPage();
-        const result = await withDeadline(page.evaluate(async (endpoint) => {
-          const value = await fetch(endpoint, { credentials: "include", headers: { accept: "application/json" } });
-          return {
-            status: value.status,
-            text: await value.text(),
-            contentType: value.headers.get("content-type") ?? "application/json",
-            finalUrl: value.url
-          };
-        }, url.toString()), 45_000, "Ozon composer browser request exceeded 45000 ms");
-        await Promise.all(ozonResponseChecks);
-        if (ozonNetworkViolation) throw ozonNetworkViolation;
+        const result = await withPageNetworkGuard(page, () => withDeadline(page.evaluate(async (endpoint) => {
+            const value = await fetch(endpoint, { credentials: "include", headers: { accept: "application/json" } });
+            return {
+              status: value.status,
+              text: await value.text(),
+              contentType: value.headers.get("content-type") ?? "application/json",
+              finalUrl: value.url
+            };
+          }, url.toString()), 45_000, "Ozon composer browser request exceeded 45000 ms"));
         const final = await assertSafePublicDestination(result.finalUrl || url.toString());
         if (!sameDomain("ozon.ru", final.hostname)) throw new Error(`Ozon composer redirected to ${final.hostname}`);
-        response = new Response(result.text, {
+        return new Response(result.text, {
           status: result.status >= 200 && result.status <= 599 ? result.status : 502,
           headers: { "content-type": result.contentType, "x-ratings-final-url": final.toString() }
         });
       });
-      await queue;
-      return response;
     }
     if (browserMode === "yandex-market-proof") {
       const query = url.searchParams.get("text")?.normalize("NFKC").trim() ?? "";
@@ -823,7 +841,7 @@ export function browserFetch(
         // Yandex intermittently serves an unhydrated 200 shell from one fixed
         // egress request and the complete source-bound ItemList immediately
         // afterwards. Retry that exact bounded URL once before entering the
-        // shared Sandbox queue. Both attempts use the same strict proof; two
+        // Yandex Sandbox lane. Both attempts use the same strict proof; two
         // misses still fall through and can never become an empty result.
         for (let attempt = 1; attempt <= 2; attempt += 1) {
           try {
@@ -851,39 +869,33 @@ export function browserFetch(
         // fixed egress. Continue to the rendered browser route without changing
         // a challenge, timeout or unknown response into an empty result.
       }
-      let response!: Response;
-      queue = queue.catch(() => undefined).then(async () => {
+      return runBrowserTask("yandex", async () => {
+        let response!: Response;
         request.signal.throwIfAborted();
         const initial = await assertSafePublicDestination(url.toString());
         const context = await getContext("trusted-yandex-market");
         const page = await context.newPage();
         try {
-          const responseChecks: Promise<void>[] = [];
-          let networkViolation: Error | undefined;
-          page.on("response", (pageResponse) => {
-            responseChecks.push(assertActualServer(pageResponse).catch((error) => {
-              networkViolation ??= error as Error;
-            }));
-          });
-          await page.route("**/*", async (route) => {
-            const targetText = route.request().url();
-            if (/^(?:data|blob):/i.test(targetText)) return route.continue();
-            try {
-              await assertSafePublicDestination(targetText);
-              return route.continue();
-            } catch {
-              return route.abort("blockedbyclient");
+          await withPageNetworkGuard(page, async () => {
+            await page.route("**/*", async (route) => {
+              const targetText = route.request().url();
+              if (/^(?:data|blob):/i.test(targetText)) return route.continue();
+              try {
+                await assertSafePublicDestination(targetText);
+                return route.continue();
+              } catch {
+                return route.abort("blockedbyclient");
+              }
+            });
+            const navigation = await page.goto(initial.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
+            if (!navigation) throw new Error("Yandex Market browser proof returned no network response");
+            await assertActualServer(navigation);
+            const final = await assertSafePublicDestination(page.url() || initial.toString());
+            if (!sameDomain("market.yandex.ru", final.hostname) || final.pathname !== initial.pathname) {
+              throw new Error(`Yandex Market browser proof redirected to ${final.hostname}${final.pathname}`);
             }
-          });
-          const navigation = await page.goto(initial.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
-          if (!navigation) throw new Error("Yandex Market browser proof returned no network response");
-          await assertActualServer(navigation);
-          const final = await assertSafePublicDestination(page.url() || initial.toString());
-          if (!sameDomain("market.yandex.ru", final.hostname) || final.pathname !== initial.pathname) {
-            throw new Error(`Yandex Market browser proof redirected to ${final.hostname}${final.pathname}`);
-          }
 
-          if (isSearch) {
+            if (isSearch) {
             let explicitNoResults = false;
             let visibleProducts = 0;
             for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -1002,7 +1014,7 @@ export function browserFetch(
               hasNext: proof.hasNext,
               products: proof.products
             });
-          } else {
+            } else {
             let productProof = false;
             for (let attempt = 0; attempt < 30; attempt += 1) {
               request.signal.throwIfAborted();
@@ -1021,15 +1033,13 @@ export function browserFetch(
                 "x-ratings-proof-route": "yandex-market-browser"
               }
             });
-          }
-          await Promise.all(responseChecks);
-          if (networkViolation) throw networkViolation;
+            }
+          });
         } finally {
           await page.close();
         }
+        return response;
       });
-      await queue;
-      return response;
     }
     if (browserMode === "wildberries-api") {
       const fixedSearch = url.hostname === "search.wb.ru" && [
@@ -1046,38 +1056,33 @@ export function browserFetch(
       if (url.protocol !== "https:" || (!fixedSearch && !fixedCard && !fixedFeedback)) {
         throw new Error("Wildberries browser mode is restricted to the fixed search and card endpoints");
       }
-      let response!: Response;
-      queue = queue.catch(() => undefined).then(async () => {
+      return runBrowserTask("wildberries", async () => {
         request.signal.throwIfAborted();
         await assertSafePublicDestination(url.toString());
         const page = await getWildberriesPage();
-        const result = await withDeadline(page.evaluate(async (endpoint) => {
-          const value = await fetch(endpoint, {
-            credentials: "include",
-            headers: { accept: "application/json, text/plain, */*" }
-          });
-          return {
-            status: value.status,
-            text: await value.text(),
-            contentType: value.headers.get("content-type") ?? "application/json",
-            finalUrl: value.url
-          };
-        }, url.toString()), 45_000, "Wildberries API browser request exceeded 45000 ms");
-        await Promise.all(wildberriesResponseChecks);
-        if (wildberriesNetworkViolation) throw wildberriesNetworkViolation;
+        const result = await withPageNetworkGuard(page, () => withDeadline(page.evaluate(async (endpoint) => {
+            const value = await fetch(endpoint, {
+              credentials: "include",
+              headers: { accept: "application/json, text/plain, */*" }
+            });
+            return {
+              status: value.status,
+              text: await value.text(),
+              contentType: value.headers.get("content-type") ?? "application/json",
+              finalUrl: value.url
+            };
+          }, url.toString()), 45_000, "Wildberries API browser request exceeded 45000 ms"));
         const final = await assertSafePublicDestination(result.finalUrl || url.toString());
         const isExpectedFinal =
           fixedSearch && final.hostname === "search.wb.ru" && final.pathname === url.pathname ||
           fixedCard && final.hostname === "card.wb.ru" && final.pathname === "/cards/v4/detail" ||
           fixedFeedback && final.hostname === "feedbacks1.wb.ru" && final.pathname === url.pathname;
         if (!isExpectedFinal) throw new Error(`Wildberries API redirected to ${final.hostname}`);
-        response = new Response(result.text, {
+        return new Response(result.text, {
           status: result.status >= 200 && result.status <= 599 ? result.status : 502,
           headers: { "content-type": result.contentType, "x-ratings-final-url": final.toString() }
         });
       });
-      await queue;
-      return response;
     }
     if (browserMode === "wildberries-search-proof") {
       const query = url.searchParams.get("search")?.trim() ?? "";
@@ -1096,8 +1101,8 @@ export function browserFetch(
       ) {
         throw new Error("Wildberries search proof is restricted to a bounded public search URL");
       }
-      let response!: Response;
-      queue = queue.catch(() => undefined).then(async () => {
+      return runBrowserTask("wildberries", async () => {
+        let response!: Response;
         request.signal.throwIfAborted();
         const initial = await assertSafePublicDestination(url.toString());
         try {
@@ -1125,54 +1130,53 @@ export function browserFetch(
                   "x-ratings-final-url": directFinal.toString()
                 }
               });
-              return;
+              return response;
             }
           }
         } catch {
           // Continue to the bounded browser proof below.
         }
         const page = await getWildberriesPage();
-        const navigation = await page.goto(initial.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
-        if (!navigation) throw new Error("Wildberries search proof returned no network response");
-        await assertActualServer(navigation);
-        const final = await assertSafePublicDestination(page.url() || initial.toString());
-        if (!sameDomain("wildberries.ru", final.hostname) || final.pathname !== "/catalog/0/search.aspx") {
-          throw new Error(`Wildberries search proof redirected to ${final.hostname}${final.pathname}`);
-        }
+        await withPageNetworkGuard(page, async () => {
+          const navigation = await page.goto(initial.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
+          if (!navigation) throw new Error("Wildberries search proof returned no network response");
+          await assertActualServer(navigation);
+          const final = await assertSafePublicDestination(page.url() || initial.toString());
+          if (!sameDomain("wildberries.ru", final.hostname) || final.pathname !== "/catalog/0/search.aspx") {
+            throw new Error(`Wildberries search proof redirected to ${final.hostname}${final.pathname}`);
+          }
 
-        let explicitNoResults = false;
-        for (let attempt = 0; attempt < 20; attempt += 1) {
-          request.signal.throwIfAborted();
-          await page.waitForTimeout(1_000);
-          const bodyText = await page.locator("body").innerText({ timeout: 5_000 });
-          if (hasExplicitWildberriesNoResults(bodyText, query)) {
-            explicitNoResults = true;
-            break;
-          }
-          const visibleProducts = await page.locator('a[href*="/catalog/"][href*="/detail.aspx"]').count();
-          if (visibleProducts > 0) break;
-        }
-        await Promise.all(wildberriesResponseChecks);
-        if (wildberriesNetworkViolation) throw wildberriesNetworkViolation;
-        response = new Response(
-          explicitNoResults
-            ? JSON.stringify({
-              products: [],
-              total: 0,
-              metadata: { source: "wildberries-visible-explicit-no-results", query }
-            })
-            : JSON.stringify({ error: "No explicit Wildberries no-results proof was rendered" }),
-          {
-            status: explicitNoResults ? 200 : 503,
-            headers: {
-              "content-type": "application/json; charset=utf-8",
-              "x-ratings-final-url": final.toString()
+          let explicitNoResults = false;
+          for (let attempt = 0; attempt < 20; attempt += 1) {
+            request.signal.throwIfAborted();
+            await page.waitForTimeout(1_000);
+            const bodyText = await page.locator("body").innerText({ timeout: 5_000 });
+            if (hasExplicitWildberriesNoResults(bodyText, query)) {
+              explicitNoResults = true;
+              break;
             }
+            const visibleProducts = await page.locator('a[href*="/catalog/"][href*="/detail.aspx"]').count();
+            if (visibleProducts > 0) break;
           }
-        );
+          response = new Response(
+            explicitNoResults
+              ? JSON.stringify({
+                products: [],
+                total: 0,
+                metadata: { source: "wildberries-visible-explicit-no-results", query }
+              })
+              : JSON.stringify({ error: "No explicit Wildberries no-results proof was rendered" }),
+            {
+              status: explicitNoResults ? 200 : 503,
+              headers: {
+                "content-type": "application/json; charset=utf-8",
+                "x-ratings-final-url": final.toString()
+              }
+            }
+          );
+        });
+        return response;
       });
-      await queue;
-      return response;
     }
     const shouldScroll = request.headers.get("x-ratings-scroll") === "1";
     // Only reviewed first-party adapters are allowed to execute page
@@ -1184,81 +1188,101 @@ export function browserFetch(
         ? "trusted-irecommend"
         : "untrusted-static";
     const trustedDynamic = trustedContext !== "untrusted-static";
-    let response!: Response;
-    queue = queue.catch(() => undefined).then(async () => {
+    return runBrowserTask(trustedContext === "trusted-yandex" ? "yandex" : "generic", async () => {
+      let response!: Response;
       const initial = await assertSafePublicDestination(url.toString());
-        const context = await getContext(trustedContext);
+      const context = await getContext(trustedContext);
       const page = await context.newPage();
       try {
-        const responseChecks: Promise<void>[] = [];
-        let networkViolation: Error | undefined;
-        page.on("response", (pageResponse) => {
-          responseChecks.push(assertActualServer(pageResponse).catch((error) => {
-            networkViolation ??= error as Error;
-          }));
-        });
-        await page.route("**/*", async (route) => {
-          const targetText = route.request().url();
-          if (/^(?:data|blob):/i.test(targetText)) return route.continue();
-          try {
-            const target = await assertSafePublicDestination(targetText);
-            const isMainNavigation = route.request().isNavigationRequest() && route.request().frame() === page.mainFrame();
-            if (isMainNavigation && !sameDomain(initial.hostname, target.hostname)) return route.abort("blockedbyclient");
-            if (!isMainNavigation && !trustedDynamic) return route.abort("blockedbyclient");
-            return route.continue();
-          } catch {
-            return route.abort("blockedbyclient");
+        await withPageNetworkGuard(page, async () => {
+          await page.route("**/*", async (route) => {
+            const targetText = route.request().url();
+            if (/^(?:data|blob):/i.test(targetText)) return route.continue();
+            try {
+              const target = await assertSafePublicDestination(targetText);
+              const isMainNavigation = route.request().isNavigationRequest() && route.request().frame() === page.mainFrame();
+              if (isMainNavigation && !sameDomain(initial.hostname, target.hostname)) return route.abort("blockedbyclient");
+              if (!isMainNavigation && !trustedDynamic) return route.abort("blockedbyclient");
+              return route.continue();
+            } catch {
+              return route.abort("blockedbyclient");
+            }
+          });
+          const navigation = await page.goto(initial.toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
+          if (!navigation) throw new Error(`Браузер не получил сетевой ответ от ${initial.hostname}`);
+          await assertActualServer(navigation);
+          const final = await assertSafePublicDestination(page.url() || initial.toString());
+          if (!sameDomain(initial.hostname, final.hostname)) {
+            throw new Error(`Браузерное перенаправление на другой домен запрещено: ${final.hostname}`);
           }
-        });
-        const navigation = await page.goto(initial.toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
-        if (!navigation) throw new Error(`Браузер не получил сетевой ответ от ${initial.hostname}`);
-        await assertActualServer(navigation);
-        const final = await assertSafePublicDestination(page.url() || initial.toString());
-        if (!sameDomain(initial.hostname, final.hostname)) {
-          throw new Error(`Браузерное перенаправление на другой домен запрещено: ${final.hostname}`);
-        }
-        if (shouldScroll && trustedDynamic) {
-          let previousHeight = 0; let stableRounds = 0;
-          for (let index = 0; index < 20 && stableRounds < 3; index += 1) {
-            const height = await page.evaluate(() => {
-              const value = Math.max(document.body?.scrollHeight ?? 0, document.documentElement?.scrollHeight ?? 0);
-              window.scrollTo(0, value);
-              return value;
-            });
-            stableRounds = height === previousHeight ? stableRounds + 1 : 0;
-            previousHeight = height;
-            await page.waitForTimeout(500);
+          if (shouldScroll && trustedDynamic) {
+            let previousHeight = 0; let stableRounds = 0;
+            for (let index = 0; index < 20 && stableRounds < 3; index += 1) {
+              const height = await page.evaluate(() => {
+                const value = Math.max(document.body?.scrollHeight ?? 0, document.documentElement?.scrollHeight ?? 0);
+                window.scrollTo(0, value);
+                return value;
+              });
+              stableRounds = height === previousHeight ? stableRounds + 1 : 0;
+              previousHeight = height;
+              await page.waitForTimeout(500);
+            }
           }
-        }
-        await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
-        await Promise.all(responseChecks);
-        if (networkViolation) throw networkViolation;
-        const navigationHeaders = await navigation.allHeaders();
-        const isHtml = /(?:text\/html|application\/xhtml\+xml)/i.test(navigationHeaders["content-type"] ?? "");
-        const content = shouldScroll && trustedDynamic || isHtml
-          ? await page.content()
-          : new Uint8Array(await withDeadline(
-            navigation.body(),
-            30_000,
-            `Чтение браузерного ответа от ${final.hostname} превысило 30000 мс`
-          ));
-        response = new Response(content, {
-          status: navigation?.status() && navigation.status() >= 200 && navigation.status() <= 599 ? navigation.status() : 200,
-          headers: {
-            "content-type": navigationHeaders["content-type"] ?? "text/html; charset=utf-8",
-            "x-ratings-final-url": final.toString()
-          }
+          await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
+          const navigationHeaders = await navigation.allHeaders();
+          const isHtml = /(?:text\/html|application\/xhtml\+xml)/i.test(navigationHeaders["content-type"] ?? "");
+          const content = shouldScroll && trustedDynamic || isHtml
+            ? await page.content()
+            : new Uint8Array(await withDeadline(
+              navigation.body(),
+              30_000,
+              `Чтение браузерного ответа от ${final.hostname} превысило 30000 мс`
+            ));
+          response = new Response(content, {
+            status: navigation.status() >= 200 && navigation.status() <= 599 ? navigation.status() : 200,
+            headers: {
+              "content-type": navigationHeaders["content-type"] ?? "text/html; charset=utf-8",
+              "x-ratings-final-url": final.toString()
+            }
+          });
         });
       } finally {
         await page.close();
       }
+      return response;
     });
-    await queue;
-    return response;
-  }) as YandexMarketCapableFetch;
+  }) as ManagedBrowserFetch;
   if (staticProxy) routedFetch.yandexBatchEndpoint = YANDEX_BATCH_ENDPOINT;
   if (staticProxy) routedFetch.yandexDirectRecovery = true;
   routedFetch.yandexMarketBrowserEndpoint = "https://market.yandex.ru/search";
+  routedFetch.dispose = async () => {
+    if (disposed) return;
+    disposed = true;
+    const pages = [ozonPage, wildberriesPage];
+    ozonPage = undefined;
+    wildberriesPage = undefined;
+    await Promise.allSettled(pages.map(async (pending) => {
+      if (!pending) return;
+      const page = await pending;
+      if (!page.isClosed()) await page.close();
+    }));
+
+    const contexts = [...hardenedContexts.values()];
+    hardenedContexts.clear();
+    await Promise.allSettled(contexts.map(async (pending) => {
+      const context = await pending;
+      await context.close();
+    }));
+
+    const browser = connected;
+    connected = undefined;
+    if (browser) {
+      await browser.then((value) => value.close()).catch(() => undefined);
+    }
+    if (sandboxAcquired && sandbox.kill) {
+      await Promise.resolve(sandbox.kill()).catch(() => undefined);
+    }
+  };
   return routedFetch;
 }
 
@@ -1311,52 +1335,35 @@ export async function onRequest(context: AgentContext): Promise<Response> {
             }
           });
         };
+        const collectorFetch = browserFetch(context.sandbox, {
+          endpoint: collectorPublicEndpoint("/api/internal/static-review-fetch"),
+          token: context.env.INTERNAL_AGENT_TOKEN ?? ""
+        });
         const runtimeOptions = () => ({
           repository,
           evidence: new RemoteEvidenceStore(repository),
-          fetch: browserFetch(context.sandbox, {
-            endpoint: collectorPublicEndpoint("/api/internal/static-review-fetch"),
-            token: context.env.INTERNAL_AGENT_TOKEN ?? ""
-          }),
+          fetch: collectorFetch,
           env: context.env,
           apifyExclusive,
           domainExclusive
         });
-        let runtime = await createCollectorRuntime(runtimeOptions());
         try {
-          let completed = await runtime.service.executeRun(run.id);
-          for (
-            let recoveryPass = 0;
-            recoveryPass < MAX_INITIAL_TRANSIENT_RECOVERY_PASSES &&
-              shouldAutoRetryInitialCollection(run.status, completed.partitions);
-            recoveryPass += 1
-          ) {
-            // Successful partitions are checkpointed, so later passes touch
-            // only failed domain/brand pairs. Keep the same runtime for an
-            // Ozon-only failure: its adapter retains exact-card proofs and
-            // retries only the blocked SKU. Other sites still receive a fresh
-            // runtime to clear route cooldowns and transient state.
-            const recoveryDelay = transientRecoveryDelayMs(completed.partitions, recoveryPass);
-            if (recoveryDelay > 0) {
-              context.request.signal.throwIfAborted();
-              await new Promise((resolve) => setTimeout(resolve, recoveryDelay));
-              context.request.signal.throwIfAborted();
+          const runtime = await createCollectorRuntime(runtimeOptions());
+          try {
+            const completed = await runtime.service.executeRun(run.id);
+            return json({ id: completed.id, status: completed.status });
+          } catch (error) {
+            const failed = await runtime.service.getRun(run.id);
+            if (failed) {
+              failed.status = "failed";
+              failed.updatedAt = new Date().toISOString();
+              failed.errors.push({ partition: "orchestrator", message: safeErrorMessage(error) });
+              await runtime.repository.saveRun(failed);
             }
-            if (!shouldReuseRuntimeForTransientRecovery(completed.partitions)) {
-              runtime = await createCollectorRuntime(runtimeOptions());
-            }
-            completed = await runtime.service.executeRun(run.id);
+            throw error;
           }
-          return json({ id: completed.id, status: completed.status });
-        } catch (error) {
-          const failed = await runtime.service.getRun(run.id);
-          if (failed) {
-            failed.status = "failed";
-            failed.updatedAt = new Date().toISOString();
-            failed.errors.push({ partition: "orchestrator", message: safeErrorMessage(error) });
-            await runtime.repository.saveRun(failed);
-          }
-          throw error;
+        } finally {
+          await collectorFetch.dispose();
         }
       }
     } finally {

@@ -400,7 +400,10 @@ describe("collector runtime fallback integration", () => {
     }]);
     expect(requestedUrls.filter((url) => url.hostname === "search.wb.ru").map((url) =>
       url.searchParams.get("appType")
-    )).toEqual(["1", "32", "32"]);
+    )).toEqual(["1", "32"]);
+    expect(requestedUrls.filter((url) => url.hostname === "search.wb.ru").every((url) =>
+      url.searchParams.get("query") === request.brands[0]
+    )).toBe(true);
     expect(requestedUrls.some((url) => url.hostname === "api.apify.com")).toBe(false);
   });
 

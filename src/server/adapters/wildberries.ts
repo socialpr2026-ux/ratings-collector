@@ -614,12 +614,13 @@ export class WildberriesAdapter implements SiteAdapter {
   }
 
   async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
+    const brand = context.brands?.find((value) => value.trim())?.trim() || "Арбидол";
     try {
-      await this.fetchSearchPage("Арбидол", 1, context);
+      const refs = await this.discover(brand, { ...context, previousIds: [], previousRefs: [] });
       return {
         ok: true,
         checkedAt: this.now().toISOString(),
-        message: "Wildberries search schema is valid"
+        message: `Wildberries search schema is valid for ${brand} (${refs.length} exact card(s))`
       };
     } catch (error) {
       return {
@@ -632,21 +633,21 @@ export class WildberriesAdapter implements SiteAdapter {
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const cacheKey = this.discoveryCacheKey(brand, context);
-    const cached = cacheKey ? this.discoveryCache.get(cacheKey) : undefined;
-    if (cached) return cached;
-
-    const discovery = this.discoverUncached(brand, context);
-    if (cacheKey) {
-      this.discoveryCache.set(cacheKey, discovery);
-      while (this.discoveryCache.size > 64) {
-        const oldest = this.discoveryCache.keys().next().value as string | undefined;
-        if (!oldest) break;
-        this.discoveryCache.delete(oldest);
+    let discovery = cacheKey ? this.discoveryCache.get(cacheKey) : undefined;
+    if (!discovery) {
+      discovery = this.discoverUncached(brand, context);
+      if (cacheKey) {
+        this.discoveryCache.set(cacheKey, discovery);
+        while (this.discoveryCache.size > 64) {
+          const oldest = this.discoveryCache.keys().next().value as string | undefined;
+          if (!oldest) break;
+          this.discoveryCache.delete(oldest);
+        }
       }
     }
 
     try {
-      return await discovery;
+      return this.withPreviousRefs(await discovery, brand, context);
     } catch (error) {
       // A blocked or malformed response must remain retryable. Only a proven,
       // successful discovery is reusable within the same run.
@@ -740,19 +741,6 @@ export class WildberriesAdapter implements SiteAdapter {
     }
 
     this.registerDiscoveryBatch([...byListingId.values()], brand, context);
-
-    for (const previousId of context.previousIds ?? []) {
-      const listingId = previousListingId(previousId);
-      if (!listingId || byListingId.has(listingId)) continue;
-      byListingId.set(listingId, {
-        domain: PLATFORM_DOMAIN,
-        platform: PLATFORM_ID,
-        listingId,
-        brand,
-        url: canonicalProductUrl(listingId),
-        metadata: { source: "previous-registry" }
-      });
-    }
 
     return [...byListingId.values()];
   }
@@ -1098,8 +1086,24 @@ export class WildberriesAdapter implements SiteAdapter {
     const runId = context.runId?.trim();
     if (!runId) return undefined;
     const normalizedBrand = brand.normalize("NFKC").trim().toLocaleLowerCase("ru-RU");
-    const previousIds = [...(context.previousIds ?? [])].sort().join("\u001f");
-    return `${runId}\u001e${normalizedBrand}\u001e${previousIds}`;
+    return `${runId}\u001e${normalizedBrand}`;
+  }
+
+  private withPreviousRefs(refs: readonly ProductRef[], brand: string, context: AdapterContext): ProductRef[] {
+    const byListingId = new Map(refs.map((ref) => [ref.listingId, ref]));
+    for (const previousId of context.previousIds ?? []) {
+      const listingId = previousListingId(previousId);
+      if (!listingId || byListingId.has(listingId)) continue;
+      byListingId.set(listingId, {
+        domain: PLATFORM_DOMAIN,
+        platform: PLATFORM_ID,
+        listingId,
+        brand,
+        url: canonicalProductUrl(listingId),
+        metadata: { source: "previous-registry" }
+      });
+    }
+    return [...byListingId.values()];
   }
 
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {

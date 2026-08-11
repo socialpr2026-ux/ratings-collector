@@ -289,7 +289,7 @@ describe("Ozon browser collector", () => {
     expect(refs.map((ref) => ref.listingId)).toEqual(["146806398", "1074811895", "2022961191"]);
   });
 
-  it("stops the product queue after the first systemic 502", async () => {
+  it("checks every independent product even when the first exact proof has a systemic 502", async () => {
     const touchedProducts: string[] = [];
     const fetch = vi.fn(async (input: URL | RequestInfo) => {
       const endpoint = new URL(String(input));
@@ -314,7 +314,8 @@ describe("Ozon browser collector", () => {
 
     await expect(adapter.discover("Baktoblis", { ...context, brands: ["Baktoblis"] }))
       .rejects.toThrow(/exact product proof is unavailable/i);
-    expect(touchedProducts).not.toContain("820002");
+    expect(touchedProducts).toContain("820001");
+    expect(touchedProducts).toContain("820002");
   });
 
   it("preserves a proven Sandbox quota through failed exact-product fallbacks", async () => {
@@ -852,9 +853,9 @@ describe("Ozon browser collector", () => {
     });
   });
 
-  it("returns and reuses completed product proofs when only the last Ozon card remains blocked", async () => {
+  it("continues and reuses later exact product proofs when the first Ozon card remains blocked", async () => {
     const items = [
-      translatedTile("730001", "Бактоблис саше №10", "4.9", 11),
+      translatedTile("730001", "Бактоблис саше №10"),
       translatedTile("730002", "Бактоблис саше №30", "4.8", 12),
       translatedTile("730003", "Бактоблис таблетки №20")
     ];
@@ -878,7 +879,7 @@ describe("Ozon browser collector", () => {
       }
       const sku = source.pathname.match(/-(\d+)\/$/)![1]!;
       detailCalls.set(sku, (detailCalls.get(sku) ?? 0) + 1);
-      if (sku === "730003") return new Response("upstream failed", { status: 502 });
+      if (sku === "730001") return new Response("upstream failed", { status: 502 });
       return new Response(translatedProductHtml(source, sku, `Бактоблис ${sku}`, 4.9, 10), {
         headers: { "content-type": "text/html" }
       });
@@ -893,8 +894,8 @@ describe("Ozon browser collector", () => {
     const first = await adapter.discover("Бактоблис", runContext);
     const second = await adapter.discover("Бактоблис", runContext);
 
-    expect(first.map(({ listingId }) => listingId)).toEqual(["730001", "730002"]);
-    expect(second.map(({ listingId }) => listingId)).toEqual(["730001", "730002"]);
+    expect(first.map(({ listingId }) => listingId)).toEqual(["730002", "730003"]);
+    expect(second.map(({ listingId }) => listingId)).toEqual(["730002", "730003"]);
     expect(first.every((ref) =>
       ref.metadata.partialDiscoveryStatus === "blocked" &&
       ref.metadata.partialDiscoveryTotal === 3 &&
@@ -903,9 +904,9 @@ describe("Ozon browser collector", () => {
     await expect(Promise.all(first.map((ref) => adapter.collect(ref, runContext)))).resolves.toHaveLength(2);
 
     expect(searchCalls).toBe(1);
-    expect(detailCalls.get("730001")).toBe(1);
+    expect(detailCalls.get("730001")).toBe(2);
     expect(detailCalls.get("730002")).toBe(1);
-    expect(detailCalls.get("730003")).toBe(2);
+    expect(detailCalls.get("730003")).toBe(1);
     expect(composerCalls).toBe(4);
   });
 

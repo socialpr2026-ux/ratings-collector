@@ -650,29 +650,25 @@ type ExactProductMetrics = {
   proof?: typeof EXACT_COMPOSER_PROOF;
 };
 
-async function mapWithConcurrency<T, R>(
+async function forEachWithConcurrencySettled<T>(
   values: readonly T[],
   concurrency: number,
-  mapper: (value: T, index: number) => Promise<R>
-): Promise<R[]> {
-  const results = new Array<R>(values.length);
+  mapper: (value: T, index: number) => Promise<unknown>
+): Promise<Array<{ index: number; error: unknown }>> {
   let cursor = 0;
-  let stopped = false;
-  let firstError: unknown;
+  const failures: Array<{ index: number; error: unknown }> = [];
   const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
-    while (!stopped && cursor < values.length) {
+    while (cursor < values.length) {
       const index = cursor++;
       try {
-        results[index] = await mapper(values[index]!, index);
+        await mapper(values[index]!, index);
       } catch (error) {
-        if (!stopped) firstError = error;
-        stopped = true;
+        failures.push({ index, error });
       }
     }
   });
   await Promise.all(workers);
-  if (firstError !== undefined) throw firstError;
-  return results;
+  return failures.sort((left, right) => left.index - right.index);
 }
 
 function exactNonNegativeInteger(value: unknown): number | null {
@@ -931,8 +927,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
       return (metricFrequency.get(`${product.reviews}\u0000${product.rating}`) ?? 0) > 1;
     };
     let partialFailure: AdapterBlockedError | AdapterQuotaError | ParserChangedError | undefined;
-    try {
-      await mapWithConcurrency(
+    const detailFailures = await forEachWithConcurrencySettled(
         matchedProducts.filter(needsExactPrefetch),
         this.detailConcurrency,
         async (product, index) => {
@@ -1032,14 +1027,20 @@ export class OzonBrowserAdapter implements SiteAdapter {
         return exact;
         }
       );
-    } catch (error) {
-      if (
-        !(error instanceof AdapterBlockedError) &&
-        !(error instanceof AdapterQuotaError) &&
-        !(error instanceof ParserChangedError)
-      ) throw error;
-      partialFailure = error;
-    }
+    const unexpectedFailure = detailFailures.find(({ error }) =>
+      !(error instanceof AdapterBlockedError) &&
+      !(error instanceof AdapterQuotaError) &&
+      !(error instanceof ParserChangedError)
+    );
+    if (unexpectedFailure) throw unexpectedFailure.error;
+    const quotaFailure = detailFailures.find(({ error }) => error instanceof AdapterQuotaError)?.error;
+    const parserFailure = detailFailures.find(({ error }) => error instanceof ParserChangedError)?.error;
+    const blockedFailure = detailFailures.find(({ error }) => error instanceof AdapterBlockedError)?.error;
+    partialFailure = quotaFailure instanceof AdapterQuotaError
+      ? quotaFailure
+      : parserFailure instanceof ParserChangedError
+        ? parserFailure
+        : blockedFailure instanceof AdapterBlockedError ? blockedFailure : undefined;
     const publishableProducts = partialFailure
       ? matchedProducts.filter((product) =>
         !needsExactPrefetch(product) ||

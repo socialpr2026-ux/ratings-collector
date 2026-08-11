@@ -1451,15 +1451,32 @@ describe("WildberriesAdapter blocking and health checks", () => {
     await expect(adapter.discover("Арбидол", context())).rejects.toBeInstanceOf(ParserChangedError);
   });
 
-  it("returns a deterministic healthy canary result for a valid search response", async () => {
-    const fetchMock = vi.fn(async () => jsonResponse({ products: [] })) as unknown as typeof globalThis.fetch;
+  it("checks the requested brand and reuses that successful discovery for collection", async () => {
+    const queries: string[] = [];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      queries.push(new URL(String(input)).searchParams.get("query") ?? "");
+      return jsonResponse({
+        total: 1,
+        products: [{ id: 701, name: "Максилак капсулы 10 шт", nmReviewRating: 4.8, nmFeedbacks: 10 }]
+      });
+    }) as unknown as typeof globalThis.fetch;
     const adapter = createAdapter(fetchMock);
+    const runContext = context({
+      runId: "maxilac-health",
+      brands: ["Максилак"],
+      previousIds: ["wildberries:702"]
+    });
 
-    await expect(adapter.healthCheck(context())).resolves.toEqual({
+    await expect(adapter.healthCheck(runContext)).resolves.toEqual({
       ok: true,
       checkedAt: "2026-07-13T09:00:00.000Z",
-      message: "Wildberries search schema is valid"
+      message: "Wildberries search schema is valid for Максилак (1 exact card(s))"
     });
+    await expect(adapter.discover("Максилак", runContext)).resolves.toMatchObject([
+      { listingId: "701", metadata: expect.objectContaining({ source: expect.any(String) }) },
+      { listingId: "702", metadata: { source: "previous-registry" } }
+    ]);
+    expect(queries).toEqual(["Максилак"]);
   });
 
   it("reports a blocked canary as unhealthy instead of hiding the failure", async () => {

@@ -1,14 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   browserFetch,
+  createBrowserLaneScheduler,
   createLazySandboxAcquire,
   extractYandexMarketSearchHtmlProof,
   hasExplicitWildberriesNoResults,
   hasExplicitYandexMarketNoResults,
-  shouldAutoRetryInitialCollection,
-  shouldReuseRuntimeForTransientRecovery,
   STATIC_PROXY_REQUEST_TIMEOUT_MS,
-  transientRecoveryDelayMs,
   YANDEX_BATCH_GATEWAY_TIMEOUT_MS
 } from "../agents/ratings/index.js";
 import { AdapterBlockedError, AdapterQuotaError } from "../src/server/adapters/errors.js";
@@ -1018,6 +1016,32 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("returns an explicit static Wildberries no-results proof without acquiring Sandbox", async () => {
+    const run = vi.fn(async () => undefined);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "По запросу «Бактоблис» ничего не нашлось. Попробуйте изменить запрос.",
+      { headers: { "content-type": "text/html; charset=utf-8" } }
+    )));
+    const routedFetch = browserFetch(sandbox(run));
+
+    const response = await routedFetch(
+      "https://www.wildberries.ru/catalog/0/search.aspx?search=Бактоблис&page=1",
+      {
+        headers: {
+          "x-ratings-browser": "1",
+          "x-ratings-browser-mode": "wildberries-search-proof"
+        }
+      }
+    );
+
+    await expect(response.json()).resolves.toMatchObject({
+      products: [],
+      total: 0,
+      metadata: { source: "wildberries-static-explicit-no-results", query: "Бактоблис" }
+    });
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("acquires Sandbox once for concurrent browser consumers", async () => {
     const run = vi.fn(async () => undefined);
     const acquire = createLazySandboxAcquire(sandbox(run));
@@ -1289,88 +1313,50 @@ describe("ratings Agent lazy Sandbox routing", () => {
   });
 });
 
-describe("ratings Agent initial recovery pass", () => {
-  it("cools down transient retries for every shared collection route", () => {
-    expect(transientRecoveryDelayMs([
-      { domain: "ozon.ru", status: "blocked", message: "blocked: HTTP 502" }
-    ], 0)).toBe(750);
-    expect(transientRecoveryDelayMs([
-      { domain: "ozon.ru", status: "blocked", message: "blocked: HTTP 429" }
-    ], 3)).toBe(3000);
-    expect(transientRecoveryDelayMs([
-      { domain: "example.com", status: "blocked", message: "blocked: HTTP 503" }
-    ], 1)).toBe(1500);
-    expect(transientRecoveryDelayMs([
-      { domain: "example.com", status: "blocked", message: "parser_changed: missing selector" }
-    ], 0)).toBe(0);
+describe("ratings Agent browser lane scheduler", () => {
+  it("runs marketplace lanes independently while serializing each lane and bounding total work", async () => {
+    const schedule = createBrowserLaneScheduler(3);
+    const started: string[] = [];
+    let active = 0;
+    let maxActive = 0;
+    const releases = new Map<string, () => void>();
+    const task = (lane: "ozon" | "yandex" | "wildberries" | "generic", id: string) =>
+      schedule(lane, async () => {
+        started.push(id);
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((resolve) => releases.set(id, resolve));
+        active -= 1;
+        return id;
+      });
+
+    const ozonFirst = task("ozon", "ozon-1");
+    const ozonSecond = task("ozon", "ozon-2");
+    const yandex = task("yandex", "yandex-1");
+    const wildberries = task("wildberries", "wildberries-1");
+    const generic = task("generic", "generic-1");
+
+    await vi.waitFor(() => expect(started).toEqual(["ozon-1", "yandex-1", "wildberries-1"]));
+    expect(maxActive).toBe(3);
+    expect(started).not.toContain("ozon-2");
+    expect(started).not.toContain("generic-1");
+
+    releases.get("yandex-1")!();
+    await vi.waitFor(() => expect(started).toContain("generic-1"));
+    expect(started).not.toContain("ozon-2");
+
+    releases.get("ozon-1")!();
+    await vi.waitFor(() => expect(started).toContain("ozon-2"));
+    releases.get("wildberries-1")!();
+    releases.get("generic-1")!();
+    releases.get("ozon-2")!();
+
+    await expect(Promise.all([ozonFirst, ozonSecond, yandex, wildberries, generic])).resolves.toEqual([
+      "ozon-1", "ozon-2", "yandex-1", "wildberries-1", "generic-1"
+    ]);
   });
 
-  it.each([408, 425, 429, 498, 499, 500, 502, 599])(
-    "retries a proven transient HTTP %i failure on the initial collection",
-    (statusCode) => {
-      expect(shouldAutoRetryInitialCollection("queued", [
-        { status: "complete" },
-        { status: "blocked", message: `blocked: upstream returned HTTP ${statusCode}` }
-      ])).toBe(true);
-    }
-  );
-
-  it("retries a CAPTCHA failure and keeps non-transient states manual", () => {
-    expect(shouldAutoRetryInitialCollection("queued", [
-      { status: "error", message: "CAPTCHA challenge interrupted collection" }
-    ])).toBe(true);
-    expect(shouldAutoRetryInitialCollection("queued", [
-      { status: "complete" },
-      { status: "no_results" }
-    ])).toBe(false);
-    expect(shouldAutoRetryInitialCollection("queued", [
-      { status: "blocked", message: "blocked: upstream returned HTTP 403" }
-    ])).toBe(false);
-    expect(shouldAutoRetryInitialCollection("queued", [
-      { status: "blocked", message: "blocked: blocked_free_mode" }
-    ])).toBe(false);
-    expect(shouldAutoRetryInitialCollection("queued", [
-      { status: "blocked", message: "quota_exceeded: HTTP 429; monthly limit reached" }
-    ])).toBe(false);
-    expect(shouldAutoRetryInitialCollection("queued", [
-      { status: "blocked", message: "parser_changed: HTTP 502 appeared in malformed evidence" }
-    ])).toBe(false);
-    expect(shouldAutoRetryInitialCollection("queued", [
-      { status: "blocked", message: "Ozon exact product proof is unavailable: translated detail HTTP 502" }
-    ])).toBe(true);
-    expect(shouldAutoRetryInitialCollection("queued", [
-      { status: "blocked", message: "Ozon exact proof: EdgeOne Sandbox monthly GB-s quota exceeded; fallback HTTP 502" }
-    ])).toBe(false);
-    expect(shouldAutoRetryInitialCollection("review", [
-      { status: "error", message: "HTTP 502" }
-    ])).toBe(false);
-  });
-
-  it("does not repeat a mixed transient and permanent failure set", () => {
-    expect(shouldAutoRetryInitialCollection("queued", [
-      { status: "blocked", message: "blocked: HTTP 502" },
-      { status: "blocked", message: "quota_exceeded: monthly limit reached" }
-    ])).toBe(false);
-  });
-
-  it("bounds automatic recovery by run and failure size", () => {
-    const complete = Array.from({ length: 102 }, () => ({ status: "complete" }));
-    const failures = Array.from({ length: 10 }, () => ({ status: "blocked", message: "blocked: HTTP 502" }));
-    expect(shouldAutoRetryInitialCollection("queued", [...complete, ...failures])).toBe(true);
-    expect(shouldAutoRetryInitialCollection("queued", [
-      ...failures,
-      { status: "blocked", message: "blocked: HTTP 502" }
-    ])).toBe(false);
-  });
-
-  it("reuses adapter caches only for an Ozon-only recovery pass", () => {
-    expect(shouldReuseRuntimeForTransientRecovery([
-      { domain: "ozon.ru", status: "complete" },
-      { domain: "ozon.ru", status: "blocked" }
-    ])).toBe(true);
-    expect(shouldReuseRuntimeForTransientRecovery([
-      { domain: "ozon.ru", status: "blocked" },
-      { domain: "market.yandex.ru", status: "blocked" }
-    ])).toBe(false);
+  it("rejects an invalid shared concurrency limit", () => {
+    expect(() => createBrowserLaneScheduler(0)).toThrow(RangeError);
   });
 });
