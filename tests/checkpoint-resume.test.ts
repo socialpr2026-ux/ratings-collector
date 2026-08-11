@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { RunState } from "../src/shared/types.js";
 import {
   AMBIGUOUS_TRIGGER_GRACE_POLLS,
+  MAX_AUTOMATIC_COLLECTION_BUDGET_MS,
   MAX_AUTOMATIC_CONTINUATIONS,
   checkpointContinuationDecision,
   collectWithCheckpointContinuation,
@@ -74,6 +75,17 @@ describe("checkpoint continuation eligibility", () => {
       .toBe("limit");
   });
 
+  it("does not continue after the cumulative automatic collection budget", () => {
+    const overBudget = run({
+      completed: 30,
+      collectionStartedAt: "2026-07-15T00:00:00.000Z",
+      updatedAt: new Date(Date.parse("2026-07-15T00:00:00.000Z") + MAX_AUTOMATIC_COLLECTION_BUDGET_MS).toISOString()
+    });
+
+    expect(checkpointContinuationDecision(initial, overBudget, 0))
+      .toEqual({ eligible: false, reason: "budget" });
+  });
+
   it("continues once more when every partition is checkpointed but final QA timed out", () => {
     const finalized = run({ completed: 100, updatedAt: "2026-07-15T00:01:00.000Z" });
 
@@ -87,8 +99,7 @@ describe("automatic checkpoint continuation loop", () => {
     const checkpoints = [
       run({ status: "queued", completed: 0, updatedAt: "2026-07-15T00:00:00.000Z", errors: [] }),
       run({ completed: 30, updatedAt: "2026-07-15T00:01:00.000Z" }),
-      run({ completed: 65, updatedAt: "2026-07-15T00:02:00.000Z" }),
-      run({ status: "review", completed: 100, updatedAt: "2026-07-15T00:03:00.000Z", errors: [] })
+      run({ status: "review", completed: 100, updatedAt: "2026-07-15T00:02:00.000Z", errors: [] })
     ];
     const seen: number[] = [];
     const execute = vi.fn(async (checkpoint: RunState) => {
@@ -100,11 +111,10 @@ describe("automatic checkpoint continuation loop", () => {
 
     const result = await collectWithCheckpointContinuation(checkpoints[0], execute, notices);
 
-    expect(seen).toEqual([0, 30, 65]);
-    expect(result).toMatchObject({ run: { status: "review" }, continuations: 2, error: undefined });
+    expect(seen).toEqual([0, 30]);
+    expect(result).toMatchObject({ run: { status: "review" }, continuations: 1, error: undefined });
     expect(notices.mock.calls.map(([notice]) => notice)).toEqual([
-      { attempt: 1, maxAttempts: 3, completedPartitions: 30, totalPartitions: 100 },
-      { attempt: 2, maxAttempts: 3, completedPartitions: 65, totalPartitions: 100 }
+      { attempt: 1, maxAttempts: 1, completedPartitions: 30, totalPartitions: 100 }
     ]);
   });
 
@@ -121,8 +131,8 @@ describe("automatic checkpoint continuation loop", () => {
 
     const result = await collectWithCheckpointContinuation(initial, execute);
 
-    expect(execute).toHaveBeenCalledTimes(4);
-    expect(result).toMatchObject({ run: { status: "failed" }, continuations: 3 });
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ run: { status: "failed" }, continuations: 1 });
   });
 
   it("treats a completed review checkpoint as success even if the HTTP response was lost", async () => {

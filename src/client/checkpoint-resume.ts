@@ -1,6 +1,7 @@
 import type { RunState } from "../shared/types.js";
 
-export const MAX_AUTOMATIC_CONTINUATIONS = 3;
+export const MAX_AUTOMATIC_CONTINUATIONS = 1;
+export const MAX_AUTOMATIC_COLLECTION_BUDGET_MS = 55 * 60 * 1000;
 // One immediate read plus 36 normal 2.5 s poll intervals covers the observed
 // delayed EdgeOne Agent start without extending the Agent execution itself.
 export const AMBIGUOUS_TRIGGER_GRACE_POLLS = 37;
@@ -10,7 +11,7 @@ const unsafeAutomaticRetry = /quota(?:_exceeded)?|\blease\b|reserveUsage|release
 
 export type ContinuationDecision = {
   eligible: boolean;
-  reason: "eligible" | "not_timeout" | "no_progress" | "unsafe" | "limit";
+  reason: "eligible" | "not_timeout" | "no_progress" | "unsafe" | "limit" | "budget";
 };
 
 export type AutomaticContinuationNotice = {
@@ -88,6 +89,10 @@ export function checkpointContinuationDecision(
   if (!timedOut) return { eligible: false, reason: "not_timeout" };
   if (messages.some((message) => unsafeAutomaticRetry.test(message))) {
     return { eligible: false, reason: "unsafe" };
+  }
+  const collectionStartedAt = timestamp(current.collectionStartedAt ?? previous.collectionStartedAt ?? current.createdAt);
+  if (timestamp(current.updatedAt) - collectionStartedAt >= MAX_AUTOMATIC_COLLECTION_BUDGET_MS) {
+    return { eligible: false, reason: "budget" };
   }
   const progressed = current.progress.completedPartitions > previous.progress.completedPartitions &&
     timestamp(current.updatedAt) > timestamp(previous.updatedAt);
