@@ -44,21 +44,33 @@ function isValidGtin(value: string): boolean {
   return (10 - sum % 10) % 10 === checkDigit;
 }
 
-function gtinKeys(
+type GtinClaim = { value: string; verified: boolean };
+
+function gtinClaim(value: string): GtinClaim | undefined {
+  const normalized = value.trim();
+  // Plain JSON-LD GTINs are source claims, not ownership proof. A verifier may
+  // promote one without a schema migration by persisting `verified:<GTIN>`.
+  const verifiedPrefix = /^(?:verified|verified-by-gs1|gs1-verified):\s*/iu;
+  const verified = verifiedPrefix.test(normalized);
+  const digits = normalized.replace(verifiedPrefix, "").replace(/\D/g, "");
+  return isValidGtin(digits) ? { value: digits, verified } : undefined;
+}
+
+function verifiedGtinKeys(
   brand: string,
   evidence: Observation["productEvidence"] | ProductRecord["productEvidence"]
 ): string[] {
   return [...new Set((evidence?.identifiers ?? [])
     .filter(({ type }) => type === "gtin")
-    .map(({ value }) => value.replace(/\D/g, ""))
-    .filter(isValidGtin)
-    .map((value) => `${normalizeText(brand)}\u0000${value}`))];
+    .map(({ value }) => gtinClaim(value))
+    .filter((claim): claim is GtinClaim => Boolean(claim?.verified))
+    .map(({ value }) => `${normalizeText(brand)}\u0000${value}`))];
 }
 
 /** Product records keep only compact cross-source identifiers; full evidence remains in monthly snapshots. */
 export function compactProductCatalogEvidence(evidence: ProductEvidence | undefined): ProductEvidence | undefined {
   const identifiers = (evidence?.identifiers ?? []).filter(({ type, value }) =>
-    type === "gtin" && isValidGtin(value.replace(/\D/g, ""))
+    type === "gtin" && Boolean(gtinClaim(value)?.verified)
   );
   if (identifiers.length === 0) return undefined;
   return {
@@ -161,6 +173,20 @@ export function reconcileProductCatalog(
     }))
   ];
   const combinedVariants = canonicalProductVariants(combinedInputs);
+  const combinedCatalogItems = [...publishedVariants, ...result];
+  const gtinVariantKeys = new Map<string, Set<string>>();
+  combinedCatalogItems.forEach((item, index) => {
+    const variantKey = combinedVariants[index]?.variantKey;
+    if (!variantKey || item.productIdentity?.granularity !== "variant" || item.productIdentity.confidence !== "exact") return;
+    for (const gtin of verifiedGtinKeys(item.brand, item.productEvidence)) {
+      const keys = gtinVariantKeys.get(gtin) ?? new Set<string>();
+      keys.add(variantKey);
+      gtinVariantKeys.set(gtin, keys);
+    }
+  });
+  const conflictingGtinKeys = new Set(
+    [...gtinVariantKeys].filter(([, keys]) => keys.size > 1).map(([gtin]) => gtin)
+  );
   const variantTargets = new Map<string, Map<string, CatalogTarget>>();
   const targetVariantKeys = new Map<string, Set<string>>();
 
@@ -170,7 +196,9 @@ export function reconcileProductCatalog(
     if (!variantKey) return;
     const target = { id: identity.canonicalVariantId ?? variantId(variantKey), label: identity.label };
     for (const key of aliasRegistrationKeys(record)) addTarget(aliases, key, target);
-    for (const gtin of gtinKeys(record.brand, record.productEvidence)) addTarget(gtinTargets, gtin, target);
+    for (const gtin of verifiedGtinKeys(record.brand, record.productEvidence)) {
+      if (!conflictingGtinKeys.has(gtin)) addTarget(gtinTargets, gtin, target);
+    }
     addTarget(variantTargets, variantKey, target);
     const keys = targetVariantKeys.get(target.id) ?? new Set<string>();
     keys.add(variantKey);
@@ -185,11 +213,22 @@ export function reconcileProductCatalog(
     const variant = combinedVariants[publishedVariants.length + index]!;
     if (identity?.granularity !== "variant" || identity.confidence !== "exact" || !variant.variantKey) return;
     const compatibleTargets = new Map<string, CatalogTarget>(variantTargets.get(variant.variantKey));
-    for (const gtin of gtinKeys(item.brand, item.productEvidence)) {
+    const itemGtinKeys = verifiedGtinKeys(item.brand, item.productEvidence);
+    if (itemGtinKeys.some((gtin) => conflictingGtinKeys.has(gtin))) {
+      item.productIdentity = catalogConflictIdentity(identity, variant.label);
+      return;
+    }
+    const incompatibleGtinTargets = new Map<string, CatalogTarget>();
+    for (const gtin of itemGtinKeys) {
       for (const target of gtinTargets.get(gtin)?.values() ?? []) {
         const knownKeys = targetVariantKeys.get(target.id);
         if (!knownKeys || knownKeys.has(variant.variantKey)) compatibleTargets.set(target.id, target);
+        else incompatibleGtinTargets.set(target.id, target);
       }
+    }
+    if (incompatibleGtinTargets.size > 0) {
+      item.productIdentity = catalogConflictIdentity(identity, variant.label);
+      return;
     }
     if ([...compatibleTargets].some(([id]) => conflictingTargetIds.has(id))) {
       item.productIdentity = catalogConflictIdentity(identity, variant.label);
@@ -208,14 +247,22 @@ export function reconcileProductCatalog(
       item.productOverride ? "operator_override" : "source_facts"
     );
     for (const key of aliasRegistrationKeys(item)) addTarget(aliases, key, target);
-    for (const gtin of gtinKeys(item.brand, item.productEvidence)) addTarget(gtinTargets, gtin, target);
+    for (const gtin of itemGtinKeys) addTarget(gtinTargets, gtin, target);
     addTarget(variantTargets, variant.variantKey, target);
+    const keys = targetVariantKeys.get(target.id) ?? new Set<string>();
+    keys.add(variant.variantKey);
+    targetVariantKeys.set(target.id, keys);
   });
 
   result.forEach((item) => {
     const identity = item.productIdentity;
     if (identity?.granularity !== "unresolved" || identity.confidence !== "partial") return;
-    const lookupKeys = [...lookupAliasKeys(item), ...gtinKeys(item.brand, item.productEvidence)];
+    const itemGtinKeys = verifiedGtinKeys(item.brand, item.productEvidence);
+    if (itemGtinKeys.some((gtin) => conflictingGtinKeys.has(gtin))) {
+      item.productIdentity = catalogConflictIdentity(identity, identity.label);
+      return;
+    }
+    const lookupKeys = [...lookupAliasKeys(item), ...itemGtinKeys];
     const candidateTargets = new Map<string, CatalogTarget>();
     for (const map of [aliases, gtinTargets]) {
       for (const key of lookupKeys) {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Observation, ProductRecord } from "../src/shared/types.js";
 import { analyzeProductIdentity, canonicalProductVariants } from "../src/server/utils/product-name.js";
-import { reconcileProductCatalog } from "../src/server/utils/product-catalog.js";
+import { compactProductCatalogEvidence, reconcileProductCatalog } from "../src/server/utils/product-catalog.js";
 
 function observation(listingId: string, product: string, brand = "Оциллококцинум"): Observation {
   return {
@@ -13,6 +13,17 @@ function observation(listingId: string, product: string, brand = "Оциллок
 }
 
 describe("persistent product catalog", () => {
+  it("keeps only explicitly verified GTIN claims in the persistent catalog", () => {
+    const base = { scope: "listing" as const, signals: [], variants: [], imageUrls: [], instructionUrls: [] };
+
+    expect(compactProductCatalogEvidence({
+      ...base, identifiers: [{ type: "gtin", value: "4006381333931" }]
+    })).toBeUndefined();
+    expect(compactProductCatalogEvidence({
+      ...base, identifiers: [{ type: "gtin", value: "verified:4006381333931" }]
+    })?.identifiers).toEqual([{ type: "gtin", value: "verified:4006381333931" }]);
+  });
+
   it("assigns one stable variant to equivalent real products across sources", () => {
     const source = [
       observation("one", "Оциллококцинум гранулы гомеопатические 1 г №30"),
@@ -155,7 +166,7 @@ describe("persistent product catalog", () => {
     expect(resolved.productIdentity?.canonicalVariantId).toBeUndefined();
   });
 
-  it("scopes validated GTINs by brand", () => {
+  it("never promotes a checksum-valid but unverified GTIN to exact", () => {
     const first = observation("old", "Анвифен капсулы 100 мг №20", "Анвифен");
     first.productEvidence = {
       scope: "listing", signals: [], variants: [],
@@ -168,15 +179,108 @@ describe("persistent product catalog", () => {
       productIdentity: catalogued.productIdentity, productEvidence: first.productEvidence,
       firstSeenMonth: "2026-07", lastSeenMonth: "2026-07"
     };
-    const otherBrand = observation("new", "Другой бренд капсулы", "Другой бренд");
-    otherBrand.productEvidence = {
+    const incomplete = observation("new", "Анвифен капсулы", "Анвифен");
+    incomplete.productEvidence = {
       scope: "listing", signals: [], variants: [],
       identifiers: [{ type: "gtin", value: "4006381333931" }], imageUrls: [], instructionUrls: []
     };
 
-    const resolved = reconcileProductCatalog([otherBrand], [prior])[0]!;
+    const resolved = reconcileProductCatalog([incomplete], [prior])[0]!;
 
+    expect(resolved.productIdentity).toMatchObject({ granularity: "unresolved", confidence: "partial" });
     expect(resolved.productIdentity?.canonicalVariantId).toBeUndefined();
+  });
+
+  it("uses an explicitly verified GTIN only when semantic facts do not conflict", () => {
+    const source = observation("old", "Анвифен капсулы 100 мг №20", "Анвифен");
+    source.productEvidence = {
+      scope: "listing", signals: [], variants: [],
+      identifiers: [{ type: "gtin", value: "verified:4006381333931" }], imageUrls: [], instructionUrls: []
+    };
+    const catalogued = reconcileProductCatalog([source])[0]!;
+    const prior: ProductRecord = {
+      key: "old.example:old", domain: "old.example", listingId: "old", brand: source.brand,
+      canonicalUrl: source.canonicalUrl, product: source.product, platform: "test",
+      productIdentity: catalogued.productIdentity, productEvidence: source.productEvidence,
+      firstSeenMonth: "2026-07", lastSeenMonth: "2026-07"
+    };
+    const incomplete = observation("new", "Анвифен капсулы", "Анвифен");
+    incomplete.productEvidence = {
+      scope: "listing", signals: [], variants: [],
+      identifiers: [{ type: "gtin", value: "verified:4006381333931" }], imageUrls: [], instructionUrls: []
+    };
+
+    const resolved = reconcileProductCatalog([incomplete], [prior])[0]!;
+
+    expect(resolved.productIdentity).toMatchObject({
+      canonicalVariantId: catalogued.productIdentity?.canonicalVariantId,
+      label: "капсулы 100 мг №20",
+      resolutionMethod: "catalog_alias"
+    });
+  });
+
+  it("rejects a verified GTIN when fresh semantic facts conflict", () => {
+    const source = observation("old", "Анвифен капсулы 100 мг №20", "Анвифен");
+    source.productEvidence = {
+      scope: "listing", signals: [], variants: [],
+      identifiers: [{ type: "gtin", value: "verified:4006381333931" }], imageUrls: [], instructionUrls: []
+    };
+    const catalogued = reconcileProductCatalog([source])[0]!;
+    const prior: ProductRecord = {
+      key: "old.example:old", domain: "old.example", listingId: "old", brand: source.brand,
+      canonicalUrl: source.canonicalUrl, product: source.product, platform: "test",
+      productIdentity: catalogued.productIdentity, productEvidence: source.productEvidence,
+      firstSeenMonth: "2026-07", lastSeenMonth: "2026-07"
+    };
+    const conflicting = observation("new", "Анвифен капсулы 250 мг №20", "Анвифен");
+    conflicting.productEvidence = {
+      scope: "listing", signals: [], variants: [],
+      identifiers: [{ type: "gtin", value: "verified:4006381333931" }], imageUrls: [], instructionUrls: []
+    };
+
+    const resolved = reconcileProductCatalog([conflicting], [prior])[0]!;
+
+    expect(resolved.productIdentity).toMatchObject({ granularity: "unresolved", confidence: "ambiguous" });
+    expect(resolved.productIdentity?.canonicalVariantId).toBeUndefined();
+  });
+
+  it("rejects conflicting verified GTIN facts inside one fresh snapshot", () => {
+    const observations = ["100", "250"].map((strength, index) => {
+      const item = observation(String(index), `Анвифен капсулы ${strength} мг №20`, "Анвифен");
+      item.productEvidence = {
+        scope: "listing", signals: [], variants: [],
+        identifiers: [{ type: "gtin", value: "verified:4006381333931" }], imageUrls: [], instructionUrls: []
+      };
+      return item;
+    });
+
+    const resolved = reconcileProductCatalog(observations);
+
+    expect(resolved.map((item) => item.productIdentity?.granularity)).toEqual(["unresolved", "unresolved"]);
+    expect(resolved.map((item) => item.productIdentity?.confidence)).toEqual(["ambiguous", "ambiguous"]);
+    expect(resolved.every((item) => item.productIdentity?.canonicalVariantId === undefined)).toBe(true);
+  });
+
+  it("assigns one official SKU to base and seller-bundle offers", () => {
+    const resolved = reconcileProductCatalog([
+      observation("base", "Максилак Премиум капсулы №10", "Максилак"),
+      observation("bundle", "Максилак Премиум капсулы №10, 2 упаковки", "Максилак")
+    ]);
+
+    expect(new Set(resolved.map((item) => item.productIdentity?.canonicalVariantId)).size).toBe(1);
+    expect(resolved.map((item) => item.productIdentity?.label)).toEqual([
+      "Премиум капсулы №10",
+      "Премиум капсулы №10 ×2 упаковки"
+    ]);
+  });
+
+  it("does not equate a missing strength with a known strength", () => {
+    const resolved = reconcileProductCatalog([
+      observation("known", "Анвифен капсулы 50 мг №20", "Анвифен"),
+      observation("missing", "Анвифен капсулы №20", "Анвифен")
+    ]);
+
+    expect(new Set(resolved.map((item) => item.productIdentity?.canonicalVariantId)).size).toBe(2);
   });
 
   it("fails closed when historical records assign two IDs to one semantic variant", () => {

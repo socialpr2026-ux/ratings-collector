@@ -8,7 +8,8 @@ type ProductParts = {
   form?: string;
   doses: string[];
   count?: number;
-  multipack?: number;
+  /** Seller offer quantity; never part of the manufacturer's SKU identity. */
+  bundleQuantity?: number;
   fallback?: string;
   generic: boolean;
   genericPage?: boolean;
@@ -472,8 +473,8 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
   }, sourceWithoutVendor);
   const form = equivalence.form;
   const doses = equivalence.doses;
-  const multipackMatch = withoutBrand.match(/(?:[xх×]\s*|(?<![\p{L}\p{N}]))(\d+)\s*(?:уп(?:аковк)?\.?|упаков(?:ки|ок|ка))(?![\p{L}\p{N}])/iu);
-  const multipack = multipackMatch ? Number(multipackMatch[1]) : undefined;
+  const bundleMatch = withoutBrand.match(/(?:[xх×]\s*|(?<![\p{L}\p{N}]))(\d+)\s*(?:уп(?:аковк)?\.?|упаков(?:ки|ок|ка))(?![\p{L}\p{N}])/iu);
+  const bundleQuantity = bundleMatch ? Number(bundleMatch[1]) : undefined;
   const sourceHasBaktoblisPlus = normalizeText(brand) === "бактоблис"
     && /(?:бактоблис|бакто\s*блис|bactoblis)\s*\+/iu.test(sourceWithoutVendor);
   const modifiers = [...(sourceHasBaktoblisPlus ? ["Плюс"] : []), ...MODIFIERS.filter((item) => item.pattern.test(withoutBrand))
@@ -495,7 +496,7 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
     form,
     doses,
     count,
-    multipack,
+    bundleQuantity,
     fallback: generic
       ? unknownModel ? "Общая карточка бренда" : genericPage ? "Общая карточка отзывов" : cleanFallback(fallbackText)
       : undefined,
@@ -507,11 +508,11 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
 }
 
 function partsKey(parts: ProductParts): string {
-  return [parts.discriminator, parts.modifier, comparableForm(parts.form), parts.doses.join("+"), canonicalCount(parts), parts.multipack].map((item) => item ?? "").join("|");
+  return [parts.discriminator, parts.modifier, comparableForm(parts.form), parts.doses.join("+"), canonicalCount(parts), parts.bundleQuantity].map((item) => item ?? "").join("|");
 }
 
 function specificity(parts: ProductParts): number {
-  return Number(Boolean(parts.discriminator)) + Number(Boolean(parts.modifier)) + Number(Boolean(parts.form)) + parts.doses.length + Number(Boolean(parts.count)) + Number(Boolean(parts.multipack));
+  return Number(Boolean(parts.discriminator)) + Number(Boolean(parts.modifier)) + Number(Boolean(parts.form)) + parts.doses.length + Number(Boolean(parts.count)) + Number(Boolean(parts.bundleQuantity));
 }
 
 function render(parts: ProductParts): string {
@@ -526,7 +527,7 @@ function render(parts: ProductParts): string {
   chunks.push(...parts.doses);
   const count = canonicalCount(parts);
   if (count) chunks.push(`№${count}`);
-  if (parts.multipack && parts.multipack > 1) chunks.push(`×${parts.multipack} упаковки`);
+  if (parts.bundleQuantity && parts.bundleQuantity > 1) chunks.push(`×${parts.bundleQuantity} упаковки`);
   return chunks.join(" ") || "Общая карточка бренда";
 }
 
@@ -545,7 +546,7 @@ function hasPackMeasure(parts: Pick<ProductParts, "form" | "doses">): boolean {
 function missingFields(parts: ProductParts): ProductIdentity["missing"] {
   const missing: ProductIdentity["missing"] = [];
   if (!parts.form) missing.push("form");
-  const hasPack = Boolean(parts.count || parts.multipack || hasPackMeasure(parts));
+  const hasPack = Boolean(parts.count || hasPackMeasure(parts));
   if (!hasPack) missing.push("pack");
   // A dosage is useful, but it is not mandatory when the page proves both the
   // pharmaceutical form and the package size. "таблетки №20" is already a
@@ -555,7 +556,7 @@ function missingFields(parts: ProductParts): ProductIdentity["missing"] {
 }
 
 function isExactVariant(parts: ProductParts): boolean {
-  const hasPack = Boolean(parts.count || parts.multipack || hasPackMeasure(parts));
+  const hasPack = Boolean(parts.count || hasPackMeasure(parts));
   const concentratedOralSolution = parts.form === "раствор для приема внутрь"
     && parts.doses.some((dose) => /\/мл$/u.test(dose));
   // Either the pharmaceutical form or a concrete strength/detail together
@@ -577,7 +578,6 @@ function partsCompatible(left: ProductParts, right: ProductParts): boolean {
   const leftCount = canonicalCount(left);
   const rightCount = canonicalCount(right);
   if (leftCount && rightCount && leftCount !== rightCount) return false;
-  if (left.multipack && right.multipack && left.multipack !== right.multipack) return false;
   if (left.discriminator && right.discriminator && normalizeText(left.discriminator) !== normalizeText(right.discriminator)) return false;
   if (left.modifier && right.modifier) {
     const leftModifiers = left.modifier.split(/\s+/u);
@@ -593,7 +593,6 @@ function partsSubsumes(richer: ProductParts, poorer: ProductParts): boolean {
   if (!formSubsumes(richer.form, poorer.form)) return false;
   const poorerCount = canonicalCount(poorer);
   if (poorerCount && canonicalCount(richer) !== poorerCount) return false;
-  if (poorer.multipack && richer.multipack !== poorer.multipack) return false;
   if (poorer.discriminator && normalizeText(richer.discriminator ?? "") !== normalizeText(poorer.discriminator)) return false;
   if (poorer.modifier && (!richer.modifier || !setIsSubset(poorer.modifier.split(/\s+/u), richer.modifier.split(/\s+/u)))) return false;
   if (!setIsSubset(poorer.doses, richer.doses)) return false;
@@ -748,9 +747,9 @@ function unresolvedIdentity(parts: ProductParts, reason: string): ProductIdentit
       ? `Общая карточка линейки «${line}»`
       : parts.modifier && !parts.form && !parts.count && parts.doses.length === 0
         ? `Общая карточка серии «${parts.modifier}»`
-        : parts.modifier && parts.form && !parts.count && !parts.multipack && !hasPackMeasure(parts)
+        : parts.modifier && parts.form && !parts.count && !hasPackMeasure(parts)
           ? `Общая карточка: ${render(parts)}`
-      : parts.form && !parts.count && !parts.multipack && !hasPackMeasure(parts) && parts.doses.length === 0
+      : parts.form && !parts.count && !hasPackMeasure(parts) && parts.doses.length === 0
         ? `Общая карточка формы «${parts.form}»`
         : known ?? fallback ?? "Общая карточка бренда",
     granularity: line && !parts.form ? "line" : "unresolved",
@@ -774,7 +773,7 @@ export function analyzeProductIdentity(item: ProductNameInput): ProductIdentity 
       // the employee-facing label as "Общий рейтинг: №30" when a review
       // control was mistaken for a variant selector.
       if (parts.generic || !parts.form && !parts.doses.length && !parts.modifier) continue;
-      const baseKey = [parts.discriminator, parts.modifier, comparableForm(parts.form), [...parts.doses].sort().join("+"), canonicalCount(parts), parts.multipack].map((value) => value ?? "").join("|");
+      const baseKey = [parts.discriminator, parts.modifier, comparableForm(parts.form), [...parts.doses].sort().join("+"), canonicalCount(parts)].map((value) => value ?? "").join("|");
       const previous = variantGroups.get(baseKey);
       if (
         !previous
@@ -941,7 +940,8 @@ function variantCoreKey(brand: string, parts: ProductParts): string {
     semanticLine,
     normalizeText(canonicalForm(parts.form) ?? ""),
     canonicalCount(parts) ?? "",
-    parts.multipack ?? ""
+    // Keep the legacy key field while deliberately excluding seller bundles.
+    ""
   ].join("|");
 }
 
@@ -973,7 +973,6 @@ function oralSolutionCandidate(parts: ProductParts): OralSolutionCandidate | und
       normalizeText(parts.discriminator ?? ""),
       normalizeText(parts.modifier ?? ""),
       canonicalCount(parts) ?? "",
-      parts.multipack ?? "",
       strengthKey,
       ...otherDoses.map(normalizeText).sort()
     ].join("|"),
@@ -1045,7 +1044,6 @@ function reconcileParenteralSolutionShorthand(
       normalizeText(parts.discriminator ?? ""),
       normalizeText(parts.modifier ?? ""),
       canonicalCount(parts) ?? "",
-      parts.multipack ?? "",
       doseKey(parts)
     ].join("|");
     const group = groups.get(key) ?? [];

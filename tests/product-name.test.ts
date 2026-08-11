@@ -253,6 +253,25 @@ describe("canonical product descriptors", () => {
     expect(canonicalProductDescriptor("Максилак", variants[1].label)).toBe(variants[1].label);
   });
 
+  it("keeps seller bundle quantity as offer metadata, not factory SKU identity", () => {
+    const variants = canonicalProductVariants([
+      { brand: "Максилак", product: "Максилак Премиум капсулы №10" },
+      { brand: "Максилак", product: "Максилак Премиум капсулы №10, 2 упаковки" },
+      { brand: "Максилак", product: "Максилак Премиум капсулы №10, 3 упаковки" }
+    ]);
+
+    expect(variants.map((item) => item.label)).toEqual([
+      "Премиум капсулы №10",
+      "Премиум капсулы №10 ×2 упаковки",
+      "Премиум капсулы №10 ×3 упаковки"
+    ]);
+    expect(new Set(variants.map((item) => item.variantKey)).size).toBe(1);
+    expect(analyzeProductIdentity({
+      brand: "Максилак",
+      product: "Максилак Премиум капсулы, 2 упаковки"
+    })).toMatchObject({ granularity: "unresolved", confidence: "partial", missing: ["pack"] });
+  });
+
   it("uses the physical pack instead of a per-item dose in marketplace titles", () => {
     const marketplaceTitle = "Оциллококцинум гранулы 1 г 1 доза 30 шт";
     expect(analyzeProductIdentity({ brand: "Оциллококцинум", product: marketplaceTitle })).toMatchObject({
