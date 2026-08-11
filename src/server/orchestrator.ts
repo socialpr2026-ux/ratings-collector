@@ -411,12 +411,9 @@ export class RatingsService {
     ]));
     const isRetry = run.status !== "queued" && run.partitions.length > 0;
     if (isRetry) run.publicationExclusions = undefined;
-    const reviewPartitions = new Set(run.observations
-      .filter((observation) => observation.status === "needs_review")
-      .map((observation) => partitionKey(observation.domain, observation.brand)));
     const retryTargets = isRetry
       ? expectedPartitions.filter(({ key }) =>
-        !SUCCESSFUL_PARTITION_STATUSES.has(previousPartitions.get(key)?.status ?? "") || reviewPartitions.has(key)
+        !SUCCESSFUL_PARTITION_STATUSES.has(previousPartitions.get(key)?.status ?? "")
       )
       : expectedPartitions;
 

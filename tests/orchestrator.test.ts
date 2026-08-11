@@ -267,7 +267,7 @@ describe("run orchestration and fail-closed QA", () => {
     expect(retried.payloadHash).not.toBe(firstHash);
   });
 
-  it("retries a technically complete partition whose observations still need review", async () => {
+  it("does not retry a technically complete partition solely because product identity needs review", async () => {
     const repository = new MemoryRepository();
     let attempts = 0;
     const service = new RatingsService(repository, async () => ({
@@ -298,12 +298,59 @@ describe("run orchestration and fail-closed QA", () => {
     expect(first.observations).toMatchObject([{ status: "needs_review" }]);
     expect(first.qa?.ok).toBe(false);
 
+    const repeated = await service.executeRun(id);
+
+    expect(attempts).toBe(1);
+    expect(repeated.partitions).toMatchObject([{ status: "complete" }]);
+    expect(repeated.observations).toMatchObject([{ status: "needs_review" }]);
+    expect(repeated.qa).toMatchObject({ ok: false });
+  });
+
+  it("preserves a successful needs-review partition while retrying only the failed partition", async () => {
+    const repository = new MemoryRepository();
+    const calls = new Map<string, number>();
+    const service = new RatingsService(repository, async (domain) => ({
+      id: domain,
+      supportedDomains: [domain],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        calls.set(domain, (calls.get(domain) ?? 0) + 1);
+        if (domain === "example.org" && calls.get(domain) === 1) {
+          throw new AdapterBlockedError("temporary exact-proof failure");
+        }
+        return [{
+          domain, platform: domain, listingId: "1", brand,
+          url: `https://${domain}/p/1`, metadata: {}
+        }];
+      },
+      async collect(ref) {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId,
+          brand: ref.brand, canonicalUrl: ref.url,
+          product: ref.domain === "example.com" ? ref.brand : `${ref.brand} таблетки 100 мг №10`,
+          reviews: 5, rating: 4.5,
+          status: ref.domain === "example.com" ? "needs_review" as const : "ok" as const,
+          capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+    const id = (await service.createRun({ ...request, domains: ["example.com", "example.org"] })).id;
+
+    const first = await service.executeRun(id);
+    const preserved = first.observations.find((item) => item.domain === "example.com");
+    expect(first.partitions.map((item) => [item.domain, item.status])).toEqual([
+      ["example.com", "complete"],
+      ["example.org", "blocked"]
+    ]);
+
     const retried = await service.executeRun(id);
 
-    expect(attempts).toBe(2);
-    expect(retried.partitions).toMatchObject([{ status: "complete" }]);
-    expect(retried.observations).toMatchObject([{ status: "ok" }]);
-    expect(retried.qa).toMatchObject({ ok: true, blockers: [] });
+    expect(calls).toEqual(new Map([["example.com", 1], ["example.org", 2]]));
+    expect(retried.observations.find((item) => item.domain === "example.com")).toEqual(preserved);
+    expect(retried.partitions.map((item) => [item.domain, item.status])).toEqual([
+      ["example.com", "complete"],
+      ["example.org", "complete"]
+    ]);
   });
 
   it("keeps successful partitions intact when a selective retry fails again", async () => {
