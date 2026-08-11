@@ -2581,6 +2581,8 @@ async function repositoryRpc(request: Request, env: Record<string, string | unde
     case "listRuns": result = await repository.listRecentRuns(body.ownerEmail, body.limit); break;
     case "getRun": result = await repository.getRun(body.id); break;
     case "getRunSummary": result = await repository.getRunSummary(body.id); break;
+    case "getProductMaster": result = await repository.getProductMaster(); break;
+    case "saveProductMaster": await repository.saveProductMaster(body.catalog, body.expectedRevision); result = null; break;
     case "saveRun": {
       const previous = await repository.getRun(body.run.id);
       if (previous?.ownerEmail && body.run.ownerEmail !== previous.ownerEmail) throw new Error("Нельзя изменить владельца запуска");

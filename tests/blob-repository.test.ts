@@ -1,6 +1,7 @@
 import type { Store } from "@edgeone/pages-blob";
 import { describe, expect, it, vi } from "vitest";
 import { BlobRepository } from "../src/server/blob-repository.js";
+import { emptyProductMasterCatalog } from "../src/server/repository.js";
 import type { RunState } from "../src/shared/types.js";
 
 function run(id: string, brand: string, updatedAt: string): RunState {
@@ -26,6 +27,24 @@ function run(id: string, brand: string, updatedAt: string): RunState {
 }
 
 describe("BlobRepository run lookup", () => {
+  it("stores the global Product Master behind an optimistic revision fence", async () => {
+    const initial = emptyProductMasterCatalog("2026-08-11T09:00:00.000Z");
+    const current = { ...initial, revision: 1, updatedAt: "2026-08-11T09:01:00.000Z" };
+    const store = {
+      get: vi.fn(async () => initial),
+      setJSON: vi.fn(async () => undefined)
+    } as unknown as Store;
+    const repository = new BlobRepository(store);
+    vi.spyOn(repository, "acquireLease").mockResolvedValue({ token: "lease", keys: [] });
+    vi.spyOn(repository, "releaseLease").mockResolvedValue();
+
+    await repository.saveProductMaster(current, 0);
+
+    expect(store.setJSON).toHaveBeenCalledWith("product-master/catalog-v2.json", current);
+    await expect(repository.saveProductMaster({ ...current, revision: 2 }, 1))
+      .rejects.toThrow("revision conflict");
+  });
+
   it("reads progress from the compact shadow object without loading the full run", async () => {
     const summary = {
       version: 2, revision: 4, id: "compact", ownerEmail: "operator@example.com", status: "running",

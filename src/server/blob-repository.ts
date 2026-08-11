@@ -4,7 +4,8 @@ import { promisify } from "node:util";
 import { getStore, PreconditionFailedError, type Store } from "@edgeone/pages-blob";
 import type { EvidenceStore } from "./evidence.js";
 import type { Observation, ProductRecord, PublicationRecord, RunHistoryItem, RunState, RunSummaryV2, SiteProfile, SourceCardRecord } from "../shared/types.js";
-import { nextRunSummaryV2, productKey, runHistoryItem, type Repository } from "./repository.js";
+import { productMasterCatalogSchema, type ProductMasterCatalog } from "../shared/product-master.js";
+import { assertProductMasterRevision, emptyProductMasterCatalog, nextRunSummaryV2, productKey, runHistoryItem, type Repository } from "./repository.js";
 
 const gzipAsync = promisify(gzip);
 const strongJson = { type: "json" as const, consistency: "strong" as const };
@@ -55,6 +56,19 @@ export class BlobRepository implements Repository {
 
   async getRunSummary(id: string): Promise<RunSummaryV2 | undefined> {
     return (await this.store.get(`run-summaries/${segment(id)}.json`, strongJson) as RunSummaryV2 | null) ?? undefined;
+  }
+
+  async getProductMaster(): Promise<ProductMasterCatalog> {
+    const stored = await this.store.get("product-master/catalog-v2.json", strongJson) as ProductMasterCatalog | null;
+    return stored ? productMasterCatalogSchema.parse(stored) : emptyProductMasterCatalog();
+  }
+
+  async saveProductMaster(catalog: ProductMasterCatalog, expectedRevision: number): Promise<void> {
+    await this.withLease("product-master:v2", 20_000, async () => {
+      const current = await this.getProductMaster();
+      assertProductMasterRevision(catalog, current.revision, expectedRevision);
+      await this.store.setJSON("product-master/catalog-v2.json", productMasterCatalogSchema.parse(catalog));
+    });
   }
 
   async listRecentRuns(ownerEmail?: string, limit = 8): Promise<RunHistoryItem[]> {

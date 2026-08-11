@@ -1,12 +1,15 @@
 import type { EvidenceStore } from "./evidence.js";
 import type { Observation, ProductRecord, PublicationRecord, RunHistoryItem, RunState, RunSummaryV2, SiteProfile, SourceCardRecord } from "../shared/types.js";
 import type { Repository } from "./repository.js";
+import type { ProductMasterCatalog } from "../shared/product-master.js";
 
 export type RepositoryRpc =
   | { action: "findRuns"; brand: string; limit?: number }
   | { action: "listRuns"; ownerEmail?: string; limit?: number }
   | { action: "getRun"; id: string }
   | { action: "getRunSummary"; id: string }
+  | { action: "getProductMaster" }
+  | { action: "saveProductMaster"; catalog: ProductMasterCatalog; expectedRevision: number }
   | { action: "saveRun"; run: RunState }
   | { action: "getProfile"; domain: string }
   | { action: "saveProfile"; profile: SiteProfile }
@@ -31,6 +34,7 @@ const RETRYABLE_ACTIONS = new Set<RepositoryRpc["action"]>([
   "listRuns",
   "getRun",
   "getRunSummary",
+  "getProductMaster",
   "saveRun",
   "getProfile",
   "saveProfile",
@@ -103,6 +107,10 @@ export class RemoteRepository implements Repository {
 
   getRun(id: string) { return this.call<RunState | undefined>({ action: "getRun", id }); }
   getRunSummary(id: string) { return this.call<RunSummaryV2 | undefined>({ action: "getRunSummary", id }); }
+  getProductMaster() { return this.call<ProductMasterCatalog>({ action: "getProductMaster" }); }
+  async saveProductMaster(catalog: ProductMasterCatalog, expectedRevision: number) {
+    await this.call({ action: "saveProductMaster", catalog, expectedRevision });
+  }
   async saveRun(run: RunState) { await this.call({ action: "saveRun", run }); }
   listRecentRuns(ownerEmail?: string, limit?: number) { return this.call<RunHistoryItem[]>({ action: "listRuns", ownerEmail, limit }); }
   getProfile(domain: string) { return this.call<SiteProfile | undefined>({ action: "getProfile", domain }); }

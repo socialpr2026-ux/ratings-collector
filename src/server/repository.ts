@@ -11,12 +11,15 @@ import type {
   SourceCardRecord,
   SiteProfile
 } from "../shared/types.js";
+import { productMasterCatalogSchema, type ProductMasterCatalog } from "../shared/product-master.js";
 
 export type Database = {
   version: 1;
   runs: Record<string, RunState>;
   /** V2 shadow projection. Optional so existing local databases remain valid. */
   runSummaries?: Record<string, RunSummaryV2>;
+  /** Global cross-sheet Product Master shadow catalog. */
+  productMaster?: ProductMasterCatalog;
   profiles: Record<string, SiteProfile>;
   products: Record<string, Record<string, ProductRecord>>;
   sourceCards: Record<string, Record<string, SourceCardRecord>>;
@@ -28,6 +31,8 @@ export type Database = {
 export interface Repository {
   getRun(id: string): Promise<RunState | undefined>;
   getRunSummary(id: string): Promise<RunSummaryV2 | undefined>;
+  getProductMaster(): Promise<ProductMasterCatalog>;
+  saveProductMaster(catalog: ProductMasterCatalog, expectedRevision: number): Promise<void>;
   saveRun(run: RunState): Promise<void>;
   listRecentRuns(ownerEmail?: string, limit?: number): Promise<RunHistoryItem[]>;
   getProfile(domain: string): Promise<SiteProfile | undefined>;
@@ -78,6 +83,15 @@ export class MemoryRepository implements Repository {
     if (stored) return clone(stored);
     const legacy = this.db.runs[id];
     return legacy ? createRunSummaryV2(legacy, 1) : undefined;
+  }
+  async getProductMaster() {
+    return clone(this.db.productMaster ?? emptyProductMasterCatalog());
+  }
+  async saveProductMaster(catalog: ProductMasterCatalog, expectedRevision: number) {
+    const current = this.db.productMaster ?? emptyProductMasterCatalog();
+    assertProductMasterRevision(catalog, current.revision, expectedRevision);
+    this.db.productMaster = clone(productMasterCatalogSchema.parse(catalog));
+    await this.changed();
   }
   async saveRun(run: RunState) {
     const summaries = this.db.runSummaries ??= {};
@@ -199,6 +213,39 @@ export class FileRepository extends MemoryRepository {
 
 export function productKey(domain: string, listingId: string): string {
   return `${domain.toLocaleLowerCase("ru-RU")}:${listingId}`;
+}
+
+export function emptyProductMasterCatalog(now = new Date().toISOString()): ProductMasterCatalog {
+  return {
+    schemaVersion: 2,
+    revision: 0,
+    brands: [],
+    families: [],
+    variants: [],
+    identifiers: [],
+    crosswalks: [],
+    aliases: [],
+    aggregates: [],
+    decisions: [],
+    legacyIds: [],
+    updatedAt: now
+  };
+}
+
+export function assertProductMasterRevision(
+  catalog: Pick<ProductMasterCatalog, "revision">,
+  currentRevision: number,
+  expectedRevision: number
+): void {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    throw new Error("Invalid Product Master expected revision");
+  }
+  if (currentRevision !== expectedRevision) {
+    throw new Error(`Product Master revision conflict: expected ${expectedRevision}, current ${currentRevision}`);
+  }
+  if (catalog.revision !== expectedRevision + 1) {
+    throw new Error(`Product Master next revision must be ${expectedRevision + 1}`);
+  }
 }
 
 export function runHistoryItem(run: RunState): RunHistoryItem {

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { productAliasSchema, productMasterCatalogSchema, type ProductFact } from "../src/shared/product-master.js";
 import { conflictingProductFacts, createProvisionalVariant, hasCompleteOfficialVariantFacts } from "../src/server/product-master.js";
+import { MemoryRepository } from "../src/server/repository.js";
 
 const observedAt = "2026-08-11T00:00:00.000Z";
 const fact = (field: ProductFact["field"], normalizedValue: string): ProductFact => ({
@@ -64,5 +65,16 @@ describe("Product Master v2 contracts", () => {
       brands: [], families: [], variants: [], identifiers: [], crosswalks: [], aliases: [],
       aggregates: [], decisions: [], legacyIds: [], updatedAt: observedAt
     })).toMatchObject({ schemaVersion: 2, revision: 0 });
+  });
+
+  it("stores one global catalog with optimistic revision fencing", async () => {
+    const repository = new MemoryRepository();
+    const initial = await repository.getProductMaster();
+    const next = { ...initial, revision: 1, updatedAt: "2026-08-11T00:01:00.000Z" };
+
+    await repository.saveProductMaster(next, 0);
+    await expect(repository.saveProductMaster({ ...next, revision: 2 }, 0))
+      .rejects.toThrow("revision conflict");
+    expect(await repository.getProductMaster()).toEqual(next);
   });
 });
