@@ -27,6 +27,7 @@ import { assertSafePublicUrl, extractSpreadsheetId } from "./utils/urls.js";
 import { analyzeProductIdentity } from "./utils/product-name.js";
 import { titleProductEvidence } from "./utils/product-evidence.js";
 import { normalizeObservationFeedback } from "./feedback-count.js";
+import { failureEnvelope } from "./failure-envelope.js";
 import { RunActivityTracker, runtimeSignals } from "./runtime-activity.js";
 import { normalizeProductOverride, resolveProductOverride } from "./utils/product-override.js";
 import { compactProductCatalogEvidence, reconcileProductCatalog } from "./utils/product-catalog.js";
@@ -185,18 +186,9 @@ function partialDiscoveryFailure(refs: readonly ProductRef[]): PartialDiscoveryF
 }
 
 function healthCheckFailure(message: string): AdapterBlockedError | AdapterQuotaError | ParserChangedError {
-  // Merely mentioning Apify does not make a non-Apify adapter quota-bound
-  // (for example: "Apify не используется"). Only an explicit quota/limit
-  // signal is allowed to become quota_exceeded.
-  if (
-    /quota[_\s-]*exceeded|квот|лимит[^.]{0,80}(?:исчерпан|превышен)|limit\s*exceeded|sandbox[^.]{0,80}limit/i.test(message) ||
-    /apify[^.]{0,120}(?:quota|квот|лимит|cost\s*(?:cap|limit)|budget)/i.test(message)
-  ) {
-    return new AdapterQuotaError(message);
-  }
-  if (
-    /^\s*blocked\s*:|blocked[_\s-]*free[_\s-]*mode|captcha|капч|\bpow\b|заблокирован|блокирует|access\s*denied|forbidden|HTTP\s+(?:401|403|408|425|429|498|499|5\d\d)\b/i.test(message)
-  ) {
+  const failure = failureEnvelope(new Error(message));
+  if (failure.category === "quota") return new AdapterQuotaError(message);
+  if (["access_block", "throttle", "timeout", "transport"].includes(failure.category)) {
     return new AdapterBlockedError(message);
   }
   return new ParserChangedError(message);
