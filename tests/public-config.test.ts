@@ -1970,9 +1970,11 @@ describe("fixed first-party collection egress", () => {
       "https://reviews.yandex.ru/ugcpub/sitemap_model_5980000000-5989999999-0.xml",
       "https://reviews.yandex.ru/ugcpub/sitemap_model_6010000000-6019999999-0.xml",
       "https://reviews.yandex.ru/ugcpub/sitemap_model_6020000000-6029999999-0.xml",
-      "https://reviews.yandex.ru/ugcpub/sitemap_model_6030000000-6039999999-0.xml"
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_6030000000-6039999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_6040000000-6049999999-0.xml",
+      "https://reviews.yandex.ru/ugcpub/sitemap_model_6110000000-6119999999-0.xml"
     ];
-    const unknown = "https://reviews.yandex.ru/ugcpub/sitemap_model_6040000000-6049999999-0.xml";
+    const unknown = "https://reviews.yandex.ru/ugcpub/sitemap_model_6120000000-6129999999-0.xml";
     const callBatch = (sitemap: string) => staticReviewFetch(new Request(
       "https://ratings.example/api/internal/static-review-fetch",
       {
