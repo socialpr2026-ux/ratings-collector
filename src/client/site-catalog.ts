@@ -28,7 +28,7 @@ export const SITE_CATALOG: readonly SiteCatalogGroup[] = [
     description: "Площадки с отзывами и оценками брендов и товаров",
     sites: [
       { domain: "irecommend.ru", label: "iRecommend" },
-      { domain: "reviews.yandex.ru", label: "Яндекс Отзывы", note: "Использует те же модели товаров, что и Яндекс Маркет; дубли объединяются" },
+      { domain: "reviews.yandex.ru", label: "Яндекс Отзывы", note: "Отдельная площадка; не объединяется с Яндекс Маркетом" },
       {
         domain: "med-otzyv.ru",
         label: "Мед-отзыв",

@@ -54,6 +54,42 @@ describe("partition completeness QA", () => {
     expect(validateRun(run)).toMatchObject({ ok: true, blockers: [] });
   });
 
+  it("blocks a legacy Yandex Market no-result inferred from the Yandex Reviews index", () => {
+    const run = runWithCounts(0, 0, false);
+    run.request.domains = ["market.yandex.ru"];
+    run.partitions = [{
+      domain: "market.yandex.ru",
+      brand: "Бренд",
+      status: "no_results",
+      discovered: 0,
+      collected: 0,
+      message: "Поиск исчерпан, карточек нет"
+    }];
+    run.activity = {
+      sequence: 1,
+      active: [],
+      recent: [{
+        id: `${run.id}:1`,
+        sequence: 1,
+        stage: "discovery",
+        status: "warning",
+        label: "Yandex: резервный полный индекс",
+        domain: "market.yandex.ru",
+        brand: "Бренд",
+        detail: "Market proof недоступен; проверяем полный Reviews index",
+        startedAt: run.createdAt,
+        finishedAt: run.createdAt
+      }]
+    };
+
+    const qa = validateRun(run);
+
+    expect(qa.ok).toBe(false);
+    expect(qa.blockers).toEqual([
+      expect.stringContaining("старого fallback Яндекс Отзывов")
+    ]);
+  });
+
   it("accepts only explicit historical not_found observations with empty metrics", () => {
     const historical = runWithCounts(1, 1);
     historical.observations[0] = {

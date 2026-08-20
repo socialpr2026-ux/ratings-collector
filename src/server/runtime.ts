@@ -5,7 +5,6 @@ import { WildberriesAdapter } from "./adapters/wildberries.js";
 import { YandexAdapter } from "./adapters/yandex.js";
 import type { OzonAdapter } from "./adapters/ozon.js";
 import type { WildberriesApifyAdapter } from "./adapters/wildberries-apify.js";
-import type { YandexApifyAdapter } from "./adapters/yandex-apify.js";
 import { BudgetedAdapter, createSerialExecutor, type AsyncExclusive } from "./adapters/budgeted.js";
 import { ResilientAdapter } from "./adapters/resilient.js";
 import { createReviewSiteAdapters } from "./adapters/review-sites.js";
@@ -82,25 +81,31 @@ export async function createCollectorRuntime(options: {
     detailRetryDelayMs: 750
   });
   const freeWildberries = new WildberriesAdapter({ fetch: options.fetch });
-  const freeYandex = new YandexAdapter({
+  const yandexShardProofStore = {
+    load: (jobKey: string) => repository.loadYandexShardProofs(jobKey),
+    put: (jobKey: string, proof: Parameters<Repository["saveYandexShardProof"]>[1]) =>
+      repository.saveYandexShardProof(jobKey, proof)
+  };
+  const freeYandexMarket = new YandexAdapter({
+    fetch: options.fetch,
+    source: "market"
+  });
+  const yandexReviews = new YandexAdapter({
     fetch: options.reviewsFetch ?? options.fetch,
-    shardProofStore: {
-      load: (jobKey) => repository.loadYandexShardProofs(jobKey),
-      put: (jobKey, proof) => repository.saveYandexShardProof(jobKey, proof)
-    }
+    source: "reviews",
+    shardProofStore: yandexShardProofStore
   });
   let ozon: SiteAdapter = freeOzon;
   let wildberries: SiteAdapter = freeWildberries;
-  let yandex: SiteAdapter = freeYandex;
+  let yandexMarket: SiteAdapter = freeYandexMarket;
 
   // Paid marketplace routing is deliberately absent from a normal runtime.
   // Dynamic imports also avoid constructing the legacy module-level paid
   // adapter singletons unless an operator explicitly opts in.
   if (apifyFallbackEnabled(env.APIFY_FALLBACK_ENABLED)) {
-    const [ozonModule, wildberriesModule, yandexModule] = await Promise.all([
+    const [ozonModule, wildberriesModule] = await Promise.all([
       import("./adapters/ozon.js"),
-      import("./adapters/wildberries-apify.js"),
-      import("./adapters/yandex-apify.js")
+      import("./adapters/wildberries-apify.js")
     ]);
     const monthlyLimit = apifyMonthlyBudget(env.APIFY_MONTHLY_BUDGET_USD);
     // Every paid Actor request is capped to the exact amount reserved below.
@@ -142,7 +147,7 @@ export async function createCollectorRuntime(options: {
     };
     const apifyExclusive = options.apifyExclusive ?? createSerialExecutor();
     const cappedFallback = (
-      adapter: OzonAdapter | WildberriesApifyAdapter | YandexApifyAdapter,
+      adapter: OzonAdapter | WildberriesApifyAdapter,
       reserveUsd = reservePerDiscovery
     ) => new BudgetedAdapter(adapter, {
       reservePerDiscovery: reserveUsd,
@@ -165,21 +170,16 @@ export async function createCollectorRuntime(options: {
       })),
       { isFallbackRef: wildberriesModule.isWildberriesApifyRef, stickyPrimaryFailure: false }
     );
-    yandex = new ResilientAdapter(
-      freeYandex,
-      cappedFallback(new yandexModule.YandexApifyAdapter({
-        fetch: options.fetch,
-        reviewsFetch: options.reviewsFetch,
-        token: env.APIFY_TOKEN,
-        maxTotalChargeUsd: reservePerDiscovery
-      })),
-      { isFallbackRef: yandexModule.isYandexApifyRef, stickyPrimaryFailure: false }
-    );
+    // Do not wire the legacy Yandex Apify adapter here: it discovered Market
+    // cards but replaced their metrics with reviews.yandex.ru aggregates.
+    // Market now has its own free translated first-party route, while Reviews
+    // keeps the independent exhaustive sitemap adapter below.
   }
   const known = [
     ozon,
     wildberries,
-    yandex,
+    yandexMarket,
+    yandexReviews,
     new MegamarketAdapter(evidence, options.fetch),
     new MedOtzyvAdapter(evidence, options.fetch),
     new EaptekaAdapter(evidence, options.fetch),

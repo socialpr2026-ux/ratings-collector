@@ -178,7 +178,7 @@ describe("review confirmation eligibility", () => {
       productEvidence: { scope: "listing", signals: [], variants: [], identifiers: [], imageUrls: [], instructionUrls: [] }
     })).toBe(true);
     expect(canConfirmObservation({
-      domain: "market.yandex.ru",
+      domain: "reviews.yandex.ru",
       reviews: 3,
       rating: 4.9,
       productIdentity: { ...exact, label: "Общая карточка бренда", granularity: "unresolved", confidence: "partial" },

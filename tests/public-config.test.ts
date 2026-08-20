@@ -178,6 +178,84 @@ describe("new static collector gateways", () => {
     expect(upstream).toHaveBeenCalledOnce();
   });
 
+  it("compacts a source-bound translated Yandex Market search without Sandbox", async () => {
+    const query = "Даксабрис";
+    const source = `https://market.yandex.ru/search?text=${encodeURIComponent(query)}`;
+    const target = new URL("https://market-yandex-ru.translate.goog/search");
+    target.searchParams.set("text", query);
+    target.searchParams.set("_x_tr_sl", "ru");
+    target.searchParams.set("_x_tr_tl", "en");
+    target.searchParams.set("_x_tr_hl", "en");
+    const itemList = {
+      "@context": "https://schema.org",
+      "@type": "ItemList",
+      name: "Даксабрис — купить по низкой цене на Яндекс Маркете",
+      itemListElement: [{
+        "@type": "ListItem",
+        item: {
+          "@type": "Product",
+          name: "Даксабрис таблетки покрыт. плен. об. 20 мг 100 шт",
+          url: "https://market.yandex.ru/card/daksabris-tabletki-20-mg-100-sht/103680334310",
+          sku: "103680334310",
+          aggregateRating: { ratingValue: 5, ratingCount: 2, bestRating: 5 }
+        }
+      }]
+    };
+    const upstream = vi.fn(async () => new Response(
+      `<html><head><base href="${source}"></head><body>` +
+      `<script type="application/ld+json">${JSON.stringify(itemList)}</script>` +
+      `<a href="https://market-yandex-ru.translate.goog/search?text=${encodeURIComponent(query)}&page=2&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en">next</a>` +
+      `</body></html>`,
+      { headers: { "content-type": "text/html; charset=utf-8" } }
+    ));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target.toString());
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-yandex-market-compact");
+    expect(response.headers.get("x-ratings-final-url")).toBe(source);
+    expect(proof).toContain("103680334310");
+    expect(proof).toContain('ratingCount":2');
+    expect(proof).toContain("page=2");
+    expect(proof).not.toContain("_x_tr_sl");
+
+    target.searchParams.set("redirect", "https://evil.example");
+    expect((await callGateway(target.toString())).status).toBe(400);
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it("proves an exact zero-rating Yandex Market card from its explicit empty state", async () => {
+    const source = "https://market.yandex.ru/card/tikalizis-tabletki-po-plen-60mg-60sht/5052501058/reviews";
+    const target = new URL("https://market-yandex-ru.translate.goog/card/tikalizis-tabletki-po-plen-60mg-60sht/5052501058/reviews");
+    target.searchParams.set("_x_tr_sl", "ru");
+    target.searchParams.set("_x_tr_tl", "en");
+    target.searchParams.set("_x_tr_hl", "en");
+    const upstream = vi.fn(async () => new Response(
+      `<html><head><base href="${source}"></head><body>` +
+      `<script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "Product",
+        name: "Тикализис таблетки п/о плен. 60мг 60шт",
+        url: source
+      })}</script>` +
+      `<script>window.__STATE__={"pageTitle":"Нет отзывов и оценок","skuId":"5052501058"}</script>` +
+      `</body></html>`,
+      { headers: { "content-type": "text/html; charset=utf-8" } }
+    ));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target.toString());
+    const proof = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(proof).toContain('"ratingCount":0');
+    expect(proof).toContain('"reviewCount":0');
+    expect(proof).toContain('"ratingValue":0');
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
   it("proxies only exact Ozon composer search or product paths", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));

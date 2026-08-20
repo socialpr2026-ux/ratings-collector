@@ -97,6 +97,7 @@ const PLATFORM_LABELS: Readonly<Record<string, string>> = {
   "ozon.ru": "Ozon",
   "wildberries.ru": "Wildberries",
   "market.yandex.ru": "Яндекс Маркет",
+  "reviews.yandex.ru": "Яндекс Отзывы",
   "megamarket.ru": "Мегамаркет",
   "irecommend.ru": "iRecommend",
   "med-otzyv.ru": "Мед-отзыв",
@@ -150,7 +151,7 @@ const PLATFORM_LABELS: Readonly<Record<string, string>> = {
 };
 
 function normalizedDomain(domain: string): string {
-  return domain.toLocaleLowerCase("en-US").replace(/^www\./, "").replace(/^reviews\.yandex\.ru$/, "market.yandex.ru");
+  return domain.toLocaleLowerCase("en-US").replace(/^www\./, "");
 }
 
 function platformLabel(domain: string): string {

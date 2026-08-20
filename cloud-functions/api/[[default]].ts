@@ -144,19 +144,41 @@ type Pharmacy009Target = {
 };
 
 type YandexMarketTranslateTarget = {
+  kind: "card";
   source: URL;
   listingId: string;
+} | {
+  kind: "search";
+  source: URL;
+  query: string;
+  page: number;
 };
 
 function parseYandexMarketTranslateTarget(target: URL): YandexMarketTranslateTarget | undefined {
   if (target.protocol !== "https:" || target.hostname !== YANDEX_MARKET_TRANSLATE_HOST || target.port ||
-    target.username || target.password || target.hash || !exactTranslateParameters(target) ||
-    [...target.searchParams.keys()].some((key) => !PHARMACY_TRANSLATE_PARAMETERS.has(key) || target.searchParams.getAll(key).length !== 1)) {
+    target.username || target.password || target.hash || !exactTranslateParameters(target)) {
     return undefined;
   }
+  if (target.pathname === "/search") {
+    if ([...target.searchParams.keys()].some((key) =>
+      !PHARMACY_TRANSLATE_PARAMETERS.has(key) && !["text", "page"].includes(key)
+    ) || [...target.searchParams.keys()].some((key) => target.searchParams.getAll(key).length !== 1)) return undefined;
+    const query = singleSearchParameter(target, "text")?.normalize("NFKC").trim() ?? "";
+    const pageText = singleSearchParameter(target, "page") ?? "1";
+    if (query.length < 2 || query.length > 160 || !/^\d+$/.test(pageText) || Number(pageText) < 1 || Number(pageText) > 50) {
+      return undefined;
+    }
+    const source = new URL("/search", "https://market.yandex.ru");
+    source.searchParams.set("text", query);
+    if (Number(pageText) > 1) source.searchParams.set("page", pageText);
+    return { kind: "search", source, query, page: Number(pageText) };
+  }
+  if ([...target.searchParams.keys()].some((key) =>
+    !PHARMACY_TRANSLATE_PARAMETERS.has(key) || target.searchParams.getAll(key).length !== 1
+  )) return undefined;
   const card = target.pathname.match(/^\/card\/[a-z0-9][a-z0-9-]*\/(\d+)\/reviews\/?$/i);
   if (!card) return undefined;
-  return { source: new URL(target.pathname, "https://market.yandex.ru"), listingId: card[1] };
+  return { kind: "card", source: new URL(target.pathname, "https://market.yandex.ru"), listingId: card[1] };
 }
 
 function parseUtekaReviewsTarget(target: URL): UtekaReviewsTarget | undefined {
@@ -1380,6 +1402,113 @@ function compactYandexMarketTranslateHtml(
   let base: URL;
   try { base = new URL(baseValue ?? ""); }
   catch { return undefined; }
+  if (requested.kind === "search") {
+    const basePage = base.searchParams.get("page") ?? "1";
+    if (base.protocol !== "https:" || base.hostname !== "market.yandex.ru" || base.port || base.username ||
+      base.password || base.hash || base.pathname !== "/search" ||
+      base.searchParams.getAll("text").length !== 1 ||
+      base.searchParams.get("text")?.normalize("NFKC").trim() !== requested.query ||
+      base.searchParams.getAll("page").length > 1 || basePage !== String(requested.page) ||
+      [...base.searchParams.keys()].some((key) => !["text", "page"].includes(key))) return undefined;
+
+    const normalizedQuery = requested.query.normalize("NFKC").toLocaleLowerCase("ru-RU");
+    const itemLists: Array<Record<string, unknown>> = [];
+    $("script[type='application/ld+json']").each((_index, node) => {
+      try {
+        const value = JSON.parse($(node).text().trim()) as unknown;
+        if (value && typeof value === "object" && !Array.isArray(value) &&
+          (value as Record<string, unknown>)["@type"] === "ItemList") {
+          itemLists.push(value as Record<string, unknown>);
+        }
+      } catch { /* ignore unrelated malformed structured data */ }
+    });
+    if (itemLists.length !== 1) {
+      const visible = $.root().text().normalize("NFKC").toLocaleLowerCase("ru-RU")
+        .replace(/ё/g, "е").replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
+      const query = normalizedQuery.replace(/ё/g, "е").replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
+      if (!visible.includes(`по запросу ${query} ничего не нашли`) &&
+        !visible.includes(`по запросу ${query} ничего не нашлось`)) return undefined;
+      return `<html><head><base href="${escapeHtml(requested.source.toString())}"></head><body>` +
+        `<p>По запросу ${escapeHtml(requested.query)} ничего не нашли</p></body></html>`;
+    }
+
+    const itemList = itemLists[0];
+    const listName = typeof itemList.name === "string"
+      ? itemList.name.normalize("NFKC").replace(/\s+/g, " ").trim()
+      : "";
+    const entries = Array.isArray(itemList.itemListElement) ? itemList.itemListElement : [];
+    if (!listName.toLocaleLowerCase("ru-RU").includes(normalizedQuery) || entries.length < 1 || entries.length > 200) {
+      return undefined;
+    }
+    const compactEntries: Array<Record<string, unknown>> = [];
+    for (const [index, entry] of entries.entries()) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return undefined;
+      const item = (entry as Record<string, unknown>).item;
+      if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+      const product = item as Record<string, unknown>;
+      const types = Array.isArray(product["@type"]) ? product["@type"] : [product["@type"]];
+      const name = typeof product.name === "string" ? product.name.normalize("NFKC").replace(/\s+/g, " ").trim() : "";
+      const rawUrl = typeof product.url === "string" ? product.url : typeof product["@id"] === "string" ? product["@id"] : "";
+      let productUrl: URL;
+      try { productUrl = new URL(rawUrl); }
+      catch { return undefined; }
+      const cardId = productUrl.pathname.match(/^\/card\/[a-z0-9][a-z0-9-]*\/(\d+)\/?$/i)?.[1];
+      if (!types.some((type) => String(type).toLocaleLowerCase("en-US") === "product") || !name ||
+        productUrl.protocol !== "https:" || productUrl.hostname !== "market.yandex.ru" || productUrl.port ||
+        productUrl.username || productUrl.password || productUrl.search || productUrl.hash || !cardId) return undefined;
+      const compactProduct: Record<string, unknown> = {
+        "@type": "Product",
+        name,
+        url: productUrl.toString()
+      };
+      const aggregate = product.aggregateRating;
+      if (aggregate !== undefined) {
+        if (!aggregate || typeof aggregate !== "object" || Array.isArray(aggregate)) return undefined;
+        const ratingCount = Number((aggregate as Record<string, unknown>).ratingCount);
+        const ratingValue = Number(String((aggregate as Record<string, unknown>).ratingValue ?? "").replace(",", "."));
+        const bestRating = (aggregate as Record<string, unknown>).bestRating === undefined
+          ? 5 : Number((aggregate as Record<string, unknown>).bestRating);
+        if (!Number.isSafeInteger(ratingCount) || ratingCount < 0 || !Number.isFinite(bestRating) || bestRating <= 0 ||
+          !Number.isFinite(ratingValue) || ratingValue < 0 || ratingValue > bestRating || ratingCount > 0 && ratingValue === 0) {
+          return undefined;
+        }
+        compactProduct.aggregateRating = { "@type": "AggregateRating", ratingCount, ratingValue, bestRating };
+      }
+      const sku = typeof product.sku === "number" || typeof product.sku === "string" ? String(product.sku).trim() : "";
+      if (sku) {
+        if (!/^\d{1,40}$/.test(sku)) return undefined;
+        compactProduct.sku = sku;
+      }
+      compactEntries.push({ "@type": "ListItem", position: index + 1, item: compactProduct });
+    }
+
+    let hasNext = false;
+    $("a[href]").each((_index, node) => {
+      if (hasNext) return;
+      let candidate: URL;
+      try { candidate = new URL($(node).attr("href")!, base); }
+      catch { return; }
+      if (candidate.hostname === YANDEX_MARKET_TRANSLATE_HOST) {
+        if (!exactTranslateParameters(candidate)) return;
+      } else if (candidate.hostname !== "market.yandex.ru") return;
+      if (candidate.protocol === "https:" && candidate.pathname === "/search" &&
+        candidate.searchParams.getAll("text").length === 1 &&
+        candidate.searchParams.get("text")?.normalize("NFKC").trim() === requested.query &&
+        candidate.searchParams.getAll("page").length === 1 &&
+        candidate.searchParams.get("page") === String(requested.page + 1)) hasNext = true;
+    });
+    const proof = JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "ItemList",
+      name: listName,
+      itemListElement: compactEntries
+    }).replace(/<\//g, "\\u003c/");
+    const next = hasNext
+      ? `<a href="${escapeHtml(new URL(`/search?text=${encodeURIComponent(requested.query)}&page=${requested.page + 1}`, "https://market.yandex.ru").toString())}">Следующая</a>`
+      : "";
+    return `<html><head><base href="${escapeHtml(requested.source.toString())}"></head><body>` +
+      `<script type="application/ld+json">${proof}</script>${next}</body></html>`;
+  }
   if (base.protocol !== "https:" || base.hostname !== "market.yandex.ru" || base.port || base.username ||
     base.password || base.search || base.hash || base.pathname.replace(/\/$/, "") !== requested.source.pathname.replace(/\/$/, "")) {
     return undefined;
@@ -1416,9 +1545,14 @@ function compactYandexMarketTranslateHtml(
   const aggregate = product.aggregateRating && typeof product.aggregateRating === "object" && !Array.isArray(product.aggregateRating)
     ? product.aggregateRating as Record<string, unknown>
     : undefined;
-  const ratingCount = Number(aggregate?.ratingCount);
-  const reviewCount = aggregate?.reviewCount === undefined ? undefined : Number(aggregate.reviewCount);
-  const ratingValue = Number(aggregate?.ratingValue);
+  const exactEmptyState = !aggregate && (
+    /"emptyState"\s*:\s*\{\s*"title"\s*:\s*"Нет отзывов и оценок"\s*,\s*"description"\s*:\s*"Отзывов и оценок пока нет - жд[её]м вместе с вами"/iu.test(html) ||
+    /"pageTitle"\s*:\s*"Нет отзывов и оценок"/iu.test(html) &&
+      new RegExp(`"skuId"\\s*:\\s*"${requested.listingId}"`, "u").test(html)
+  );
+  const ratingCount = exactEmptyState ? 0 : Number(aggregate?.ratingCount);
+  const reviewCount = exactEmptyState ? 0 : aggregate?.reviewCount === undefined ? undefined : Number(aggregate.reviewCount);
+  const ratingValue = exactEmptyState ? 0 : Number(aggregate?.ratingValue);
   const bestRating = aggregate?.bestRating === undefined ? 5 : Number(aggregate.bestRating);
   if (!name || !Number.isSafeInteger(ratingCount) || ratingCount < 0 ||
     reviewCount !== undefined && (!Number.isSafeInteger(reviewCount) || reviewCount < 0) ||

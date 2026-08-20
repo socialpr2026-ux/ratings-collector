@@ -50,16 +50,13 @@ function domainOnly(input: string): string {
   const url = assertSafePublicUrl(candidate);
   if (url.protocol !== "https:") throw new Error("Разрешены только HTTPS-площадки");
   if (url.pathname !== "/" || url.search || url.hash) throw new Error(`Укажите домен без пути: ${input}`);
-  const hostname = url.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
-  // Yandex Reviews is the collection origin, while the stable public contract
-  // and row identity use the marketplace domain.
-  return hostname === "reviews.yandex.ru" ? "market.yandex.ru" : hostname;
+  return url.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
 }
 
 function resolveYandexFamilyOverride(item: Observation, value: string): ProductIdentity | undefined {
   const label = normalizeProductOverride(value);
   if (
-    item.domain !== "market.yandex.ru" ||
+    item.domain !== "reviews.yandex.ru" ||
     normalizeText(label) !== normalizeText(item.brand) ||
     item.productEvidence?.scope !== "listing" ||
     !/^yandex_reviews_/i.test(item.source ?? "") ||
@@ -330,7 +327,20 @@ export class RatingsService {
     return run;
   }
 
-  async getRun(id: string): Promise<RunState | undefined> { return this.repository.getRun(id); }
+  async getRun(id: string): Promise<RunState | undefined> {
+    const run = await this.repository.getRun(id);
+    if (!run || run.status !== "review") return run;
+    // Re-evaluate terminal review snapshots on read so a deployment that
+    // tightens a fail-closed proof contract immediately protects existing
+    // employee runs. Persist only an actual change; ordinary 2.5–10 second
+    // polling must not create repository writes or revision churn.
+    const qa = validateRun(run);
+    if (JSON.stringify(run.qa) !== JSON.stringify(qa)) {
+      run.qa = qa;
+      await this.repository.saveRun(run);
+    }
+    return run;
+  }
 
   /**
    * Converts a worker-level persistence interruption into an ordinary partial

@@ -1231,7 +1231,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
         }
       }]
     })}</script>`;
-    const directFetch = vi.fn(async () => new Response(html, {
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(html, {
       headers: { "content-type": "text/html; charset=utf-8" }
     }));
     vi.stubGlobal("fetch", directFetch);
@@ -1252,10 +1252,48 @@ describe("ratings Agent lazy Sandbox routing", () => {
       products: [{ id: "103552838702", ratingCount: 24, rating: 4.8, familyId: "101758091850" }]
     });
     expect(directFetch).toHaveBeenCalledOnce();
+    const translatedRequest = new URL(JSON.parse(String((directFetch.mock.calls[0]![1] as RequestInit).body)).url);
+    expect(translatedRequest.hostname).toBe("market-yandex-ru.translate.goog");
+    expect(translatedRequest.pathname).toBe("/search");
+    expect(translatedRequest.searchParams.get("text")).toBe("Энтеролактис");
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("retries one strict Yandex search proof miss through fixed egress before acquiring Sandbox", async () => {
+  it("uses an exact translated Yandex Market card proof without acquiring Sandbox", async () => {
+    const run = vi.fn(async () => undefined);
+    const source = "https://market.yandex.ru/card/tikalizis-tabletki-po-plen-60mg-60sht/5052501058/reviews";
+    const html = `<html><body><script type="application/ld+json">${JSON.stringify({
+      "@type": "Product",
+      name: "Тикализис таблетки п/о плен. 60мг 60шт",
+      url: source,
+      aggregateRating: { ratingValue: 0, ratingCount: 0, reviewCount: 0, bestRating: 5 }
+    })}</script></body></html>`;
+    const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(html, {
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "x-ratings-source": "google-translate-yandex-market-compact",
+        "x-ratings-final-url": source
+      }
+    }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(source, {
+      headers: { "x-ratings-browser": "1", "x-ratings-browser-mode": "yandex-market-proof" }
+    });
+
+    expect(await response.text()).toContain('"ratingCount":0');
+    const translatedRequest = new URL(JSON.parse(String((directFetch.mock.calls[0]![1] as RequestInit).body)).url);
+    expect(translatedRequest.toString()).toBe(
+      "https://market-yandex-ru.translate.goog/card/tikalizis-tabletki-po-plen-60mg-60sht/5052501058/reviews?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
+    );
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("retries one strict translated Yandex search proof miss before acquiring Sandbox", async () => {
     const run = vi.fn(async () => undefined);
     const exactHtml = `<script type="application/ld+json">${JSON.stringify({
       "@type": "ItemList",
@@ -1300,7 +1338,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("keeps two unproven fixed Yandex search responses fail-closed and falls back to Sandbox", async () => {
+  it("keeps two unproven translated Yandex search responses fail-closed and falls back to Sandbox", async () => {
     const run = vi.fn(async () => {
       throw new Error("test Sandbox unavailable");
     });

@@ -444,7 +444,7 @@ describe("collector runtime fallback integration", () => {
     expect(requestedUrls.some((url) => url.hostname === "api.apify.com")).toBe(false);
   });
 
-  it("preserves the capped paid marketplace fallbacks only after explicit opt-in", async () => {
+  it("keeps only source-correct paid marketplace fallbacks after explicit opt-in", async () => {
     const mocked = marketplaceFetch(1);
     const runtime = await createCollectorRuntime({
       repository: new MemoryRepository(),
@@ -458,9 +458,9 @@ describe("collector runtime fallback integration", () => {
 
     expect(run.partitions).toMatchObject([
       { domain: "wildberries.ru", brand: "Кагоцел", status: "complete", discovered: 1, collected: 1 },
-      { domain: "market.yandex.ru", brand: "Кагоцел", status: "complete", discovered: 1, collected: 1 }
+      { domain: "market.yandex.ru", brand: "Кагоцел", status: "blocked", discovered: 0, collected: 0 }
     ]);
-    expect(run.observations).toHaveLength(2);
+    expect(run.observations).toHaveLength(1);
     expect(run.observations.find((item) => item.domain === "wildberries.ru")).toMatchObject({
       listingId: "822686443",
       reviews: 106,
@@ -468,17 +468,10 @@ describe("collector runtime fallback integration", () => {
       status: "ok",
       source: "apify:piotrv1001/wildberries-listings-scraper:listing"
     });
-    expect(run.observations.find((item) => item.domain === "market.yandex.ru")).toMatchObject({
-      listingId: "265149860",
-      reviews: 1827,
-      writtenReviewCount: 711,
-      rating: 4.7,
-      status: "ok",
-      source: "yandex_reviews_json_ld"
-    });
-    expect(mocked.paidPaths).toHaveLength(2);
+    expect(run.observations.find((item) => item.domain === "market.yandex.ru")).toBeUndefined();
+    expect(mocked.paidPaths).toHaveLength(1);
     expect(mocked.paidPaths.some((path) => path.includes("piotrv1001~wildberries-listings-scraper"))).toBe(true);
-    expect(mocked.paidPaths.some((path) => path.includes("yandex-market-scraper"))).toBe(true);
+    expect(mocked.paidPaths.some((path) => path.includes("yandex-market-scraper"))).toBe(false);
     expect(mocked.maximumPaidCalls()).toBe(1);
     expect(mocked.requestedUrls.some((url) => url.hostname === "card.wb.ru")).toBe(false);
   });
@@ -497,9 +490,12 @@ describe("collector runtime fallback integration", () => {
     expect(run.observations).toEqual([]);
     expect(run.partitions).toHaveLength(2);
     expect(run.partitions.every((partition) => partition.status === "blocked")).toBe(true);
-    expect(run.partitions.every((partition) => partition.message?.includes("quota_exceeded"))).toBe(true);
-    expect(run.errors).toHaveLength(2);
-    expect(run.errors.every((error) => error.message.includes("quota_exceeded"))).toBe(true);
+    expect(run.partitions.find((partition) => partition.domain === "wildberries.ru")?.message)
+      .toContain("quota_exceeded");
+    expect(run.partitions.find((partition) => partition.domain === "market.yandex.ru")?.message)
+      .toContain("Yandex Market exact search route is unavailable");
+    expect(run.errors).toHaveLength(1);
+    expect(run.errors[0]?.message).toContain("quota_exceeded");
     expect(mocked.paidPaths).toEqual([]);
   });
 
@@ -551,12 +547,12 @@ describe("collector runtime fallback integration", () => {
     });
     const created = await runtime.service.createRun({
       ...request,
-      domains: ["market.yandex.ru"]
+      domains: ["reviews.yandex.ru"]
     });
 
     const first = await runtime.service.executeRun(created.id);
     expect(first.partitions).toEqual([{
-      domain: "market.yandex.ru",
+      domain: "reviews.yandex.ru",
       brand: "Кагоцел",
       status: "blocked",
       discovered: 0,
@@ -566,14 +562,14 @@ describe("collector runtime fallback integration", () => {
 
     const retried = await runtime.service.executeRun(created.id);
     expect(retried.partitions).toMatchObject([{
-      domain: "market.yandex.ru",
+      domain: "reviews.yandex.ru",
       brand: "Кагоцел",
       status: "complete",
       discovered: 1,
       collected: 1
     }]);
     expect(retried.observations).toMatchObject([{
-      domain: "market.yandex.ru",
+      domain: "reviews.yandex.ru",
       listingId: "265149860",
       reviews: 1827,
       writtenReviewCount: 711,

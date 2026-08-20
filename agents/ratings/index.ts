@@ -878,23 +878,38 @@ export function browserFetch(
       if (!isSearch && !isCard) {
         throw new Error("Yandex Market browser proof is restricted to bounded search or exact reviews routes");
       }
-      if (isSearch && staticProxy) {
-        // Yandex intermittently serves an unhydrated 200 shell from one fixed
-        // egress request and the complete source-bound ItemList immediately
-        // afterwards. Retry that exact bounded URL once before entering the
-        // Yandex Sandbox lane. Both attempts use the same strict proof; two
-        // misses still fall through and can never become an empty result.
+      if (staticProxy) {
+        // The fixed Function cannot request market.yandex.ru directly, while
+        // Google's translated first-party renderer returns the source-bound
+        // Market ItemList/card JSON-LD without spending Sandbox GB-s. Keep the
+        // exact query/page or card path and let the Function compact only a
+        // cryptographically transport-bound, strictly parsed proof.
+        const translated = new URL(url.pathname, "https://market-yandex-ru.translate.goog");
+        if (isSearch) {
+          translated.searchParams.set("text", query);
+          if (Number(pageText) > 1) translated.searchParams.set("page", pageText);
+        }
+        translated.searchParams.set("_x_tr_sl", "ru");
+        translated.searchParams.set("_x_tr_tl", "en");
+        translated.searchParams.set("_x_tr_hl", "en");
         for (let attempt = 1; attempt <= 2; attempt += 1) {
           try {
-            const proxied = await fetchViaStaticProxy(url, request.signal);
+            const proxied = await fetchViaStaticProxy(translated, request.signal);
             const contentType = proxied.headers.get("content-type") ?? "";
             const contentLength = Number(proxied.headers.get("content-length"));
             if (proxied.ok && /html/i.test(contentType) &&
-              (!Number.isFinite(contentLength) || contentLength <= 10_000_000)) {
+              (!Number.isFinite(contentLength) || contentLength <= 100_000)) {
               const html = await proxied.text();
-              if (html.length <= 10_000_000) {
+              if (html.length <= 100_000 && isSearch) {
                 const proof = extractYandexMarketSearchHtmlProof(html, query, Number(pageText));
                 if (proof) return json(proof);
+                if (hasExplicitYandexMarketNoResults(html, query)) {
+                  return json({ query, page: Number(pageText), hasNext: false, products: [] });
+                }
+              } else if (html.length <= 100_000 &&
+                proxied.headers.get("x-ratings-source") === "google-translate-yandex-market-compact" &&
+                proxied.headers.get("x-ratings-final-url") === url.toString()) {
+                return new Response(html, { status: 200, headers: proxied.headers });
               }
             }
           } catch (error) {
@@ -906,9 +921,9 @@ export function browserFetch(
             await abortableDelay(YANDEX_MARKET_STATIC_RETRY_DELAY_MS, request.signal);
           }
         }
-        // The strict first-party JSON-LD proof was unavailable twice through
-        // fixed egress. Continue to the rendered browser route without changing
-        // a challenge, timeout or unknown response into an empty result.
+        // The strict translated first-party proof was unavailable twice.
+        // Continue to the rendered browser route without changing a challenge,
+        // timeout or unknown response into an empty result.
       }
       return runBrowserTask("yandex", async () => {
         let response!: Response;

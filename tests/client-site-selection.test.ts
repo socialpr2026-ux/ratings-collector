@@ -41,6 +41,8 @@ describe("site picker catalog", () => {
       "etabl.ru",
       "apteka-april.ru"
     ]));
+    expect(SITE_CATALOG.flatMap((group) => group.sites).find((site) => site.domain === "reviews.yandex.ru"))
+      .toMatchObject({ note: "Отдельная площадка; не объединяется с Яндекс Маркетом" });
     expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("medum.ru");
     expect(SELECTABLE_CATALOG_DOMAINS).not.toContain("med-otzyv.ru");
     expect(SITE_CATALOG.flatMap((group) => group.sites).find((site) => site.domain === "med-otzyv.ru")).toMatchObject({

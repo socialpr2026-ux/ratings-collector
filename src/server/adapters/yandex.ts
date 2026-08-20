@@ -159,6 +159,12 @@ async function fetchWithDeadline(
 
 export type YandexAdapterOptions = {
   fetch?: typeof globalThis.fetch;
+  /**
+   * Production source contract. `market` uses only market.yandex.ru search/card
+   * proof; `reviews` uses only reviews.yandex.ru model sitemaps/pages. `legacy`
+   * remains test-only compatibility for older focused fixtures.
+   */
+  source?: "market" | "reviews" | "legacy";
   sitemapIndexUrl?: string;
   /** Maximum number of model sitemap documents inspected during one discovery. */
   maxSitemaps?: number;
@@ -226,8 +232,9 @@ const CYRILLIC_TO_YANDEX_LATIN: Record<string, string> = {
  */
 export class YandexAdapter implements SiteAdapter {
   readonly id = "yandex";
-  readonly supportedDomains = ["market.yandex.ru", "reviews.yandex.ru"] as const;
+  readonly supportedDomains: readonly string[];
 
+  private readonly source: "market" | "reviews" | "legacy";
   private readonly fallbackFetch: typeof globalThis.fetch;
   private readonly sitemapIndexUrl: string;
   private readonly maxSitemaps: number;
@@ -257,6 +264,10 @@ export class YandexAdapter implements SiteAdapter {
   private readonly unavailableMarketRuns = new Set<string>();
 
   constructor(options: YandexAdapterOptions = {}) {
+    this.source = options.source ?? "legacy";
+    this.supportedDomains = this.source === "market"
+      ? ["market.yandex.ru"]
+      : this.source === "reviews" ? ["reviews.yandex.ru"] : ["market.yandex.ru", "reviews.yandex.ru"];
     this.fallbackFetch = options.fetch ?? globalThis.fetch;
     this.sitemapIndexUrl = options.sitemapIndexUrl ?? DEFAULT_SITEMAP_INDEX;
     // The live index grows over time. The hard ceiling catches a structural
@@ -309,6 +320,12 @@ export class YandexAdapter implements SiteAdapter {
 
   async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
     const checkedAt = this.now().toISOString();
+    if (this.source === "market") {
+      const fetcher = (context.fetch ?? this.fallbackFetch) as YandexCapableFetch;
+      return fetcher.yandexMarketBrowserEndpoint
+        ? { ok: true, checkedAt, message: "Yandex Market exact search route is configured" }
+        : { ok: false, checkedAt, message: "Yandex Market exact search route is unavailable" };
+    }
     const knownModelIds = previousModelIds(context.previousIds ?? []);
     if (knownModelIds.length > 0 && !context.refreshDiscovery) {
       return {
@@ -347,7 +364,7 @@ export class YandexAdapter implements SiteAdapter {
     }));
 
     for (const listingId of knownIds) {
-      refs.set(listingId, productRefFromPreviousId(listingId, brand, previousRefs.get(listingId)));
+      refs.set(listingId, this.sourceRef(productRefFromPreviousId(listingId, brand, previousRefs.get(listingId))));
     }
 
     // Repeat collections validate the exact models retained after the previous
@@ -359,7 +376,8 @@ export class YandexAdapter implements SiteAdapter {
 
     const fetcher = (context.fetch ?? this.fallbackFetch) as YandexCapableFetch;
     const marketRunKey = context.runId?.trim();
-    if (fetcher.yandexMarketBrowserEndpoint && (!marketRunKey || !this.unavailableMarketRuns.has(marketRunKey))) {
+    if (this.source !== "reviews" && fetcher.yandexMarketBrowserEndpoint &&
+      (!marketRunKey || !this.unavailableMarketRuns.has(marketRunKey))) {
       try {
         for (const ref of await this.discoverMarketCards(
           fetcher.yandexMarketBrowserEndpoint,
@@ -380,7 +398,7 @@ export class YandexAdapter implements SiteAdapter {
       } catch (error) {
         if (!(error instanceof AdapterBlockedError) && !(error instanceof AdapterQuotaError) &&
           !(error instanceof ParserChangedError)) throw error;
-        if (context.signal?.aborted) throw error;
+        if (context.signal?.aborted || this.source === "market") throw error;
         if (marketRunKey) {
           this.unavailableMarketRuns.add(marketRunKey);
           while (this.unavailableMarketRuns.size > 8) {
@@ -398,6 +416,12 @@ export class YandexAdapter implements SiteAdapter {
           detail: `Market proof недоступен; проверяем полный Reviews index: ${errorMessage(error)}`
         });
       }
+    }
+
+    if (this.source === "market") {
+      throw new AdapterBlockedError(
+        `Yandex Market exact search is unavailable for ${brand}; Yandex Reviews cannot prove Market completeness`
+      );
     }
 
     const brands = uniqueDiscoveryBrands(brand, context.brands ?? []);
@@ -419,7 +443,7 @@ export class YandexAdapter implements SiteAdapter {
     const discovered = discoveredByBrand.get(brandKey(brand));
     if (discovered instanceof AdapterBlockedError) throw discovered;
     for (const ref of discovered ?? []) {
-      refs.set(ref.listingId, ref);
+      refs.set(ref.listingId, this.sourceRef(ref));
     }
 
     if (refs.size > this.maxCandidates) {
@@ -971,6 +995,24 @@ export class YandexAdapter implements SiteAdapter {
   }
 
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
+    const listingId = normalizeListingId(ref.listingId) ?? extractModelId(ref.url) ?? extractMarketCardId(ref.url);
+    if (!listingId) throw new ParserChangedError(`Invalid Yandex modelId: ${ref.listingId}`);
+    const marketCard = isAllowedMarketCardReviewsUrl(ref.url, listingId);
+    if (this.source === "market" && !marketCard) {
+      throw new ParserChangedError(`Yandex Market collection received a non-Market card: ${ref.url}`);
+    }
+    if (this.source === "reviews" && marketCard) {
+      throw new ParserChangedError(`Yandex Reviews collection received a Market card: ${ref.url}`);
+    }
+    const observation = await this.collectSource(ref, context);
+    return this.source === "reviews" ? { ...observation, domain: "reviews.yandex.ru" } : observation;
+  }
+
+  private sourceRef(ref: ProductRef): ProductRef {
+    return this.source === "reviews" ? { ...ref, domain: "reviews.yandex.ru" } : ref;
+  }
+
+  private async collectSource(ref: ProductRef, context: AdapterContext): Promise<Observation> {
     const listingId = normalizeListingId(ref.listingId) ?? extractModelId(ref.url) ?? extractMarketCardId(ref.url);
     if (!listingId) throw new ParserChangedError(`Invalid Yandex modelId: ${ref.listingId}`);
     if (isAllowedMarketCardReviewsUrl(ref.url, listingId)) {

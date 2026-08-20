@@ -533,13 +533,49 @@ describe("run orchestration and fail-closed QA", () => {
     await expect(first).resolves.toMatchObject({ status: "review" });
   });
 
-  it("canonicalizes the Yandex Reviews collection alias to the marketplace domain", async () => {
+  it("keeps Yandex Reviews and Yandex Market as separate collection domains", async () => {
     const repository = new MemoryRepository();
     const service = new RatingsService(repository, async () => new FakeAdapter());
     const run = await service.createRun({ ...request, domains: ["reviews.yandex.ru", "market.yandex.ru"] });
 
-    expect(run.request.domains).toEqual(["market.yandex.ru"]);
-    expect(run.progress.totalPartitions).toBe(1);
+    expect(run.request.domains).toEqual(["reviews.yandex.ru", "market.yandex.ru"]);
+    expect(run.progress.totalPartitions).toBe(2);
+  });
+
+  it("revalidates a stored legacy Market no-result that came from Yandex Reviews", async () => {
+    const repository = new MemoryRepository();
+    const service = new RatingsService(repository, async () => new FakeAdapter());
+    const run = await service.createRun({ ...request, domains: ["market.yandex.ru"], brands: ["Даксабрис"] });
+    run.status = "review";
+    run.progress.completedPartitions = 1;
+    run.partitions = [{
+      domain: "market.yandex.ru",
+      brand: "Даксабрис",
+      status: "no_results",
+      discovered: 0,
+      collected: 0,
+      message: "Поиск исчерпан, карточек нет"
+    }];
+    run.qa = { ok: true, blockers: [], warnings: [] };
+    run.activity = {
+      sequence: 1,
+      active: [],
+      recent: [{
+        id: `${run.id}:1`, sequence: 1, stage: "discovery", status: "warning",
+        label: "Yandex: резервный полный индекс", domain: "market.yandex.ru", brand: "Даксабрис",
+        detail: "Market proof недоступен; проверяем полный Reviews index",
+        startedAt: run.createdAt, finishedAt: run.createdAt
+      }]
+    };
+    await repository.saveRun(run);
+
+    const refreshed = await service.getRun(run.id);
+
+    expect(refreshed?.qa).toMatchObject({
+      ok: false,
+      blockers: [expect.stringContaining("старого fallback Яндекс Отзывов")]
+    });
+    expect((await repository.getRun(run.id))?.qa?.ok).toBe(false);
   });
 
   it("deduplicates equivalent brand spellings before creating partitions", async () => {
@@ -1140,13 +1176,13 @@ describe("run orchestration and fail-closed QA", () => {
     await expect(legacyReviewService.approveObservations(legacyReviewRun.id, ["irecommend.ru:11557796"]))
       .resolves.toMatchObject({ observations: [{ status: "ok", productIdentity: { granularity: "family" } }] });
 
-    const yandexRequest = { ...request, domains: ["market.yandex.ru"], brands: ["Даксабрис"] };
+    const yandexRequest = { ...request, domains: ["reviews.yandex.ru"], brands: ["Даксабрис"] };
     const yandexService = new RatingsService(new MemoryRepository(), async () => ({
       id: "yandex-review-aggregate",
-      supportedDomains: ["market.yandex.ru"],
+      supportedDomains: ["reviews.yandex.ru"],
       async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
       async discover(brand: string) {
-        return [{ domain: "market.yandex.ru", platform: "yandex", listingId: "900082876", brand, url: "https://reviews.yandex.ru/product/daksabris--900082876", metadata: {} }];
+        return [{ domain: "reviews.yandex.ru", platform: "yandex", listingId: "900082876", brand, url: "https://reviews.yandex.ru/product/daksabris--900082876", metadata: {} }];
       },
       async collect(ref: ProductRef): Promise<Observation> {
         return {
@@ -1158,7 +1194,7 @@ describe("run orchestration and fail-closed QA", () => {
       }
     }));
     const yandexRun = await yandexService.executeRun((await yandexService.createRun(yandexRequest)).id);
-    await expect(yandexService.approveObservations(yandexRun.id, ["market.yandex.ru:900082876"]))
+    await expect(yandexService.approveObservations(yandexRun.id, ["reviews.yandex.ru:900082876"]))
       .resolves.toMatchObject({ observations: [{ status: "ok", productIdentity: { granularity: "family" } }] });
   });
 
@@ -1166,11 +1202,11 @@ describe("run orchestration and fail-closed QA", () => {
     const repository = new MemoryRepository();
     const service = new RatingsService(repository, async () => ({
       id: "yandex-family-normalization",
-      supportedDomains: ["market.yandex.ru"],
+      supportedDomains: ["reviews.yandex.ru"],
       async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
       async discover(brand: string) {
         return [{
-          domain: "market.yandex.ru", platform: "yandex", listingId: "704207830", brand,
+          domain: "reviews.yandex.ru", platform: "yandex", listingId: "704207830", brand,
           url: "https://reviews.yandex.ru/product/semavik--704207830", metadata: {}
         }];
       },
@@ -1188,14 +1224,14 @@ describe("run orchestration and fail-closed QA", () => {
     }));
     const run = await service.executeRun((await service.createRun({
       ...request,
-      domains: ["market.yandex.ru"],
+      domains: ["reviews.yandex.ru"],
       brands: ["Семавик"]
     })).id);
 
     const approved = await service.approveObservations(
       run.id,
-      ["market.yandex.ru:704207830"],
-      { "market.yandex.ru:704207830": "Семавик" }
+      ["reviews.yandex.ru:704207830"],
+      { "reviews.yandex.ru:704207830": "Семавик" }
     );
 
     expect(approved.observations[0]).toMatchObject({
@@ -1433,7 +1469,7 @@ describe("run orchestration and fail-closed QA", () => {
   });
 
   it("auto-accepts a dedicated Yandex model aggregate with a stable model id", async () => {
-    const domain = "market.yandex.ru";
+    const domain = "reviews.yandex.ru";
     const service = new RatingsService(new MemoryRepository(), async () => ({
       id: "yandex-model-aggregate",
       supportedDomains: [domain],

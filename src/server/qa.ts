@@ -6,6 +6,12 @@ export type QaResult = { ok: boolean; blockers: string[]; warnings: string[] };
 export function validateRun(run: RunState): QaResult {
   const blockers: string[] = [];
   const warnings: string[] = [];
+  const legacyYandexReviewsFallback = run.activity?.recent.some((event) =>
+    event.domain === "market.yandex.ru" && (
+      event.label === "Yandex: резервный полный индекс" ||
+      /(?:Reviews index|reviews\.yandex\.ru|индекс Яндекс Отзывов)/iu.test(event.detail ?? "")
+    )
+  ) ?? false;
   const excludedKeys = new Set<string>();
   const excludedPartitions = new Set<string>();
   for (const exclusion of run.publicationExclusions ?? []) {
@@ -55,6 +61,11 @@ export function validateRun(run: RunState): QaResult {
     }
     if (partition.status === 'no_results' && (partition.discovered !== 0 || partition.collected !== 0)) {
       blockers.push(`${partition.domain} / ${partition.brand}: некорректный no_results`);
+    }
+    if (partition.domain === "market.yandex.ru" && partition.status === "no_results" && legacyYandexReviewsFallback) {
+      blockers.push(
+        `${partition.domain} / ${partition.brand}: пустой результат получен из старого fallback Яндекс Отзывов; повторите только эту площадку`
+      );
     }
   }
   for (const key of expectedPartitions) {

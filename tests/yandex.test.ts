@@ -163,6 +163,54 @@ describe("YandexAdapter discovery", () => {
     }));
   });
 
+  it("never uses Yandex Reviews as no-results proof for Yandex Market", async () => {
+    let reviewsRequests = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url.startsWith("https://market.yandex.ru/search?")) {
+        throw new AdapterBlockedError("EdgeOne Sandbox monthly quota is exhausted");
+      }
+      reviewsRequests += 1;
+      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A]));
+      if (url === MAP_A) return xmlResponse(modelSitemap([]));
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexMarketBrowserEndpoint?: string };
+    fetch.yandexMarketBrowserEndpoint = "https://market.yandex.ru/search";
+    const adapter = new YandexAdapter({ fetch, source: "market" });
+
+    await expect(adapter.discover("Даксабрис", context({ brands: ["Даксабрис"] })))
+      .rejects.toThrow("EdgeOne Sandbox monthly quota is exhausted");
+    expect(reviewsRequests).toBe(0);
+  });
+
+  it("collects Yandex Reviews under its own domain without probing Market", async () => {
+    let marketRequests = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url.startsWith("https://market.yandex.ru/search?")) {
+        marketRequests += 1;
+        throw new Error("Market must not be probed by the Reviews adapter");
+      }
+      if (url === INDEX) return xmlResponse(sitemapIndex([MAP_A]));
+      if (url === MAP_A) return xmlResponse(modelSitemap([
+        "https://reviews.yandex.ru/product/daksabris--111"
+      ]));
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexMarketBrowserEndpoint?: string };
+    fetch.yandexMarketBrowserEndpoint = "https://market.yandex.ru/search";
+    const adapter = new YandexAdapter({ fetch, source: "reviews", maxSitemaps: 1 });
+
+    await expect(adapter.discover("Даксабрис", context({ brands: ["Даксабрис"] }))).resolves.toMatchObject([{
+      domain: "reviews.yandex.ru",
+      listingId: "111",
+      url: "https://reviews.yandex.ru/product/daksabris--111"
+    }]);
+    expect(adapter.supportedDomains).toEqual(["reviews.yandex.ru"]);
+    expect(marketRequests).toBe(0);
+  });
+
   it("opens the unavailable Market route only once for every brand in the same run", async () => {
     let marketCalls = 0;
     let sitemapCalls = 0;
@@ -1464,7 +1512,7 @@ describe("YandexAdapter collection", () => {
     }).replace("</body>", `
       <div class="Review-ReasonToTrustText">Товар — Бактоблис+ Таб. д/Рассас.No90</div>
     </body>`);
-    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }) });
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }), source: "reviews" });
 
     const observation = await adapter.collect(ref({ listingId, brand: "Бактоблис", url }), context());
 
@@ -1492,7 +1540,7 @@ describe("YandexAdapter collection", () => {
     }).replace("</body>", `
       <div class="Review-ReasonToTrustText">Товар — ${incompatibleReviewedTitle}</div>
     </body>`);
-    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }) });
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }), source: "reviews" });
 
     const observation = await adapter.collect(ref({ listingId, brand: "Бактоблис", url }), context());
     const identity = analyzeProductIdentity({
@@ -1569,7 +1617,7 @@ describe("YandexAdapter collection", () => {
       <div class="Review-ReasonToTrustText">Товар — Хондрофен мазь для наружного применения 30 г 1 шт</div>
       <div class="Review-ReasonToTrustText">Товар — Хондрофен мазь для наружного применения 50 г 1 шт</div>
     </body>`);
-    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }) });
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }), source: "reviews" });
 
     const observation = await adapter.collect(ref({ listingId, brand: "Хондрофен", url }), context());
     const identity = analyzeProductIdentity({
@@ -1634,7 +1682,7 @@ describe("YandexAdapter collection", () => {
       <div class="Review-ReasonToTrustText">Товар — Церетон, капсулы 400 мг, 112 шт.</div>
       <div class="Review-ReasonToTrustText">Товар — Церетон, капсулы 400 мг, 56 шт.</div>
     </body>`);
-    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }) });
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }), source: "reviews" });
 
     const observation = await adapter.collect(ref({ listingId, brand: "Церетон", url }), context());
     const identity = analyzeProductIdentity({
@@ -1654,6 +1702,7 @@ describe("YandexAdapter collection", () => {
     const listingId = "5887938423";
     const url = `https://reviews.yandex.ru/product/tsereton-kaps--${listingId}`;
     const adapter = new YandexAdapter({
+      source: "reviews",
       fetch: routeFetch({
         [url]: htmlResponse(productHtml({
           // This is the exact malformed canonical currently returned by the
@@ -1691,6 +1740,7 @@ describe("YandexAdapter collection", () => {
   ) => {
     const url = `https://reviews.yandex.ru/product/tsereton--${listingId}`;
     const adapter = new YandexAdapter({
+      source: "reviews",
       fetch: routeFetch({
         [url]: htmlResponse(productHtml({
           canonical: url,

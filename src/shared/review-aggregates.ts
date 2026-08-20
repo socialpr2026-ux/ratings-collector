@@ -13,11 +13,8 @@ const REVIEW_AGGREGATE_DOMAINS = new Set([
   "megapteka.ru",
   "ozerki.ru",
   "med-otzyv.ru",
-  // The Yandex Reviews adapter publishes one stable modelId aggregate and
-  // already de-duplicates seller offers. Some model pages are brand-level
-  // rather than a dosage/pack SKU, so they need the same explicit operator
-  // confirmation path as other proven review aggregates.
-  "market.yandex.ru",
+  // Yandex Reviews is its own review source. Yandex Market is a marketplace
+  // and must never borrow this aggregate or completeness contract.
   "reviews.yandex.ru"
 ]);
 
@@ -30,7 +27,6 @@ function canonicalBelongsToDomain(domain: string, canonicalUrl: string): boolean
   try {
     const hostname = new URL(canonicalUrl).hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
     const normalizedDomain = domain.toLocaleLowerCase("en-US").replace(/^www\./, "");
-    if (normalizedDomain === "market.yandex.ru") return hostname === "market.yandex.ru" || hostname === "reviews.yandex.ru";
     return hostname === normalizedDomain;
   } catch {
     return false;
