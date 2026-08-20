@@ -4,6 +4,7 @@ import {
   AMBIGUOUS_TRIGGER_GRACE_POLLS,
   MAX_AUTOMATIC_COLLECTION_BUDGET_MS,
   MAX_AUTOMATIC_CONTINUATIONS,
+  MAX_TRANSIENT_CHECKPOINT_READ_FAILURES,
   checkpointContinuationDecision,
   collectWithCheckpointContinuation,
   pollSavedCollectionAttempt
@@ -267,5 +268,46 @@ describe("ambiguous collection POST recovery", () => {
 
     expect(result).toEqual(initial);
     expect(readCheckpoint).toHaveBeenCalledTimes(AMBIGUOUS_TRIGGER_GRACE_POLLS);
+  });
+
+  it("keeps following a live checkpoint across transient progress read failures", async () => {
+    const initial = run({ status: "queued", completed: 0, updatedAt: "2026-07-17T10:00:00.000Z", errors: [] });
+    const running = run({ status: "running", completed: 1, updatedAt: "2026-07-17T10:00:01.000Z", errors: [] });
+    const completed = run({ status: "review", completed: 2, updatedAt: "2026-07-17T10:00:20.000Z", errors: [] });
+    const readCheckpoint = vi.fn()
+      .mockResolvedValueOnce(running)
+      .mockRejectedValueOnce(new Error("progress gateway HTTP 502"))
+      .mockRejectedValueOnce(new Error("progress gateway HTTP 502"))
+      .mockResolvedValueOnce(completed);
+    const wait = vi.fn(async () => undefined);
+
+    const result = await pollSavedCollectionAttempt({
+      checkpoint: initial,
+      readCheckpoint,
+      triggerError: () => new Error("POST /ratings connection closed"),
+      triggerFinished: () => true,
+      wait
+    });
+
+    expect(result).toEqual(completed);
+    expect(readCheckpoint).toHaveBeenCalledTimes(4);
+    expect(wait).toHaveBeenCalledTimes(3);
+  });
+
+  it("surfaces a checkpoint read failure only after the bounded retry allowance", async () => {
+    const initial = run({ status: "queued", completed: 0, updatedAt: "2026-07-17T10:00:00.000Z", errors: [] });
+    const readCheckpoint = vi.fn(async () => { throw new Error("progress unavailable"); });
+    const wait = vi.fn(async () => undefined);
+
+    await expect(pollSavedCollectionAttempt({
+      checkpoint: initial,
+      readCheckpoint,
+      triggerError: () => undefined,
+      triggerFinished: () => false,
+      wait
+    })).rejects.toThrow("progress unavailable");
+
+    expect(readCheckpoint).toHaveBeenCalledTimes(MAX_TRANSIENT_CHECKPOINT_READ_FAILURES + 1);
+    expect(wait).toHaveBeenCalledTimes(MAX_TRANSIENT_CHECKPOINT_READ_FAILURES);
   });
 });

@@ -5,6 +5,7 @@ export const MAX_AUTOMATIC_COLLECTION_BUDGET_MS = 55 * 60 * 1000;
 // One immediate read plus 36 normal 2.5 s poll intervals covers the observed
 // delayed EdgeOne Agent start without extending the Agent execution itself.
 export const AMBIGUOUS_TRIGGER_GRACE_POLLS = 37;
+export const MAX_TRANSIENT_CHECKPOINT_READ_FAILURES = 3;
 
 const timeoutFailure = /run_deadline_exceeded|the operation was aborted due to timeout/i;
 const unsafeAutomaticRetry = /quota(?:_exceeded)?|\blease\b|reserveUsage|releaseUsage|acquireLease|releaseLease|publish(?:ing|ed)?|квот|аренд|публикац/iu;
@@ -31,6 +32,7 @@ export type CollectionAttemptPollOptions = {
   onCheckpoint?: (run: RunState) => void;
   wait?: () => Promise<void>;
   unstartedFailurePollLimit?: number;
+  transientReadFailureLimit?: number;
 };
 
 const pendingStatuses = new Set<RunState["status"]>(["queued", "running", "publishing"]);
@@ -54,13 +56,24 @@ export async function pollSavedCollectionAttempt({
   triggerFinished,
   onCheckpoint,
   wait = () => new Promise((resolve) => setTimeout(resolve, 2500)),
-  unstartedFailurePollLimit = AMBIGUOUS_TRIGGER_GRACE_POLLS
+  unstartedFailurePollLimit = AMBIGUOUS_TRIGGER_GRACE_POLLS,
+  transientReadFailureLimit = MAX_TRANSIENT_CHECKPOINT_READ_FAILURES
 }: CollectionAttemptPollOptions): Promise<RunState> {
   let lastUpdatedAt = checkpoint.updatedAt;
   let unchangedPollsAfterFailure = 0;
   let attemptStarted = false;
+  let consecutiveReadFailures = 0;
   for (;;) {
-    const next = await readCheckpoint();
+    let next: RunState;
+    try {
+      next = await readCheckpoint();
+      consecutiveReadFailures = 0;
+    } catch (error) {
+      consecutiveReadFailures += 1;
+      if (consecutiveReadFailures > transientReadFailureLimit) throw error;
+      await wait();
+      continue;
+    }
     onCheckpoint?.(next);
     attemptStarted ||= next.updatedAt !== checkpoint.updatedAt || next.status !== checkpoint.status;
     const failure = triggerError();
