@@ -1902,6 +1902,18 @@ describe("fixed first-party collection egress", () => {
     expect(new URL(String(upstream.mock.calls[1]?.[0])).toString()).toBe("https://ru.otzyv.com/hloretta");
   });
 
+  it("still probes the exact first-party card when translated transport throws", async () => {
+    const upstream = vi.fn()
+      .mockRejectedValueOnce(new TypeError("translated transport failed"))
+      .mockResolvedValueOnce(new Response("missing", { status: 404 }));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway("https://ru.otzyv.com/hloretta");
+    expect(response.status).toBe(404);
+    expect(response.headers.get("x-ratings-source")).toBe("direct-ru-otzyv-missing");
+    expect(new URL(String(upstream.mock.calls[1]?.[0])).toString()).toBe("https://ru.otzyv.com/hloretta");
+  });
+
   it("proves a Yandex batch shard when exact XML tags and locations cross stream chunks", async () => {
     const sitemap = "https://reviews.yandex.ru/ugcpub/sitemap_model_1030000000-1039999999-0.xml";
     const chunks = [

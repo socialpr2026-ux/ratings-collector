@@ -3552,28 +3552,38 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     return json({ error: "ru.otzyv.com search did not prove exact results or an explicit zero" }, 502);
   }
   if (ruOtzyvTarget?.kind === "product") {
-    const upstream = await safeFetch(ruOtzyvTarget.translated.toString(), {
-      method: "GET",
-      redirect: "manual",
-      headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
-    }, fetch, 0, 60_000);
+    const exactSourceMissing = async (): Promise<Response | undefined> => {
+      try {
+        const source = await safeFetch(ruOtzyvTarget.source.toString(), {
+          method: "GET", redirect: "manual",
+          headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+        }, fetch, 0, 60_000);
+        const sourceBody = await readTextBounded(source, 1_000_000, 60_000);
+        if ([404, 410].includes(source.status)) {
+          return new Response(sourceBody, {
+            status: source.status,
+            headers: { "content-type": source.headers.get("content-type") ?? "text/html; charset=utf-8",
+              "x-ratings-source": "direct-ru-otzyv-missing" }
+          });
+        }
+      } catch { /* exact source absence remains unproved */ }
+      return undefined;
+    };
+    let upstream: Response;
+    try {
+      upstream = await safeFetch(ruOtzyvTarget.translated.toString(), {
+        method: "GET",
+        redirect: "manual",
+        headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+      }, fetch, 0, 60_000);
+    } catch {
+      return await exactSourceMissing() ?? json({ error: "Translated ru.otzyv.com request failed" }, 502);
+    }
     const html = await readTextBounded(upstream, 12_000_000, 60_000);
     if (!upstream.ok) {
       if ([408, 425, 429, 498, 500, 502, 503, 504].includes(upstream.status)) {
-        try {
-          const source = await safeFetch(ruOtzyvTarget.source.toString(), {
-            method: "GET", redirect: "manual",
-            headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
-          }, fetch, 0, 60_000);
-          const sourceBody = await readTextBounded(source, 1_000_000, 60_000);
-          if ([404, 410].includes(source.status)) {
-            return new Response(sourceBody, {
-              status: source.status,
-              headers: { "content-type": source.headers.get("content-type") ?? "text/html; charset=utf-8",
-                "x-ratings-source": "direct-ru-otzyv-missing" }
-            });
-          }
-        } catch { /* preserve the translated blocker below */ }
+        const missing = await exactSourceMissing();
+        if (missing) return missing;
       }
       return new Response(html, {
         status: upstream.status,
