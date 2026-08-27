@@ -700,6 +700,13 @@ export function browserFetch(
       !url.port && !url.username && !url.password && !url.hash && !url.search &&
       /^\/[a-z0-9][a-z0-9-]*$/i.test(url.pathname) &&
       !/^\/(?:login|register|meditsina|search)$/i.test(url.pathname);
+    const ruOtzyvSearchBrand = url.searchParams.get("q")?.normalize("NFKC").trim() ?? "";
+    const fixedRuOtzyvSearchTarget = url.protocol === "https:" && url.hostname === "ru.otzyv.com" &&
+      !url.port && !url.username && !url.password && !url.hash && url.pathname === "/search/" &&
+      url.searchParams.getAll("q").length === 1 &&
+      [...url.searchParams.keys()].every((key) => key === "q") &&
+      ruOtzyvSearchBrand.length >= 2 && ruOtzyvSearchBrand.length <= 160;
+    const fixedRuOtzyvDirectTarget = fixedRuOtzyvProductTarget || fixedRuOtzyvSearchTarget;
     const fixedAptekaTarget = url.protocol === "https:" && url.hostname === "apteka.ru" &&
       !url.port && !url.username && !url.password && !url.hash && (
         !url.search && (
@@ -852,20 +859,22 @@ export function browserFetch(
       // sites. Some exact public pages can remain healthy while that
       // Function's upstream receives a transient 5xx. Retry only the bounded
       // URL through the Agent's ordinary egress before declaring the product
-      // uncollectable. For ru.otzyv.com, only a first-party terminal status on
-      // one exact product slug is accepted; search and arbitrary paths remain
-      // on the fixed reader. A failed fallback never becomes a zero.
+      // uncollectable. For ru.otzyv.com, direct egress is bounded to one exact
+      // product slug or one brand-only search URL. A terminal 404/410 is proof
+      // only for the product URL; search still requires a healthy HTML page
+      // and the adapter's explicit exact-results/no-results proof. A failed
+      // fallback never becomes a zero.
       if (
         (
           !["vseotzyvy.ru", "pravogolosa.net", "otzyv.pro"].includes(host) &&
-          !fixedRuOtzyvProductTarget
+          !fixedRuOtzyvDirectTarget
         ) ||
         !TRANSIENT_STATIC_PROXY_STATUSES.has(proxied.status)
       ) return proxied;
       try {
         const direct = await fetch(
           request,
-          fixedRuOtzyvProductTarget ? { redirect: "manual" } : undefined
+          fixedRuOtzyvDirectTarget ? { redirect: "manual" } : undefined
         );
         if (direct.ok || (fixedRuOtzyvProductTarget && [404, 410].includes(direct.status))) {
           await proxied.body?.cancel().catch(() => undefined);
