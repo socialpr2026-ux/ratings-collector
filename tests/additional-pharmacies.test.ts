@@ -660,6 +660,91 @@ describe("additional pharmacy adapters", () => {
     expect((error as Error).message).toContain("review_aggregate_unavailable");
   });
 
+  it("accepts an Apteka.ru zero only from the exact selected-product SSR state", async () => {
+    const id = "69cfc7f2fe56bf3a18668d99";
+    const siblingId = "69cfc72d6814b63ce393e596";
+    const title = "Хлорэтта 2 мг + 0,03 мг 63 шт. таблетки, покрытые пленочной оболочкой";
+    const productUrl = `https://apteka.ru/product/xloretta-2-mg--003-mg-63-sht-tabletki-pokrytye-plenochnoj-obolochkoj-${id}/`;
+    const productSlug = new URL(productUrl).pathname.split("/").filter(Boolean)[1];
+    const selected = {
+      id, name: title, humanableUrl: productSlug, reviewsCount: 0, rating: null, default: true
+    };
+    const sibling = {
+      id: siblingId,
+      name: "Хлорэтта 2 мг + 0,03 мг 21 шт. таблетки, покрытые пленочной оболочкой",
+      humanableUrl: `xloretta-2-mg--003-mg-21-sht-tabletki-pokrytye-plenochnoj-obolochkoj-${siblingId}`,
+      reviewsCount: 2,
+      rating: 5,
+      default: false
+    };
+    const groupItems = [{ itemInfos: [sibling, selected] }];
+    const initialState = {
+      product: {
+        selected: id,
+        groupId: id,
+        error: false,
+        transition: null,
+        itemReviews: [],
+        iteminfo: { [id]: selected },
+        products: { [siblingId]: sibling, [id]: selected },
+        groupItems,
+        groupinfo: { groupItems }
+      }
+    };
+    const html = translated(productUrl, `<h1>${title}</h1>
+      <script type="application/ld+json">${JSON.stringify({ "@type": "Product", sku: id, name: title })}</script>
+      <script>window.__INITIAL_STATE__ = ${JSON.stringify(initialState)};</script>`);
+    const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(html, {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "apteka.ru", platform: "apteka.ru", listingId: id, brand: "Хлорэтта",
+      url: productUrl, metadata: {}
+    }, context)).resolves.toMatchObject({
+      reviews: 0,
+      writtenReviewCount: 0,
+      ratingCount: 0,
+      rating: null,
+      status: "no_reviews"
+    });
+  });
+
+  it("keeps conflicting Apteka.ru selected-product SSR state blocked instead of zero", async () => {
+    const id = "69cfc7f2fe56bf3a18668d99";
+    const title = "Хлорэтта 2 мг + 0,03 мг 63 шт. таблетки, покрытые пленочной оболочкой";
+    const productUrl = `https://apteka.ru/product/xloretta-2-mg--003-mg-63-sht-tabletki-pokrytye-plenochnoj-obolochkoj-${id}/`;
+    const productSlug = new URL(productUrl).pathname.split("/").filter(Boolean)[1];
+    const selected = {
+      id, name: title, humanableUrl: productSlug, reviewsCount: 0, rating: null, default: true
+    };
+    const groupItems = [{ itemInfos: [selected] }];
+    const initialState = {
+      product: {
+        selected: id,
+        groupId: id,
+        error: false,
+        transition: null,
+        itemReviews: [{ id: "hidden-review" }],
+        iteminfo: { [id]: selected },
+        products: { [id]: selected },
+        groupItems,
+        groupinfo: { groupItems }
+      }
+    };
+    const html = translated(productUrl, `<h1>${title}</h1>
+      <script type="application/ld+json">${JSON.stringify({ "@type": "Product", sku: id, name: title })}</script>
+      <script>window.__INITIAL_STATE__ = ${JSON.stringify(initialState)};</script>`);
+    const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(html, {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    })) as unknown as typeof fetch);
+
+    await expect(adapter.collect({
+      domain: "apteka.ru", platform: "apteka.ru", listingId: id, brand: "Хлорэтта",
+      url: productUrl, metadata: {}
+    }, context)).rejects.toThrow("review_aggregate_unavailable");
+  });
+
   it("rejects Apteka.ru stale or cross-variant AggregateRating without selected-product proof", async () => {
     const id = "5e3268eaca7bdc000192d316";
     const productUrl = `https://apteka.ru/product/oczillokokczinum-30-sht-granuly-${id}/`;

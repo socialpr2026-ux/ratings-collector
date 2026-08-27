@@ -7,6 +7,7 @@ import {
   extractYandexMarketSearchHtmlProof,
   hasExplicitWildberriesNoResults,
   hasExplicitYandexMarketNoResults,
+  PHARMACY009_DIRECT_TIMEOUT_MS,
   OZON_LEASE_HEARTBEAT_MS,
   OZON_LEASE_MS,
   runWithRenewableLease,
@@ -31,6 +32,16 @@ function sandbox(run: (command: string) => Promise<unknown>) {
     commands: { run },
     envdAccessToken: "test-token"
   };
+}
+
+function exactOkaptekaMissingPage(source: string, challenge = false): string {
+  return `<!doctype html><html><head><link rel="canonical" href="${source}"></head><body>` +
+    `<!-- ${"verified-first-party-template ".repeat(45)} -->` +
+    `${challenge ? '<form data-sitekey="captcha"></form>' : ""}` +
+    `<div class="error-page"><img class="error-page__image" src="/error.png" alt="404">` +
+    `<h1 class="error-page__header">Похоже Вы потерялись</h1>` +
+    `<h3 class="error-page__message">Попробуйте вернуться назад или поищите что-нибудь другое.</h3>` +
+    `<a href="/" class="btn">Вернуться на главную</a></div></body></html>`;
 }
 
 describe("ratings Agent lazy Sandbox routing", () => {
@@ -669,7 +680,6 @@ describe("ratings Agent lazy Sandbox routing", () => {
 
     for (const target of [
       "https://farmlend-ru.translate.goog/search?keyword=Кагоцел&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
-      "https://okapteka-ru.translate.goog/pg/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
       "https://www-asna-ru.translate.goog/cards/kagotsel_12mg_n10_tab_niarmedik_plyus_ooo.html?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
       "https://polza-ru.translate.goog/product/otsillokoktsinum/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
       "https://apteka-ru.translate.goog/preparation/otsillokoktsinum/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
@@ -706,10 +716,135 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(directFetch.mock.calls.every(([input]) => input === "https://ratings.example/api/internal/static-review-fetch")).toBe(true);
   });
 
-  it("routes exact 009.рф sitemap and family-review pages through fixed function egress", async () => {
-    const directFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      const requested = JSON.parse(String(init?.body)) as { url: string };
-      return new Response(requested.url.endsWith(".xml") ? "<urlset></urlset>" : "<html>family proof</html>");
+  it("recovers an exact Apteka.ru GET directly after fixed egress fails", async () => {
+    const target = "https://apteka.ru/product/xloretta-2-mg--003-mg-63-sht-tabletki-pokrytye-plenochnoj-obolochkoj-69cfc7f2fe56bf3a18668d99/";
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        return new Response("fixed route unavailable", { status: 502 });
+      }
+      expect(new Request(input).url).toBe(target);
+      expect(init?.method).toBe("GET");
+      expect(init?.redirect).toBe("manual");
+      return new Response("exact first-party Apteka proof", {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const run = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "t".repeat(32)
+    });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("exact first-party Apteka proof");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("proves an empty Okapteka brand only from the exact first-party terminal response", async () => {
+    const translatedTarget = "https://okapteka-ru.translate.goog/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const source = "https://okapteka.ru/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/";
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new Request(input).url).toBe(source);
+      expect(init?.method).toBe("GET");
+      expect(init?.redirect).toBe("manual");
+      return new Response(exactOkaptekaMissingPage(source), {
+        status: 404,
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const run = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "t".repeat(32)
+    });
+
+    const response = await routedFetch(translatedTarget);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("okapteka-first-party-missing");
+    expect(await response.text()).toContain('data-ratings-empty="first-party-404"');
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("never turns an exact first-party Okapteka CAPTCHA 404 into an empty brand proof", async () => {
+    const translatedTarget = "https://okapteka-ru.translate.goog/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const source = "https://okapteka.ru/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const requested = new Request(input).url;
+      if (requested === source) {
+        return new Response(exactOkaptekaMissingPage(source, true), { status: 404 });
+      }
+      return new Response("upstream blocked", { status: 502 });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "t".repeat(32)
+    });
+
+    const response = await routedFetch(translatedTarget);
+
+    expect(response.status).toBe(502);
+    expect(response.headers.get("x-ratings-source")).toBeNull();
+    expect(await response.text()).not.toContain("data-ratings-empty");
+  });
+
+  it("falls back to fixed egress when the exact first-party Okapteka route is nonterminal", async () => {
+    const translatedTarget = "https://okapteka-ru.translate.goog/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) =>
+      input === "https://ratings.example/api/internal/static-review-fetch"
+        ? new Response("compact fixed proof", { headers: { "content-type": "text/html" } })
+        : new Response("source unavailable", { status: 503 })
+    );
+    vi.stubGlobal("fetch", directFetch);
+    const run = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "t".repeat(32)
+    });
+
+    const response = await routedFetch(translatedTarget);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("compact fixed proof");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("does not turn a direct Apteka.ru 404 into product absence after fixed egress fails", async () => {
+    const target = "https://apteka.ru/product/xloretta-2-mg--003-mg-63-sht-tabletki-pokrytye-plenochnoj-obolochkoj-69cfc7f2fe56bf3a18668d99/";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) =>
+      input === "https://ratings.example/api/internal/static-review-fetch"
+        ? new Response("fixed route unavailable", { status: 502 })
+        : new Response("direct missing", { status: 404 })
+    );
+    vi.stubGlobal("fetch", directFetch);
+    const run = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "t".repeat(32)
+    });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(502);
+    expect(await response.text()).toBe("fixed route unavailable");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("routes exact 009.рф sitemap and family-review pages directly with manual redirects", async () => {
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const requested = new Request(input).url;
+      expect(init?.method).toBe("GET");
+      expect(init?.redirect).toBe("manual");
+      return new Response(requested.endsWith(".xml") ? "<urlset></urlset>" : "<html>family proof</html>");
     });
     vi.stubGlobal("fetch", directFetch);
     const run = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
@@ -725,8 +860,7 @@ describe("ratings Agent lazy Sandbox routing", () => {
     ]) {
       await routedFetch(target);
       const call = directFetch.mock.calls.at(-1)!;
-      expect(call[0]).toBe("https://ratings.example/api/internal/static-review-fetch");
-      expect(JSON.parse(String((call[1] as RequestInit).body))).toEqual({ url: target });
+      expect(new Request(call[0]).url).toBe(target);
     }
     expect(run).not.toHaveBeenCalled();
   });
@@ -780,12 +914,9 @@ describe("ratings Agent lazy Sandbox routing", () => {
 
   it.each([
     ["https://009.xn--p1ai/sitemap_2.xml", 200, 200],
-    ["https://009.xn--p1ai/kupit-hloretta/otzyvy", 404, 502]
-  ])("uses only positive direct recovery for an exact 009.рф target: %s", async (target, directStatus, expectedStatus) => {
+    ["https://009.xn--p1ai/kupit-hloretta/otzyvy", 404, 404]
+  ])("returns the exact first-party 009.рф status for adapter-level proof: %s", async (target, directStatus, expectedStatus) => {
     const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (input === "https://ratings.example/api/internal/static-review-fetch") {
-        return new Response("fixed route unavailable", { status: 502 });
-      }
       expect(new Request(input).url).toBe(target);
       expect(init?.redirect).toBe("manual");
       return new Response(directStatus === 200 ? "<urlset></urlset>" : "missing", { status: directStatus });
@@ -800,8 +931,86 @@ describe("ratings Agent lazy Sandbox routing", () => {
     const response = await routedFetch(target);
 
     expect(response.status).toBe(expectedStatus);
-    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(directFetch).toHaveBeenCalledOnce();
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("falls back to fixed egress when an exact 009.рф direct request throws", async () => {
+    const target = "https://009.xn--p1ai/sitemap_2.xml";
+    const failedDirect = { signal: undefined as AbortSignal | undefined };
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        return new Response("<urlset><url><loc>https://009.xn--p1ai/kupit-kagocel/otzyvy</loc></url></urlset>", {
+          headers: { "content-type": "application/xml; charset=utf-8" }
+        });
+      }
+      expect(new Request(input).url).toBe(target);
+      expect(init?.redirect).toBe("manual");
+      failedDirect.signal = init?.signal ?? undefined;
+      throw new TypeError("direct transport failed");
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const run = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "t".repeat(32)
+    });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("<urlset>");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(failedDirect.signal?.aborted).toBe(true);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("aborts a stalled exact 009.рф direct request before starting fixed egress", async () => {
+    vi.useFakeTimers();
+    const target = "https://009.xn--p1ai/sitemap_2.xml";
+    const stalled = { signal: undefined as AbortSignal | undefined };
+    const directFetch = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        return Promise.resolve(new Response(
+          "<urlset><url><loc>https://009.xn--p1ai/kupit-kagocel/otzyvy</loc></url></urlset>"
+        ));
+      }
+      stalled.signal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        stalled.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "t".repeat(32)
+    });
+    const pending = routedFetch(target);
+
+    await vi.advanceTimersByTimeAsync(PHARMACY009_DIRECT_TIMEOUT_MS + 1);
+    const response = await pending;
+
+    expect(stalled.signal?.aborted).toBe(true);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("<urlset>");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns an exact 009.рф family redirect without following it", async () => {
+    const target = "https://009.xn--p1ai/kupit-hloretta/otzyvy";
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new Request(input).url).toBe(target);
+      expect(init?.redirect).toBe("manual");
+      return new Response(null, { status: 302, headers: { location: "/404" } });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "t".repeat(32)
+    });
+
+    expect((await routedFetch(target)).status).toBe(302);
+    expect(directFetch).toHaveBeenCalledOnce();
   });
 
   it("does not recover an unbounded 009.рф path directly", async () => {

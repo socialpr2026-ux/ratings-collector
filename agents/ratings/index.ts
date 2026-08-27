@@ -11,7 +11,11 @@ import { safeErrorMessage } from "../../src/server/utils/error-message.js";
 import { loadPlaywright } from "../../src/server/utils/playwright-runtime.js";
 import { playwrightCdpBaseUrl } from "../../src/server/utils/sandbox-cdp.js";
 import { collectorPublicEndpoint } from "../../src/server/utils/collector-public-endpoint.js";
-import { assertSafePublicDestination, isPrivateNetworkAddress } from "../../src/server/utils/safe-fetch.js";
+import {
+  OKAPTEKA_MISSING_HTML_MAX_BYTES,
+  provesExactOkaptekaMissingHtml
+} from "../../src/server/utils/okapteka-missing.js";
+import { assertSafePublicDestination, isPrivateNetworkAddress, readTextBounded } from "../../src/server/utils/safe-fetch.js";
 
 type BrowserApi = { cdpUrl: string };
 type SandboxCommands = { run(command: string): Promise<unknown> };
@@ -29,6 +33,8 @@ type AgentContext = {
 };
 
 export const STATIC_PROXY_REQUEST_TIMEOUT_MS = 55_000;
+export const PHARMACY009_DIRECT_TIMEOUT_MS = 15_000;
+export const OKAPTEKA_DIRECT_TIMEOUT_MS = 15_000;
 export const OZON_LEASE_MS = 120_000;
 export const OZON_LEASE_HEARTBEAT_MS = 40_000;
 
@@ -714,7 +720,7 @@ export function browserFetch(
       url.searchParams.getAll("_x_tr_tl").length === 1 && url.searchParams.get("_x_tr_tl") === "en" &&
       url.searchParams.getAll("_x_tr_hl").length === 1 && url.searchParams.get("_x_tr_hl") === "en" &&
       [...url.searchParams.keys()].every((key) => ["_x_tr_sl", "_x_tr_tl", "_x_tr_hl"].includes(key));
-    const fixedAptekaTarget = url.protocol === "https:" && url.hostname === "apteka.ru" &&
+    const fixedAptekaTarget = request.method === "GET" && url.protocol === "https:" && url.hostname === "apteka.ru" &&
       !url.port && !url.username && !url.password && !url.hash && (
         !url.search && (
           /^\/preparation\/[a-z0-9][a-z0-9-]*\/$/i.test(url.pathname) ||
@@ -724,6 +730,21 @@ export function browserFetch(
           [...url.searchParams.keys()].every((key) => key === "slugs") &&
           url.searchParams.get("slugs")!.split(",").every((slug) => /^[a-z0-9-]{3,80}$/i.test(slug))
       );
+    const okaptekaGroupMatch = url.pathname.match(/^\/pg\/([^/]+)\/$/i);
+    let fixedOkaptekaGroupSource: URL | undefined;
+    if (request.method === "GET" && url.protocol === "https:" && url.hostname === "okapteka-ru.translate.goog" &&
+      !url.port && !url.username && !url.password && !url.hash && okaptekaGroupMatch &&
+      url.searchParams.getAll("_x_tr_sl").length === 1 && url.searchParams.get("_x_tr_sl") === "ru" &&
+      url.searchParams.getAll("_x_tr_tl").length === 1 && url.searchParams.get("_x_tr_tl") === "en" &&
+      url.searchParams.getAll("_x_tr_hl").length === 1 && url.searchParams.get("_x_tr_hl") === "en" &&
+      [...url.searchParams.keys()].every((key) => ["_x_tr_sl", "_x_tr_tl", "_x_tr_hl"].includes(key))) {
+      try {
+        const brand = decodeURIComponent(okaptekaGroupMatch[1]).normalize("NFKC").trim();
+        if (brand.length >= 2 && brand.length <= 160 && !/[\/\\\u0000-\u001f\u007f]/u.test(brand)) {
+          fixedOkaptekaGroupSource = new URL(url.pathname, "https://okapteka.ru");
+        }
+      } catch { /* malformed encoded group path stays on the fixed proxy only */ }
+    }
     const fixedAsnaSitemapTarget = url.protocol === "https:" && url.hostname === "www.asna.ru" &&
       !url.port && !url.username && !url.password && !url.hash &&
       ["/sitemap/sitemap_cards.xml", "/sitemap/sitemap_cards1.xml"].includes(url.pathname) &&
@@ -731,6 +752,42 @@ export function browserFetch(
       url.searchParams.get("slugs")!.split(",").every((slug) => /^[a-z0-9][a-z0-9-]{0,79}$/i.test(slug));
     if (fixedYandexBatchTarget) {
       return fetchYandexBatchViaStaticProxy(request);
+    }
+    if (staticProxy && fixedOkaptekaGroupSource) {
+      const attemptAbort = new AbortController();
+      const directSignal = AbortSignal.any([request.signal, attemptAbort.signal]);
+      try {
+        const direct = await withDeadline(fetch(fixedOkaptekaGroupSource, {
+          method: "GET",
+          redirect: "manual",
+          signal: directSignal,
+          headers: {
+            accept: "text/html,application/xhtml+xml",
+            "accept-language": "ru-RU,ru;q=0.9,en;q=0.7"
+          }
+        }), OKAPTEKA_DIRECT_TIMEOUT_MS, `Okapteka direct request exceeded ${OKAPTEKA_DIRECT_TIMEOUT_MS} ms`);
+        if ([404, 410].includes(direct.status)) {
+          const source = fixedOkaptekaGroupSource.toString();
+          const missingHtml = await readTextBounded(direct, OKAPTEKA_MISSING_HTML_MAX_BYTES, 10_000);
+          if (provesExactOkaptekaMissingHtml(missingHtml, source)) {
+            const proof = `<html><head><base href="${source}"></head>` +
+              `<body><main><p data-ratings-empty="first-party-404">Не найдено ни одного товара.</p></main></body></html>`;
+            return new Response(proof, {
+              status: 200,
+              headers: {
+                "content-type": "text/html; charset=utf-8",
+                "cache-control": "no-store",
+                "x-ratings-source": "okapteka-first-party-missing"
+              }
+            });
+          }
+        }
+        if (direct.ok) return direct;
+        await direct.body?.cancel().catch(() => undefined);
+      } catch (error) {
+        attemptAbort.abort();
+        if (request.signal.aborted) throw error;
+      }
     }
     if (staticProxy && [
       "translate.yandex.ru",
@@ -815,16 +872,15 @@ export function browserFetch(
       }
     }
     if (staticProxy && fixedAptekaTarget) {
-      return fetchViaStaticProxy(url, request.signal);
-    }
-    if (staticProxy && fixedAsnaSitemapTarget) {
-      // ASNA serves multi-megabyte card maps. Keep their bounded brand-filtered
-      // route on the same fixed egress as the proven translated product card.
-      return fetchViaStaticProxy(url, request.signal);
-    }
-    if (staticProxy && fixedPharmacy009Target) {
-      const proxied = await fetchViaStaticProxy(url, request.signal);
-      if (!TRANSIENT_STATIC_PROXY_STATUSES.has(proxied.status)) return proxied;
+      let proxied: Response | undefined;
+      let proxyFailure: unknown;
+      try {
+        proxied = await fetchViaStaticProxy(url, request.signal);
+        if (!TRANSIENT_STATIC_PROXY_STATUSES.has(proxied.status)) return proxied;
+      } catch (error) {
+        if (request.signal.aborted) throw error;
+        proxyFailure = error;
+      }
       try {
         const direct = await fetch(url, {
           method: "GET",
@@ -836,14 +892,46 @@ export function browserFetch(
           }
         });
         if (direct.ok) {
-          await proxied.body?.cancel().catch(() => undefined);
+          await proxied?.body?.cancel().catch(() => undefined);
           return direct;
         }
         await direct.body?.cancel().catch(() => undefined);
-      } catch {
-        request.signal.throwIfAborted();
+      } catch (error) {
+        if (request.signal.aborted) throw error;
       }
-      return proxied;
+      if (proxied) return proxied;
+      throw proxyFailure;
+    }
+    if (staticProxy && fixedAsnaSitemapTarget) {
+      // ASNA serves multi-megabyte card maps. Keep their bounded brand-filtered
+      // route on the same fixed egress as the proven translated product card.
+      return fetchViaStaticProxy(url, request.signal);
+    }
+    if (staticProxy && fixedPharmacy009Target) {
+      const attemptAbort = new AbortController();
+      const directSignal = AbortSignal.any([request.signal, attemptAbort.signal]);
+      try {
+        // The exact first-party sitemap is substantially larger than the
+        // compact proxy budget. Prefer bounded direct egress and let the
+        // adapter validate the complete XML/status; only transport failure
+        // falls back to the fixed function.
+        return await withDeadline(fetch(url, {
+          method: "GET",
+          redirect: "manual",
+          signal: directSignal,
+          headers: {
+            accept: request.headers.get("accept") ?? "text/html,application/xhtml+xml",
+            "accept-language": "ru-RU,ru;q=0.9,en;q=0.7"
+          }
+        }), PHARMACY009_DIRECT_TIMEOUT_MS, `009 direct request exceeded ${PHARMACY009_DIRECT_TIMEOUT_MS} ms`);
+      } catch (error) {
+        // A deadline must actually stop the in-flight direct request before
+        // the fixed fallback starts, otherwise a timed-out shard keeps a host
+        // slot and recreates the resource leak this route is meant to remove.
+        attemptAbort.abort();
+        if (request.signal.aborted) throw error;
+        return fetchViaStaticProxy(url, request.signal);
+      }
     }
     if (staticProxy && fixedWildberriesTarget) {
       let proxied: Response | undefined;

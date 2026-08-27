@@ -253,6 +253,23 @@ describe("MaksavitAdapter", () => {
     });
   });
 
+  it("binds the health request and blocker to the requested exact brand instead of the Taustin fallback", async () => {
+    const requested: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestedUrl(input);
+      requested.push(url.pathname);
+      return new Response("browser check", { status: 503 });
+    }) as unknown as typeof fetch;
+    await expect(new MaksavitAdapter(new MemoryEvidenceStore(), fetchMock).healthCheck({
+      ...CONTEXT,
+      brands: ["Хлорэтта"]
+    })).resolves.toMatchObject({
+      ok: false,
+      message: expect.stringMatching(/^blocked_free_mode: .*maksavit\.ru:945425: blocked response HTTP 503$/)
+    });
+    expect(requested).toEqual(["/catalog/945425/"]);
+  });
+
   it("reports healthy only after the exact source-bound canary proves the visible zero", async () => {
     await expect(new MaksavitAdapter(new MemoryEvidenceStore(), exactFetch()).healthCheck(CONTEXT)).resolves.toMatchObject({
       ok: true,

@@ -28,6 +28,10 @@ import {
 } from "../../src/server/sheets/publication-state.js";
 import { safeErrorMessage } from "../../src/server/utils/error-message.js";
 import { matchesBrand } from "../../src/server/utils/normalize.js";
+import {
+  OKAPTEKA_MISSING_HTML_MAX_BYTES,
+  provesExactOkaptekaMissingHtml
+} from "../../src/server/utils/okapteka-missing.js";
 import { assertSafePublicDestination, readTextBounded, safeFetch } from "../../src/server/utils/safe-fetch.js";
 import { readerMarkdownToHtml, readerProxyUrl } from "../../src/server/utils/reader-proxy.js";
 import { importOzonCompanionResult, issueOzonCompanionSession } from "../../src/server/companion-import.js";
@@ -3553,18 +3557,20 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
           headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
         }, fetch, 0, 60_000);
         if ([404, 410].includes(direct.status)) {
-          await direct.body?.cancel().catch(() => undefined);
-          const compactHtml = `<html><head><base href="${escapeHtml(pharmacyTranslatedTarget.source.toString())}"></head>` +
-            `<body><main><p data-ratings-empty="first-party-404">Не найдено ни одного товара.</p></main></body></html>`;
-          return new Response(compactHtml, {
-            status: 200,
-            headers: {
-              "content-type": "text/html; charset=utf-8",
-              "cache-control": "no-store",
-              "x-ratings-source": "okapteka-first-party-missing",
-              "x-ratings-proof-bytes": String(new TextEncoder().encode(compactHtml).byteLength)
-            }
-          });
+          const directHtml = await readTextBounded(direct, OKAPTEKA_MISSING_HTML_MAX_BYTES, 10_000);
+          if (provesExactOkaptekaMissingHtml(directHtml, pharmacyTranslatedTarget.source.toString())) {
+            const compactHtml = `<html><head><base href="${escapeHtml(pharmacyTranslatedTarget.source.toString())}"></head>` +
+              `<body><main><p data-ratings-empty="first-party-404">Не найдено ни одного товара.</p></main></body></html>`;
+            return new Response(compactHtml, {
+              status: 200,
+              headers: {
+                "content-type": "text/html; charset=utf-8",
+                "cache-control": "no-store",
+                "x-ratings-source": "okapteka-first-party-missing",
+                "x-ratings-proof-bytes": String(new TextEncoder().encode(compactHtml).byteLength)
+              }
+            });
+          }
         }
         await direct.body?.cancel().catch(() => undefined);
       } catch { /* keep the transport failure explicit */ }
@@ -3609,12 +3615,16 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
           redirect: "manual",
           headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
         }, fetch, 0, 60_000);
-        const directHtml = await readTextBounded(direct, 12_000_000, 60_000);
         if ([404, 410].includes(direct.status)) {
-          html = directHtml;
-          compactHtml = `<html><head><base href="${escapeHtml(pharmacyTranslatedTarget.source.toString())}"></head>` +
-            `<body><main><p data-ratings-empty="first-party-404">Не найдено ни одного товара.</p></main></body></html>`;
-          source = "okapteka-first-party-missing";
+          const directHtml = await readTextBounded(direct, OKAPTEKA_MISSING_HTML_MAX_BYTES, 10_000);
+          if (provesExactOkaptekaMissingHtml(directHtml, pharmacyTranslatedTarget.source.toString())) {
+            html = directHtml;
+            compactHtml = `<html><head><base href="${escapeHtml(pharmacyTranslatedTarget.source.toString())}"></head>` +
+              `<body><main><p data-ratings-empty="first-party-404">Не найдено ни одного товара.</p></main></body></html>`;
+            source = "okapteka-first-party-missing";
+          }
+        } else {
+          await direct.body?.cancel().catch(() => undefined);
         }
       } catch { /* keep the translated response blocked */ }
     }

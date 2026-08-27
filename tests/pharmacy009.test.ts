@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { Pharmacy009Adapter } from "../src/server/adapters/pharmacy009.js";
+import {
+  Pharmacy009Adapter,
+  VERIFIED_PHARMACY009_HLORETTA_ABSENCE,
+  normalizePharmacy009LastModified,
+  provesVerifiedPharmacy009Absence,
+  type Pharmacy009SnapshotProof
+} from "../src/server/adapters/pharmacy009.js";
 import { AdapterBlockedError, ParserChangedError } from "../src/server/adapters/errors.js";
 import { MemoryEvidenceStore } from "../src/server/evidence.js";
 import type { AdapterContext, ProductRef } from "../src/shared/types.js";
@@ -111,6 +117,55 @@ function ref(brand: string, slug: string): ProductRef {
 }
 
 describe("Pharmacy009Adapter", () => {
+  it("keeps timezone-less source Last-Modified evidence byte-stable in every runtime timezone", () => {
+    const originalTimezone = process.env.TZ;
+    try {
+      process.env.TZ = "UTC";
+      const utc = normalizePharmacy009LastModified(new Headers({
+        "last-modified": " 2026-08-23   08:00:05 "
+      }));
+      process.env.TZ = "Asia/Bangkok";
+      const bangkok = normalizePharmacy009LastModified(new Headers({
+        "last-modified": " 2026-08-23   08:00:05 "
+      }));
+      expect(utc).toBe("2026-08-23 08:00:05");
+      expect(bangkok).toBe(utc);
+    } finally {
+      if (originalTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTimezone;
+    }
+  });
+
+  it("accepts the immutable complete Hloretta absence proof only when every source invariant matches", () => {
+    const expected = VERIFIED_PHARMACY009_HLORETTA_ABSENCE;
+    const clone = (): Pharmacy009SnapshotProof => ({
+      ...expected,
+      embeddedLastmods: [...expected.embeddedLastmods],
+      shardUrls: [...expected.shardUrls],
+      shardSha256: [...expected.shardSha256],
+      shardLastModified: [...expected.shardLastModified],
+      shardUrlCounts: [...expected.shardUrlCounts]
+    });
+    expect(provesVerifiedPharmacy009Absence("Хлорэтта", clone())).toBe(true);
+    expect(provesVerifiedPharmacy009Absence("Бактоблис", clone())).toBe(false);
+
+    const mutations: Pharmacy009SnapshotProof[] = [
+      { ...clone(), indexSha256: "0".repeat(64) },
+      { ...clone(), indexLastModified: "2026-08-23 08:00:06" },
+      { ...clone(), embeddedLastmods: ["2026-08-24", ...expected.embeddedLastmods.slice(1)] },
+      { ...clone(), shardUrls: [`${ORIGIN}/sitemap_99.xml`, ...expected.shardUrls.slice(1)] },
+      { ...clone(), shardSha256: ["0".repeat(64), ...expected.shardSha256.slice(1)] },
+      { ...clone(), shardLastModified: ["2026-08-23 08:00:06", ...expected.shardLastModified.slice(1)] },
+      { ...clone(), shardUrlCounts: [49_999, ...expected.shardUrlCounts.slice(1)] },
+      { ...clone(), familyRefCount: expected.familyRefCount - 1 },
+      { ...clone(), familyRefSetSha256: "0".repeat(64) },
+      { ...clone(), absencePredicateVersion: "changed" }
+    ];
+    for (const mutation of mutations) {
+      expect(provesVerifiedPharmacy009Absence("Хлорэтта", mutation)).toBe(false);
+    }
+  });
+
   it("scans every advertised shard, de-duplicates family URLs and publishes one source-bound aggregate", async () => {
     const family = `${ORIGIN}/kupit-lirika/otzyvy`;
     const requested: string[] = [];
@@ -171,6 +226,33 @@ describe("Pharmacy009Adapter", () => {
     expect(observation.evidenceRef).toMatch(/^evidence:/u);
     expect(evidence.items.size).toBe(1);
     expect(requested.filter((path) => path === "/kupit-lirika/otzyvy")).toHaveLength(1);
+  });
+
+  it("aligns sitemap fan-out with the Agent two-request per-host lane", async () => {
+    const family = `${ORIGIN}/kupit-lirika/otzyvy`;
+    let activeShards = 0;
+    let maxActiveShards = 0;
+    const requestedShards: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/sitemap.xml") return new Response(sitemapIndex(3));
+      if (/^\/sitemap_\d+\.xml$/u.test(url.pathname)) {
+        activeShards += 1;
+        maxActiveShards = Math.max(maxActiveShards, activeShards);
+        requestedShards.push(url.pathname);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        activeShards -= 1;
+        return new Response(urlset(url.pathname === "/sitemap_2.xml" ? family : `${ORIGIN}/kupit-pregabalin/otzyvy`));
+      }
+      if (url.pathname === "/kupit-lirika/otzyvy") return new Response(familyIdentity(family, "ЛИРИКА"));
+      throw new Error(`unexpected request ${url}`);
+    }) as unknown as typeof fetch;
+
+    const refs = await new Pharmacy009Adapter(new MemoryEvidenceStore(), fetchMock).discover("Лирика", context);
+
+    expect(refs).toHaveLength(1);
+    expect(maxActiveShards).toBe(2);
+    expect(requestedShards.sort()).toEqual(["/sitemap_0.xml", "/sitemap_1.xml", "/sitemap_2.xml"]);
   });
 
   it("refreshes the complete sitemap on a same-run retry after all requested brands finish discovery", async () => {
@@ -366,7 +448,7 @@ describe("Pharmacy009Adapter", () => {
 
     await expect(adapter.healthCheck({ ...context, runId: "stop-after-shard-failure" })).resolves.toMatchObject({ ok: false });
     expect(requested.filter((path) => path.startsWith("/sitemap_")).sort()).toEqual([
-      "/sitemap_0.xml", "/sitemap_1.xml", "/sitemap_2.xml"
+      "/sitemap_0.xml", "/sitemap_1.xml"
     ]);
   });
 

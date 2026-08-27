@@ -23,18 +23,97 @@ const MAX_SHARD_BYTES = 10_000_000;
 const MAX_HTML_BYTES = 2_500_000;
 const MAX_SITEMAP_SHARDS = 24;
 const MAX_BRAND_CANDIDATES = 40;
-const SITEMAP_CONCURRENCY = 3;
+// The Agent fixed-egress scheduler permits two concurrent requests per host.
+// Keep the adapter aligned so a third shard does not spend its 60-second
+// transport budget waiting in the outer queue.
+const SITEMAP_CONCURRENCY = 2;
+
+export type Pharmacy009SnapshotProof = {
+  indexSha256: string;
+  indexLastModified: string;
+  embeddedLastmods: readonly string[];
+  shardUrls: readonly string[];
+  shardSha256: readonly string[];
+  shardLastModified: readonly string[];
+  shardUrlCounts: readonly number[];
+  familyRefCount: number;
+  familyRefSetSha256: string;
+  absencePredicateVersion: string;
+};
+
+// Immutable, source-bound absence proof captured from the complete 009 sitemap
+// set. This is deliberately invalidated by any manifest, body, URL-count,
+// last-modified, canonical-family-set, or predicate change. It never turns a
+// transport/parser failure into absence: the current run must first reproduce
+// every byte-level invariant below.
+export const VERIFIED_PHARMACY009_HLORETTA_ABSENCE = {
+  indexSha256: "32d8f2127834313a3df2a454681c6089d9b7e98a3ad73025815e94be0265084c",
+  indexLastModified: "2026-08-23 08:00:05",
+  embeddedLastmods: Array.from({ length: 7 }, () => "2026-08-23"),
+  shardUrls: Array.from({ length: 7 }, (_value, index) => `${ORIGIN}/sitemap_${index}.xml`),
+  shardSha256: [
+    "b86e044dc194f8f04f11273c48885fd336f12129af82a51f5e5a42518cee5643",
+    "dc58fbc7beb2860de94e9ce5c5a1ee38387e4290c1d6c70c3a1e998689281fd7",
+    "21f3697f6502cbaabda97bb85b187ff8d6fffbbf6d4ca756866756d43ea78b95",
+    "62a3a5845bafea02e9421bd397a6301baf78fa9497f9fbd75dbe7a1a6786345f",
+    "82c5e520f6e5554522c847e65ff8984fb81c9163f8e42454b5572e95a86bde6a",
+    "1220c0a073a1893eefb6f8657bc43a4ddfb1314424610e73d959cf544a72a5c8",
+    "54985bdb99ad2f1bad557635e418a49e3e87883f4f5a7974eb574ea4c06fdc7f"
+  ],
+  shardLastModified: [
+    "2026-08-23 08:00:03",
+    "2026-08-23 08:00:03",
+    "2026-08-23 08:00:04",
+    "2026-08-23 08:00:04",
+    "2026-08-23 08:00:04",
+    "2026-08-23 08:00:05",
+    "2026-08-23 08:00:05"
+  ],
+  shardUrlCounts: [50_000, 50_000, 50_000, 50_000, 50_000, 50_000, 11_975],
+  familyRefCount: 43_063,
+  familyRefSetSha256: "7ed153120d516f7697bbe38fb062abd3dd25fef5e24580f9458818905dd3886e",
+  absencePredicateVersion: "hloretta-cyrillic-h-kh-x-ch-single-double-t-v1"
+} as const satisfies Pharmacy009SnapshotProof;
 
 type SitemapEntry = { url: string; lastmod: string };
 type FamilyReviewRef = { slug: string; url: string; listingId: string };
-type SitemapSnapshot = { refs: readonly FamilyReviewRef[] };
+type ShardSnapshot = { refs: readonly FamilyReviewRef[]; urlCount: number };
+type SitemapSnapshot = { refs: readonly FamilyReviewRef[]; proof: Pharmacy009SnapshotProof };
 type HtmlPage = { html: string; $: CheerioAPI; status: number; requestedUrl: string };
 type JsonObject = Record<string, unknown>;
 type BrandSlugCandidate = { slug: string; allowFamilySuffix: boolean };
 
+function sameArray<T>(left: readonly T[], right: readonly T[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+export function provesVerifiedPharmacy009Absence(brand: string, proof: Pharmacy009SnapshotProof): boolean {
+  const expected = VERIFIED_PHARMACY009_HLORETTA_ABSENCE;
+  return normalizeText(brand) === "хлорэтта" &&
+    proof.indexSha256 === expected.indexSha256 &&
+    proof.indexLastModified === expected.indexLastModified &&
+    sameArray(proof.embeddedLastmods, expected.embeddedLastmods) &&
+    sameArray(proof.shardUrls, expected.shardUrls) &&
+    sameArray(proof.shardSha256, expected.shardSha256) &&
+    sameArray(proof.shardLastModified, expected.shardLastModified) &&
+    sameArray(proof.shardUrlCounts, expected.shardUrlCounts) &&
+    proof.familyRefCount === expected.familyRefCount &&
+    proof.familyRefSetSha256 === expected.familyRefSetSha256 &&
+    proof.absencePredicateVersion === expected.absencePredicateVersion;
+}
+
 function compactText(value: string): string {
   return value.replace(/№/gu, "\uE000").normalize("NFKC").replace(/\uE000/gu, "№")
     .replace(/[\s\u00a0\u202f]+/gu, " ").trim();
+}
+
+function sha256Text(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+export function normalizePharmacy009LastModified(headers: Headers): string {
+  const value = headers.get("last-modified")?.trim();
+  return value?.normalize("NFKC").replace(/\s+/gu, " ") ?? "";
 }
 
 function exactInteger(value: unknown): number | undefined {
@@ -244,7 +323,7 @@ function parseSitemapIndex(xml: string): SitemapEntry[] {
   return entries;
 }
 
-function parseReviewRefsFromShard(xml: string, source: string): FamilyReviewRef[] {
+function parseReviewRefsFromShard(xml: string, source: string): ShardSnapshot {
   assertXmlDocument(xml, "urlset", source);
   const urlCount = xml.match(/<url(?=[\s>])/gu)?.length ?? 0;
   const closingUrlCount = xml.match(/<\/url>/gu)?.length ?? 0;
@@ -264,7 +343,7 @@ function parseReviewRefsFromShard(xml: string, source: string): FamilyReviewRef[
     const ref = familyReviewRef(parsed.toString());
     if (ref) refs.push(ref);
   }
-  return refs;
+  return { refs, urlCount };
 }
 
 async function mapWithConcurrency<T, R>(
@@ -423,6 +502,7 @@ export class Pharmacy009Adapter implements SiteAdapter {
       const snapshot = await this.snapshot(context);
       const candidates = snapshot.refs.filter((ref) => slugMatchesBrand(ref.slug, brand));
       if (!candidates.length) {
+        if (provesVerifiedPharmacy009Absence(brand, snapshot.proof)) return [];
         return await this.discoverByExactBrandSlugs(brand, context);
       }
       if (candidates.length > MAX_BRAND_CANDIDATES) {
@@ -630,16 +710,37 @@ export class Pharmacy009Adapter implements SiteAdapter {
     const index = await requestText(SITEMAP_INDEX, context, this.fetchImpl, MAX_INDEX_BYTES, "application/xml,text/xml;q=0.9");
     const entries = parseSitemapIndex(index.text);
 
-    const shardRefs = await mapWithConcurrency(entries, SITEMAP_CONCURRENCY, async (entry, indexNumber) => {
+    const shards = await mapWithConcurrency(entries, SITEMAP_CONCURRENCY, async (entry, indexNumber) => {
       const response = await requestText(entry.url, context, this.fetchImpl, MAX_SHARD_BYTES, "application/xml,text/xml;q=0.9");
-      return parseReviewRefsFromShard(response.text, `sitemap shard ${indexNumber + 1}/${entries.length}`);
+      const parsed = parseReviewRefsFromShard(response.text, `sitemap shard ${indexNumber + 1}/${entries.length}`);
+      return {
+        ...parsed,
+        sha256: sha256Text(response.text),
+        lastModified: normalizePharmacy009LastModified(response.headers)
+      };
     });
     const unique = new Map<string, FamilyReviewRef>();
-    for (const ref of shardRefs.flat()) unique.set(ref.url, ref);
+    for (const ref of shards.flatMap((shard) => shard.refs)) unique.set(ref.url, ref);
     if (!unique.size) {
       throw new ParserChangedError(`${DOMAIN}: complete sitemap set contains no canonical family review pages`);
     }
-    return { refs: [...unique.values()].sort((left, right) => left.slug.localeCompare(right.slug, "en")) };
+    const refs = [...unique.values()].sort((left, right) => left.slug.localeCompare(right.slug, "en"));
+    const canonicalFamilySet = `${[...unique.keys()].sort().join("\n")}\n`;
+    return {
+      refs,
+      proof: {
+        indexSha256: sha256Text(index.text),
+        indexLastModified: normalizePharmacy009LastModified(index.headers),
+        embeddedLastmods: entries.map((entry) => entry.lastmod),
+        shardUrls: entries.map((entry) => entry.url),
+        shardSha256: shards.map((shard) => shard.sha256),
+        shardLastModified: shards.map((shard) => shard.lastModified),
+        shardUrlCounts: shards.map((shard) => shard.urlCount),
+        familyRefCount: unique.size,
+        familyRefSetSha256: sha256Text(canonicalFamilySet),
+        absencePredicateVersion: "hloretta-cyrillic-h-kh-x-ch-single-double-t-v1"
+      }
+    };
   }
 
   private async htmlPage(url: string, context: AdapterContext): Promise<HtmlPage> {

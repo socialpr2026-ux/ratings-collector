@@ -335,6 +335,98 @@ function aptekaExactOfferProof(product: Record<string, unknown>, expectedUrl: st
   return matches.length === 1;
 }
 
+function aptekaStateRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function aptekaAssignedProductState($: CheerioAPI): Record<string, unknown> | undefined {
+  const scripts = $("script").toArray().map((node) => $(node).html() ?? "").filter((script) =>
+    /^\s*window\.__INITIAL_STATE__\s*=\s*/.test(script)
+  );
+  if (scripts.length !== 1) return undefined;
+  const prefix = scripts[0].match(/^\s*window\.__INITIAL_STATE__\s*=\s*/)?.[0];
+  if (!prefix) return undefined;
+  let objectStart = prefix.length;
+  while (/\s/.test(scripts[0][objectStart] ?? "")) objectStart += 1;
+  if (scripts[0][objectStart] !== "{") return undefined;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = objectStart; index < scripts[0].length; index += 1) {
+    const character = scripts[0][index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === "{") depth += 1;
+    else if (character === "}" && --depth === 0) {
+      try {
+        const state = JSON.parse(scripts[0].slice(objectStart, index + 1)) as Record<string, unknown>;
+        return aptekaStateRecord(state.product);
+      } catch { return undefined; }
+    }
+  }
+  return undefined;
+}
+
+function aptekaStateItemProvesExactZero(
+  value: unknown,
+  productId: string,
+  productSlug: string,
+  productName: string,
+  requireDefault = false
+): boolean {
+  const item = aptekaStateRecord(value);
+  return Boolean(item) && String(item!.id ?? "") === productId &&
+    compactText(String(item!.humanableUrl ?? "")) === productSlug &&
+    compactText(String(item!.name ?? "")) === productName &&
+    item!.reviewsCount === 0 && item!.rating === null &&
+    (!requireDefault || item!.default === true);
+}
+
+function aptekaStateGroupItems(value: unknown, productId: string): unknown[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const selected: unknown[] = [];
+  for (const groupValue of value) {
+    const group = aptekaStateRecord(groupValue);
+    if (!group || !Array.isArray(group.itemInfos)) return undefined;
+    for (const item of group.itemInfos) {
+      const itemRecord = aptekaStateRecord(item);
+      if (!itemRecord) return undefined;
+      if (String(itemRecord.id ?? "") === productId) selected.push(item);
+    }
+  }
+  return selected;
+}
+
+function aptekaInitialStateProvesExactZero(
+  $: CheerioAPI,
+  productId: string,
+  productUrl: string,
+  productName: string
+): boolean {
+  const productSlug = new URL(productUrl).pathname.match(/^\/product\/([^/]+)\/$/i)?.[1];
+  const productState = aptekaAssignedProductState($);
+  if (!productSlug || !productState || productState.selected !== productId || productState.groupId !== productId ||
+    productState.error !== false || productState.transition !== null ||
+    !Array.isArray(productState.itemReviews) || productState.itemReviews.length !== 0) return false;
+  const itemInfo = aptekaStateRecord(productState.iteminfo);
+  if (!itemInfo || Object.keys(itemInfo).length !== 1 || !(productId in itemInfo) ||
+    !aptekaStateItemProvesExactZero(itemInfo[productId], productId, productSlug, productName)) return false;
+  const products = aptekaStateRecord(productState.products);
+  if (!products || !aptekaStateItemProvesExactZero(products[productId], productId, productSlug, productName)) return false;
+  const directGroups = aptekaStateGroupItems(productState.groupItems, productId);
+  const mirroredGroups = aptekaStateGroupItems(aptekaStateRecord(productState.groupinfo)?.groupItems, productId);
+  return directGroups?.length === 1 && mirroredGroups?.length === 1 &&
+    aptekaStateItemProvesExactZero(directGroups[0], productId, productSlug, productName, true) &&
+    aptekaStateItemProvesExactZero(mirroredGroups[0], productId, productSlug, productName, true);
+}
+
 export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
   readonly id = "apteka.ru:preparation-jsonld-v1";
   readonly supportedDomains = [APTEKA_DOMAIN, `www.${APTEKA_DOMAIN}`] as const;
@@ -441,6 +533,15 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
       ratingCount = exactInteger(record.ratingCount);
       value = exactRating(record.ratingValue);
     }
+    if (reviews === undefined && ratingCount === undefined) {
+      if (!aptekaInitialStateProvesExactZero(page.$, ref.listingId, parsedRef.url, title)) {
+        throw new AdapterBlockedError(
+          `${APTEKA_DOMAIN}:${ref.listingId}: review_aggregate_unavailable: exact product has no source-bound feedback aggregate`
+        );
+      }
+      reviews = 0;
+      ratingCount = 0;
+    }
     const feedbackCount = Math.max(reviews ?? 0, ratingCount ?? 0);
     if (feedbackCount > 0) {
       const visible = aptekaVisibleFeedback(page.$, parsedRef.url, title);
@@ -448,11 +549,6 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
       if ((!visible || visible.count !== feedbackCount || visible.rating !== value) && !exactOffer) {
         throw new ParserChangedError(`${APTEKA_DOMAIN}:${ref.listingId}: structured feedback is not proven by the selected product variant`);
       }
-    }
-    if (reviews === undefined && ratingCount === undefined) {
-      throw new AdapterBlockedError(
-        `${APTEKA_DOMAIN}:${ref.listingId}: review_aggregate_unavailable: exact product has no source-bound feedback aggregate`
-      );
     }
     if (feedbackCount > 0 && value === undefined) {
       throw new ParserChangedError(`${APTEKA_DOMAIN}:${ref.listingId}: complete feedback aggregate is missing`);

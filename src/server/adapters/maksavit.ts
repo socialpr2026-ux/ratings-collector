@@ -130,10 +130,16 @@ export class MaksavitAdapter implements SiteAdapter {
 
   async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
     const checkedAt = new Date().toISOString();
+    const requestedBrand = context.brands?.find((brand) => (expectedIds(brand)?.length ?? 0) > 0);
+    const canaryBrand = requestedBrand ?? "Таустин";
+    const canaryId = expectedIds(canaryBrand)?.[0] ?? "149212";
     try {
-      const page = await this.page("149212", { ...context, runId: `${context.runId ?? "health"}:maksavit-health` });
-      if (!matchesBrand(page.title, "Таустин")) {
-        throw new ParserChangedError(`${DOMAIN}: health canary changed product identity`);
+      // Bind the health request to an exact product from the employee's
+      // requested brand. A blocked unrelated Taustin canary must not label a
+      // Hloretta partition with the wrong product ID.
+      const page = await this.page(canaryId, { ...context, runId: `${context.runId ?? "health"}:maksavit-health` });
+      if (!matchesBrand(page.title, canaryBrand)) {
+        throw new ParserChangedError(`${DOMAIN}:${canaryId}: health canary changed ${canaryBrand} product identity`);
       }
       return {
         ok: true,

@@ -3,6 +3,16 @@ import onRequest, { staticReviewFetch } from "../cloud-functions/api/[[default]]
 
 afterEach(() => vi.unstubAllGlobals());
 
+function exactOkaptekaMissingPage(source: string, challenge = false): string {
+  return `<!doctype html><html><head><link rel="canonical" href="${source}"></head><body>` +
+    `<!-- ${"verified-first-party-template ".repeat(45)} -->` +
+    `${challenge ? '<form data-sitekey="captcha"></form>' : ""}` +
+    `<div class="error-page"><img class="error-page__image" src="/error.png" alt="404">` +
+    `<h1 class="error-page__header">Похоже Вы потерялись</h1>` +
+    `<h3 class="error-page__message">Попробуйте вернуться назад или поищите что-нибудь другое.</h3>` +
+    `<a href="/" class="btn">Вернуться на главную</a></div></body></html>`;
+}
+
 describe("public configuration", () => {
   it("does not expose an editable spreadsheet URL", async () => {
     const response = await onRequest({
@@ -1257,9 +1267,12 @@ describe("static pharmacy Translate gateway", () => {
 
   it("accepts a translated Okapteka 404 only after the exact first-party group also returns 404", async () => {
     const target = translated("okapteka-ru.translate.goog", "/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/");
+    const source = "https://okapteka.ru/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/";
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
-      return new Response("missing", { status: url.hostname === "okapteka.ru" ? 404 : 404 });
+      return new Response(url.hostname === "okapteka.ru" ? exactOkaptekaMissingPage(source) : "translated missing", {
+        status: 404
+      });
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -1281,10 +1294,11 @@ describe("static pharmacy Translate gateway", () => {
 
   it("recovers an exact Okapteka group 404 after translated transport fails", async () => {
     const target = translated("okapteka-ru.translate.goog", "/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/");
+    const source = "https://okapteka.ru/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/";
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
       if (url.hostname === "okapteka-ru.translate.goog") throw new TypeError("translated egress failed");
-      return new Response("missing", { status: 404 });
+      return new Response(exactOkaptekaMissingPage(source), { status: 404 });
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -1301,6 +1315,23 @@ describe("static pharmacy Translate gateway", () => {
       return new Response("source unavailable", { status: 503 });
     }));
     expect((await callGateway(target.toString())).status).toBe(502);
+  });
+
+  it("keeps an Okapteka CAPTCHA 404 blocked instead of synthesizing an empty brand", async () => {
+    const target = translated("okapteka-ru.translate.goog", "/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/");
+    const source = "https://okapteka.ru/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      return new Response(url.hostname === "okapteka.ru"
+        ? exactOkaptekaMissingPage(source, true)
+        : "translated missing", { status: 404 });
+    }));
+
+    const blocked = await callGateway(target.toString());
+
+    expect(blocked.status).toBe(404);
+    expect(blocked.headers.get("x-ratings-source")).toBeNull();
+    expect(await blocked.text()).not.toContain("data-ratings-empty");
   });
 
   it("accepts and compacts source-bound Farmlend product metrics", async () => {
