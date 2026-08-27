@@ -13,6 +13,7 @@ import type {
   SiteProfile
 } from "../shared/types.js";
 import { observationSchema, productRefSchema, runRequestSchema } from "../shared/types.js";
+import { isFailedOnlyRetryTarget } from "../shared/partition-retry.js";
 import { hasDeterministicAggregateProof, isKnownReviewAggregateDomain } from "../shared/review-aggregates.js";
 import type { EvidenceStore } from "./evidence.js";
 import { GenericSiteAdapter } from "./generic/adapter.js";
@@ -191,7 +192,7 @@ function partialDiscoveryFailure(refs: readonly ProductRef[]): PartialDiscoveryF
 function healthCheckFailure(message: string): AdapterBlockedError | AdapterQuotaError | ParserChangedError {
   const failure = failureEnvelope(new Error(message));
   if (failure.category === "quota") return new AdapterQuotaError(message);
-  if (["access_block", "throttle", "timeout", "transport"].includes(failure.category)) {
+  if (["access_block", "source_unavailable", "throttle", "timeout", "transport"].includes(failure.category)) {
     return new AdapterBlockedError(message);
   }
   return new ParserChangedError(message);
@@ -472,7 +473,7 @@ export class RatingsService {
     if (isRetry) run.publicationExclusions = undefined;
     const retryTargets = isRetry
       ? expectedPartitions.filter(({ key }) =>
-        !SUCCESSFUL_PARTITION_STATUSES.has(previousPartitions.get(key)?.status ?? "")
+        isFailedOnlyRetryTarget(previousPartitions.get(key))
       )
       : expectedPartitions;
 
@@ -510,7 +511,7 @@ export class RatingsService {
     const preservedPartitions = isRetry
       ? expectedPartitions.flatMap(({ key }) => {
         const previous = previousPartitions.get(key);
-        return previous && SUCCESSFUL_PARTITION_STATUSES.has(previous.status) && !retryTargetKeys.has(key) ? [previous] : [];
+        return previous && !retryTargetKeys.has(key) ? [previous] : [];
       })
       : [];
     run.status = "running";
@@ -698,6 +699,7 @@ export class RatingsService {
           deadline.signal.throwIfAborted();
           const kind = errorStatus(error);
           const message = safeErrorMessage(error);
+          const retryable = failureEnvelope(error).category === "source_unavailable" ? false : undefined;
           healthReporter.warnActive(message);
           activity.warn(healthActivity, {
             ...runtimeSignals(message),
@@ -711,7 +713,8 @@ export class RatingsService {
               kind === "error" ? "error" : "blocked",
               0,
               0,
-              message.startsWith(`${kind}:`) ? message : `${kind}: ${message}`
+              message.startsWith(`${kind}:`) ? message : `${kind}: ${message}`,
+              retryable
             );
           }
           await saveProgress();
@@ -741,7 +744,12 @@ export class RatingsService {
           let discoveredCount = 0;
           let viableDiscovered = 0;
           let collected = 0;
-          const collectionFailures: Array<{ listingId: string; kind: ReturnType<typeof errorStatus>; message: string }> = [];
+          const collectionFailures: Array<{
+            listingId: string;
+            kind: ReturnType<typeof errorStatus>;
+            message: string;
+            sourceUnavailable: boolean;
+          }> = [];
           const refreshedKeys = new Set<string>();
           const previousObservationKeys = new Set([...seen.entries()]
             .filter(([, observation]) =>
@@ -924,7 +932,12 @@ export class RatingsService {
                 deadline.signal.throwIfAborted();
                 const kind = errorStatus(error);
                 const message = safeErrorMessage(error);
-                collectionFailures.push({ listingId: ref.listingId, kind, message });
+                collectionFailures.push({
+                  listingId: ref.listingId,
+                  kind,
+                  message,
+                  sourceUnavailable: failureEnvelope(error).category === "source_unavailable"
+                });
                 adapterReporter.warnActive(message);
                 if (activeCollection) activity.warn(activeCollection, { ...runtimeSignals(message), detail: message });
                 if (activeNormalization) activity.warn(activeNormalization, { detail: message });
@@ -944,6 +957,8 @@ export class RatingsService {
               const retainedCount = [...seen.values()].filter((observation) =>
                 observation.domain === domain && normalizeText(observation.brand) === normalizeText(brand)
               ).length;
+              const sourceUnavailableOnly = !partialFailure && collectionFailures.length > 0 &&
+                collectionFailures.every((failure) => failure.sourceUnavailable);
               this.addPartition(
                 run,
                 domain,
@@ -951,7 +966,10 @@ export class RatingsService {
                 collectionFailures.some((failure) => failure.kind === "error") ? "error" : "blocked",
                 partialFailure?.total ?? discoveredCount,
                 retainedCount,
-                message
+                message,
+                sourceUnavailableOnly
+                  ? false
+                  : collectionFailures.some((failure) => failure.sourceUnavailable) ? true : undefined
               );
             } else {
               for (const key of previousObservationKeys) {
@@ -974,6 +992,7 @@ export class RatingsService {
             deadline.signal.throwIfAborted();
             const kind = errorStatus(error);
             const message = safeErrorMessage(error);
+            const retryable = failureEnvelope(error).category === "source_unavailable" ? false : undefined;
             adapterReporter.warnActive(message);
             activity.warn(discoveryActivity, { ...runtimeSignals(message), detail: message });
             if (activeCollection) activity.warn(activeCollection, { ...runtimeSignals(message), detail: message });
@@ -989,7 +1008,8 @@ export class RatingsService {
               kind === "error" ? "error" : "blocked",
               Math.max(discoveredCount, retainedCount),
               Math.max(collected, retainedCount),
-              `${kind}: ${message}`
+              `${kind}: ${message}`,
+              retryable
             );
           }
           await saveProgress();
@@ -1002,6 +1022,7 @@ export class RatingsService {
           if (domainStarted) throw error;
           const kind = errorStatus(error);
           const message = safeErrorMessage(error);
+          const retryable = failureEnvelope(error).category === "source_unavailable" ? false : undefined;
           for (const brand of retryBrands) {
             this.addPartition(
               run,
@@ -1010,7 +1031,8 @@ export class RatingsService {
               kind === "error" ? "error" : "blocked",
               0,
               0,
-              message.startsWith(`${kind}:`) ? message : `${kind}: ${message}`
+              message.startsWith(`${kind}:`) ? message : `${kind}: ${message}`,
+              retryable
             );
           }
           await saveProgress();
@@ -1303,8 +1325,8 @@ export class RatingsService {
     if (!run) throw new Error("Запуск не найден");
     return run;
   }
-  private addPartition(run: RunState, domain: string, brand: string, status: "complete" | "no_results" | "blocked" | "error", discovered: number, collected: number, message?: string) {
-    run.partitions.push({ domain, brand, status, discovered, collected, message });
+  private addPartition(run: RunState, domain: string, brand: string, status: "complete" | "no_results" | "blocked" | "error", discovered: number, collected: number, message?: string, retryable?: boolean) {
+    run.partitions.push({ domain, brand, status, discovered, collected, message, retryable });
     run.progress.completedPartitions += 1;
   }
   private async touch(run: RunState) { run.updatedAt = new Date().toISOString(); await this.repository.saveRun(run); }

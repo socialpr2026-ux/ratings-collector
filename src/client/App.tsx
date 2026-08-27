@@ -21,6 +21,7 @@ import {
   setupReadinessText,
   summarizeIssues
 } from "./review-copy.js";
+import { retryableFailedPartitionCount as countRetryableFailedPartitions } from "../shared/partition-retry.js";
 import {
   CATALOG_DOMAINS,
   SELECTABLE_CATALOG_DOMAINS,
@@ -672,7 +673,7 @@ export function App() {
   }
 
   async function retryFailedPartitions() {
-    if (!run || !canRetryFailedPartitions(run.status, partitionSummary?.failed ?? 0)) return;
+    if (!run || !canRetryFailedPartitions(run.status, countRetryableFailedPartitions(run.partitions))) return;
     setBusyAction("retry");
     setError("");
     setAutomaticContinuation(undefined);
@@ -885,6 +886,8 @@ export function App() {
     failed: run.partitions.filter((item) => !["complete", "no_results"].includes(item.status)).length
   } : undefined, [run]);
   const failedPartitionCount = partitionSummary?.failed ?? 0;
+  const retryableFailedPartitionCount = run ? countRetryableFailedPartitions(run.partitions) : 0;
+  const terminalFailedPartitionCount = Math.max(0, failedPartitionCount - retryableFailedPartitionCount);
   const successfulPartitionCount = (partitionSummary?.complete ?? 0) + (partitionSummary?.empty ?? 0);
   const canPublishCompletedOnly = Boolean(run && canPublishSuccessfulPartitions(
     run.status,
@@ -901,7 +904,7 @@ export function App() {
       : failedPartitionCount > 0 || run?.qa?.ok === false
         ? "Завершите сбор"
         : "Результат готов";
-  const canRetry = Boolean(run && canRetryFailedPartitions(run.status, partitionSummary?.failed ?? 0));
+  const canRetry = Boolean(run && canRetryFailedPartitions(run.status, retryableFailedPartitionCount));
   const companionBrands = useMemo(() => run ? ozonCompanionEligibleBrands(run) : [], [run]);
   const visibleBlockers = summarizeIssues(run?.qa?.blockers ?? []);
   const visibleWarnings = summarizeIssues(run?.qa?.warnings ?? []);
@@ -1271,7 +1274,7 @@ export function App() {
 
       {run && !pendingStatuses.has(run.status) && <section className="card review-card" aria-labelledby="review-title">
         <div className="card-heading review-heading">
-          <div><p className="section-number">Шаг 3</p><h2 id="review-title">{reviewSectionTitle}</h2><p>{run.status === "published" ? "Данные уже записаны в Google Таблицу." : reviewIntroText(reviewItems.length, failedPartitionCount, canPublishCompletedOnly)}</p></div>
+          <div><p className="section-number">Шаг 3</p><h2 id="review-title">{reviewSectionTitle}</h2><p>{run.status === "published" ? "Данные уже записаны в Google Таблицу." : reviewIntroText(reviewItems.length, failedPartitionCount, canPublishCompletedOnly, retryableFailedPartitionCount)}</p></div>
           {reviewItems.length > 0 && <div className="view-switch" role="group" aria-label="Какие карточки показывать">
             <button type="button" className={reviewOnly && reviewItems.length ? "active" : ""} aria-pressed={Boolean(reviewOnly && reviewItems.length)} onClick={() => setReviewOnly(true)} disabled={!reviewItems.length}>Требуют проверки <span>{reviewItems.length}</span></button>
             <button type="button" className={!reviewOnly || !reviewItems.length ? "active" : ""} aria-pressed={!reviewOnly || !reviewItems.length} onClick={() => setReviewOnly(false)}>Все <span>{run.observations.length}</span></button>
@@ -1280,9 +1283,9 @@ export function App() {
 
         {(partitionSummary?.failed ?? 0) > 0 && run.status !== "published" && <div className="collection-warning" role="status">
           <span className="notice-icon" aria-hidden="true">!</span>
-          <div><strong>{collectionIsContinuing ? busyAction === "continue" ? "Автоматически продолжаем с сохранённого места…" : "Повторно проверяем проблемные площадки…" : partialPublicationCompleted ? "Готовая часть уже записана" : canPublishCompletedOnly ? "Часть проверок не завершена" : "Сбор неполный — публикация отключена"}</strong><p>{collectionIsContinuing ? "Готовые результаты остаются на месте. После завершения список и проверка публикации обновятся автоматически." : partialPublicationCompleted ? "Повторите только проблемные площадки. Уже записанные карточки сохранятся, а восстановленные результаты можно будет дописать без дублей." : canPublishCompletedOnly ? "Успешные бренды и площадки сохранены. Их можно записать сейчас, а неуспешные проверки повторить позже." : "Данные не будут записаны частично. Можно повторить только неуспешные площадки, не запуская весь сбор заново."}</p></div>
+          <div><strong>{collectionIsContinuing ? busyAction === "continue" ? "Автоматически продолжаем с сохранённого места…" : "Повторно проверяем временные сбои…" : partialPublicationCompleted ? "Готовая часть уже записана" : canPublishCompletedOnly ? "Часть проверок не завершена" : "Сбор неполный — публикация отключена"}</strong><p>{collectionIsContinuing ? "Готовые результаты и окончательные ограничения источников остаются на месте. После завершения список и проверка публикации обновятся автоматически." : retryableFailedPartitionCount > 0 ? `Успешные данные сохранены. Повторятся только временные сбои: ${retryableFailedPartitionCount}; окончательные ограничения источников: ${terminalFailedPartitionCount}.` : "Точные карточки найдены, но источники не публикуют связанный с ними доказуемый рейтинг. Автоматический повтор не нужен; значения останутся пустыми, а не нулями."}</p></div>
           <div className="collection-warning-actions">
-            {canRetry && <button className="button button-secondary" type="button" onClick={retryFailedPartitions} disabled={busy}>{collectionIsContinuing ? "Продолжаем…" : "Повторить неуспешные площадки"}</button>}
+            {canRetry && <button className="button button-secondary" type="button" onClick={retryFailedPartitions} disabled={busy}>{collectionIsContinuing ? "Продолжаем…" : `Повторить временные сбои · ${retryableFailedPartitionCount}`}</button>}
             <a className="button button-quiet" href="#publish-status">Посмотреть причины</a>
           </div>
         </div>}

@@ -3,6 +3,7 @@ import { safeErrorMessage } from "./utils/error-message.js";
 
 export type FailureCategory =
   | "access_block"
+  | "source_unavailable"
   | "quota"
   | "throttle"
   | "timeout"
@@ -29,6 +30,7 @@ export type FailureContext = Pick<FailureEnvelope, "provider" | "route" | "host"
 const QUOTA = /quota(?:_exceeded)?|квот|monthly[^.]{0,100}GB-s|лимит[^.]{0,100}(?:исчерпан|превышен)|limit[^.]{0,100}(?:exceeded|reached)/iu;
 const CAPTCHA = /captcha|капч|proof[ -]?of[ -]?work|\bpow\b/iu;
 const INCOMPLETE_PROOF = /incomplete[^.]{0,120}(?:proof|sitemap|xml)|proof[^.]{0,120}(?:incomplete|unproven)|непол[^.]{0,120}(?:доказ|sitemap|xml)|не доказ/iu;
+const SOURCE_UNAVAILABLE = /\breview_(?:channel|aggregate)_unavailable\b/iu;
 
 function statusFromMessage(message: string): number | undefined {
   const match = message.match(/\bHTTP\s+(\d{3})\b/i);
@@ -62,6 +64,9 @@ export function failureEnvelope(error: unknown, context: FailureContext = {}): F
   }
   if (INCOMPLETE_PROOF.test(message)) {
     return { ...base, category: "proof_incomplete", retryable: false, scope: "host" };
+  }
+  if (SOURCE_UNAVAILABLE.test(message)) {
+    return { ...base, category: "source_unavailable", retryable: false, scope: "request" };
   }
   if (CAPTCHA.test(message) || upstreamStatus === 401 || upstreamStatus === 403 || upstreamStatus === 498) {
     return { ...base, category: "access_block", retryable: false, scope: "host" };

@@ -25,6 +25,14 @@ describe("typed collection failure policy", () => {
       .toMatchObject({ category: "proof_incomplete", retryable: false });
   });
 
+  it.each([
+    "review_channel_unavailable",
+    "review_aggregate_unavailable"
+  ])("classifies %s as a terminal source condition instead of a generic access block", (marker) => {
+    expect(failureEnvelope(new AdapterBlockedError(`vitaexpress.ru: ${marker}`)))
+      .toMatchObject({ category: "source_unavailable", retryable: false, scope: "request" });
+  });
+
   it("preserves route metadata without using it to weaken the classification", () => {
     expect(failureEnvelope(new AdapterQuotaError("quota_exceeded"), {
       provider: "edgeone",

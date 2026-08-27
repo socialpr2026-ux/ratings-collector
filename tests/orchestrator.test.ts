@@ -222,6 +222,35 @@ describe("run orchestration and fail-closed QA", () => {
     expect(run.partitions[0]!.message).not.toContain("parser_changed");
   });
 
+  it("persists a terminal review source health result and does not probe it again", async () => {
+    let healthCalls = 0;
+    const service = new RatingsService(new MemoryRepository(), async () => ({
+      id: "terminal-health",
+      supportedDomains: ["example.com"],
+      async healthCheck() {
+        healthCalls += 1;
+        return {
+          ok: false,
+          checkedAt: new Date().toISOString(),
+          message: "review_aggregate_unavailable: exact product has no source-bound aggregate"
+        };
+      },
+      async discover() { throw new Error("discovery must not run after terminal health proof"); },
+      async collect() { throw new Error("collection must not run after terminal health proof"); }
+    }));
+    const id = (await service.createRun(request)).id;
+
+    const first = await service.executeRun(id);
+    expect(first.partitions).toMatchObject([{
+      status: "blocked",
+      retryable: false,
+      message: expect.stringContaining("review_aggregate_unavailable")
+    }]);
+
+    await service.executeRun(id);
+    expect(healthCalls).toBe(1);
+  });
+
   it("retries only failed partitions and preserves successful observations", async () => {
     const repository = new MemoryRepository();
     const calls = new Map<string, number>();
@@ -278,6 +307,158 @@ describe("run orchestration and fail-closed QA", () => {
     expect(retried.payloadHash).not.toBe(firstHash);
     expect(retried.collectionStartedAt).not.toBe("2020-01-01T00:00:00.000Z");
     expect(Date.parse(retried.collectionFinishedAt!) - Date.parse(retried.collectionStartedAt!)).toBeLessThan(10_000);
+  });
+
+  it("retries only transient failures while preserving a terminal source blocker and all successes", async () => {
+    const repository = new MemoryRepository();
+    const calls = new Map<string, number>();
+    const service = new RatingsService(repository, async (domain) => ({
+      id: domain,
+      supportedDomains: [domain],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        const attempt = (calls.get(domain) ?? 0) + 1;
+        calls.set(domain, attempt);
+        if (domain === "example.org") {
+          throw new AdapterBlockedError("review_channel_unavailable: exact product has no bound review aggregate");
+        }
+        if (domain === "example.net" && attempt === 1) {
+          throw new AdapterBlockedError("temporary exact-card route returned HTTP 502");
+        }
+        return [{
+          domain, platform: domain, listingId: "1", brand,
+          url: `https://${domain}/p/1`, metadata: {}
+        }];
+      },
+      async collect(ref) {
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId,
+          brand: ref.brand, canonicalUrl: ref.url, product: `${ref.brand} таблетки 100 мг №10`,
+          reviews: 5, rating: 4.5, status: "ok" as const, capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+    const id = (await service.createRun({
+      ...request,
+      domains: ["example.com", "example.org", "example.net"]
+    })).id;
+
+    const first = await service.executeRun(id);
+    const successfulObservation = first.observations.find((item) => item.domain === "example.com");
+    const terminalPartition = structuredClone(first.partitions.find((item) => item.domain === "example.org"));
+
+    expect(first.partitions).toMatchObject([
+      { domain: "example.com", status: "complete" },
+      { domain: "example.org", status: "blocked", retryable: false, message: expect.stringContaining("review_channel_unavailable") },
+      { domain: "example.net", status: "blocked", message: expect.stringContaining("HTTP 502") }
+    ]);
+
+    const retried = await service.executeRun(id);
+
+    expect(calls).toEqual(new Map([
+      ["example.com", 1],
+      ["example.org", 1],
+      ["example.net", 2]
+    ]));
+    expect(retried.partitions.find((item) => item.domain === "example.org")).toEqual(terminalPartition);
+    expect(retried.partitions.find((item) => item.domain === "example.net")).toMatchObject({ status: "complete" });
+    expect(retried.observations.find((item) => item.domain === "example.com")).toEqual(successfulObservation);
+    expect(retried.observations.some((item) => item.domain === "example.org")).toBe(false);
+    expect(retried.errors).toEqual([expect.objectContaining({
+      partition: "example.org/Бренд",
+      message: expect.stringContaining("review_channel_unavailable")
+    })]);
+
+    const terminalOnlyRepeat = await service.executeRun(id);
+    expect(calls).toEqual(new Map([
+      ["example.com", 1],
+      ["example.org", 1],
+      ["example.net", 2]
+    ]));
+    expect(terminalOnlyRepeat.partitions).toEqual(retried.partitions);
+  });
+
+  it("keeps a legacy terminal marker out of failed-only retry", async () => {
+    const repository = new MemoryRepository();
+    let calls = 0;
+    const service = new RatingsService(repository, async () => ({
+      id: "legacy-terminal",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover() {
+        calls += 1;
+        throw new AdapterBlockedError("review_aggregate_unavailable: exact legacy source proof");
+      },
+      async collect() { throw new Error("collect must not run"); }
+    }));
+    const id = (await service.createRun(request)).id;
+    const first = await service.executeRun(id);
+    delete first.partitions[0]!.retryable;
+    await repository.saveRun(first);
+
+    const repeated = await service.executeRun(id);
+
+    expect(calls).toBe(1);
+    expect(repeated.partitions).toMatchObject([{
+      status: "blocked",
+      message: expect.stringContaining("review_aggregate_unavailable")
+    }]);
+    expect(repeated.observations).toEqual([]);
+  });
+
+  it("keeps a mixed terminal and HTTP 502 card failure retryable until the transient card recovers", async () => {
+    const repository = new MemoryRepository();
+    let discoveryAttempts = 0;
+    const service = new RatingsService(repository, async () => ({
+      id: "mixed-source-failure",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        discoveryAttempts += 1;
+        return ["terminal", "transient"].map((listingId) => ({
+          domain: "example.com", platform: "example.com", listingId, brand,
+          url: `https://example.com/p/${listingId}`, metadata: {}
+        }));
+      },
+      async collect(ref) {
+        if (ref.listingId === "terminal") {
+          throw new AdapterBlockedError("review_channel_unavailable: exact product has no review aggregate");
+        }
+        if (discoveryAttempts === 1) {
+          throw new AdapterBlockedError("exact card temporarily returned HTTP 502");
+        }
+        return {
+          domain: ref.domain, platform: ref.platform, listingId: ref.listingId,
+          brand: ref.brand, canonicalUrl: ref.url, product: `${ref.brand} таблетки 100 мг №10`,
+          reviews: 4, rating: 5, status: "ok" as const, capturedAt: new Date().toISOString()
+        };
+      }
+    }));
+    const id = (await service.createRun(request)).id;
+
+    const mixed = await service.executeRun(id);
+    expect(mixed.partitions).toMatchObject([{
+      status: "blocked",
+      retryable: true,
+      message: expect.stringMatching(/review_channel_unavailable.*HTTP 502/)
+    }]);
+    // Simulate the same saved run from before the explicit retry policy bit
+    // existed. Its mixed message must still retry the recoverable card.
+    delete mixed.partitions[0]!.retryable;
+    await repository.saveRun(mixed);
+
+    const recoveredTransient = await service.executeRun(id);
+    expect(discoveryAttempts).toBe(2);
+    expect(recoveredTransient.partitions).toMatchObject([{
+      status: "blocked",
+      retryable: false,
+      collected: 1,
+      message: expect.stringContaining("review_channel_unavailable")
+    }]);
+    expect(recoveredTransient.observations.map((item) => item.listingId)).toEqual(["transient"]);
+
+    await service.executeRun(id);
+    expect(discoveryAttempts).toBe(2);
   });
 
   it("does not retry a technically complete partition solely because product identity needs review", async () => {

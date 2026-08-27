@@ -77,6 +77,13 @@ describe("Interfox Ratings product shell", () => {
     expect(appSource).toContain('(partitionSummary?.failed ?? 0) > 0 && run.status !== "published"');
   });
 
+  it("retries only temporary failures and explains terminal source limits", () => {
+    expect(appSource).toContain("countRetryableFailedPartitions(run.partitions)");
+    expect(appSource).toContain("Повторить временные сбои · ${retryableFailedPartitionCount}");
+    expect(appSource).toContain("Автоматический повтор не нужен; значения останутся пустыми, а не нулями.");
+    expect(appSource).not.toContain('collectionIsContinuing ? "Продолжаем…" : "Повторить неуспешные площадки"');
+  });
+
   it("lets an operator repair and confirm every disputed product card", () => {
     expect(appSource).toContain('className={`product-edit');
     expect(appSource).toContain('placeholder="Например: раствор 2 мл №10"');

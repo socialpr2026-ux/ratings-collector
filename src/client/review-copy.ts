@@ -58,7 +58,7 @@ export function friendlyIssueText(value: string) {
     return `${prefix}площадка пока не поддерживается в бесплатном режиме.`;
   }
   if (/review_(?:channel|aggregate)_unavailable/i.test(raw)) {
-    return `${prefix}площадка не публикует доказуемый общий рейтинг для этой карточки.`;
+    return `${prefix}точная карточка найдена, но площадка не публикует связанный с ней доказуемый рейтинг; автоматический повтор не запускается, значение останется пустым, а не нулём.`;
   }
   if (/captcha|капч|\bpow\b|\b429\b|\b498\b|blocked|заблокирован|ограничил(?:а|и)?\s+(?:доступ|сбор)/i.test(raw)) {
     return `${prefix}площадка временно ограничила сбор. Повторите позже.`;
@@ -139,7 +139,7 @@ export function summarizeIssues(values: readonly string[]): string[] {
     const suffix = !showBrands && count > 1 ? ` (${count} ${plural(count, "проверка", "проверки", "проверок")})` : "";
     if (kind === "quota") return `${target}: исчерпан доступный лимит сбора${suffix}.`;
     if (kind === "unsupported") return `${target}: площадка пока не поддерживается в бесплатном режиме${suffix}.`;
-    if (kind === "unavailable") return `${target}: площадка не публикует доказуемый общий рейтинг для этой карточки${suffix}.`;
+    if (kind === "unavailable") return `${target}: точная карточка найдена, но площадка не публикует связанный с ней доказуемый рейтинг${suffix}; автоматический повтор не запускается, значение останется пустым, а не нулём.`;
     if (kind === "blocked") return `${target}: площадка не дала завершить автоматический сбор${suffix}.`;
     if (kind === "parser") return `${target}: требуется повторная настройка сбора${suffix}.`;
     return `${target}: проверьте найденную карточку выше${suffix}.`;
@@ -300,11 +300,25 @@ export function ozonCompanionEligibleBrands(
   ));
 }
 
-export function reviewIntroText(reviewCount: number, failedPartitionCount: number, partialPublicationAvailable = false) {
+export function reviewIntroText(
+  reviewCount: number,
+  failedPartitionCount: number,
+  partialPublicationAvailable = false,
+  retryableFailedPartitionCount?: number
+) {
   if (failedPartitionCount > 0) {
-    const blockerText = partialPublicationAvailable
+    const retryableCount = retryableFailedPartitionCount ?? failedPartitionCount;
+    const terminalCount = Math.max(0, failedPartitionCount - retryableCount);
+    const retryText = retryableFailedPartitionCount === undefined
+      ? ""
+      : retryableCount > 0
+      ? ` Временных сбоев для повтора: ${retryableCount}.`
+      : terminalCount > 0
+        ? " Автоматический повтор не требуется: источник не публикует доказуемый рейтинг; значение останется пустым, а не нулём."
+        : "";
+    const blockerText = (partialPublicationAvailable
       ? `Не завершено проверок: ${failedPartitionCount}. Готовые сочетания площадок и брендов можно записать отдельно.`
-      : `Не завершено проверок: ${failedPartitionCount}. Запись отключена, чтобы в таблицу не попали частичные данные.`;
+      : `Не завершено проверок: ${failedPartitionCount}. Запись отключена, чтобы в таблицу не попали частичные данные.`) + retryText;
     return reviewCount > 0
       ? `${reviewCount} ${plural(reviewCount, "карточка требует", "карточки требуют", "карточек требуют")} решения. Откройте карточку, сверьте товар и отметьте подходящие: выбранные сохранятся, остальные будут исключены. ${blockerText}`
       : `Спорных карточек нет, но сбор завершён не полностью. ${blockerText}`;

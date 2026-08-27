@@ -168,7 +168,9 @@ export const partitionResultSchema = z.object({
   discovered: z.number().int().nonnegative().default(0),
   collected: z.number().int().nonnegative().default(0),
   evidenceRef: z.string().optional(),
-  message: z.string().optional()
+  message: z.string().optional(),
+  /** False only for a proven terminal source condition, never for a false zero. */
+  retryable: z.boolean().optional()
 });
 
 export type PartitionResult = z.infer<typeof partitionResultSchema>;

@@ -118,7 +118,7 @@ describe("plain-language feedback", () => {
     expect(friendlyIssueText("wildberries.ru: HTTP 429 blocked")).toBe("wildberries.ru: площадка временно ограничила сбор. Повторите позже.");
     expect(friendlyIssueText("medum.ru: parser_changed: blocked_free_mode")).toBe("medum.ru: площадка пока не поддерживается в бесплатном режиме.");
     expect(friendlyIssueText("vitaexpress.ru / Хлорэтта: blocked: review_channel_unavailable"))
-      .toBe("vitaexpress.ru / Хлорэтта: площадка не публикует доказуемый общий рейтинг для этой карточки.");
+      .toBe("vitaexpress.ru / Хлорэтта: точная карточка найдена, но площадка не публикует связанный с ней доказуемый рейтинг; автоматический повтор не запускается, значение останется пустым, а не нулём.");
   });
 
   it("groups the same site failure across brands", () => {
@@ -249,13 +249,20 @@ describe("partial publication checkpoint", () => {
     })).toBe(true);
   });
 
+  it("explains a terminal-only source result without offering a futile automatic repeat", () => {
+    expect(reviewIntroText(0, 1, true, 0)).toBe(
+      "Спорных карточек нет, но сбор завершён не полностью. Не завершено проверок: 1. Готовые сочетания площадок и брендов можно записать отдельно. Автоматический повтор не требуется: источник не публикует доказуемый рейтинг; значение останется пустым, а не нулём."
+    );
+    expect(reviewIntroText(0, 2, true, 1)).toContain("Временных сбоев для повтора: 1.");
+  });
+
   it("groups exact cards whose first-party review aggregate is unavailable", () => {
     expect(summarizeIssues([
       "vitaexpress.ru / Хлорэтта: blocked: review_channel_unavailable",
       "apteka.ru / Хлорэтта: blocked: review_aggregate_unavailable"
     ])).toEqual([
-      "vitaexpress.ru / Хлорэтта: площадка не публикует доказуемый общий рейтинг для этой карточки.",
-      "apteka.ru / Хлорэтта: площадка не публикует доказуемый общий рейтинг для этой карточки."
+      "vitaexpress.ru / Хлорэтта: точная карточка найдена, но площадка не публикует связанный с ней доказуемый рейтинг; автоматический повтор не запускается, значение останется пустым, а не нулём.",
+      "apteka.ru / Хлорэтта: точная карточка найдена, но площадка не публикует связанный с ней доказуемый рейтинг; автоматический повтор не запускается, значение останется пустым, а не нулём."
     ]);
   });
 });
