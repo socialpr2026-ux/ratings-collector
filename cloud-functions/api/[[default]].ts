@@ -510,7 +510,7 @@ function compactMegamarketTranslateHtml(html: string, target: URL): string | und
     const mainText = $("main .listing-not-found-block, main.listing-not-found-block").first().text()
       .normalize("NFKC").replace(/\s+/g, " ").trim();
     const explicitEmpty = cards.length === 0 &&
-      /ничего не найдено|товары не найдены|no products found|we (?:did not|didn't) find (?:it|anything)/i.test(mainText);
+      /мы (?:это|ничего) не нашли|ничего не найдено|товары не найдены|no products found|we (?:did not|didn't) find (?:it|anything)/i.test(mainText);
     const emptyProof = explicitEmpty ? '<p data-ratings-empty="search">No products found</p>' : "";
     return `<html><head>${base}</head><body>${cards.join("")}${pagination}${emptyProof}</body></html>`;
   }

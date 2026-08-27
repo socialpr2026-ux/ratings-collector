@@ -712,7 +712,7 @@ Markdown Content:
     const source = "https://megamarket.ru/catalog/?q=%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0";
     vi.stubGlobal("fetch", vi.fn(async () => new Response(
       `<!doctype html><html><head><base href="${source}"><title>Results for the query Chloretta</title></head>` +
-      `<body><main><article class="listing-not-found-block"><p>We didn't find it.</p><p>Try writing it differently or look in the catalog</p></article></main></body></html>`,
+      `<body><main><article class="listing-not-found-block"><p>Мы это не нашли</p><p>Попробуйте написать по-другому или поищите в каталоге</p></article></main></body></html>`,
       { headers: { "content-type": "text/html; charset=utf-8" } }
     )));
 
