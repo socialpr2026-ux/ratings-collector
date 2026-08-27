@@ -16,6 +16,7 @@ import {
 import {
   reconcileStaleCollectionCheckpoint,
   reconcileStalePublicationCheckpoint,
+  STALE_COLLECTION_CHECKPOINT_ERROR,
   STALE_COLLECTION_CHECKPOINT_MS,
   STALE_PUBLICATION_CHECKPOINT_MS
 } from "../../src/server/collection-checkpoint.js";
@@ -29,10 +30,19 @@ import {
 import { safeErrorMessage } from "../../src/server/utils/error-message.js";
 import { matchesBrand } from "../../src/server/utils/normalize.js";
 import {
+  bindExactOkaptekaFirstPartyHtml,
+  OKAPTEKA_FIRST_PARTY_HTML_MAX_BYTES,
   OKAPTEKA_MISSING_HTML_MAX_BYTES,
   provesExactOkaptekaMissingHtml
 } from "../../src/server/utils/okapteka-missing.js";
 import { assertSafePublicDestination, readTextBounded, safeFetch } from "../../src/server/utils/safe-fetch.js";
+import {
+  proveExactZdravcityGroupBff,
+  ZDRAVCITY_GROUP_BFF_MAX_BYTES,
+  ZDRAVCITY_GROUP_BFF_URL,
+  zdravcityGroupBffRequest,
+  zdravcityGroupSlugFromUrl
+} from "../../src/server/utils/zdravcity-group-bff.js";
 import { readerMarkdownToHtml, readerProxyUrl } from "../../src/server/utils/reader-proxy.js";
 import { importOzonCompanionResult, issueOzonCompanionSession } from "../../src/server/companion-import.js";
 
@@ -2096,6 +2106,39 @@ function aptekaStateRecord(value: unknown): Record<string, unknown> | undefined 
     : undefined;
 }
 
+async function fetchZdravcityGroupMissingProof(target: URL): Promise<Response | undefined> {
+  const slug = zdravcityGroupSlugFromUrl(target);
+  if (!slug) return undefined;
+  try {
+    const response = await safeFetch(ZDRAVCITY_GROUP_BFF_URL, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        "user-agent": "Mozilla/5.0"
+      },
+      body: JSON.stringify(zdravcityGroupBffRequest(slug))
+    }, fetch, 0, 20_000);
+    if (response.status !== 200 || !/application\/json/iu.test(response.headers.get("content-type") ?? "")) {
+      await response.body?.cancel().catch(() => undefined);
+      return undefined;
+    }
+    const text = await readTextBounded(response, ZDRAVCITY_GROUP_BFF_MAX_BYTES, 20_000);
+    let value: unknown;
+    try { value = JSON.parse(text); }
+    catch { return undefined; }
+    if (proveExactZdravcityGroupBff(value, slug) !== "missing") return undefined;
+    return new Response(null, {
+      status: 404,
+      headers: {
+        "cache-control": "no-store",
+        "x-ratings-source": "zdravcity-first-party-bff-missing"
+      }
+    });
+  } catch { return undefined; }
+}
+
 function aptekaStateText(value: unknown): string {
   return typeof value === "string" ? value.normalize("NFKC").replace(/\s+/g, " ").trim() : "";
 }
@@ -2852,6 +2895,52 @@ function summaryNeedsFullReconciliation(summary: RunSummaryV2, now = Date.now())
   );
 }
 
+async function reconcileStaleCollectionRun(repository: BlobRepository, run: RunState): Promise<RunState> {
+  const observed = {
+    status: run.status,
+    updatedAt: run.updatedAt,
+    activitySequence: run.activity?.sequence ?? 0,
+    partitionCount: run.partitions.length
+  };
+  const candidate = structuredClone(run);
+  if (!reconcileStaleCollectionCheckpoint(candidate)) return run;
+
+  const attempt = await repository.getRunAttempt(run.id);
+  if (attempt?.status === "running") {
+    try {
+      await repository.finishAttempt({
+        runId: run.id,
+        attemptId: attempt.attemptId,
+        fencingToken: attempt.fencingToken,
+        expectedRevision: attempt.revision,
+        status: "failed",
+        message: STALE_COLLECTION_CHECKPOINT_ERROR
+      });
+    } catch (error) {
+      const latest = await repository.getRun(run.id);
+      if (latest) return latest;
+      throw error;
+    }
+  }
+
+  // finishAttempt and saveRun share the run lease. Reload between them so a
+  // final worker checkpoint that won the lease immediately before fencing is
+  // never overwritten by the older stale snapshot.
+  const latest = await repository.getRun(run.id);
+  if (!latest) return run;
+  if (latest.status !== observed.status || latest.updatedAt !== observed.updatedAt ||
+    (latest.activity?.sequence ?? 0) !== observed.activitySequence || latest.partitions.length !== observed.partitionCount) {
+    return latest;
+  }
+  try {
+    await repository.saveRun(candidate);
+    return candidate;
+  } catch (error) {
+    if (!(error instanceof AttemptConflictError)) throw error;
+    return await repository.getRun(run.id) ?? run;
+  }
+}
+
 function pagedRun(
   run: RunState,
   url: URL
@@ -3571,6 +3660,23 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
               }
             });
           }
+        } else if (direct.ok && /(?:text\/html|application\/xhtml\+xml)/iu.test(direct.headers.get("content-type") ?? "")) {
+          const directHtml = await readTextBounded(direct, OKAPTEKA_FIRST_PARTY_HTML_MAX_BYTES, 10_000);
+          const sourceBoundHtml = bindExactOkaptekaFirstPartyHtml(
+            directHtml,
+            pharmacyTranslatedTarget.source.toString()
+          );
+          if (sourceBoundHtml) {
+            return new Response(sourceBoundHtml, {
+              status: 200,
+              headers: {
+                "content-type": "text/html; charset=utf-8",
+                "cache-control": "no-store",
+                "x-ratings-source": "okapteka-first-party-ssr",
+                "x-ratings-proof-bytes": String(new TextEncoder().encode(sourceBoundHtml).byteLength)
+              }
+            });
+          }
         }
         await direct.body?.cancel().catch(() => undefined);
       } catch { /* keep the transport failure explicit */ }
@@ -3607,8 +3713,9 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     // A Google Translate 404 is not authoritative for the source pharmacy.
     // Only a matching terminal response from the exact first-party group URL
     // may become a compact empty proof; every other outcome remains blocked.
-    if (!compactHtml && pharmacyTranslatedTarget.kind === "okapteka-group" &&
-      [404, 410].includes(upstream.status)) {
+    if (!compactHtml && pharmacyTranslatedTarget.kind === "okapteka-group" && (
+      [403, 404, 408, 410, 425, 429, 498].includes(upstream.status) || upstream.status >= 500
+    )) {
       try {
         const direct = await safeFetch(pharmacyTranslatedTarget.source.toString(), {
           method: "GET",
@@ -3622,6 +3729,17 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
             compactHtml = `<html><head><base href="${escapeHtml(pharmacyTranslatedTarget.source.toString())}"></head>` +
               `<body><main><p data-ratings-empty="first-party-404">Не найдено ни одного товара.</p></main></body></html>`;
             source = "okapteka-first-party-missing";
+          }
+        } else if (direct.ok && /(?:text\/html|application\/xhtml\+xml)/iu.test(direct.headers.get("content-type") ?? "")) {
+          const directHtml = await readTextBounded(direct, OKAPTEKA_FIRST_PARTY_HTML_MAX_BYTES, 10_000);
+          const sourceBoundHtml = bindExactOkaptekaFirstPartyHtml(
+            directHtml,
+            pharmacyTranslatedTarget.source.toString()
+          );
+          if (sourceBoundHtml) {
+            html = directHtml;
+            compactHtml = sourceBoundHtml;
+            source = "okapteka-first-party-ssr";
           }
         } else {
           await direct.body?.cancel().catch(() => undefined);
@@ -3679,6 +3797,8 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         }
         await direct.body?.cancel().catch(() => undefined);
       } catch { /* keep the translated transport failure explicit */ }
+      const missing = await fetchZdravcityGroupMissingProof(target);
+      if (missing) return missing;
       return json({ error: `Zdravcity translated transport failed: ${safeErrorMessage(error)}` }, 502);
     }
     if (!upstream.ok && (
@@ -3705,6 +3825,11 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         }
         await direct.body?.cancel().catch(() => undefined);
       } catch { /* preserve the translated failure below */ }
+      const missing = await fetchZdravcityGroupMissingProof(target);
+      if (missing) {
+        await upstream.body?.cancel().catch(() => undefined);
+        return missing;
+      }
     }
     if ([404, 410].includes(upstream.status)) {
       await upstream.body?.cancel().catch(() => undefined);
@@ -4102,7 +4227,10 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       ...(pharmacy009Target ? {
         "x-ratings-source": pharmacy009Target.kind === "family-reviews"
           ? "009-first-party-family-reviews"
-          : "009-first-party-sitemap"
+          : "009-first-party-sitemap",
+        ...(upstream.headers.get("last-modified")
+          ? { "last-modified": upstream.headers.get("last-modified")! }
+          : {})
       } : {})
     }
   });
@@ -4180,7 +4308,7 @@ export default async function onRequest(context: Context): Promise<Response> {
         run = await service.getRun(runId);
         if (!run) return json({ error: "Запуск не найден" }, 404);
         assertOwner(run, user);
-        if (reconcileStaleCollectionCheckpoint(run)) await repository.saveRun(run);
+        run = await reconcileStaleCollectionRun(repository, run);
         if (reconcileStalePublicationCheckpoint(run)) await repository.saveRun(run);
         run = await service.reconcileInterruptedRun(run);
         summary = await repository.getRunSummary(runId) ?? createRunSummaryV2(run, summary?.revision ?? 1);
@@ -4192,7 +4320,7 @@ export default async function onRequest(context: Context): Promise<Response> {
       let run = await service.getRun(decodeURIComponent(runMatch[1]));
       if (!run) return json({ error: "Запуск не найден" }, 404);
       assertOwner(run, user);
-      if (reconcileStaleCollectionCheckpoint(run)) await repository.saveRun(run);
+      run = await reconcileStaleCollectionRun(repository, run);
       if (reconcileStalePublicationCheckpoint(run)) await repository.saveRun(run);
       run = await service.reconcileInterruptedRun(run);
       // Older deployments marked a successful partial write as fully

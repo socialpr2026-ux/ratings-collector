@@ -44,6 +44,15 @@ function exactOkaptekaMissingPage(source: string, challenge = false): string {
     `<a href="/" class="btn">Вернуться на главную</a></div></body></html>`;
 }
 
+function exactOkaptekaGroupPage(source: string): string {
+  return `<!doctype html><html><head><link rel="canonical" href="${source}"></head><body>` +
+    `<!-- ${"verified-first-party-group ".repeat(45)} -->` +
+    `<article class="product"><a href="/kagotsyel-tab-12mg-30-529011/">Кагоцел таблетки 12мг №30</a></article>` +
+    `<article class="product"><a href="/kagotsyel-tab-12mg-20-529012/">Кагоцел таблетки 12мг №20</a></article>` +
+    `<article class="product"><a href="/kagotsyel-tab-12mg-10-30687/">Кагоцел таблетки 12мг №10</a></article>` +
+    `</body></html>`;
+}
+
 describe("ratings Agent lazy Sandbox routing", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -770,6 +779,30 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(await response.text()).toContain('data-ratings-empty="first-party-404"');
     expect(directFetch).toHaveBeenCalledOnce();
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("source-binds an exact healthy first-party Okapteka group instead of returning raw HTML without a base", async () => {
+    const translatedTarget = "https://okapteka-ru.translate.goog/pg/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const source = "https://okapteka.ru/pg/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/";
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new Request(input).url).toBe(source);
+      expect(init?.redirect).toBe("manual");
+      return new Response(exactOkaptekaGroupPage(source), {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "t".repeat(32)
+    });
+
+    const response = await routedFetch(translatedTarget);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("okapteka-first-party-ssr");
+    expect(await response.text()).toContain(`<base href="${source}">`);
+    expect(directFetch).toHaveBeenCalledOnce();
   });
 
   it("never turns an exact first-party Okapteka CAPTCHA 404 into an empty brand proof", async () => {
@@ -1794,6 +1827,65 @@ describe("ratings Agent lazy Sandbox routing", () => {
     const response = await routedFetch(target);
     expect(response.status).toBe(404);
     expect(directFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers an exact missing Zdravcity brand through the bounded first-party BFF proof", async () => {
+    const target = "https://zdravcity.ru/g_hloretta/";
+    const staticEndpoint = "https://ratings.example/api/internal/static-review-fetch";
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const requested = new Request(input).url;
+      if (requested === target) return new Response("forbidden", { status: 403 });
+      if (requested === staticEndpoint) return new Response("fixed route unavailable", { status: 502 });
+      expect(requested).toBe("https://zdravcity.ru/bff/query");
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        operationName: "ExactGroupPresence",
+        variables: { regionID: "moscowregion", code: "hloretta" }
+      });
+      return new Response(JSON.stringify({
+        errors: [{
+          message: "queryResolver.Group: catalog.Manager.Group: rpc error: code = NotFound desc = group.group: catalog.group by code hloretta: group not found",
+          path: ["group"], extensions: { code: 404 }
+        }],
+        data: null
+      }), { headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: staticEndpoint, token: "internal-token"
+    });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("x-ratings-source")).toBe("zdravcity-first-party-bff-missing");
+    expect(directFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("never accepts a Zdravcity BFF missing envelope bound to another slug", async () => {
+    const target = "https://zdravcity.ru/g_hloretta/";
+    const staticEndpoint = "https://ratings.example/api/internal/static-review-fetch";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const requested = new Request(input).url;
+      if (requested === target) return new Response("forbidden", { status: 403 });
+      if (requested === staticEndpoint) return new Response("fixed route unavailable", { status: 502 });
+      return new Response(JSON.stringify({
+        errors: [{
+          message: "queryResolver.Group: catalog.Manager.Group: rpc error: code = NotFound desc = group.group: catalog.group by code kagocel: group not found",
+          path: ["group"], extensions: { code: 404 }
+        }],
+        data: null
+      }), { headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: staticEndpoint, token: "internal-token"
+    });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("x-ratings-source")).toBeNull();
   });
 
   it("falls back from a transient Yandex index gateway failure to exact direct XML", async () => {

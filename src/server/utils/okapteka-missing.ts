@@ -2,6 +2,7 @@ const DOMAIN = "okapteka.ru";
 const GROUP_PATH = /^\/pg\/[^/]+\/$/iu;
 const CHALLENGE_MARKERS = /captcha|data-sitekey|cf-chl|challenge-page|access denied|forbidden|проверка браузера|доступ (?:ограничен|запрещен)|не робот/iu;
 export const OKAPTEKA_MISSING_HTML_MAX_BYTES = 400_000;
+export const OKAPTEKA_FIRST_PARTY_HTML_MAX_BYTES = 2_500_000;
 
 function attribute(tag: string, name: string): string | undefined {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
@@ -53,6 +54,40 @@ function exactCanonical(html: string, source: URL): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Binds a healthy exact first-party group response to the source URL expected
+ * by the translated-page adapter. EdgeOne can reach the source while Google
+ * Translate cannot; returning the raw HTML would then fail because first-party
+ * pages intentionally contain no `<base>`. Canonical identity and challenge
+ * rejection are mandatory before the synthetic base is inserted.
+ */
+export function bindExactOkaptekaFirstPartyHtml(html: string, sourceUrl: string): string | undefined {
+  let source: URL;
+  try { source = new URL(sourceUrl); }
+  catch { return undefined; }
+  if (source.protocol !== "https:" || source.hostname !== DOMAIN || source.port || source.username ||
+    source.password || source.search || source.hash || !GROUP_PATH.test(source.pathname) ||
+    html.length < 1_000 || html.length > OKAPTEKA_FIRST_PARTY_HTML_MAX_BYTES || CHALLENGE_MARKERS.test(html) ||
+    !exactCanonical(html, source)) return undefined;
+
+  const bases = openingTags(html, "base");
+  if (bases.length > 1) return undefined;
+  if (bases.length === 1) {
+    const href = attribute(bases[0].tag, "href");
+    if (!href) return undefined;
+    try {
+      const base = new URL(href, source);
+      if (base.toString() !== source.toString()) return undefined;
+    } catch { return undefined; }
+    return html;
+  }
+
+  const heads = openingTags(html, "head");
+  if (heads.length !== 1) return undefined;
+  const insertion = heads[0].index + heads[0].tag.length;
+  return `${html.slice(0, insertion)}<base href="${source.toString()}">${html.slice(insertion)}`;
 }
 
 /**

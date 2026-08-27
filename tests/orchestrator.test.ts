@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest";
-import type { AdapterContext, Observation, ProductRef, SiteAdapter } from "../src/shared/types.js";
+import { describe, expect, it, vi } from "vitest";
+import type {
+  AdapterContext,
+  FinishAttemptCommand,
+  Observation,
+  ProductRef,
+  RunState,
+  SiteAdapter
+} from "../src/shared/types.js";
 import { AdapterBlockedError, AdapterQuotaError } from "../src/server/adapters/errors.js";
 import { DEFAULT_DOMAIN_CONCURRENCY, RatingsService } from "../src/server/orchestrator.js";
 import { MemoryRepository } from "../src/server/repository.js";
@@ -728,6 +735,148 @@ describe("run orchestration and fail-closed QA", () => {
     expect(recovered.collectionFinishedAt).toBeTruthy();
     expect(recovered.payloadHash).toMatch(/^[a-f0-9]{64}$/);
     expect(recovered.qa).toMatchObject({ ok: true, blockers: [] });
+  });
+
+  it("does not reconcile a terminal-looking snapshot while a fenced worker attempt is still running", async () => {
+    const repository = new MemoryRepository();
+    const service = new RatingsService(repository, async () => new FakeAdapter());
+    const completed = await service.executeRun((await service.createRun(request)).id);
+    completed.status = "running";
+    completed.payloadHash = undefined;
+    completed.qa = undefined;
+    completed.collectionFinishedAt = undefined;
+    completed.activity = { sequence: 2, active: [], recent: [] };
+    await repository.saveRun(completed);
+    const attempt = await repository.beginAttempt({ runId: completed.id, expectedRevision: 0 });
+
+    const observed = await service.reconcileInterruptedRun(completed);
+
+    expect(attempt.status).toBe("running");
+    expect(observed.status).toBe("running");
+    expect(observed.collectionFinishedAt).toBeUndefined();
+    expect(observed.payloadHash).toBeUndefined();
+    expect((await repository.getRun(completed.id))?.status).toBe("running");
+  });
+
+  it("fences a stale running attempt and finalizes its fully durable terminal checkpoint", async () => {
+    const repository = new MemoryRepository();
+    const service = new RatingsService(repository, async () => new FakeAdapter());
+    const completed = await service.executeRun((await service.createRun(request)).id);
+    completed.status = "running";
+    completed.payloadHash = undefined;
+    completed.qa = undefined;
+    completed.collectionFinishedAt = undefined;
+    completed.activity = { sequence: 3, active: [], recent: [] };
+    await repository.saveRun(completed);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-27T10:00:00.000Z"));
+      const attempt = await repository.beginAttempt({ runId: completed.id, expectedRevision: 0 });
+      vi.setSystemTime(new Date("2026-08-27T10:31:00.000Z"));
+
+      const recovered = await service.reconcileInterruptedRun(completed);
+
+      expect(attempt.status).toBe("running");
+      expect(recovered.status).toBe("review");
+      expect(recovered.collectionFinishedAt).toBeTruthy();
+      expect(recovered.payloadHash).toMatch(/^[a-f0-9]{64}$/u);
+      expect(await repository.getRunAttempt(completed.id)).toMatchObject({ status: "failed" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns the worker's newer run when it wins the stale-attempt finish race", async () => {
+    class WorkerWinsRepository extends MemoryRepository {
+      override async finishAttempt(command: FinishAttemptCommand) {
+        const newer = (await this.getRun(command.runId))!;
+        newer.status = "review";
+        newer.updatedAt = "2026-08-27T10:30:59.000Z";
+        newer.collectionFinishedAt = newer.updatedAt;
+        newer.errors = [{ partition: "worker", message: "worker final checkpoint" }];
+        await super.saveRun(newer, {
+          attemptId: command.attemptId,
+          fencingToken: command.fencingToken
+        });
+        await super.finishAttempt({
+          ...command,
+          status: "completed",
+          message: "worker completed"
+        });
+        return super.finishAttempt(command);
+      }
+    }
+    const repository = new WorkerWinsRepository();
+    const service = new RatingsService(repository, async () => new FakeAdapter());
+    const completed = await service.executeRun((await service.createRun(request)).id);
+    completed.status = "running";
+    completed.payloadHash = undefined;
+    completed.qa = undefined;
+    completed.collectionFinishedAt = undefined;
+    completed.activity = { sequence: 4, active: [], recent: [] };
+    await repository.saveRun(completed);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-27T10:00:00.000Z"));
+      await repository.beginAttempt({ runId: completed.id, expectedRevision: 0 });
+      vi.setSystemTime(new Date("2026-08-27T10:31:00.000Z"));
+
+      const recovered = await service.reconcileInterruptedRun(completed);
+
+      expect(recovered).toMatchObject({
+        status: "review",
+        updatedAt: "2026-08-27T10:30:59.000Z",
+        errors: [{ partition: "worker", message: "worker final checkpoint" }]
+      });
+      expect(await repository.getRun(completed.id)).toEqual(recovered);
+      expect(await repository.getRunAttempt(completed.id)).toMatchObject({ status: "completed" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves a newer worker checkpoint saved immediately before a successful stale fence", async () => {
+    class WorkerCheckpointRepository extends MemoryRepository {
+      override async finishAttempt(command: FinishAttemptCommand) {
+        const newer = (await this.getRun(command.runId))!;
+        newer.status = "review";
+        newer.updatedAt = "2026-08-27T10:30:59.000Z";
+        newer.collectionFinishedAt = newer.updatedAt;
+        newer.errors = [{ partition: "worker", message: "newer terminal state" }];
+        await super.saveRun(newer, {
+          attemptId: command.attemptId,
+          fencingToken: command.fencingToken
+        });
+        return super.finishAttempt(command);
+      }
+    }
+    const repository = new WorkerCheckpointRepository();
+    const service = new RatingsService(repository, async () => new FakeAdapter());
+    const completed = await service.executeRun((await service.createRun(request)).id);
+    completed.status = "running";
+    completed.payloadHash = undefined;
+    completed.qa = undefined;
+    completed.collectionFinishedAt = undefined;
+    completed.activity = { sequence: 5, active: [], recent: [] };
+    await repository.saveRun(completed);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-27T10:00:00.000Z"));
+      await repository.beginAttempt({ runId: completed.id, expectedRevision: 0 });
+      vi.setSystemTime(new Date("2026-08-27T10:31:00.000Z"));
+
+      const recovered = await service.reconcileInterruptedRun(completed);
+
+      expect(recovered).toMatchObject({
+        status: "review",
+        updatedAt: "2026-08-27T10:30:59.000Z",
+        errors: [{ partition: "worker", message: "newer terminal state" }]
+      });
+      expect(await repository.getRun(completed.id)).toEqual(recovered);
+      expect(await repository.getRunAttempt(completed.id)).toMatchObject({ status: "failed" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("restores partial publication and failed-only retry after a checkpoint RPC interruption", async () => {

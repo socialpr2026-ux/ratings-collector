@@ -112,6 +112,31 @@ describe("OkaptekaAdapter", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("discovers exact relative product links on a source-bound first-party Okapteka group", async () => {
+    const group = fixtures.okGroup.replaceAll(/https:\/\/okapteka-ru\.translate\.goog([^?"']+)\?[^"']+/gu, "$1");
+    const adapter = new OkaptekaAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(group, { headers: { "content-type": "text/html; charset=utf-8" } })
+    ) as unknown as typeof fetch);
+
+    const refs = await adapter.discover("Кагоцел", context);
+
+    expect(refs.map((item) => item.listingId).sort()).toEqual(["30687", "529011", "529012"]);
+    expect(refs.every((item) => item.url.startsWith("https://okapteka.ru/"))).toBe(true);
+  });
+
+  it("checks the requested Okapteka brand instead of an unrelated fixed canary", async () => {
+    const requested: string[] = [];
+    const source = "https://okapteka.ru/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/";
+    const adapter = new OkaptekaAdapter(new MemoryEvidenceStore(), vi.fn(async (input: RequestInfo | URL) => {
+      requested.push(requestedUrl(input).pathname);
+      return new Response(`<!doctype html><html><head><base href="${source}"></head>` +
+        `<body><main>Не найдено ни одного товара.</main></body></html>`);
+    }) as unknown as typeof fetch);
+
+    await expect(adapter.healthCheck({ ...context, brands: ["Хлорэтта"] })).resolves.toMatchObject({ ok: true });
+    expect(requested).toEqual(["/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/"]);
+  });
+
   it("fails closed when an empty review page has no explicit no-reviews proof", async () => {
     const ambiguous = `<!doctype html><html><head><base href="https://okapteka.ru/reviews/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/"></head><body><main>Отзывы</main></body></html>`;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {

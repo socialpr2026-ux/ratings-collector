@@ -12,10 +12,19 @@ import { loadPlaywright } from "../../src/server/utils/playwright-runtime.js";
 import { playwrightCdpBaseUrl } from "../../src/server/utils/sandbox-cdp.js";
 import { collectorPublicEndpoint } from "../../src/server/utils/collector-public-endpoint.js";
 import {
+  bindExactOkaptekaFirstPartyHtml,
+  OKAPTEKA_FIRST_PARTY_HTML_MAX_BYTES,
   OKAPTEKA_MISSING_HTML_MAX_BYTES,
   provesExactOkaptekaMissingHtml
 } from "../../src/server/utils/okapteka-missing.js";
 import { assertSafePublicDestination, isPrivateNetworkAddress, readTextBounded } from "../../src/server/utils/safe-fetch.js";
+import {
+  proveExactZdravcityGroupBff,
+  ZDRAVCITY_GROUP_BFF_MAX_BYTES,
+  ZDRAVCITY_GROUP_BFF_URL,
+  zdravcityGroupBffRequest,
+  zdravcityGroupSlugFromUrl
+} from "../../src/server/utils/zdravcity-group-bff.js";
 
 type BrowserApi = { cdpUrl: string };
 type SandboxCommands = { run(command: string): Promise<unknown> };
@@ -35,6 +44,7 @@ type AgentContext = {
 export const STATIC_PROXY_REQUEST_TIMEOUT_MS = 55_000;
 export const PHARMACY009_DIRECT_TIMEOUT_MS = 15_000;
 export const OKAPTEKA_DIRECT_TIMEOUT_MS = 15_000;
+export const ZDRAVCITY_GROUP_BFF_TIMEOUT_MS = 15_000;
 export const OZON_LEASE_MS = 120_000;
 export const OZON_LEASE_HEARTBEAT_MS = 40_000;
 
@@ -538,6 +548,46 @@ export function browserFetch(
     signal.throwIfAborted();
     return fetchViaStaticProxy(url, signal);
   };
+  const fetchZdravcityGroupMissingProof = async (url: URL, signal: AbortSignal): Promise<Response | undefined> => {
+    const slug = zdravcityGroupSlugFromUrl(url);
+    if (!slug) return undefined;
+    const attemptAbort = new AbortController();
+    const combinedSignal = AbortSignal.any([signal, attemptAbort.signal]);
+    try {
+      const response = await withDeadline(fetch(ZDRAVCITY_GROUP_BFF_URL, {
+        method: "POST",
+        redirect: "manual",
+        signal: combinedSignal,
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+          "user-agent": "Mozilla/5.0"
+        },
+        body: JSON.stringify(zdravcityGroupBffRequest(slug))
+      }), ZDRAVCITY_GROUP_BFF_TIMEOUT_MS, "Zdravcity exact group proof timed out");
+      if (response.status !== 200 || !/application\/json/iu.test(response.headers.get("content-type") ?? "")) {
+        await response.body?.cancel().catch(() => undefined);
+        return undefined;
+      }
+      const text = await readTextBounded(response, ZDRAVCITY_GROUP_BFF_MAX_BYTES, ZDRAVCITY_GROUP_BFF_TIMEOUT_MS);
+      let value: unknown;
+      try { value = JSON.parse(text); }
+      catch { return undefined; }
+      if (proveExactZdravcityGroupBff(value, slug) !== "missing") return undefined;
+      return new Response(null, {
+        status: 404,
+        headers: {
+          "cache-control": "no-store",
+          "x-ratings-source": "zdravcity-first-party-bff-missing"
+        }
+      });
+    } catch (error) {
+      if (signal.aborted) throw error;
+      return undefined;
+    } finally {
+      attemptAbort.abort();
+    }
+  };
   const acquireSandbox = createLazySandboxAcquire(sandbox);
   const getBrowser = () => {
     if (disposed) return Promise.reject(new Error("Browser collector has already been disposed"));
@@ -782,7 +832,21 @@ export function browserFetch(
             });
           }
         }
-        if (direct.ok) return direct;
+        if (direct.ok && /(?:text\/html|application\/xhtml\+xml)/iu.test(direct.headers.get("content-type") ?? "")) {
+          const source = fixedOkaptekaGroupSource.toString();
+          const directHtml = await readTextBounded(direct, OKAPTEKA_FIRST_PARTY_HTML_MAX_BYTES, 10_000);
+          const sourceBoundHtml = bindExactOkaptekaFirstPartyHtml(directHtml, source);
+          if (sourceBoundHtml) {
+            return new Response(sourceBoundHtml, {
+              status: 200,
+              headers: {
+                "content-type": "text/html; charset=utf-8",
+                "cache-control": "no-store",
+                "x-ratings-source": "okapteka-first-party-ssr"
+              }
+            });
+          }
+        }
         await direct.body?.cancel().catch(() => undefined);
       } catch (error) {
         attemptAbort.abort();
@@ -973,20 +1037,41 @@ export function browserFetch(
       return proxied;
     }
     if (staticProxy && fixedZdravcityTarget) {
+      let direct: Response | undefined;
       try {
-        const direct = await fetch(request);
-        const shouldFallback = [403, 408, 425, 429].includes(direct.status) || direct.status >= 500;
-        if (!shouldFallback) return direct;
-        const proxied = await fetchViaStaticProxy(url, request.signal);
-        if (proxied.ok || [404, 410].includes(proxied.status)) {
-          await direct.body?.cancel().catch(() => undefined);
-          return proxied;
-        }
-        await proxied.body?.cancel().catch(() => undefined);
-        return direct;
-      } catch {
-        return fetchViaStaticProxy(url, request.signal);
+        direct = await fetch(request);
+      } catch (error) {
+        if (request.signal.aborted) throw error;
       }
+      const shouldFallback = !direct || [403, 408, 425, 429].includes(direct.status) || direct.status >= 500;
+      if (!shouldFallback) return direct;
+      let proxied: Response;
+      try {
+        proxied = await fetchViaStaticProxy(url, request.signal);
+      } catch (error) {
+        const missing = await fetchZdravcityGroupMissingProof(url, request.signal);
+        if (missing) {
+          await direct?.body?.cancel().catch(() => undefined);
+          return missing;
+        }
+        if (direct) return direct;
+        throw error;
+      }
+      if (proxied.ok || [404, 410].includes(proxied.status)) {
+        await direct?.body?.cancel().catch(() => undefined);
+        return proxied;
+      }
+      const missing = await fetchZdravcityGroupMissingProof(url, request.signal);
+      if (missing) {
+        await Promise.all([
+          direct?.body?.cancel().catch(() => undefined),
+          proxied.body?.cancel().catch(() => undefined)
+        ]);
+        return missing;
+      }
+      if (!direct) return proxied;
+      await proxied.body?.cancel().catch(() => undefined);
+      return direct;
     }
     if (staticProxy && host === "vapteke.ru" && !shouldUseHardenedBrowser(request)) {
       return fetchVaptekeViaStaticProxy(request);

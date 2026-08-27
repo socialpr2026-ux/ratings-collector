@@ -43,9 +43,13 @@ export type Pharmacy009SnapshotProof = {
 
 // Immutable, source-bound absence proof captured from the complete 009 sitemap
 // set. This is deliberately invalidated by any manifest, body, URL-count,
-// last-modified, canonical-family-set, or predicate change. It never turns a
+// Last-Modified calendar date, canonical-family-set, or predicate change. It never turns a
 // transport/parser failure into absence: the current run must first reproduce
-// every byte-level invariant below.
+// every byte-level invariant below. 009 regenerates Last-Modified seconds
+// while serving byte-identical sitemap bodies, so the strict source date is
+// identity while the unstable time-of-day remains validator metadata. The
+// cryptographic body hashes, exact manifest URLs/counts and canonical family
+// set remain the authoritative proof and fail closed on any content change.
 export const VERIFIED_PHARMACY009_HLORETTA_ABSENCE = {
   indexSha256: "32d8f2127834313a3df2a454681c6089d9b7e98a3ad73025815e94be0265084c",
   indexLastModified: "2026-08-23 08:00:05",
@@ -87,15 +91,26 @@ function sameArray<T>(left: readonly T[], right: readonly T[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+function lastModifiedDate(value: string): string | undefined {
+  return value.match(/^(\d{4}-\d{2}-\d{2}) \d{2}:\d{2}:\d{2}$/u)?.[1];
+}
+
+function sameLastModifiedDates(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => {
+    const actual = lastModifiedDate(value);
+    return actual !== undefined && actual === lastModifiedDate(right[index] ?? "");
+  });
+}
+
 export function provesVerifiedPharmacy009Absence(brand: string, proof: Pharmacy009SnapshotProof): boolean {
   const expected = VERIFIED_PHARMACY009_HLORETTA_ABSENCE;
   return normalizeText(brand) === "хлорэтта" &&
     proof.indexSha256 === expected.indexSha256 &&
-    proof.indexLastModified === expected.indexLastModified &&
+    lastModifiedDate(proof.indexLastModified) === lastModifiedDate(expected.indexLastModified) &&
     sameArray(proof.embeddedLastmods, expected.embeddedLastmods) &&
     sameArray(proof.shardUrls, expected.shardUrls) &&
     sameArray(proof.shardSha256, expected.shardSha256) &&
-    sameArray(proof.shardLastModified, expected.shardLastModified) &&
+    sameLastModifiedDates(proof.shardLastModified, expected.shardLastModified) &&
     sameArray(proof.shardUrlCounts, expected.shardUrlCounts) &&
     proof.familyRefCount === expected.familyRefCount &&
     proof.familyRefSetSha256 === expected.familyRefSetSha256 &&

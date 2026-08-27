@@ -18,7 +18,7 @@ import type { EvidenceStore } from "./evidence.js";
 import { GenericSiteAdapter } from "./generic/adapter.js";
 import { profileSite } from "./generic/profiler.js";
 import { validateRun } from "./qa.js";
-import { productKey, type Repository } from "./repository.js";
+import { AttemptConflictError, productKey, type Repository } from "./repository.js";
 import { observationsForPublication } from "./publication-scope.js";
 import { AdapterBlockedError, AdapterQuotaError, ParserChangedError } from "./adapters/errors.js";
 import { safeErrorMessage } from "./utils/error-message.js";
@@ -31,6 +31,7 @@ import { failureEnvelope } from "./failure-envelope.js";
 import { RunActivityTracker, runtimeSignals } from "./runtime-activity.js";
 import { normalizeProductOverride, resolveProductOverride } from "./utils/product-override.js";
 import { compactProductCatalogEvidence, reconcileProductCatalog } from "./utils/product-catalog.js";
+import { STALE_COLLECTION_CHECKPOINT_MS } from "./collection-checkpoint.js";
 
 const RUN_SOFT_DEADLINE_MS = 26 * 60 * 1000;
 export const DEFAULT_DOMAIN_CONCURRENCY = 12;
@@ -86,6 +87,11 @@ function resolveYandexFamilyOverride(item: Observation, value: string): ProductI
 
 function stableHash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function isAttemptConflict(error: unknown): boolean {
+  return error instanceof AttemptConflictError ||
+    error instanceof Error && /^attempt_(?:fencing|revision|checkpoint)_conflict$/u.test(error.message);
 }
 
 function uniqueBrands(brands: readonly string[]): string[] {
@@ -360,6 +366,44 @@ export class RatingsService {
       run.partitions.length === expectedPartitions.length &&
       (run.activity?.active.length ?? 0) === 0;
     if ((run.status !== "failed" || orchestratorErrors.length === 0) && !terminalCheckpoint) return run;
+    // Parallel domains briefly leave no active UI operation after all current
+    // partitions have checkpointed but before the worker persists final QA.
+    // A legacy GET during that gap must stay read-only. A crashed Agent can,
+    // however, leave its fenced head marked running forever, so freshness is
+    // bounded by the same deadline that owns stale collection recovery. Once
+    // stale, finish that head first; this fences a late worker before the
+    // unfenced recovery write.
+    const observedHash = stableHash(run);
+    const attempt = await this.repository.getRunAttempt(run.id);
+    if (attempt?.status === "running") {
+      const attemptUpdatedAt = Date.parse(attempt.updatedAt);
+      const attemptAge = Date.now() - attemptUpdatedAt;
+      if (Number.isFinite(attemptUpdatedAt) && attemptAge >= 0 && attemptAge < STALE_COLLECTION_CHECKPOINT_MS) {
+        return run;
+      }
+      try {
+        await this.repository.finishAttempt({
+          runId: run.id,
+          attemptId: attempt.attemptId,
+          fencingToken: attempt.fencingToken,
+          expectedRevision: attempt.revision,
+          status: "failed",
+          message: "stale collection attempt reconciled from its durable checkpoint"
+        });
+      } catch {
+        // The worker may have won the final save/finish race. Never continue
+        // from the caller's older snapshot after a failed fence.
+        return await this.repository.getRun(run.id) ?? run;
+      }
+    }
+
+    // finishAttempt and saveRun are separate repository transactions. Reload
+    // between them and abandon reconciliation if any worker checkpoint changed
+    // the observed snapshot immediately before it was fenced.
+    const latest = await this.repository.getRun(run.id);
+    if (!latest) return run;
+    if (stableHash(latest) !== observedHash) return latest;
+    run = structuredClone(latest);
 
     const existing = new Set(run.partitions.map((partition) => partitionKey(partition.domain, partition.brand)));
     const missing = expectedPartitions.filter(({ key }) => !existing.has(key));
@@ -391,8 +435,13 @@ export class RatingsService {
     run.collectionFinishedAt ??= recoveredAt;
     run.updatedAt = recoveredAt;
     run.qa = validateRun(run);
-    await this.repository.saveRun(run);
-    return run;
+    try {
+      await this.repository.saveRun(run);
+      return run;
+    } catch (error) {
+      if (!isAttemptConflict(error)) throw error;
+      return await this.repository.getRun(run.id) ?? run;
+    }
   }
 
   async listRecentRuns(ownerEmail?: string, limit = 8): Promise<RunHistoryItem[]> {

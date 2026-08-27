@@ -244,7 +244,10 @@ const OK_PRODUCT = /^\/([a-z0-9][a-z0-9-]*-(\d+))\/?$/i;
 
 function okProduct(value: string): { id: string; url: string } | undefined {
   try {
-    const url = new URL(value);
+    // Exact first-party group pages use relative product links. The page itself
+    // is source-bound before discovery, and this parser still rejects every
+    // non-Okapteka host/path after resolving against the only allowed origin.
+    const url = new URL(value, `https://${OK_DOMAIN}/`);
     const host = url.hostname.replace(/^www\./, "");
     if (url.protocol !== "https:" || host !== OK_DOMAIN && url.hostname !== OK_TRANSLATE_HOST) return undefined;
     const match = url.pathname.match(OK_PRODUCT);
@@ -279,8 +282,17 @@ export class OkaptekaAdapter extends PharmacyAdapter {
   readonly supportedDomains = [OK_DOMAIN, `www.${OK_DOMAIN}`] as const;
   private reviewCache = new Map<string, Promise<{ html: string; status: number; requestedUrl: string; metrics: Map<string, OkReviewAggregate> }>>();
 
-  healthCheck(context: AdapterContext): Promise<AdapterHealth> {
-    return this.canary("Кагоцел", context);
+  async healthCheck(context: AdapterContext): Promise<AdapterHealth> {
+    const checkedAt = new Date().toISOString();
+    const brand = context.brands?.[0]?.trim() || "Кагоцел";
+    try {
+      const refs = await this.discover(brand, { ...context, previousIds: [], previousRefs: [] });
+      return refs.length
+        ? { ok: true, checkedAt, message: `${this.id}: operative discovery found ${refs.length} product card(s)` }
+        : { ok: true, checkedAt, message: `${this.id}: complete brand lookup proved no current product for ${brand}` };
+    } catch (error) {
+      return { ok: false, checkedAt, message: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {

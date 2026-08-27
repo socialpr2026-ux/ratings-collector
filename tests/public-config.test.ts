@@ -13,6 +13,14 @@ function exactOkaptekaMissingPage(source: string, challenge = false): string {
     `<a href="/" class="btn">Вернуться на главную</a></div></body></html>`;
 }
 
+function exactOkaptekaGroupPage(source: string, options: { challenge?: boolean; canonical?: string } = {}): string {
+  return `<!doctype html><html><head><link rel="canonical" href="${options.canonical ?? source}"></head><body>` +
+    `<!-- ${"verified-first-party-group ".repeat(45)} -->` +
+    `${options.challenge ? '<form data-sitekey="captcha"></form>' : ""}` +
+    `<article class="product"><a href="/kagotsyel-tab-12mg-30-529011/">Кагоцел таблетки 12мг №30</a></article>` +
+    `</body></html>`;
+}
+
 describe("public configuration", () => {
   it("does not expose an editable spreadsheet URL", async () => {
     const response = await onRequest({
@@ -90,7 +98,10 @@ describe("new static collector gateways", () => {
       return new Response(url.pathname.endsWith(".xml")
         ? "<urlset><url><loc>https://009.xn--p1ai/kupit-lirika/otzyvy</loc></url></urlset>"
         : "<html><h1 class='reviewsPage__h1'>ЛИРИКА ОТЗЫВЫ</h1></html>", {
-        headers: { "content-type": url.pathname.endsWith(".xml") ? "application/xml" : "text/html; charset=utf-8" }
+        headers: {
+          "content-type": url.pathname.endsWith(".xml") ? "application/xml" : "text/html; charset=utf-8",
+          "last-modified": "2026-08-23 08:00:07"
+        }
       });
     });
     vi.stubGlobal("fetch", upstream);
@@ -100,6 +111,7 @@ describe("new static collector gateways", () => {
     const family = await callGateway("https://009.xn--p1ai/kupit-lirika/otzyvy");
     expect(index.status).toBe(200);
     expect(shard.headers.get("x-ratings-source")).toBe("009-first-party-sitemap");
+    expect(shard.headers.get("last-modified")).toBe("2026-08-23 08:00:07");
     expect(family.headers.get("x-ratings-source")).toBe("009-first-party-family-reviews");
     expect(await family.text()).toContain("ЛИРИКА ОТЗЫВЫ");
 
@@ -1317,6 +1329,52 @@ describe("static pharmacy Translate gateway", () => {
     expect((await callGateway(target.toString())).status).toBe(502);
   });
 
+  it("source-binds a healthy exact Okapteka group after translated transport or transient status fails", async () => {
+    const target = translated("okapteka-ru.translate.goog", "/pg/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/");
+    const source = "https://okapteka.ru/pg/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/";
+    for (const translatedOutcome of ["throw", "502"] as const) {
+      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        if (url.hostname === "okapteka-ru.translate.goog") {
+          if (translatedOutcome === "throw") throw new TypeError("translated egress failed");
+          return new Response("translated unavailable", { status: 502 });
+        }
+        return new Response(exactOkaptekaGroupPage(source), {
+          headers: { "content-type": "text/html; charset=utf-8" }
+        });
+      }));
+
+      const recovered = await callGateway(target.toString());
+
+      expect(recovered.status).toBe(200);
+      expect(recovered.headers.get("x-ratings-source")).toBe("okapteka-first-party-ssr");
+      expect(await recovered.text()).toContain(`<base href="${source}">`);
+    }
+  });
+
+  it.each([
+    ["challenge", exactOkaptekaGroupPage(
+      "https://okapteka.ru/pg/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/",
+      { challenge: true }
+    )],
+    ["wrong canonical", exactOkaptekaGroupPage(
+      "https://okapteka.ru/pg/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/",
+      { canonical: "https://okapteka.ru/pg/drugoy-brand/" }
+    )]
+  ])("keeps a first-party Okapteka %s response blocked", async (_case, firstPartyHtml) => {
+    const target = translated("okapteka-ru.translate.goog", "/pg/%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB/");
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "okapteka-ru.translate.goog") throw new TypeError("translated egress failed");
+      return new Response(firstPartyHtml, { headers: { "content-type": "text/html; charset=utf-8" } });
+    }));
+
+    const blocked = await callGateway(target.toString());
+
+    expect(blocked.status).toBe(502);
+    expect(blocked.headers.get("x-ratings-source")).toBeNull();
+  });
+
   it("keeps an Okapteka CAPTCHA 404 blocked instead of synthesizing an empty brand", async () => {
     const target = translated("okapteka-ru.translate.goog", "/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/");
     const source = "https://okapteka.ru/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/";
@@ -2507,7 +2565,7 @@ describe("fixed first-party collection egress", () => {
       expect(await unconfirmed.json()).toEqual({
         error: "Zdravcity translated terminal status was not confirmed by first-party"
       });
-      expect(unconfirmedTranslated404).toHaveBeenCalledTimes(2);
+      expect(unconfirmedTranslated404).toHaveBeenCalledTimes(3);
     }
 
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
@@ -2516,6 +2574,31 @@ describe("fixed first-party collection egress", () => {
       return new Response("source unavailable", { status: 503 });
     }));
     expect((await callGateway(target)).status).toBe(502);
+  });
+
+  it("confirms a missing Zdravcity group through the exact first-party BFF when page routes are blocked", async () => {
+    const target = "https://zdravcity.ru/g_hloretta/";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "zdravcity-ru.translate.goog") throw new TypeError("translated egress failed");
+      if (url.pathname === "/bff/query") {
+        return new Response(JSON.stringify({
+          errors: [{
+            message: "queryResolver.Group: catalog.Manager.Group: rpc error: code = NotFound desc = group.group: catalog.group by code hloretta: group not found",
+            path: ["group"], extensions: { code: 404 }
+          }],
+          data: null
+        }), { headers: { "content-type": "application/json" } });
+      }
+      return new Response("source blocked", { status: 503 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const recovered = await callGateway(target);
+
+    expect(recovered.status).toBe(404);
+    expect(recovered.headers.get("x-ratings-source")).toBe("zdravcity-first-party-bff-missing");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("compacts Zdravcity written reviews without inventing a missing star rating", async () => {

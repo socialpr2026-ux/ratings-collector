@@ -136,7 +136,7 @@ describe("Pharmacy009Adapter", () => {
     }
   });
 
-  it("accepts the immutable complete Hloretta absence proof only when every source invariant matches", () => {
+  it("accepts the immutable complete Hloretta absence proof when content invariants match despite validator drift", () => {
     const expected = VERIFIED_PHARMACY009_HLORETTA_ABSENCE;
     const clone = (): Pharmacy009SnapshotProof => ({
       ...expected,
@@ -148,14 +148,23 @@ describe("Pharmacy009Adapter", () => {
     });
     expect(provesVerifiedPharmacy009Absence("Хлорэтта", clone())).toBe(true);
     expect(provesVerifiedPharmacy009Absence("Бактоблис", clone())).toBe(false);
+    expect(provesVerifiedPharmacy009Absence("Хлорэтта", {
+      ...clone(),
+      indexLastModified: "2026-08-23 08:00:07",
+      shardLastModified: expected.shardLastModified.map((value, index) =>
+        value.replace(/:\d{2}$/u, `:${String(7 + index).padStart(2, "0")}`)
+      )
+    })).toBe(true);
 
     const mutations: Pharmacy009SnapshotProof[] = [
       { ...clone(), indexSha256: "0".repeat(64) },
-      { ...clone(), indexLastModified: "2026-08-23 08:00:06" },
+      { ...clone(), indexLastModified: "2026-08-24 08:00:05" },
+      { ...clone(), indexLastModified: "Sun, 23 Aug 2026 08:00:05 GMT" },
       { ...clone(), embeddedLastmods: ["2026-08-24", ...expected.embeddedLastmods.slice(1)] },
       { ...clone(), shardUrls: [`${ORIGIN}/sitemap_99.xml`, ...expected.shardUrls.slice(1)] },
       { ...clone(), shardSha256: ["0".repeat(64), ...expected.shardSha256.slice(1)] },
-      { ...clone(), shardLastModified: ["2026-08-23 08:00:06", ...expected.shardLastModified.slice(1)] },
+      { ...clone(), shardLastModified: ["2026-08-24 08:00:03", ...expected.shardLastModified.slice(1)] },
+      { ...clone(), shardLastModified: ["", ...expected.shardLastModified.slice(1)] },
       { ...clone(), shardUrlCounts: [49_999, ...expected.shardUrlCounts.slice(1)] },
       { ...clone(), familyRefCount: expected.familyRefCount - 1 },
       { ...clone(), familyRefSetSha256: "0".repeat(64) },
