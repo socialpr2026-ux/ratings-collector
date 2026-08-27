@@ -1279,6 +1279,30 @@ describe("static pharmacy Translate gateway", () => {
     expect(unproven.status).toBe(404);
   });
 
+  it("recovers an exact Okapteka group 404 after translated transport fails", async () => {
+    const target = translated("okapteka-ru.translate.goog", "/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "okapteka-ru.translate.goog") throw new TypeError("translated egress failed");
+      return new Response("missing", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const recovered = await callGateway(target.toString());
+
+    expect(recovered.status).toBe(200);
+    expect(recovered.headers.get("x-ratings-source")).toBe("okapteka-first-party-missing");
+    expect(await recovered.text()).toContain('data-ratings-empty="first-party-404"');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "okapteka-ru.translate.goog") throw new TypeError("translated egress failed");
+      return new Response("source unavailable", { status: 503 });
+    }));
+    expect((await callGateway(target.toString())).status).toBe(502);
+  });
+
   it("accepts and compacts source-bound Farmlend product metrics", async () => {
     const noise = "x".repeat(500_000);
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`<html><head>
@@ -1614,6 +1638,88 @@ describe("static pharmacy Translate gateway", () => {
     expect(proof).toContain('"ratingCount":57');
     expect(proof).toContain('class="variantButton" aria-selected="true"');
     expect((await callGateway("https://apteka.ru/search?q=Оциллококцинум")).status).toBe(400);
+  });
+
+  it("derives an Apteka.ru zero only from the exact selected product state", async () => {
+    const source = "https://apteka.ru/product/xloretta-2-mg--003-mg-63-sht-tabletki-pokrytye-plenochnoj-obolochkoj-69cfc7f2fe56bf3a18668d99/";
+    const id = "69cfc7f2fe56bf3a18668d99";
+    const siblingId = "69cfc72d6814b63ce393e596";
+    const productSlug = new URL(source).pathname.split("/").filter(Boolean)[1];
+    const product = {
+      "@type": "Product", sku: id,
+      name: "Хлорэтта 2 мг + 0,03 мг 63 шт. таблетки, покрытые пленочной оболочкой"
+    };
+    const sibling = {
+      id: siblingId,
+      name: "Хлорэтта 2 мг + 0,03 мг 21 шт. таблетки, покрытые пленочной оболочкой",
+      humanableUrl: `xloretta-2-mg--003-mg-21-sht-tabletki-pokrytye-plenochnoj-obolochkoj-${siblingId}`,
+      reviewsCount: 2,
+      rating: 5,
+      default: false
+    };
+    const state = (
+      selectedOverrides: Record<string, unknown> = {},
+      itemReviews: unknown[] = [],
+      productOverrides: Record<string, unknown> = {}
+    ) => {
+      const selected = {
+        id,
+        name: product.name,
+        humanableUrl: productSlug,
+        reviewsCount: 0,
+        rating: null,
+        default: true,
+        ...selectedOverrides
+      };
+      const groupItems = [{ itemInfos: [sibling, selected] }];
+      return {
+        product: {
+          selected: id,
+          groupId: id,
+          error: false,
+          transition: null,
+          itemReviews,
+          iteminfo: { [id]: selected },
+          products: { [siblingId]: sibling, [id]: selected },
+          groupItems,
+          groupinfo: { groupItems },
+          ...productOverrides
+        }
+      };
+    };
+    const page = (initialState?: object, body = "") => `<html><head><base href="${source}"><link rel="canonical" href="${source}">
+      <script type="application/ld+json">${JSON.stringify(product)}</script></head><body><h1>${product.name}</h1>${body}
+      ${initialState ? `<script>window.__INITIAL_STATE__ = ${JSON.stringify(initialState)};</script>` : ""}</body></html>`;
+    const emptyText = "<h2>Отзывы</h2><span>0</span><span>отзывов</span><p>К этому товару ещё нет отзывов.</p>";
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(page(state()), { headers: { "content-type": "text/html" } }))
+      .mockResolvedValueOnce(new Response(page(state({ reviewsCount: 1, rating: 5 }, [{ id: "review-1" }]), emptyText), {
+        headers: { "content-type": "text/html" }
+      }))
+      .mockResolvedValueOnce(new Response(page(state({}, [{ id: "contradicting-review" }]), emptyText), {
+        headers: { "content-type": "text/html" }
+      }))
+      .mockResolvedValueOnce(new Response(page(state({}, [], { error: true }), emptyText), {
+        headers: { "content-type": "text/html" }
+      }))
+      .mockResolvedValueOnce(new Response(page(state({}, [], { transition: { pending: true } }), emptyText), {
+        headers: { "content-type": "text/html" }
+      }))
+      .mockResolvedValueOnce(new Response(page(undefined, emptyText), { headers: { "content-type": "text/html" } })));
+    const target = translated("apteka-ru.translate.goog", new URL(source).pathname).toString();
+
+    const response = await callGateway(target);
+
+    expect(response.status).toBe(200);
+    const proof = await response.text();
+    expect(proof).toContain('"reviewCount":0');
+    expect(proof).toContain('"ratingCount":0');
+    expect(proof).not.toContain(siblingId);
+    expect((await callGateway(target)).status).toBe(502);
+    expect((await callGateway(target)).status).toBe(502);
+    expect((await callGateway(target)).status).toBe(502);
+    expect((await callGateway(target)).status).toBe(502);
+    expect((await callGateway(target)).status).toBe(502);
   });
 
   it("preserves an exact empty NFapteka product review section as zero", async () => {
@@ -2251,6 +2357,29 @@ describe("fixed first-party collection egress", () => {
     expect((await callGateway("https://zdravcity.ru/g_kagocel/?redirect=https://evil.example")).status).toBe(400);
     expect((await callGateway("https://reviews.yandex.ru/ugcpub/private.xml")).status).toBe(400);
     expect(upstream).toHaveBeenCalledTimes(3);
+  });
+
+  it("preserves an exact first-party Zdravcity 404 after translated transport fails", async () => {
+    const target = "https://zdravcity.ru/g_hloretta/";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "zdravcity-ru.translate.goog") throw new TypeError("translated egress failed");
+      return new Response("missing", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const recovered = await callGateway(target);
+
+    expect(recovered.status).toBe(404);
+    expect(recovered.headers.get("x-ratings-source")).toBe("zdravcity-first-party-missing");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "zdravcity-ru.translate.goog") throw new TypeError("translated egress failed");
+      return new Response("source unavailable", { status: 503 });
+    }));
+    expect((await callGateway(target)).status).toBe(502);
   });
 
   it("compacts Zdravcity written reviews without inventing a missing star rating", async () => {

@@ -387,7 +387,42 @@ describe("Pharmacy009Adapter", () => {
     expect(requested.filter((path) => path.startsWith("/kupit-"))).toEqual([]);
   });
 
-  it("does not claim no results when a complete sitemap has no proven brand mapping", async () => {
+  it("uses bounded exact brand slugs only after a complete sitemap miss and keeps the proven page for collection", async () => {
+    const family = `${ORIGIN}/kupit-khloretta/otzyvy`;
+    const requested: string[] = [];
+    const exactPage = positiveFamily(family, { heading: "ХЛОРЭТТА ОТЗЫВЫ" })
+      .replaceAll("ЛИРИКА", "ХЛОРЭТТА");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      requested.push(url.pathname);
+      if (url.pathname === "/sitemap.xml") return new Response(sitemapIndex(2));
+      if (url.pathname === "/sitemap_0.xml") return new Response(urlset(`${ORIGIN}/kupit-pregabalin/otzyvy`));
+      if (url.pathname === "/sitemap_1.xml") return new Response(urlset(`${ORIGIN}/kupit-lorista/otzyvy`));
+      if (url.pathname === "/kupit-khloretta/otzyvy") return new Response(exactPage);
+      if (/^\/kupit-(?:h|x)loretta\/otzyvy$/u.test(url.pathname)) return new Response("missing", { status: 404 });
+      throw new Error(`unexpected request ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new Pharmacy009Adapter(new MemoryEvidenceStore(), fetchMock);
+    const fallbackContext = { ...context, runId: "exact-slug-hit", brands: ["Хлорэтта"] };
+
+    const refs = await adapter.discover("Хлорэтта", fallbackContext);
+    expect(refs).toMatchObject([{
+      listingId: "family-khloretta",
+      brand: "Хлорэтта",
+      url: family,
+      metadata: { discovery: "009-bounded-exact-brand-slug" }
+    }]);
+    expect(requested.filter((path) => path.startsWith("/kupit-")).sort()).toEqual([
+      "/kupit-hloretta/otzyvy", "/kupit-khloretta/otzyvy", "/kupit-xloretta/otzyvy"
+    ]);
+
+    await expect(adapter.collect(refs[0]!, fallbackContext)).resolves.toMatchObject({
+      listingId: "family-khloretta", product: "ХЛОРЭТТА", reviews: 19, rating: 4.4
+    });
+    expect(requested.filter((path) => path === "/kupit-khloretta/otzyvy")).toHaveLength(1);
+  });
+
+  it("keeps absence unproven when every guessed exact brand slug is terminally absent", async () => {
     const requested: string[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = urlOf(input);
@@ -395,12 +430,120 @@ describe("Pharmacy009Adapter", () => {
       if (url.pathname === "/sitemap.xml") return new Response(sitemapIndex(2));
       if (url.pathname === "/sitemap_0.xml") return new Response(urlset(`${ORIGIN}/kupit-pregabalin/otzyvy`));
       if (url.pathname === "/sitemap_1.xml") return new Response(urlset(`${ORIGIN}/kupit-lorista/otzyvy`));
+      if (/^\/kupit-(?:h|kh|x)loretta\/otzyvy$/u.test(url.pathname)) {
+        return new Response("missing", { status: url.pathname.includes("khloretta") ? 410 : 404 });
+      }
       throw new Error(`unexpected request ${url}`);
     }) as unknown as typeof fetch;
     const adapter = new Pharmacy009Adapter(new MemoryEvidenceStore(), fetchMock);
 
-    await expect(adapter.discover("Бактоблис", { ...context, runId: "complete-empty" })).rejects.toBeInstanceOf(ParserChangedError);
+    await expect(adapter.discover("Хлорэтта", {
+      ...context, runId: "complete-empty", brands: ["Хлорэтта"]
+    })).rejects.toThrow(/did not prove absence/u);
     expect(requested[0]).toBe("/sitemap.xml");
-    expect(requested.slice(1).sort()).toEqual(["/sitemap_0.xml", "/sitemap_1.xml"]);
+    expect(requested.slice(1).sort()).toEqual([
+      "/kupit-hloretta/otzyvy", "/kupit-khloretta/otzyvy", "/kupit-xloretta/otzyvy",
+      "/sitemap_0.xml", "/sitemap_1.xml"
+    ]);
+  });
+
+  it("does not infer absence when the complete sitemap can use an unexpected family alias", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/sitemap.xml") return new Response(sitemapIndex(1));
+      if (url.pathname === "/sitemap_0.xml") {
+        return new Response(urlset(`${ORIGIN}/kupit-contraceptive-x/otzyvy`));
+      }
+      if (/^\/kupit-(?:h|kh|x)loretta\/otzyvy$/u.test(url.pathname)) {
+        return new Response("missing", { status: 404 });
+      }
+      throw new Error(`unexpected request ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new Pharmacy009Adapter(new MemoryEvidenceStore(), fetchMock);
+
+    await expect(adapter.discover("Хлорэтта", {
+      ...context, runId: "unexpected-alias", brands: ["Хлорэтта"]
+    })).rejects.toBeInstanceOf(AdapterBlockedError);
+  });
+
+  it("does not follow an exact-slug redirect into a terminal miss", async () => {
+    const requested: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      requested.push(url.pathname);
+      if (url.pathname === "/sitemap.xml") return new Response(sitemapIndex(1));
+      if (url.pathname === "/sitemap_0.xml") return new Response(urlset(`${ORIGIN}/kupit-pregabalin/otzyvy`));
+      if (url.pathname === "/kupit-khloretta/otzyvy") {
+        return new Response(null, { status: 302, headers: { location: "/missing-family" } });
+      }
+      if (/^\/kupit-(?:h|x)loretta\/otzyvy$/u.test(url.pathname)) return new Response("missing", { status: 404 });
+      if (url.pathname === "/missing-family") return new Response("missing", { status: 404 });
+      throw new Error(`unexpected request ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new Pharmacy009Adapter(new MemoryEvidenceStore(), fetchMock);
+
+    await expect(adapter.discover("Хлорэтта", {
+      ...context, runId: "redirect-terminal-miss", brands: ["Хлорэтта"]
+    })).rejects.toBeInstanceOf(AdapterBlockedError);
+    expect(requested).not.toContain("/missing-family");
+  });
+
+  it.each([401, 403, 429, 500, 502])("keeps exact-slug HTTP %s as a discovery blocker", async (status) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/sitemap.xml") return new Response(sitemapIndex(1));
+      if (url.pathname === "/sitemap_0.xml") return new Response(urlset(`${ORIGIN}/kupit-pregabalin/otzyvy`));
+      if (url.pathname === "/kupit-khloretta/otzyvy") return new Response("blocked", { status });
+      if (/^\/kupit-(?:h|x)loretta\/otzyvy$/u.test(url.pathname)) return new Response("missing", { status: 404 });
+      throw new Error(`unexpected request ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new Pharmacy009Adapter(new MemoryEvidenceStore(), fetchMock);
+
+    await expect(adapter.discover("Хлорэтта", {
+      ...context, runId: `exact-slug-blocked-${status}`, brands: ["Хлорэтта"]
+    })).rejects.toBeInstanceOf(AdapterBlockedError);
+  });
+
+  it.each([200, 404])("keeps an exact-slug HTTP %s challenge blocked", async (status) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/sitemap.xml") return new Response(sitemapIndex(1));
+      if (url.pathname === "/sitemap_0.xml") return new Response(urlset(`${ORIGIN}/kupit-pregabalin/otzyvy`));
+      if (url.pathname === "/kupit-khloretta/otzyvy") {
+        return new Response(
+          "<html><head><title>Проверка браузера</title></head><body><form action='/captcha'></form></body></html>",
+          { status }
+        );
+      }
+      if (/^\/kupit-(?:h|x)loretta\/otzyvy$/u.test(url.pathname)) return new Response("missing", { status: 404 });
+      throw new Error(`unexpected request ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new Pharmacy009Adapter(new MemoryEvidenceStore(), fetchMock);
+
+    await expect(adapter.discover("Хлорэтта", {
+      ...context, runId: `exact-slug-challenge-${status}`, brands: ["Хлорэтта"]
+    })).rejects.toBeInstanceOf(AdapterBlockedError);
+  });
+
+  it.each([
+    ["wrong family", (candidate: string) => familyIdentity(candidate, "ХЛОРЭТТА ПЛЮС")],
+    ["incomplete", () => "<html><body><h1 class='reviewsPage__h1'>ХЛОРЭТТА ОТЗЫВЫ</h1></body></html>"]
+  ])("rejects an exact-slug HTTP 200 %s identity", async (_label, page) => {
+    const candidate = `${ORIGIN}/kupit-khloretta/otzyvy`;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/sitemap.xml") return new Response(sitemapIndex(1));
+      if (url.pathname === "/sitemap_0.xml") return new Response(urlset(`${ORIGIN}/kupit-pregabalin/otzyvy`));
+      if (url.pathname === "/kupit-khloretta/otzyvy") {
+        return new Response(page(candidate));
+      }
+      if (/^\/kupit-(?:h|x)loretta\/otzyvy$/u.test(url.pathname)) return new Response("missing", { status: 404 });
+      throw new Error(`unexpected request ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new Pharmacy009Adapter(new MemoryEvidenceStore(), fetchMock);
+
+    await expect(adapter.discover("Хлорэтта", {
+      ...context, runId: "exact-slug-wrong-identity", brands: ["Хлорэтта"]
+    })).rejects.toBeInstanceOf(ParserChangedError);
   });
 });

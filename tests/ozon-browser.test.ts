@@ -141,7 +141,180 @@ function translatedProductHtml(
   </body></html>`;
 }
 
+const HLORETTA_SEEDS = [
+  {
+    sku: "4499023625",
+    title: "Хлорэтта таблетки, покрытые пленочной оболочкой 2мг+0,03мг 21шт"
+  },
+  {
+    sku: "4499024235",
+    title: "Хлорэтта таблетки, покрытые пленочной оболочкой 2мг+0,03мг 63шт"
+  }
+] as const;
+
+function seededOzonProductHtml(
+  source: URL,
+  sku: string,
+  title: string,
+  memberSkus: readonly string[],
+  reviews = 0,
+  ratingValue: number | null = null
+): string {
+  const product: Record<string, unknown> = {
+    "@context": "http://schema.org",
+    "@type": "Product",
+    sku,
+    name: title
+  };
+  if (reviews > 0 && ratingValue !== null) {
+    product.aggregateRating = {
+      "@type": "AggregateRating",
+      ratingValue: String(ratingValue),
+      reviewCount: String(reviews)
+    };
+  }
+  const score = reviews === 0 ? "Нет отзывов" : `${ratingValue} • ${reviews} отзывов`;
+  return `<html><head><base href="${source.toString()}"><script type="application/ld+json">${JSON.stringify(product)}</script>
+    <meta name="ratings-ozon-variant-skus" content="${memberSkus.join(",")}"></head><body>
+    <div id="state-webSingleProductScore-1" data-state='${JSON.stringify({ text: score })}'></div>
+    <script>window.__NUXT__={};window.__NUXT__.state='{}';</script></body></html>`;
+}
+
+function seededOzonAdapter(
+  members: Readonly<Record<string, readonly string[]>>,
+  metrics: Readonly<Record<string, { reviews: number; rating: number | null }>> = {}
+): OzonBrowserAdapter {
+  const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+    const source = sourceUrlFromTranslate(new URL(String(input)));
+    const seed = HLORETTA_SEEDS.find((item) => source.pathname.endsWith(`-${item.sku}/`));
+    expect(seed).toBeDefined();
+    const metric = metrics[seed!.sku] ?? { reviews: 0, rating: null };
+    return new Response(seededOzonProductHtml(
+      source,
+      seed!.sku,
+      seed!.title,
+      members[seed!.sku] ?? [],
+      metric.reviews,
+      metric.rating
+    ), { headers: { "content-type": "text/html" } });
+  });
+  return new OzonBrowserAdapter({
+    fetch: fetchMock as unknown as typeof globalThis.fetch,
+    detailConcurrency: 2,
+    detailDelayMs: 0
+  });
+}
+
 describe("Ozon browser collector", () => {
+  it("uses exact Хлорэтта seeds and product proofs without search or Sandbox discovery", async () => {
+    const seeds = [
+      {
+        sku: "4499023625",
+        title: "Хлорэтта таблетки, покрытые пленочной оболочкой 2мг+0,03мг 21шт"
+      },
+      {
+        sku: "4499024235",
+        title: "Хлорэтта таблетки, покрытые пленочной оболочкой 2мг+0,03мг 63шт"
+      }
+    ];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const endpoint = new URL(String(input));
+      const source = sourceUrlFromTranslate(endpoint);
+      expect(source.pathname).toMatch(/^\/product\/hloretta-/);
+      const seed = seeds.find((item) => source.pathname.endsWith(`-${item.sku}/`));
+      expect(seed).toBeDefined();
+      const product = { "@context": "http://schema.org", "@type": "Product", sku: seed!.sku, name: seed!.title };
+      const sibling = seeds.find((item) => item.sku !== seed!.sku)!;
+      return new Response(`<html><head><base href="${source.toString()}"><script type="application/ld+json">${JSON.stringify(product)}</script>
+        <meta name="ratings-ozon-variant-skus" content="${seeds.map((item) => item.sku).join(",")}"></head><body>
+        <a href="https://www-ozon-ru.translate.goog/product/variant-${sibling.sku}/?from_sku=${seed!.sku}&oos_search=false&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"></a>
+        <div id="state-webSingleProductScore-1" data-state='${JSON.stringify({ text: "Нет отзывов" })}'></div>
+        <script>window.__NUXT__={};window.__NUXT__.state='{}';</script></body></html>`, {
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const adapter = new OzonBrowserAdapter({
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+      detailConcurrency: 2,
+      detailDelayMs: 0
+    });
+    const seedContext = { ...context, runId: "hloretta-seeds", brands: ["Хлорэтта"] };
+
+    await expect(adapter.healthCheck(seedContext)).resolves.toMatchObject({ ok: true });
+    const refs = await adapter.discover("Хлорэтта", seedContext);
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, seedContext)));
+
+    expect(refs.map((ref) => ref.listingId)).toEqual(seeds.map((item) => item.sku));
+    expect(observations).toEqual(expect.arrayContaining(seeds.map((item) => expect.objectContaining({
+      listingId: item.sku,
+      reviews: 0,
+      rating: null,
+      status: "no_reviews",
+      aggregateGroupId: "ozon:variants:4499023625,4499024235"
+    }))));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.every(([input]) => sourceUrlFromTranslate(new URL(String(input))).pathname.startsWith("/product/"))).toBe(true);
+  });
+
+  it("rejects seeded Ozon cards when their pages have no complete variant member proof", async () => {
+    const adapter = seededOzonAdapter({
+      [HLORETTA_SEEDS[0].sku]: [HLORETTA_SEEDS[0].sku],
+      [HLORETTA_SEEDS[1].sku]: [HLORETTA_SEEDS[1].sku]
+    });
+
+    await expect(adapter.discover("Хлорэтта", {
+      ...context,
+      runId: "hloretta-missing-members",
+      brands: ["Хлорэтта"]
+    })).rejects.toThrow(/no reciprocal variant member proof/i);
+  });
+
+  it("rejects seeded Ozon cards when the reciprocal set contains an unseeded extra SKU", async () => {
+    const extra = "4499024999";
+    const all = [...HLORETTA_SEEDS.map((seed) => seed.sku), extra];
+    const adapter = seededOzonAdapter({
+      [HLORETTA_SEEDS[0].sku]: all,
+      [HLORETTA_SEEDS[1].sku]: all
+    });
+
+    await expect(adapter.discover("Хлорэтта", {
+      ...context,
+      runId: "hloretta-extra-member",
+      brands: ["Хлорэтта"]
+    })).rejects.toThrow(/extra 4499024999/i);
+  });
+
+  it("rejects a non-reciprocal seeded Ozon member set", async () => {
+    const both = HLORETTA_SEEDS.map((seed) => seed.sku);
+    const adapter = seededOzonAdapter({
+      [HLORETTA_SEEDS[0].sku]: both,
+      [HLORETTA_SEEDS[1].sku]: [HLORETTA_SEEDS[1].sku]
+    });
+
+    await expect(adapter.discover("Хлорэтта", {
+      ...context,
+      runId: "hloretta-non-reciprocal",
+      brands: ["Хлорэтта"]
+    })).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
+  it("rejects conflicting aggregate metrics across reciprocal seeded Ozon pages", async () => {
+    const both = HLORETTA_SEEDS.map((seed) => seed.sku);
+    const adapter = seededOzonAdapter({
+      [HLORETTA_SEEDS[0].sku]: both,
+      [HLORETTA_SEEDS[1].sku]: both
+    }, {
+      [HLORETTA_SEEDS[0].sku]: { reviews: 7, rating: 4.8 },
+      [HLORETTA_SEEDS[1].sku]: { reviews: 8, rating: 4.8 }
+    });
+
+    await expect(adapter.discover("Хлорэтта", {
+      ...context,
+      runId: "hloretta-conflicting-aggregate",
+      brands: ["Хлорэтта"]
+    })).rejects.toThrow(/aggregate metrics conflict/i);
+  });
+
   it("uses compact Google composer JSON before translated HTML and exhausts pagination", async () => {
     const searchPages: number[] = [];
     let htmlCalls = 0;

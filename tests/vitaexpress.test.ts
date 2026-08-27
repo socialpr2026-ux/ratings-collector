@@ -32,6 +32,14 @@ const PRODUCTS = [
     path: "/product/taurin__taustin__kapli_glaznye_4_10ml_solofarm/"
   },
   {
+    id: "211589", brand: "Хлорэтта", title: "Хлорэтта Таблетки, покрытые пленочной оболочкой 2мг+0,03мг, №21",
+    path: "/product/khloretta_tab__ppo_2mg_0_03mg__21/"
+  },
+  {
+    id: "211590", brand: "Хлорэтта", title: "Хлорэтта Таблетки, покрытые пленочной оболочкой 2мг+0,03мг, №63",
+    path: "/product/khloretta_tab__ppo_2mg_0_03mg__21_3/"
+  },
+  {
     id: "203657", brand: "Бактоблис", title: "Бактоблис таблетки для рассасывания, №30 без сахара",
     path: "/product/baktoblis_plyus_tab__drassas___30_bsakhara_bad/"
   },
@@ -124,6 +132,25 @@ function page(product: TestProduct, options: {
       </product-reviews>
     </div>
   </body></html>`;
+}
+
+function unavailableReviewPage(
+  product: TestProduct,
+  payloadOverrides: Record<string, unknown> = {}
+): string {
+  const payload = {
+    ID: Number(product.id),
+    XML_ID: Number(product.id),
+    NAME: product.title,
+    DETAIL_PAGE_URL: product.path,
+    APLAUT: 0,
+    SHOW_REVIEW: 1,
+    ...payloadOverrides
+  };
+  return page(product).replace(
+    /<product-reviews[^]*?<\/product-reviews>/u,
+    `<product-detail-header :product="${escapeAttribute(payload)}" :reviews="null" :rating="${product.id}"></product-detail-header>`
+  );
 }
 
 function productById(id: string): TestProduct {
@@ -276,6 +303,23 @@ describe("VitaExpressAdapter", () => {
     const refs = await adapter.discover("Бактоблис", { ...CONTEXT, runId: "discover-baktoblis" });
 
     expect(refs.map((item) => item.listingId)).toEqual(["203657", "197583", "190233", "193661", "175303"]);
+  });
+
+  it("registers the two exact current Хлорэтта variants with their proven IDs and URLs", async () => {
+    const adapter = new VitaExpressAdapter(new MemoryEvidenceStore(), fetchProducts());
+
+    await expect(adapter.discover("Хлорэтта", { ...CONTEXT, runId: "discover-khloretta" })).resolves.toMatchObject([
+      {
+        listingId: "211589",
+        title: "Хлорэтта Таблетки, покрытые пленочной оболочкой 2мг+0,03мг, №21",
+        url: `${ORIGIN}/product/khloretta_tab__ppo_2mg_0_03mg__21/`
+      },
+      {
+        listingId: "211590",
+        title: "Хлорэтта Таблетки, покрытые пленочной оболочкой 2мг+0,03мг, №63",
+        url: `${ORIGIN}/product/khloretta_tab__ppo_2mg_0_03mg__21_3/`
+      }
+    ]);
   });
 
   it("discovers and collects all three exact Enterolactis cards with proven empty reviews", async () => {
@@ -471,6 +515,56 @@ describe("VitaExpressAdapter", () => {
 
     await expect(adapter.collect(ref(product), { ...CONTEXT, runId: "captcha" }))
       .rejects.toBeInstanceOf(AdapterBlockedError);
+  });
+
+  it.each(["211589", "211590"])(
+    "classifies Хлорэтта %s as review_channel_unavailable without producing zero",
+    async (id) => {
+      const product = productById(id);
+      const evidence = new MemoryEvidenceStore();
+      const adapter = new VitaExpressAdapter(evidence, fetchProducts({
+        [product.id]: new Response(unavailableReviewPage(product), {
+          status: 200, headers: { "content-type": "text/html; charset=utf-8" }
+        })
+      }));
+
+      const error = await adapter.collect(ref(product), { ...CONTEXT, runId: `unavailable-${id}` })
+        .then(() => undefined, (reason: unknown) => reason);
+      expect(error).toBeInstanceOf(AdapterBlockedError);
+      expect(error).toMatchObject({ code: "blocked" });
+      expect((error as Error).message).toContain("review_channel_unavailable");
+      expect(evidence.items.size).toBe(0);
+    }
+  );
+
+  it.each([
+    ["another product ID", { ID: 211590 }],
+    ["another product name", { NAME: "Тирзетта таблетки 10 мг №4" }],
+    ["APLAUT other than numeric zero", { APLAUT: "0" }],
+    ["SHOW_REVIEW other than numeric one", { SHOW_REVIEW: 0 }]
+  ])("does not classify a non-source-bound %s payload as review_channel_unavailable", async (_label, override) => {
+    const product = productById("211589");
+    const adapter = new VitaExpressAdapter(new MemoryEvidenceStore(), fetchProducts({
+      [product.id]: new Response(unavailableReviewPage(product, override), {
+        status: 200, headers: { "content-type": "text/html; charset=utf-8" }
+      })
+    }));
+
+    await expect(adapter.collect(ref(product), { ...CONTEXT, runId: `unavailable-invalid-${_label}` }))
+      .rejects.toBeInstanceOf(ParserChangedError);
+  });
+
+  it("checks canonical, h1 and page-content identity before the unavailable-channel payload", async () => {
+    const product = productById("211589");
+    const wrongPageIdentity = unavailableReviewPage(product).replace('data-id="211589"', 'data-id="211590"');
+    const adapter = new VitaExpressAdapter(new MemoryEvidenceStore(), fetchProducts({
+      [product.id]: new Response(wrongPageIdentity, {
+        status: 200, headers: { "content-type": "text/html; charset=utf-8" }
+      })
+    }));
+
+    await expect(adapter.collect(ref(product), { ...CONTEXT, runId: "unavailable-wrong-page-identity" }))
+      .rejects.toBeInstanceOf(ParserChangedError);
   });
 
   it("rejects unknown markup instead of inferring zero from missing rating fields", async () => {

@@ -35,6 +35,57 @@ function nfReviewList(title: string, ratings: number[]) {
   ).join("")}</div>`;
 }
 
+type OzerkiSearchFixtureProduct = {
+  productId: number;
+  id: string;
+  name: string;
+  href: string;
+};
+
+function ozerkiSearchPage(
+  brand: string,
+  products: OzerkiSearchFixtureProduct[],
+  options: {
+    page?: number;
+    total?: number;
+    perPage?: number;
+    productCount?: number;
+    paginationTotal?: number;
+    queryBrand?: string;
+    filterBrand?: string;
+  } = {}
+) {
+  const page = options.page ?? 1;
+  const total = options.total ?? products.length;
+  const perPage = options.perPage ?? 36;
+  const lastPage = Math.max(1, Math.ceil(total / perPage));
+  const from = total === 0 ? null : (page - 1) * perPage + 1;
+  const to = from === null ? null : from + products.length - 1;
+  return `<!doctype html><html><head></head><body><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
+    query: {
+      q: options.queryBrand ?? brand,
+      ...(page > 1 ? { page: String(page) } : {}),
+      region: "region-moskva"
+    },
+    props: { pageProps: { data: { componentData: {
+      filterUrl: `/catalog/search?q=${encodeURIComponent(options.filterBrand ?? brand)}`,
+      productCount: options.productCount ?? total,
+      catalogControls: { sort: "popularity", order: "desc", view: "list", limit: String(perPage) },
+      productList: {
+        products,
+        pagination: { meta: total === 0 ? null : {
+          current_page: page,
+          from,
+          last_page: lastPage,
+          per_page: perPage,
+          to,
+          total: options.paginationTotal ?? total
+        } }
+      }
+    } } } }
+  })}</script></body></html>`;
+}
+
 describe("additional pharmacy adapters", () => {
   it("discovers one exact Ozerki family and keeps its aggregate bound to that family", async () => {
     const brand = "\u0410\u043a\u0432\u0430\u041e\u043f\u0442\u0438\u043a";
@@ -127,6 +178,130 @@ describe("additional pharmacy adapters", () => {
       "/alphabet/k/kagotsel/",
       "/alphabet/k/kagotsel/"
     ]);
+  });
+
+  it("keeps Baktoblis on its exact Ozerki family and never falls through to search", async () => {
+    const brand = "Бактоблис";
+    const familyUrl = "https://ozerki.ru/alphabet/b/baktoblis/";
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/catalog/search/") throw new Error("search must not run after exact family proof");
+      expect(url.toString()).toBe(familyUrl);
+      return new Response(`<html><body><h1>${brand}</h1></body></html>`, {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const adapter = new OzerkiAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    await expect(adapter.discover(brand, context)).resolves.toMatchObject([{
+      listingId: "family-baktoblis",
+      url: familyUrl,
+      metadata: { discovery: "ozerki-exact-family-page" }
+    }]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns no exact Ozerki result for Хлорэтта only after exhausting all fuzzy search pages", async () => {
+    const brand = "Хлорэтта";
+    const products = [
+      {
+        productId: 362233,
+        id: "362233",
+        name: "Кальция хлорид 100 мг/мл раствор для инъекций 10 мл 10 шт",
+        href: "/catalog/product/kaltsiya-khlorid-r-r-dlya-v-v-vved-100mg-ml-amp-10ml-10/"
+      },
+      {
+        productId: 63103,
+        id: "63103",
+        name: "Кальция хлорид 100 мг/мл раствор для внутривенного введения 10 мл 10 шт",
+        href: "/catalog/product/kaltsiya_khlorid_r_r_d_i_10_10ml_n10_1/"
+      }
+    ];
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.startsWith("/alphabet/")) return new Response("missing", { status: 404 });
+      expect(url.pathname).toBe("/catalog/search/");
+      expect(url.searchParams.get("q")).toBe(brand);
+      const page = Number(url.searchParams.get("page") ?? "1");
+      return new Response(ozerkiSearchPage(brand, [products[page - 1]!], {
+        page,
+        total: products.length,
+        perPage: 1
+      }), { status: 200, headers: { "content-type": "text/html" } });
+    });
+    const adapter = new OzerkiAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    await expect(adapter.discover(brand, context)).resolves.toEqual([]);
+    const calls = fetchSpy.mock.calls.map(([input]) => new URL(String(input)));
+    expect(calls.filter((url) => url.pathname.startsWith("/alphabet/"))).toHaveLength(3);
+    expect(calls.filter((url) => url.pathname === "/catalog/search/").map((url) => url.searchParams.get("page"))).toEqual([
+      null,
+      "2"
+    ]);
+  });
+
+  it("fails closed when Ozerki search count and pagination proof disagree", async () => {
+    const brand = "Хлорэтта";
+    const fuzzy = {
+      productId: 362233,
+      id: "362233",
+      name: "Кальция хлорид 100 мг/мл раствор для инъекций 10 мл 10 шт",
+      href: "/catalog/product/kaltsiya-khlorid-r-r-dlya-v-v-vved-100mg-ml-amp-10ml-10/"
+    };
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      return url.pathname.startsWith("/alphabet/")
+        ? new Response("missing", { status: 404 })
+        : new Response(ozerkiSearchPage(brand, [fuzzy], {
+          total: 1,
+          productCount: 2,
+          paginationTotal: 1
+        }), { status: 200, headers: { "content-type": "text/html" } });
+    });
+    const adapter = new OzerkiAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    await expect(adapter.discover(brand, context)).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
+  it("discovers and collects an exact Ozerki search product whose slug ends with pack count", async () => {
+    const brand = "Новобренд";
+    const productId = "292922";
+    const productUrl = "https://ozerki.ru/catalog/product/novobrend-tabletki-d-rassasyv-30/";
+    const title = "Новобренд таблетки для рассасывания 30 шт";
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.startsWith("/alphabet/")) return new Response("missing", { status: 404 });
+      if (url.pathname === "/catalog/search/") {
+        return new Response(ozerkiSearchPage(brand, [{
+          productId: Number(productId), id: productId, name: title, href: new URL(productUrl).pathname
+        }]), { status: 200, headers: { "content-type": "text/html" } });
+      }
+      expect(url.toString()).toBe(productUrl);
+      return new Response(`<!doctype html><html><head><link rel="canonical" href="${productUrl}">
+        <script type="application/ld+json">${JSON.stringify({
+          "@type": "Product", sku: productId, name: title, url: productUrl,
+          aggregateRating: { "@type": "AggregateRating", ratingValue: 4.8, reviewCount: 5, ratingCount: 5 }
+        })}</script></head><body><h1>${title}</h1></body></html>`, {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const adapter = new OzerkiAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    const refs = await adapter.discover(brand, context);
+    expect(refs).toEqual([expect.objectContaining({
+      listingId: productId,
+      url: productUrl,
+      metadata: { discovery: "ozerki-complete-search" }
+    })]);
+    await expect(adapter.collect(refs[0]!, context)).resolves.toMatchObject({
+      listingId: productId,
+      reviews: 5,
+      ratingCount: 5,
+      rating: 4.8,
+      source: "ozerki-product-aggregate-jsonld"
+    });
   });
 
   it("fails closed when Ozerki family counts are not backed by exact review markup", async () => {
@@ -448,7 +623,7 @@ describe("additional pharmacy adapters", () => {
     ]);
   });
 
-  it("fails closed when Apteka.ru Product JSON-LD loses its feedback aggregate", async () => {
+  it("reports an exact Apteka.ru card without a feedback aggregate as unavailable, never zero", async () => {
     const id = "5e3268eaca7bdc000192d316";
     const productUrl = `https://apteka.ru/product/oczillokokczinum-30-sht-granuly-${id}/`;
     const html = `<!doctype html><head><base href="${productUrl}"></head><script type="application/ld+json">${JSON.stringify({
@@ -457,10 +632,32 @@ describe("additional pharmacy adapters", () => {
     const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(html, {
       status: 200, headers: { "content-type": "text/html" }
     })) as unknown as typeof fetch);
-    await expect(adapter.collect({
+    const error = await adapter.collect({
       domain: "apteka.ru", platform: "apteka.ru", listingId: id, brand: "Оциллококцинум",
       url: productUrl, metadata: {}
-    }, context)).rejects.toBeInstanceOf(ParserChangedError);
+    }, context).then(() => undefined, (reason: unknown) => reason);
+    expect(error).toBeInstanceOf(AdapterBlockedError);
+    expect((error as Error).message).toContain("review_aggregate_unavailable");
+  });
+
+  it("does not infer an Apteka.ru zero from visible empty-review text", async () => {
+    const id = "69cfc7f2fe56bf3a18668d99";
+    const title = "Хлорэтта 2 мг + 0,03 мг 63 шт. таблетки, покрытые пленочной оболочкой";
+    const productUrl = `https://apteka.ru/product/xloretta-2-mg--003-mg-63-sht-tabletki-pokrytye-plenochnoj-obolochkoj-${id}/`;
+    const html = `<!doctype html><head><base href="${productUrl}"></head><script type="application/ld+json">${JSON.stringify({
+      "@type": "Product", sku: id, name: title
+    })}</script><h1>${title}</h1><h2>Отзывы</h2><span>0</span><span>отзывов</span>
+      <p>К этому товару ещё нет отзывов.</p><p>Оставить отзыв можно после приобретения товара.</p>`;
+    const adapter = new AptekaRuAdapter(new MemoryEvidenceStore(), vi.fn(async () => new Response(html, {
+      status: 200, headers: { "content-type": "text/html" }
+    })) as unknown as typeof fetch);
+
+    const error = await adapter.collect({
+      domain: "apteka.ru", platform: "apteka.ru", listingId: id, brand: "Хлорэтта",
+      url: productUrl, metadata: {}
+    }, context).then(() => undefined, (reason: unknown) => reason);
+    expect(error).toBeInstanceOf(AdapterBlockedError);
+    expect((error as Error).message).toContain("review_aggregate_unavailable");
   });
 
   it("rejects Apteka.ru stale or cross-variant AggregateRating without selected-product proof", async () => {

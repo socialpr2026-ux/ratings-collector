@@ -450,10 +450,11 @@ export class AptekaRuAdapter extends AdditionalPharmacyAdapter {
       }
     }
     if (reviews === undefined && ratingCount === undefined) {
-      const text = compactText(page.$("body").text());
-      if (/Отзывы\s*0\b|нет отзывов/i.test(text)) reviews = 0;
+      throw new AdapterBlockedError(
+        `${APTEKA_DOMAIN}:${ref.listingId}: review_aggregate_unavailable: exact product has no source-bound feedback aggregate`
+      );
     }
-    if (reviews === undefined && ratingCount === undefined || feedbackCount > 0 && value === undefined) {
+    if (feedbackCount > 0 && value === undefined) {
       throw new ParserChangedError(`${APTEKA_DOMAIN}:${ref.listingId}: complete feedback aggregate is missing`);
     }
     return observation(this.evidence, ref, page, {
@@ -1050,7 +1051,10 @@ export class AptekaAprilAdapter extends AdditionalPharmacyAdapter {
 
 const OZERKI_DOMAIN = "ozerki.ru";
 const OZERKI_FAMILY = /^\/alphabet\/([a-z0-9-]+)\/([a-z0-9-]+)\/?$/i;
-const OZERKI_PRODUCT = /^\/catalog\/product\/([a-z0-9-]+)\/?$/i;
+const OZERKI_PRODUCT = /^\/catalog\/product\/([a-z0-9_-]+)\/?$/i;
+const OZERKI_SEARCH_PATH = "/catalog/search/";
+const OZERKI_MAX_SEARCH_PAGES = 50;
+const OZERKI_MAX_SEARCH_PRODUCTS = 1_800;
 const OZERKI_BOUNDED_PRODUCTS = [
   {
     brand: "Бивиарт",
@@ -1128,7 +1132,11 @@ function ozerkiFamilyRef(value: string, expectedId?: string): { id: string; url:
   }
 }
 
-function ozerkiProductRef(value: string, expectedId?: string): { id: string; url: string } | undefined {
+function ozerkiProductRef(
+  value: string,
+  expectedId?: string,
+  allowSearchBoundId = false
+): { id: string; url: string } | undefined {
   try {
     const url = new URL(value, `https://${OZERKI_DOMAIN}/`);
     const hostname = url.hostname.toLocaleLowerCase("en-US");
@@ -1143,7 +1151,7 @@ function ozerkiProductRef(value: string, expectedId?: string): { id: string; url
         product.id === expectedId && new URL(product.url).pathname === url.pathname
       )
       : undefined;
-    if (embeddedId && expectedId && embeddedId !== expectedId && !exactBoundedProduct) return undefined;
+    if (embeddedId && expectedId && embeddedId !== expectedId && !exactBoundedProduct && !allowSearchBoundId) return undefined;
     const id = expectedId ?? embeddedId;
     if (!id) return undefined;
     return { id, url: `https://${OZERKI_DOMAIN}/catalog/product/${match[1]}/` };
@@ -1152,12 +1160,16 @@ function ozerkiProductRef(value: string, expectedId?: string): { id: string; url
   }
 }
 
-function ozerkiCanonicalProductRef(value: string | undefined, expectedId: string): { id: string; url: string } | undefined {
+function ozerkiCanonicalProductRef(
+  value: string | undefined,
+  expectedId: string,
+  allowSearchBoundId = false
+): { id: string; url: string } | undefined {
   if (!value) return undefined;
   try {
     const url = new URL(value, `https://${OZERKI_DOMAIN}/`);
     if (host(url.hostname) !== OZERKI_DOMAIN) return undefined;
-    return ozerkiProductRef(url.toString(), expectedId);
+    return ozerkiProductRef(url.toString(), expectedId, allowSearchBoundId);
   } catch {
     return undefined;
   }
@@ -1165,6 +1177,185 @@ function ozerkiCanonicalProductRef(value: string | undefined, expectedId: string
 
 function ozerkiMissingFamilyPage(error: unknown): error is AdapterBlockedError {
   return error instanceof AdapterBlockedError && /\(HTTP 404\)$/.test(error.message);
+}
+
+type OzerkiSearchProduct = { id: string; title: string; url: string };
+type OzerkiSearchPage = {
+  products: OzerkiSearchProduct[];
+  total: number;
+  currentPage: number;
+  lastPage: number;
+  perPage: number;
+  controls: string;
+};
+
+function ozerkiRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function ozerkiSearchProofError(detail: string): ParserChangedError {
+  return new ParserChangedError(`${OZERKI_DOMAIN}: exact search proof is incomplete (${detail})`);
+}
+
+function ozerkiExactSearchQuery(value: unknown, brand: string): boolean {
+  return typeof value === "string" && normalizeText(value) === normalizeText(brand);
+}
+
+function ozerkiSearchFilterProof(value: unknown, brand: string): boolean {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value, `https://${OZERKI_DOMAIN}/`);
+    const keys = [...url.searchParams.keys()];
+    return url.protocol === "https:" && host(url.hostname) === OZERKI_DOMAIN &&
+      url.pathname.replace(/\/$/, "") === OZERKI_SEARCH_PATH.replace(/\/$/, "") && !url.hash &&
+      keys.length === 1 && keys[0] === "q" && url.searchParams.getAll("q").length === 1 &&
+      ozerkiExactSearchQuery(url.searchParams.get("q"), brand);
+  } catch {
+    return false;
+  }
+}
+
+function ozerkiSearchProduct(value: unknown): OzerkiSearchProduct | undefined {
+  const item = ozerkiRecord(value);
+  if (!item || typeof item.id !== "string" || !/^\d+$/.test(item.id)) return undefined;
+  const productId = exactInteger(item.productId);
+  const id = exactInteger(item.id);
+  const title = typeof item.name === "string" ? compactText(item.name) : "";
+  if (!productId || productId !== id || !title || typeof item.href !== "string") return undefined;
+  try {
+    const url = new URL(item.href, `https://${OZERKI_DOMAIN}/`);
+    if (url.protocol !== "https:" || host(url.hostname) !== OZERKI_DOMAIN || url.search || url.hash ||
+      !url.pathname.match(OZERKI_PRODUCT)) return undefined;
+    return {
+      id: String(productId),
+      title,
+      url: `https://${OZERKI_DOMAIN}${url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`}`
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function parseOzerkiSearchPage(page: HtmlPage, brand: string, expectedPage: number): OzerkiSearchPage {
+  const scripts = page.$("script#__NEXT_DATA__[type='application/json']");
+  if (scripts.length !== 1) throw ozerkiSearchProofError("NEXT_DATA");
+  let payload: unknown;
+  try {
+    payload = JSON.parse(scripts.first().html() ?? "") as unknown;
+  } catch {
+    throw ozerkiSearchProofError("NEXT_DATA JSON");
+  }
+
+  const root = ozerkiRecord(payload);
+  const query = ozerkiRecord(root?.query);
+  const pageQuery = query?.page;
+  if (!query || !ozerkiExactSearchQuery(query.q, brand) ||
+    (expectedPage === 1
+      ? pageQuery !== undefined && exactInteger(pageQuery) !== 1
+      : exactInteger(pageQuery) !== expectedPage)) {
+    throw ozerkiSearchProofError("query");
+  }
+
+  const componentData = ozerkiRecord(ozerkiRecord(ozerkiRecord(ozerkiRecord(root?.props)?.pageProps)?.data)?.componentData);
+  const controls = ozerkiRecord(componentData?.catalogControls);
+  const productList = ozerkiRecord(componentData?.productList);
+  const productsValue = productList?.products;
+  const pagination = ozerkiRecord(productList?.pagination);
+  const total = exactInteger(componentData?.productCount);
+  const limit = exactInteger(controls?.limit);
+  if (!componentData || !controls || !productList || !Array.isArray(productsValue) || !pagination ||
+    total === undefined || total > OZERKI_MAX_SEARCH_PRODUCTS || !limit ||
+    !ozerkiSearchFilterProof(componentData.filterUrl, brand)) {
+    throw ozerkiSearchProofError("catalog state");
+  }
+  const sort = controls.sort;
+  const order = controls.order;
+  const view = controls.view;
+  if (typeof sort !== "string" || !sort || typeof order !== "string" || !order ||
+    typeof view !== "string" || !view) throw ozerkiSearchProofError("catalog controls");
+  const controlsProof = JSON.stringify({ sort, order, view, limit });
+
+  if (total === 0) {
+    if (expectedPage !== 1 || productsValue.length !== 0 || pagination.meta !== null) {
+      throw ozerkiSearchProofError("empty pagination");
+    }
+    return { products: [], total: 0, currentPage: 1, lastPage: 1, perPage: limit, controls: controlsProof };
+  }
+
+  const meta = ozerkiRecord(pagination.meta);
+  const currentPage = exactInteger(meta?.current_page);
+  const from = exactInteger(meta?.from);
+  const lastPage = exactInteger(meta?.last_page);
+  const perPage = exactInteger(meta?.per_page);
+  const to = exactInteger(meta?.to);
+  const paginationTotal = exactInteger(meta?.total);
+  if (!currentPage || !from || !lastPage || !perPage || !to || paginationTotal === undefined ||
+    currentPage !== expectedPage || perPage !== limit || total !== paginationTotal ||
+    lastPage > OZERKI_MAX_SEARCH_PAGES || lastPage !== Math.ceil(total / perPage) ||
+    from !== (currentPage - 1) * perPage + 1 || to !== from + productsValue.length - 1 ||
+    productsValue.length === 0 || productsValue.length > perPage ||
+    (currentPage < lastPage && productsValue.length !== perPage) ||
+    (currentPage === lastPage && to !== total)) {
+    throw ozerkiSearchProofError("pagination");
+  }
+
+  const products = productsValue.map(ozerkiSearchProduct);
+  if (products.some((item) => item === undefined)) throw ozerkiSearchProofError("product listing");
+  return {
+    products: products as OzerkiSearchProduct[],
+    total,
+    currentPage,
+    lastPage,
+    perPage,
+    controls: controlsProof
+  };
+}
+
+async function discoverOzerkiSearch(
+  brand: string,
+  context: AdapterContext,
+  fetchImpl: typeof fetch
+): Promise<ProductRef[]> {
+  const products: OzerkiSearchProduct[] = [];
+  const ids = new Set<string>();
+  const urls = new Set<string>();
+  let firstPage: OzerkiSearchPage | undefined;
+  let pageNumber = 1;
+  do {
+    const source = new URL(OZERKI_SEARCH_PATH, `https://${OZERKI_DOMAIN}/`);
+    source.searchParams.set("q", brand);
+    if (pageNumber > 1) source.searchParams.set("page", String(pageNumber));
+    const parsed = parseOzerkiSearchPage(
+      await requestPage(source, context, fetchImpl),
+      brand,
+      pageNumber
+    );
+    if (!firstPage) firstPage = parsed;
+    else if (parsed.total !== firstPage.total || parsed.lastPage !== firstPage.lastPage ||
+      parsed.perPage !== firstPage.perPage || parsed.controls !== firstPage.controls) {
+      throw ozerkiSearchProofError("snapshot changed between pages");
+    }
+    for (const product of parsed.products) {
+      if (ids.has(product.id) || urls.has(product.url)) throw ozerkiSearchProofError("duplicate listing");
+      ids.add(product.id);
+      urls.add(product.url);
+      products.push(product);
+    }
+    pageNumber += 1;
+  } while (firstPage && pageNumber <= firstPage.lastPage);
+
+  if (!firstPage || products.length !== firstPage.total) throw ozerkiSearchProofError("incomplete result set");
+  return products.filter((product) => matchesBrand(product.title, brand)).map((product) => ({
+    domain: OZERKI_DOMAIN,
+    platform: OZERKI_DOMAIN,
+    listingId: product.id,
+    brand,
+    url: product.url,
+    title: product.title,
+    metadata: { discovery: "ozerki-complete-search" }
+  }));
 }
 
 export class OzerkiAdapter extends AdditionalPharmacyAdapter {
@@ -1236,17 +1427,18 @@ export class OzerkiAdapter extends AdditionalPharmacyAdapter {
       });
       return [...previous.values()];
     }
-    if (missingPage) throw missingPage;
+    if (missingPage) return discoverOzerkiSearch(brand, context, this.fetchImpl);
     throw new ParserChangedError(`${OZERKI_DOMAIN}: no bounded family slug for ${brand}`);
   }
 
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
-    const productRef = ozerkiProductRef(ref.url, ref.listingId);
+    const searchBoundId = ref.metadata.discovery === "ozerki-complete-search";
+    const productRef = ozerkiProductRef(ref.url, ref.listingId, searchBoundId);
     if (productRef) {
       const page = await requestPage(new URL(productRef.url), context, this.fetchImpl);
       const canonicalLinks = page.$("link[rel='canonical'][href]");
       const canonicalRef = canonicalLinks.length === 1
-        ? ozerkiCanonicalProductRef(canonicalLinks.first().attr("href"), productRef.id)
+        ? ozerkiCanonicalProductRef(canonicalLinks.first().attr("href"), productRef.id, searchBoundId)
         : undefined;
       if (!canonicalRef || canonicalRef.url !== productRef.url) {
         throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: exact product canonical is missing or changed`);
@@ -1259,7 +1451,8 @@ export class OzerkiAdapter extends AdditionalPharmacyAdapter {
       const product = products[0];
       const structuredUrl = ozerkiCanonicalProductRef(
         typeof product.url === "string" ? product.url : undefined,
-        productRef.id
+        productRef.id,
+        searchBoundId
       );
       const title = compactText(String(product.name ?? ""));
       const heading = compactText(page.$("h1").first().text());

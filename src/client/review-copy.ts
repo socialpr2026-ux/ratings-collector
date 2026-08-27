@@ -57,6 +57,9 @@ export function friendlyIssueText(value: string) {
   if (/blocked[_\s-]*free[_\s-]*mode/i.test(raw)) {
     return `${prefix}площадка пока не поддерживается в бесплатном режиме.`;
   }
+  if (/review_(?:channel|aggregate)_unavailable/i.test(raw)) {
+    return `${prefix}площадка не публикует доказуемый общий рейтинг для этой карточки.`;
+  }
   if (/captcha|капч|\bpow\b|\b429\b|\b498\b|blocked|заблокирован|ограничил(?:а|и)?\s+(?:доступ|сбор)/i.test(raw)) {
     return `${prefix}площадка временно ограничила сбор. Повторите позже.`;
   }
@@ -70,7 +73,7 @@ export function friendlyIssueText(value: string) {
     .trim() || "Не удалось завершить проверку.";
 }
 
-type IssueKind = "quota" | "unsupported" | "blocked" | "parser" | "review" | "other";
+type IssueKind = "quota" | "unsupported" | "unavailable" | "blocked" | "parser" | "review" | "other";
 
 function isQuotaIssue(raw: string) {
   return /quota[_\s-]*exceeded|квот|лимит[^.]{0,80}(?:исчерпан|превышен)|limit\s*exceeded/i.test(raw) ||
@@ -80,6 +83,7 @@ function isQuotaIssue(raw: string) {
 function issueKind(raw: string): IssueKind {
   if (isQuotaIssue(raw)) return "quota";
   if (/blocked[_\s-]*free[_\s-]*mode/i.test(raw)) return "unsupported";
+  if (/review_(?:channel|aggregate)_unavailable/i.test(raw)) return "unavailable";
   if (/captcha|капч|\bpow\b|\b429\b|\b498\b|blocked|заблокирован|ограничил(?:а|и)?\s+(?:доступ|сбор)/i.test(raw)) return "blocked";
   if (/parser[_\s-]*changed|парсер|селектор|структур\S*\s+(?:измен|обнов)/i.test(raw)) return "parser";
   if (/needs[_\s-]*review/i.test(raw)) return "review";
@@ -135,6 +139,7 @@ export function summarizeIssues(values: readonly string[]): string[] {
     const suffix = !showBrands && count > 1 ? ` (${count} ${plural(count, "проверка", "проверки", "проверок")})` : "";
     if (kind === "quota") return `${target}: исчерпан доступный лимит сбора${suffix}.`;
     if (kind === "unsupported") return `${target}: площадка пока не поддерживается в бесплатном режиме${suffix}.`;
+    if (kind === "unavailable") return `${target}: площадка не публикует доказуемый общий рейтинг для этой карточки${suffix}.`;
     if (kind === "blocked") return `${target}: площадка не дала завершить автоматический сбор${suffix}.`;
     if (kind === "parser") return `${target}: требуется повторная настройка сбора${suffix}.`;
     return `${target}: проверьте найденную карточку выше${suffix}.`;

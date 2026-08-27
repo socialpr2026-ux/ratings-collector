@@ -117,6 +117,8 @@ describe("plain-language feedback", () => {
     expect(friendlyIssueText("ozon.ru / Анвифен: quota_exceeded: квота исчерпана")).toBe("ozon.ru / Анвифен: исчерпан доступный лимит сбора.");
     expect(friendlyIssueText("wildberries.ru: HTTP 429 blocked")).toBe("wildberries.ru: площадка временно ограничила сбор. Повторите позже.");
     expect(friendlyIssueText("medum.ru: parser_changed: blocked_free_mode")).toBe("medum.ru: площадка пока не поддерживается в бесплатном режиме.");
+    expect(friendlyIssueText("vitaexpress.ru / Хлорэтта: blocked: review_channel_unavailable"))
+      .toBe("vitaexpress.ru / Хлорэтта: площадка не публикует доказуемый общий рейтинг для этой карточки.");
   });
 
   it("groups the same site failure across brands", () => {
@@ -245,6 +247,16 @@ describe("partial publication checkpoint", () => {
         updatedRange: "'Ratings Энтеролактис'!A1:F54"
       }
     })).toBe(true);
+  });
+
+  it("groups exact cards whose first-party review aggregate is unavailable", () => {
+    expect(summarizeIssues([
+      "vitaexpress.ru / Хлорэтта: blocked: review_channel_unavailable",
+      "apteka.ru / Хлорэтта: blocked: review_aggregate_unavailable"
+    ])).toEqual([
+      "vitaexpress.ru / Хлорэтта: площадка не публикует доказуемый общий рейтинг для этой карточки.",
+      "apteka.ru / Хлорэтта: площадка не публикует доказуемый общий рейтинг для этой карточки."
+    ]);
   });
 });
 

@@ -690,7 +690,7 @@ export function browserFetch(
         /^\/g_[a-z0-9-]+\/$/i.test(url.pathname) ||
         /^\/p_[a-z0-9][a-z0-9-]*-\d+\.html$/i.test(url.pathname)
       );
-    const fixedPharmacy009Target = url.protocol === "https:" && url.hostname === "009.xn--p1ai" &&
+    const fixedPharmacy009Target = request.method === "GET" && url.protocol === "https:" && url.hostname === "009.xn--p1ai" &&
       !url.port && !url.username && !url.password && !url.hash && !url.search && (
         url.pathname === "/sitemap.xml" ||
         /^\/sitemap_(?:[0-9]|1[0-9]|2[0-3])\.xml$/i.test(url.pathname) ||
@@ -707,6 +707,13 @@ export function browserFetch(
       [...url.searchParams.keys()].every((key) => key === "q") &&
       ruOtzyvSearchBrand.length >= 2 && ruOtzyvSearchBrand.length <= 160;
     const fixedRuOtzyvDirectTarget = fixedRuOtzyvProductTarget || fixedRuOtzyvSearchTarget;
+    const fixedOzonTranslatedProductTarget = request.method === "GET" && url.protocol === "https:" &&
+      url.hostname === "www-ozon-ru.translate.goog" && !url.port && !url.username && !url.password && !url.hash &&
+      /^\/product\/[a-z0-9-]*-\d{5,}\/$/i.test(url.pathname) &&
+      url.searchParams.getAll("_x_tr_sl").length === 1 && url.searchParams.get("_x_tr_sl") === "ru" &&
+      url.searchParams.getAll("_x_tr_tl").length === 1 && url.searchParams.get("_x_tr_tl") === "en" &&
+      url.searchParams.getAll("_x_tr_hl").length === 1 && url.searchParams.get("_x_tr_hl") === "en" &&
+      [...url.searchParams.keys()].every((key) => ["_x_tr_sl", "_x_tr_tl", "_x_tr_hl"].includes(key));
     const fixedAptekaTarget = url.protocol === "https:" && url.hostname === "apteka.ru" &&
       !url.port && !url.username && !url.password && !url.hash && (
         !url.search && (
@@ -738,12 +745,42 @@ export function browserFetch(
       "market-yandex-ru.translate.goog",
       "megamarket-ru.translate.goog"
     ].includes(url.hostname)) {
+      const fetchExactOzonDirect = async (): Promise<Response | undefined> => {
+        if (!fixedOzonTranslatedProductTarget) return undefined;
+        const attemptAbort = new AbortController();
+        const signal = AbortSignal.any([request.signal, attemptAbort.signal]);
+        try {
+          return await withDeadline(fetch(url, {
+            method: "GET",
+            redirect: "manual",
+            signal,
+            headers: {
+              accept: "text/html,application/xhtml+xml",
+              "accept-language": "ru-RU,ru;q=0.9,en;q=0.7"
+            }
+          }), STATIC_PROXY_REQUEST_TIMEOUT_MS, `Ozon direct request exceeded ${STATIC_PROXY_REQUEST_TIMEOUT_MS} ms`);
+        } catch {
+          request.signal.throwIfAborted();
+          return undefined;
+        } finally {
+          attemptAbort.abort();
+        }
+      };
       const maxAttempts = url.hostname === "megamarket-ru.translate.goog" ? 3 : 2;
       for (let attempt = 1; ; attempt += 1) {
-        const response = await fetchViaStaticProxy(url, request.signal);
+        let response: Response;
+        try {
+          response = await fetchViaStaticProxy(url, request.signal);
+        } catch (error) {
+          const direct = await fetchExactOzonDirect();
+          if (direct && (direct.ok || [404, 410].includes(direct.status))) return direct;
+          await direct?.body?.cancel().catch(() => undefined);
+          throw error;
+        }
         if (![429, 502, 503, 504].includes(response.status)) return response;
         if (attempt >= maxAttempts) {
           if ([
+            ...(fixedOzonTranslatedProductTarget ? ["www-ozon-ru.translate.goog"] : []),
             "apteka-ru.translate.goog",
             "www-budzdorov-ru.translate.goog",
             "www-asna-ru.translate.goog",
@@ -751,7 +788,10 @@ export function browserFetch(
             "polza-ru.translate.goog"
           ].includes(url.hostname)) {
             try {
-              const direct = await fetch(request);
+              const direct = fixedOzonTranslatedProductTarget
+                ? await fetchExactOzonDirect()
+                : await fetch(request);
+              if (!direct) return response;
               if (direct.ok || [404, 410].includes(direct.status)) {
                 await response.body?.cancel().catch(() => undefined);
                 return direct;
@@ -783,7 +823,27 @@ export function browserFetch(
       return fetchViaStaticProxy(url, request.signal);
     }
     if (staticProxy && fixedPharmacy009Target) {
-      return fetchViaStaticProxy(url, request.signal);
+      const proxied = await fetchViaStaticProxy(url, request.signal);
+      if (!TRANSIENT_STATIC_PROXY_STATUSES.has(proxied.status)) return proxied;
+      try {
+        const direct = await fetch(url, {
+          method: "GET",
+          redirect: "manual",
+          signal: request.signal,
+          headers: {
+            accept: request.headers.get("accept") ?? "text/html,application/xhtml+xml",
+            "accept-language": "ru-RU,ru;q=0.9,en;q=0.7"
+          }
+        });
+        if (direct.ok) {
+          await proxied.body?.cancel().catch(() => undefined);
+          return direct;
+        }
+        await direct.body?.cancel().catch(() => undefined);
+      } catch {
+        request.signal.throwIfAborted();
+      }
+      return proxied;
     }
     if (staticProxy && fixedWildberriesTarget) {
       let proxied: Response | undefined;

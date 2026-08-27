@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { load } from "cheerio";
+import { load, type CheerioAPI } from "cheerio";
 import type {
   AdapterContext,
   AdapterHealth,
@@ -22,7 +22,7 @@ const EMPTY_REVIEW_TEXT = "\u0432\u0430\u0448 \u043e\u0442\u0437\u044b\u0432 \u0
 
 type ExactProduct = {
   id: string;
-  brand: "\u0411\u0438\u0432\u0438\u0430\u0440\u0442" | "\u041e\u043a\u0443\u0441\u0430\u043b\u0438\u043d" | "\u041e\u0444\u0442\u0430\u0440\u0438\u043d\u0442" | "\u0422\u0430\u0443\u0441\u0442\u0438\u043d" | "Бактоблис" | "Энтеролактис";
+  brand: "\u0411\u0438\u0432\u0438\u0430\u0440\u0442" | "\u041e\u043a\u0443\u0441\u0430\u043b\u0438\u043d" | "\u041e\u0444\u0442\u0430\u0440\u0438\u043d\u0442" | "\u0422\u0430\u0443\u0441\u0442\u0438\u043d" | "Бактоблис" | "Энтеролактис" | "Хлорэтта";
   url: string;
   requiredPhrases: readonly string[];
 };
@@ -97,6 +97,18 @@ const EXACT_PRODUCTS: readonly ExactProduct[] = [
     brand: "\u0422\u0430\u0443\u0441\u0442\u0438\u043d",
     url: `${ORIGIN}/product/taurin__taustin__kapli_glaznye_4_10ml_solofarm/`,
     requiredPhrases: ["\u0442\u0430\u0443\u0441\u0442\u0438\u043d", "\u0441\u043e\u043b\u043e\u0444\u0430\u0440\u043c", "\u043a\u0430\u043f\u043b\u0438 \u0433\u043b\u0430\u0437\u043d\u044b\u0435", "4", "10\u043c\u043b"]
+  },
+  {
+    id: "211589",
+    brand: "Хлорэтта",
+    url: `${ORIGIN}/product/khloretta_tab__ppo_2mg_0_03mg__21/`,
+    requiredPhrases: ["хлорэтта", "таблетки", "2мг 0 03мг", "no21"]
+  },
+  {
+    id: "211590",
+    brand: "Хлорэтта",
+    url: `${ORIGIN}/product/khloretta_tab__ppo_2mg_0_03mg__21_3/`,
+    requiredPhrases: ["хлорэтта", "таблетки", "2мг 0 03мг", "no63"]
   },
   {
     id: "203657",
@@ -255,6 +267,18 @@ function matchesExactTitle(title: string, product: ExactProduct): boolean {
   if (!matchesBrand(title, product.brand)) return false;
   const normalized = ` ${normalizeText(title)} `;
   return product.requiredPhrases.every((phrase) => normalized.includes(` ${normalizeText(phrase)} `));
+}
+
+function explicitlyUnavailableReviewChannel($: CheerioAPI, product: ExactProduct): boolean {
+  const headers = $("product-detail-header").filter((_index, node) => $(node).attr(":product") !== undefined);
+  if (headers.length !== 1) return false;
+  const payload = parseJsonAttribute(headers.first().attr(":product"), "product", product.id);
+  if (!isRecord(payload)) return false;
+  const expectedUrl = new URL(product.url);
+  return String(payload.ID) === product.id && String(payload.XML_ID) === product.id &&
+    payload.DETAIL_PAGE_URL === expectedUrl.pathname &&
+    typeof payload.NAME === "string" && matchesExactTitle(payload.NAME, product) &&
+    payload.APLAUT === 0 && payload.SHOW_REVIEW === 1;
 }
 
 function productEvidence(product: ExactProduct, title: string): ProductEvidence {
@@ -481,6 +505,11 @@ function parseExactPage(body: string, product: ExactProduct): ParsedPage {
 
   const reviewComponents = $("product-reviews");
   const reviews = reviewComponents.first();
+  if (reviewComponents.length === 0 && explicitlyUnavailableReviewChannel($, product)) {
+    throw new AdapterBlockedError(
+      `${DOMAIN}:${product.id}: review_channel_unavailable: exact product has APLAUT=0 and SHOW_REVIEW=1`
+    );
+  }
   if (reviewComponents.length !== 1 || reviews.attr(":id") !== product.id ||
       reviews.attr(":product-id") !== product.id ||
       !matchesExactTitle(reviews.attr("name") ?? "", product)) {

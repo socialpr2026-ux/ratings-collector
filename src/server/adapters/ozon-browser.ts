@@ -33,6 +33,23 @@ const DISCOVERY_QUERY_ALIASES: Readonly<Record<string, readonly string[]>> = {
   "\u043a\u0430\u0433\u043e\u0446\u0435\u043b": ["Kagocel", "Kagotsel"]
 };
 
+type ExactProductSeed = Pick<SearchTile, "listingId" | "title" | "url">;
+
+const EXACT_PRODUCT_SEEDS: Readonly<Record<string, readonly ExactProductSeed[]>> = {
+  "хлорэтта": [
+    {
+      listingId: "4499023625",
+      title: "Хлорэтта таблетки, покрытые пленочной оболочкой 2мг+0,03мг 21шт",
+      url: "https://www.ozon.ru/product/hloretta-tabletki-pokrytye-plenochnoy-obolochkoy-2mg-0-03mg-21sht-4499023625/"
+    },
+    {
+      listingId: "4499024235",
+      title: "Хлорэтта таблетки, покрытые пленочной оболочкой 2мг+0,03мг 63шт",
+      url: "https://www.ozon.ru/product/hloretta-tabletki-pokrytye-plenochnoy-obolochkoy-2mg-0-03mg-63sht-4499024235/"
+    }
+  ]
+};
+
 type JsonObject = Record<string, unknown>;
 
 type ActivityInput = Omit<AdapterActivityEvent, "status">;
@@ -82,6 +99,59 @@ type SearchPage = {
 function discoveryQueries(brand: string): string[] {
   const key = brand.normalize("NFKC").toLocaleLowerCase("ru-RU");
   return [...new Set([brand, ...(DISCOVERY_QUERY_ALIASES[key] ?? [])])];
+}
+
+function exactProductSeeds(brand: string): readonly ExactProductSeed[] {
+  return EXACT_PRODUCT_SEEDS[brand.normalize("NFKC").toLocaleLowerCase("ru-RU").trim()] ?? [];
+}
+
+function exactAggregateMemberIds(value: string | undefined): string[] | undefined {
+  const prefix = "ozon:variants:";
+  if (!value?.startsWith(prefix)) return undefined;
+  const rawIds = value.slice(prefix.length).split(",");
+  const ids = rawIds.map(asSku);
+  if (ids.length < 2 || ids.some((id) => !id) || new Set(ids).size !== ids.length) return undefined;
+  return (ids as string[]).sort((left, right) => Number(left) - Number(right));
+}
+
+function assertExactSeedCompleteness(
+  brand: string,
+  seeds: readonly ExactProductSeed[],
+  metrics: ReadonlyMap<string, ExactProductMetrics>
+): void {
+  const expectedIds = seeds.map((seed) => seed.listingId)
+    .sort((left, right) => Number(left) - Number(right));
+  if (new Set(expectedIds).size !== expectedIds.length || metrics.size !== expectedIds.length) {
+    throw new ParserChangedError(`Ozon exact seed proof is incomplete for ${brand}`);
+  }
+
+  let aggregateSignature: string | undefined;
+  for (const seed of seeds) {
+    const exact = metrics.get(seed.listingId);
+    if (!exact) throw new ParserChangedError(`Ozon exact seed ${seed.listingId} has no product proof`);
+    const memberIds = exactAggregateMemberIds(exact.aggregateGroupId);
+    if (!memberIds) {
+      throw new ParserChangedError(`Ozon exact seed ${seed.listingId} has no reciprocal variant member proof`);
+    }
+    const missing = expectedIds.filter((id) => !memberIds.includes(id));
+    const extra = memberIds.filter((id) => !expectedIds.includes(id));
+    if (missing.length || extra.length) {
+      throw new ParserChangedError(
+        `Ozon exact seed ${seed.listingId} variant members differ from the seeded set` +
+        `${missing.length ? `; missing ${missing.join(",")}` : ""}` +
+        `${extra.length ? `; extra ${extra.join(",")}` : ""}`
+      );
+    }
+    const signature = JSON.stringify({
+      reviews: exact.reviews,
+      rawRating: exact.rawRating,
+      ratingUnavailable: exact.ratingUnavailable === true
+    });
+    if (aggregateSignature !== undefined && signature !== aggregateSignature) {
+      throw new ParserChangedError(`Ozon exact seed aggregate metrics conflict for ${brand}`);
+    }
+    aggregateSignature = signature;
+  }
 }
 
 function mergeSearchTiles(first: SearchTile | undefined, next: SearchTile): SearchTile {
@@ -825,6 +895,14 @@ export class OzonBrowserAdapter implements SiteAdapter {
     const checkedAt = this.now().toISOString();
     try {
       const brand = context.brands?.[0]?.normalize("NFKC").trim() || "Арбидол";
+      const seeds = exactProductSeeds(brand);
+      if (seeds.length) {
+        const refs = await this.discover(brand, context);
+        if (refs.length !== seeds.length) {
+          throw new ParserChangedError(`Ozon exact seed set is incomplete for ${brand}`);
+        }
+        return { ok: true, checkedAt, message: `Ozon exact product seeds are valid for ${brand}` };
+      }
       const page = await this.fetchSearchPage(brand, 1, context, "health_check");
       if (page.rawItemCount === 0 && page.totalPages !== 0) {
         throw new ParserChangedError("Ozon canary search proved neither products nor an empty result");
@@ -839,10 +917,18 @@ export class OzonBrowserAdapter implements SiteAdapter {
     const requestedBrand = brand.normalize("NFKC").trim();
     if (!requestedBrand) throw new TypeError("brand must not be empty");
     const runScope = `${context.runId ?? "unscoped"}\u0000${requestedBrand.toLocaleLowerCase("ru-RU")}`;
+    const seeds = exactProductSeeds(requestedBrand);
     let matchedProducts = this.discoveryTileCache.get(runScope);
     if (!matchedProducts) {
-      const products = new Map<string, SearchTile>();
-      for (const query of discoveryQueries(requestedBrand)) {
+      const products = new Map<string, SearchTile>(seeds.map((seed) => [seed.listingId, {
+        ...seed,
+        reviews: null,
+        rating: null,
+        rawRating: null,
+        rawReviewCount: null,
+        source: TRANSLATE_SOURCE
+      }]));
+      for (const query of seeds.length ? [] : discoveryQueries(requestedBrand)) {
         let previousPageIds: string | undefined;
         let declaredTotalPages: number | undefined;
         let exhausted = false;
@@ -894,6 +980,16 @@ export class OzonBrowserAdapter implements SiteAdapter {
       }
       matchedProducts = [...products.values()];
       setBounded(this.discoveryTileCache, runScope, matchedProducts, 250);
+      if (seeds.length) {
+        await reportActivity(context, {
+          operationId: `ozon:exact-seeds:${requestedBrand}`,
+          stage: "discovery",
+          label: "Ozon · точные сохранённые карточки",
+          channels: ["registry"],
+          status: "complete",
+          detail: `Проверяем ${seeds.length} точные карточки без повторного поиска`
+        });
+      }
     } else {
       await reportActivity(context, {
         operationId: `ozon:reuse-discovery:${requestedBrand}`,
@@ -1022,7 +1118,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
         if (!matchesBrand(exact.product, requestedBrand)) {
           throw new ParserChangedError("Ozon exact product proof belongs to a different brand");
         }
-        setBounded(this.exactProductCache, proofCacheKey, exact, 5_000);
+        if (!seeds.length) setBounded(this.exactProductCache, proofCacheKey, exact, 5_000);
         exactMetrics.set(product.listingId, exact);
         return exact;
         }
@@ -1041,6 +1137,18 @@ export class OzonBrowserAdapter implements SiteAdapter {
       : parserFailure instanceof ParserChangedError
         ? parserFailure
         : blockedFailure instanceof AdapterBlockedError ? blockedFailure : undefined;
+    if (seeds.length) {
+      if (partialFailure) throw partialFailure;
+      assertExactSeedCompleteness(requestedBrand, seeds, exactMetrics);
+      for (const seed of seeds) {
+        setBounded(
+          this.exactProductCache,
+          `${runScope}\u0000${seed.listingId}`,
+          exactMetrics.get(seed.listingId)!,
+          5_000
+        );
+      }
+    }
     const publishableProducts = partialFailure
       ? matchedProducts.filter((product) =>
         !needsExactPrefetch(product) ||

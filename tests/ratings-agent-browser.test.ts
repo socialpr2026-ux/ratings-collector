@@ -88,6 +88,168 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("falls back directly only for one bounded Ozon translated product after fixed egress fails", async () => {
+    const run = vi.fn(async () => undefined);
+    const target = "https://www-ozon-ru.translate.goog/product/hloretta-21sht-4499023625/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        return new Response("reader unavailable", { status: 502 });
+      }
+      expect(new Request(input).url).toBe(target);
+      expect(init?.method).toBe("GET");
+      expect(init?.redirect).toBe("manual");
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBeNull();
+      expect(headers.get("cookie")).toBeNull();
+      expect(headers.get("x-private-header")).toBeNull();
+      return new Response("exact product proof", { status: 200 });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(target, {
+      headers: {
+        authorization: "Bearer must-not-forward",
+        cookie: "session=must-not-forward",
+        "x-private-header": "must-not-forward"
+      }
+    });
+
+    expect(await response.text()).toBe("exact product proof");
+    expect(directFetch).toHaveBeenCalledTimes(3);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("recovers one bounded Ozon translated GET after fixed-egress transport failure", async () => {
+    const run = vi.fn(async () => undefined);
+    const target = "https://www-ozon-ru.translate.goog/product/hloretta-21sht-4499023625/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        throw new Error("fixed egress transport unavailable");
+      }
+      expect(new Request(input).url).toBe(target);
+      expect(init?.method).toBe("GET");
+      expect(init?.redirect).toBe("manual");
+      return new Response("direct exact proof");
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    await expect((await routedFetch(target)).text()).resolves.toBe("direct exact proof");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("recovers one bounded Ozon translated GET after the fixed-egress timeout", async () => {
+    vi.useFakeTimers();
+    const target = "https://www-ozon-ru.translate.goog/product/hloretta-21sht-4499023625/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const directFetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        return new Promise<Response>(() => undefined);
+      }
+      expect(new Request(input).url).toBe(target);
+      expect(init?.method).toBe("GET");
+      return Promise.resolve(new Response("direct after timeout"));
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const pending = routedFetch(target);
+    await vi.advanceTimersByTimeAsync(STATIC_PROXY_REQUEST_TIMEOUT_MS + 1);
+
+    expect(await (await pending).text()).toBe("direct after timeout");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not accept a redirect from the bounded Ozon direct fallback", async () => {
+    const target = "https://www-ozon-ru.translate.goog/product/hloretta-21sht-4499023625/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        return new Response("fixed failure", { status: 502 });
+      }
+      expect(init?.redirect).toBe("manual");
+      return new Response(null, { status: 302, headers: { location: "https://evil.example/" } });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(502);
+    expect(directFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("bounds a stalled Ozon direct-product fallback and preserves the fixed-route blocker", async () => {
+    vi.useFakeTimers();
+    const target = "https://www-ozon-ru.translate.goog/product/hloretta-21sht-4499023625/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const directFetch = vi.fn((input: RequestInfo | URL) => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        return Promise.resolve(new Response("fixed failure", { status: 502 }));
+      }
+      return new Promise<Response>(() => undefined);
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const pending = routedFetch(target);
+    await vi.advanceTimersByTimeAsync(201);
+    await vi.advanceTimersByTimeAsync(STATIC_PROXY_REQUEST_TIMEOUT_MS + 1);
+    const response = await pending;
+
+    expect(response.status).toBe(502);
+    expect(directFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("never uses the Ozon direct-product fallback for POST", async () => {
+    const target = "https://www-ozon-ru.translate.goog/product/hloretta-21sht-4499023625/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) => {
+      expect(input).toBe("https://ratings.example/api/internal/static-review-fetch");
+      return new Response("fixed failure", { status: 502 });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(target, { method: "POST", body: "must-not-forward" });
+
+    expect(response.status).toBe(502);
+    expect(directFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not use direct egress for an unbounded Ozon translated product query", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async () => new Response("reader unavailable", { status: 502 }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const target = "https://www-ozon-ru.translate.goog/product/hloretta-21sht-4499023625/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en&evil=1";
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(502);
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("does not acquire Sandbox for an external Apify request", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async () => new Response("ok"));
@@ -614,6 +776,44 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(await response.text()).toBe("exact category aggregate");
     expect(directFetch).toHaveBeenCalledTimes(2);
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["https://009.xn--p1ai/sitemap_2.xml", 200, 200],
+    ["https://009.xn--p1ai/kupit-hloretta/otzyvy", 404, 502]
+  ])("uses only positive direct recovery for an exact 009.рф target: %s", async (target, directStatus, expectedStatus) => {
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        return new Response("fixed route unavailable", { status: 502 });
+      }
+      expect(new Request(input).url).toBe(target);
+      expect(init?.redirect).toBe("manual");
+      return new Response(directStatus === 200 ? "<urlset></urlset>" : "missing", { status: directStatus });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const run = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "t".repeat(32)
+    });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(expectedStatus);
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("does not recover an unbounded 009.рф path directly", async () => {
+    const directFetch = vi.fn(async () => new Response("fixed route unavailable", { status: 502 }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "t".repeat(32)
+    });
+
+    expect((await routedFetch("https://009.xn--p1ai/catalog/?q=Хлорэтта")).status).toBe(502);
+    expect(directFetch).toHaveBeenCalledOnce();
   });
 
   it("preserves a first-party terminal status for one exact ru.otzyv.com product after reader failure", async () => {

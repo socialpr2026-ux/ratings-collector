@@ -141,6 +141,13 @@ function familyTitleMatchesBrand(familyTitle: string, brand: string): boolean {
   return descriptorFree !== undefined && normalizeText(familyTitle) === normalizeText(descriptorFree);
 }
 
+function exactFamilyTitleMatchesBrand(familyTitle: string, brand: string): boolean {
+  const normalizedTitle = normalizeText(familyTitle);
+  if (aliasesForBrand(brand).some((alias) => normalizedTitle === normalizeText(alias))) return true;
+  const descriptorFree = descriptorFreeBrand(brand);
+  return descriptorFree !== undefined && normalizedTitle === normalizeText(descriptorFree);
+}
+
 function provesSolutionVariant(title: string): boolean {
   return normalizeText(title).split(" ").includes("раствор");
 }
@@ -173,18 +180,20 @@ async function requestText(
   context: AdapterContext,
   fetchImpl: typeof fetch,
   maxBytes: number,
-  accept: string
+  accept: string,
+  readableTerminalStatuses: readonly number[] = [],
+  maxRedirects = 4
 ): Promise<{ text: string; status: number; requestedUrl: string; headers: Headers }> {
   let response: Response;
   try {
     response = await safeFetch(url, {
       signal: context.signal,
       headers: { accept, "accept-language": "ru-RU,ru;q=0.9,en;q=0.7" }
-    }, context.fetch ?? fetchImpl, 4, 60_000);
+    }, context.fetch ?? fetchImpl, maxRedirects, 60_000);
   } catch (error) {
     throw new AdapterBlockedError(`${DOMAIN}: blocked: request failed: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (!response.ok) {
+  if (!response.ok && !readableTerminalStatuses.includes(response.status)) {
     await response.body?.cancel().catch(() => undefined);
     const message = `${DOMAIN}: HTTP ${response.status} for ${new URL(url).pathname}`;
     if (blockedStatus(response.status)) throw new AdapterBlockedError(`${DOMAIN}: blocked: ${message}`);
@@ -414,7 +423,7 @@ export class Pharmacy009Adapter implements SiteAdapter {
       const snapshot = await this.snapshot(context);
       const candidates = snapshot.refs.filter((ref) => slugMatchesBrand(ref.slug, brand));
       if (!candidates.length) {
-        throw new ParserChangedError(`${DOMAIN}: complete sitemap did not prove an exact family mapping or absence for ${brand}`);
+        return await this.discoverByExactBrandSlugs(brand, context);
       }
       if (candidates.length > MAX_BRAND_CANDIDATES) {
         throw new ParserChangedError(`${DOMAIN}: sitemap mapping for ${brand} is too broad for exact bounded proof`);
@@ -450,6 +459,66 @@ export class Pharmacy009Adapter implements SiteAdapter {
     } finally {
       this.finishSnapshotUse(brand, context);
     }
+  }
+
+  private async discoverByExactBrandSlugs(brand: string, context: AdapterContext): Promise<ProductRef[]> {
+    const candidates = new Map<string, FamilyReviewRef>();
+    for (const { slug } of brandSlugCandidates(brand)) {
+      const candidate = familyReviewRef(`${ORIGIN}/kupit-${slug}/otzyvy`);
+      if (candidate) candidates.set(candidate.url, candidate);
+    }
+    if (!candidates.size || candidates.size > MAX_BRAND_CANDIDATES) {
+      throw new ParserChangedError(`${DOMAIN}: exact brand slug fallback is empty or too broad for ${brand}`);
+    }
+
+    const proven = (await mapWithConcurrency([...candidates.values()], SITEMAP_CONCURRENCY, async (candidate) => {
+      const response = await requestText(
+        candidate.url,
+        context,
+        this.fetchImpl,
+        MAX_HTML_BYTES,
+        "text/html,application/xhtml+xml",
+        [404, 410],
+        0
+      );
+      const page: HtmlPage = {
+        html: response.text,
+        $: load(response.text),
+        status: response.status,
+        requestedUrl: response.requestedUrl
+      };
+      if (activeChallenge(page.$)) {
+        throw new AdapterBlockedError(`${DOMAIN}: blocked: active challenge on ${new URL(candidate.url).pathname}`);
+      }
+      if (response.status === 404 || response.status === 410) return undefined;
+      if (response.status !== 200) {
+        throw new ParserChangedError(`${DOMAIN}:${candidate.listingId}: exact brand slug returned unsupported HTTP ${response.status}`);
+      }
+
+      const familyTitle = exactFamilyTitle(page.$, candidate);
+      if (!exactFamilyTitleMatchesBrand(familyTitle, brand)) {
+        throw new ParserChangedError(`${DOMAIN}:${candidate.listingId}: exact brand slug is not bound to ${brand}`);
+      }
+      this.rememberHtmlPage(candidate.url, context, page);
+      return candidate;
+    })).filter((candidate): candidate is FamilyReviewRef => candidate !== undefined);
+
+    const refs = proven
+      .map((candidate) => ({
+        domain: DOMAIN,
+        platform: DOMAIN,
+        listingId: candidate.listingId,
+        brand,
+        url: candidate.url,
+        metadata: { discovery: "009-bounded-exact-brand-slug" }
+      }))
+      .sort((left, right) => left.listingId.localeCompare(right.listingId, "ru"));
+    if (!refs.length) {
+      throw new AdapterBlockedError(
+        `${DOMAIN}: exact brand slug probes did not prove absence for ${brand}; the complete sitemap may use an unexpected alias`
+      );
+    }
+    return refs;
   }
 
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
@@ -599,6 +668,16 @@ export class Pharmacy009Adapter implements SiteAdapter {
 
   private pageCacheKey(url: string, context: AdapterContext): string {
     return `${context.runId?.trim() || "anonymous"}:${context.refreshDiscovery ? "refresh" : "normal"}:${url}`;
+  }
+
+  private rememberHtmlPage(url: string, context: AdapterContext, page: HtmlPage): void {
+    const cacheKey = this.pageCacheKey(url, context);
+    this.runPages.set(cacheKey, Promise.resolve(page));
+    while (this.runPages.size > 32) {
+      const oldest = this.runPages.keys().next().value as string | undefined;
+      if (!oldest || oldest === cacheKey) break;
+      this.runPages.delete(oldest);
+    }
   }
 
   private releaseHtmlPage(url: string, context: AdapterContext): void {
