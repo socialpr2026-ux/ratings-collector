@@ -2118,10 +2118,71 @@ function aptekaStateGroupItems(value: unknown, productId: string): unknown[] | u
     const group = aptekaStateRecord(groupValue);
     if (!group || !Array.isArray(group.itemInfos)) return undefined;
     for (const item of group.itemInfos) {
-      if (String(aptekaStateRecord(item)?.id ?? "") === productId) selected.push(item);
+      const itemRecord = aptekaStateRecord(item);
+      if (!itemRecord) return undefined;
+      if (String(itemRecord.id ?? "") === productId) selected.push(item);
     }
   }
   return selected;
+}
+
+type AptekaInitialProductState =
+  | { status: "absent" }
+  | { status: "invalid" }
+  | { status: "present"; product: Record<string, unknown> };
+
+function aptekaInitialProductState($: ReturnType<typeof load>): AptekaInitialProductState {
+  const scripts = $("script").toArray().map((node) => $(node).html() ?? "").filter((script) =>
+    /^\s*window\.__INITIAL_STATE__\s*=\s*/.test(script)
+  );
+  if (scripts.length === 0) return { status: "absent" };
+  if (scripts.length !== 1) return { status: "invalid" };
+  const prefix = scripts[0].match(/^\s*window\.__INITIAL_STATE__\s*=\s*/)?.[0];
+  const state = prefix ? parseAssignedJsonObject(scripts[0], prefix) : undefined;
+  const product = aptekaStateRecord(state?.product);
+  return product ? { status: "present", product } : { status: "invalid" };
+}
+
+function aptekaInitialStateAllowsExactRetry(
+  $: ReturnType<typeof load>,
+  requested: AptekaRuTarget
+): boolean {
+  if (requested.kind !== "product" || !requested.productId || /"aggregateRating"\s*:/i.test($.html())) return false;
+  const initialState = aptekaInitialProductState($);
+  if (initialState.status === "absent") return true;
+  if (initialState.status !== "present") return false;
+  const productState = initialState.product;
+  if (productState.selected !== undefined && productState.selected !== requested.productId ||
+    productState.groupId !== undefined && productState.groupId !== requested.productId ||
+    productState.itemReviews !== undefined && !Array.isArray(productState.itemReviews) ||
+    Array.isArray(productState.itemReviews) && productState.itemReviews.length > 0) return false;
+
+  const itemInfo = aptekaStateRecord(productState.iteminfo);
+  const products = aptekaStateRecord(productState.products);
+  const directGroups = aptekaStateGroupItems(productState.groupItems, requested.productId);
+  const groupInfo = aptekaStateRecord(productState.groupinfo);
+  const mirroredGroups = aptekaStateGroupItems(groupInfo?.groupItems, requested.productId);
+  if (productState.iteminfo !== undefined && !itemInfo ||
+    productState.products !== undefined && !products ||
+    productState.groupItems !== undefined && !directGroups ||
+    productState.groupinfo !== undefined && !groupInfo ||
+    groupInfo?.groupItems !== undefined && !mirroredGroups) return false;
+  const candidates = [
+    itemInfo?.[requested.productId],
+    products?.[requested.productId],
+    ...(directGroups ?? []),
+    ...(mirroredGroups ?? [])
+  ];
+  return candidates.every((value) => {
+    if (value === undefined) return true;
+    const item = aptekaStateRecord(value);
+    if (!item) return false;
+    if (item.reviewsCount !== undefined) {
+      const count = Number(item.reviewsCount);
+      if (!Number.isFinite(count) || count < 0 || count > 0) return false;
+    }
+    return item.rating === null || item.rating === undefined;
+  });
 }
 
 function aptekaInitialStateProvesExactZero(
@@ -2132,14 +2193,10 @@ function aptekaInitialStateProvesExactZero(
   if (requested.kind !== "product" || !requested.productId) return false;
   const productSlug = requested.source.pathname.match(/^\/product\/([^/]+)\/$/i)?.[1];
   if (!productSlug) return false;
-  const scripts = $("script").toArray().map((node) => $(node).html() ?? "").filter((script) =>
-    /^\s*window\.__INITIAL_STATE__\s*=\s*/.test(script)
-  );
-  if (scripts.length !== 1) return false;
-  const prefix = scripts[0].match(/^\s*window\.__INITIAL_STATE__\s*=\s*/)?.[0];
-  const state = prefix ? parseAssignedJsonObject(scripts[0], prefix) : undefined;
-  const productState = aptekaStateRecord(state?.product);
-  if (!productState || productState.selected !== requested.productId || productState.groupId !== requested.productId ||
+  const initialState = aptekaInitialProductState($);
+  if (initialState.status !== "present") return false;
+  const productState = initialState.product;
+  if (productState.selected !== requested.productId || productState.groupId !== requested.productId ||
     productState.error !== false || productState.transition !== null ||
     !Array.isArray(productState.itemReviews) || productState.itemReviews.length !== 0) return false;
 
@@ -3371,7 +3428,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       redirect: "manual",
       headers: { accept: aptekaRuTarget.kind === "sitemap" ? "application/xml,text/xml" : "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
     }, fetch, 0, 60_000);
-    const html = await readTextBounded(upstream, 12_000_000, 60_000);
+    let html = await readTextBounded(upstream, 12_000_000, 60_000);
     if (!upstream.ok) {
       return new Response(html, {
         status: upstream.status,
@@ -3405,7 +3462,27 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     if (!/(?:text\/html|application\/xhtml\+xml)/i.test(upstream.headers.get("content-type") ?? "")) {
       return json({ error: "Apteka.ru response is not HTML" }, 502);
     }
-    const compactHtml = compactAptekaRuHtml(html, aptekaRuTarget);
+    let compactHtml = compactAptekaRuHtml(html, aptekaRuTarget);
+    // Apteka can serve a short-lived SSR shell while its selected-product
+    // state is still transitioning. One bounded refresh is allowed only for
+    // an exact product URL, and it must pass the same source-bound proof.
+    if (!compactHtml && aptekaInitialStateAllowsExactRetry(load(html), aptekaRuTarget)) {
+      try {
+        const retry = await safeFetch(aptekaRuTarget.source.toString(), {
+          method: "GET",
+          redirect: "manual",
+          headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+        }, fetch, 0, 60_000);
+        const retryHtml = await readTextBounded(retry, 12_000_000, 60_000);
+        const retryCompact = retry.ok && /(?:text\/html|application\/xhtml\+xml)/i.test(retry.headers.get("content-type") ?? "")
+          ? compactAptekaRuHtml(retryHtml, aptekaRuTarget)
+          : undefined;
+        if (retryCompact) {
+          html = retryHtml;
+          compactHtml = retryCompact;
+        }
+      } catch { /* the exact selected-product proof remains unavailable */ }
+    }
     if (!compactHtml || compactHtml.length > 350_000) {
       return json({ error: "Apteka.ru page did not prove the requested source and metrics" }, 502);
     }
@@ -3593,6 +3670,35 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         await direct.body?.cancel().catch(() => undefined);
       } catch { /* keep the translated transport failure explicit */ }
       return json({ error: `Zdravcity translated transport failed: ${safeErrorMessage(error)}` }, 502);
+    }
+    if (!upstream.ok && (
+      [403, 404, 408, 410, 425, 429, 498].includes(upstream.status) || upstream.status >= 500
+    )) {
+      try {
+        const direct = await safeFetch(target.toString(), {
+          method: "GET",
+          redirect: "manual",
+          headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+        }, fetch, 0, 60_000);
+        if ([404, 410].includes(direct.status)) {
+          await Promise.all([
+            upstream.body?.cancel().catch(() => undefined),
+            direct.body?.cancel().catch(() => undefined)
+          ]);
+          return new Response(null, {
+            status: direct.status,
+            headers: {
+              "cache-control": "no-store",
+              "x-ratings-source": "zdravcity-first-party-missing"
+            }
+          });
+        }
+        await direct.body?.cancel().catch(() => undefined);
+      } catch { /* preserve the translated failure below */ }
+    }
+    if ([404, 410].includes(upstream.status)) {
+      await upstream.body?.cancel().catch(() => undefined);
+      return json({ error: "Zdravcity translated terminal status was not confirmed by first-party" }, 502);
     }
     const html = await readTextBounded(upstream, 12_000_000, 60_000);
     if (!upstream.ok) {

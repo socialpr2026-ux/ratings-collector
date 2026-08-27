@@ -1691,23 +1691,17 @@ describe("static pharmacy Translate gateway", () => {
       <script type="application/ld+json">${JSON.stringify(product)}</script></head><body><h1>${product.name}</h1>${body}
       ${initialState ? `<script>window.__INITIAL_STATE__ = ${JSON.stringify(initialState)};</script>` : ""}</body></html>`;
     const emptyText = "<h2>Отзывы</h2><span>0</span><span>отзывов</span><p>К этому товару ещё нет отзывов.</p>";
-    vi.stubGlobal("fetch", vi.fn()
-      .mockResolvedValueOnce(new Response(page(state()), { headers: { "content-type": "text/html" } }))
-      .mockResolvedValueOnce(new Response(page(state({ reviewsCount: 1, rating: 5 }, [{ id: "review-1" }]), emptyText), {
+    const target = source;
+    const usePages = (...pages: string[]) => {
+      const pending = [...pages];
+      const fetchMock = vi.fn(async () => new Response(pending.shift() ?? pages.at(-1) ?? "", {
         headers: { "content-type": "text/html" }
-      }))
-      .mockResolvedValueOnce(new Response(page(state({}, [{ id: "contradicting-review" }]), emptyText), {
-        headers: { "content-type": "text/html" }
-      }))
-      .mockResolvedValueOnce(new Response(page(state({}, [], { error: true }), emptyText), {
-        headers: { "content-type": "text/html" }
-      }))
-      .mockResolvedValueOnce(new Response(page(state({}, [], { transition: { pending: true } }), emptyText), {
-        headers: { "content-type": "text/html" }
-      }))
-      .mockResolvedValueOnce(new Response(page(undefined, emptyText), { headers: { "content-type": "text/html" } })));
-    const target = translated("apteka-ru.translate.goog", new URL(source).pathname).toString();
+      }));
+      vi.stubGlobal("fetch", fetchMock);
+      return fetchMock;
+    };
 
+    const transientFetch = usePages(page(undefined, emptyText), page(state()));
     const response = await callGateway(target);
 
     expect(response.status).toBe(200);
@@ -1715,11 +1709,94 @@ describe("static pharmacy Translate gateway", () => {
     expect(proof).toContain('"reviewCount":0');
     expect(proof).toContain('"ratingCount":0');
     expect(proof).not.toContain(siblingId);
+    expect(transientFetch).toHaveBeenCalledTimes(2);
+
+    const selectedPositiveFetch = usePages(
+      page(state({ reviewsCount: 1, rating: 5 }), emptyText),
+      page(state())
+    );
     expect((await callGateway(target)).status).toBe(502);
+    expect(selectedPositiveFetch).toHaveBeenCalledTimes(1);
+
+    const writtenReviewFetch = usePages(
+      page(state({}, [{ id: "contradicting-review" }]), emptyText),
+      page(state())
+    );
     expect((await callGateway(target)).status).toBe(502);
+    expect(writtenReviewFetch).toHaveBeenCalledTimes(1);
+
+    for (const invalidHtml of [
+      page(state({}, [], { error: true }), emptyText),
+      page(state({}, [], { transition: { pending: true } }), emptyText),
+      page(undefined, emptyText)
+    ]) {
+      const retryFetch = usePages(invalidHtml, invalidHtml);
+      expect((await callGateway(target)).status).toBe(502);
+      expect(retryFetch).toHaveBeenCalledTimes(2);
+    }
+
+    const positiveAggregatePage = page(undefined, emptyText).replace(
+      "</head>",
+      `<script type="application/ld+json">${JSON.stringify({
+        "@type": "Product",
+        sku: id,
+        name: product.name,
+        aggregateRating: { "@type": "AggregateRating", reviewCount: 1, ratingValue: 5 }
+      })}</script></head>`
+    );
+    const aggregateFetch = usePages(positiveAggregatePage, page(state()));
     expect((await callGateway(target)).status).toBe(502);
+    expect(aggregateFetch).toHaveBeenCalledTimes(1);
+
+    const exactPositive = {
+      id,
+      name: product.name,
+      humanableUrl: productSlug,
+      reviewsCount: 5,
+      rating: 5,
+      default: true
+    };
+    const malformedGroupFetch = usePages(
+      page(state({}, [], {
+        groupItems: [{ itemInfos: "malformed" }, { itemInfos: [exactPositive] }]
+      }), emptyText),
+      page(state())
+    );
     expect((await callGateway(target)).status).toBe(502);
+    expect(malformedGroupFetch).toHaveBeenCalledTimes(1);
+
+    const malformedReviewsFetch = usePages(
+      page(state({}, [], { itemReviews: { review: { id: "positive-review" } } }), emptyText),
+      page(state())
+    );
     expect((await callGateway(target)).status).toBe(502);
+    expect(malformedReviewsFetch).toHaveBeenCalledTimes(1);
+
+    for (const malformedState of [
+      state({}, [], { iteminfo: "malformed" }),
+      state({}, [], { products: "malformed" }),
+      state({}, [], { groupinfo: "malformed" })
+    ]) {
+      const malformedFetch = usePages(page(malformedState, emptyText), page(state()));
+      expect((await callGateway(target)).status).toBe(502);
+      expect(malformedFetch).toHaveBeenCalledTimes(1);
+    }
+
+    const duplicateStatePage = page(state()).replace(
+      "</body>",
+      `<script>window.__INITIAL_STATE__ = ${JSON.stringify(state({ reviewsCount: 3, rating: 5 }))};</script></body>`
+    );
+    const duplicateStateFetch = usePages(duplicateStatePage, page(state()));
+    expect((await callGateway(target)).status).toBe(502);
+    expect(duplicateStateFetch).toHaveBeenCalledTimes(1);
+
+    const malformedScriptPage = page(undefined, emptyText).replace(
+      "</body>",
+      "<script>window.__INITIAL_STATE__ = { product: notValidJson };</script></body>"
+    );
+    const malformedScriptFetch = usePages(malformedScriptPage, page(state()));
+    expect((await callGateway(target)).status).toBe(502);
+    expect(malformedScriptFetch).toHaveBeenCalledTimes(1);
   });
 
   it("preserves an exact empty NFapteka product review section as zero", async () => {
@@ -2373,6 +2450,34 @@ describe("fixed first-party collection egress", () => {
     expect(recovered.status).toBe(404);
     expect(recovered.headers.get("x-ratings-source")).toBe("zdravcity-first-party-missing");
     expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const nonOkTranslated = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      return url.hostname === "zdravcity-ru.translate.goog"
+        ? new Response("translated forbidden", { status: 403 })
+        : new Response("missing", { status: 404 });
+    });
+    vi.stubGlobal("fetch", nonOkTranslated);
+    const terminal = await callGateway(target);
+    expect(terminal.status).toBe(404);
+    expect(terminal.headers.get("x-ratings-source")).toBe("zdravcity-first-party-missing");
+    expect(nonOkTranslated).toHaveBeenCalledTimes(2);
+
+    for (const directStatus of [200, 302, 503]) {
+      const unconfirmedTranslated404 = vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        return url.hostname === "zdravcity-ru.translate.goog"
+          ? new Response("translated missing", { status: 404 })
+          : new Response("not terminal", { status: directStatus });
+      });
+      vi.stubGlobal("fetch", unconfirmedTranslated404);
+      const unconfirmed = await callGateway(target);
+      expect(unconfirmed.status).toBe(502);
+      expect(await unconfirmed.json()).toEqual({
+        error: "Zdravcity translated terminal status was not confirmed by first-party"
+      });
+      expect(unconfirmedTranslated404).toHaveBeenCalledTimes(2);
+    }
 
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
