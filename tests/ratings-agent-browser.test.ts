@@ -616,6 +616,72 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("preserves a first-party terminal status for one exact ru.otzyv.com product after reader failure", async () => {
+    const run = vi.fn(async () => undefined);
+    const target = "https://ru.otzyv.com/hloretta";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        return new Response("reader unavailable", { status: 502 });
+      }
+      expect(new Request(input).url).toBe(target);
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(404);
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("does not use direct egress for an arbitrary ru.otzyv.com URL", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async () => new Response("reader unavailable", { status: 502 }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch("https://ru.otzyv.com/search/?q=%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0");
+
+    expect(response.status).toBe(502);
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("does not follow a redirect from an exact ru.otzyv.com product fallback", async () => {
+    const run = vi.fn(async () => undefined);
+    const target = "https://ru.otzyv.com/hloretta";
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        return new Response("reader unavailable", { status: 502 });
+      }
+      expect(new Request(input).url).toBe(target);
+      expect(init?.redirect).toBe("manual");
+      return new Response(null, {
+        status: 302,
+        headers: { location: "https://untrusted.example/not-found" }
+      });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(502);
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("keeps exact Wildberries root feedback off the shared Sandbox queue", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn().mockResolvedValueOnce(new Response('{"feedbackCount":5}'));

@@ -696,6 +696,10 @@ export function browserFetch(
         /^\/sitemap_(?:[0-9]|1[0-9]|2[0-3])\.xml$/i.test(url.pathname) ||
         /^\/kupit-[a-z0-9][a-z0-9_-]*\/otzyvy\/?$/i.test(url.pathname)
       );
+    const fixedRuOtzyvProductTarget = url.protocol === "https:" && url.hostname === "ru.otzyv.com" &&
+      !url.port && !url.username && !url.password && !url.hash && !url.search &&
+      /^\/[a-z0-9][a-z0-9-]*$/i.test(url.pathname) &&
+      !/^\/(?:login|register|meditsina|search)$/i.test(url.pathname);
     const fixedAptekaTarget = url.protocol === "https:" && url.hostname === "apteka.ru" &&
       !url.port && !url.username && !url.password && !url.hash && (
         !url.search && (
@@ -845,18 +849,25 @@ export function browserFetch(
     )) {
       const proxied = await fetchViaStaticProxy(url, request.signal);
       // The fixed reader is normally the most reliable route for review
-      // sites. Vseotzyvy and Pravogolosa are exceptions: their public pages
-      // can remain healthy while that Function's upstream receives a
-      // transient 5xx. Retry their same bounded, exact URL through the
-      // Agent's ordinary egress before declaring the product uncollectable.
-      // A failed fallback never becomes a zero or a successful observation.
+      // sites. Some exact public pages can remain healthy while that
+      // Function's upstream receives a transient 5xx. Retry only the bounded
+      // URL through the Agent's ordinary egress before declaring the product
+      // uncollectable. For ru.otzyv.com, only a first-party terminal status on
+      // one exact product slug is accepted; search and arbitrary paths remain
+      // on the fixed reader. A failed fallback never becomes a zero.
       if (
-        !["vseotzyvy.ru", "pravogolosa.net", "otzyv.pro"].includes(host) ||
+        (
+          !["vseotzyvy.ru", "pravogolosa.net", "otzyv.pro"].includes(host) &&
+          !fixedRuOtzyvProductTarget
+        ) ||
         !TRANSIENT_STATIC_PROXY_STATUSES.has(proxied.status)
       ) return proxied;
       try {
-        const direct = await fetch(request);
-        if (direct.ok) {
+        const direct = await fetch(
+          request,
+          fixedRuOtzyvProductTarget ? { redirect: "manual" } : undefined
+        );
+        if (direct.ok || (fixedRuOtzyvProductTarget && [404, 410].includes(direct.status))) {
           await proxied.body?.cancel().catch(() => undefined);
           return direct;
         }
