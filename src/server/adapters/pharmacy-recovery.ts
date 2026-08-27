@@ -126,7 +126,7 @@ async function translatedPage(
   }
   const html = await readTextBounded(response, MAX_DOCUMENT_BYTES);
   if (!response.ok || blockPage(html)) {
-    if (allowLauncherFallback && [403, 408, 425, 429, 498, 502, 503, 504].includes(response.status)) {
+    if (allowLauncherFallback && [400, 403, 408, 425, 429, 498, 502, 503, 504].includes(response.status)) {
       return translatedPageViaLauncher(source, translatedHost, context, fallbackFetch);
     }
     throw new AdapterBlockedError(`${normalizeHost(source.hostname)} translated request is blocked (HTTP ${response.status})`);

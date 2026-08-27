@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   browserFetch,
   createBrowserLaneScheduler,
+  createStaticProxyScheduler,
   createLazySandboxAcquire,
   extractYandexMarketSearchHtmlProof,
   hasExplicitWildberriesNoResults,
@@ -1259,6 +1260,56 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("recovers Polza through one bounded direct Translate request after fixed egress 502", async () => {
+    const target = "https://polza-ru.translate.goog/catalog/hloretta-tabletki-2-mg-30-mkg-21-sht_78690/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === "https://ratings.example/api/internal/static-review-fetch"
+        ? new Response("fixed route failed", { status: 502 })
+        : new Response("exact direct proof", { headers: { "content-type": "text/html" } })
+    );
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch", token: "internal-token"
+    });
+
+    expect(await (await routedFetch(target)).text()).toBe("exact direct proof");
+    expect(directFetch).toHaveBeenCalledTimes(3);
+    expect(new Request(directFetch.mock.calls.at(-1)?.[0]!).url).toBe(target);
+  });
+
+  it("preserves authoritative proxy 404 for an exact Zdravcity brand route", async () => {
+    const target = "https://zdravcity.ru/g_hloretta/";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) =>
+      new Request(input).url === target
+        ? new Response("forbidden", { status: 403 })
+        : new Response("missing", { status: 404 })
+    );
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch", token: "internal-token"
+    });
+
+    const response = await routedFetch(target);
+    expect(response.status).toBe(404);
+    expect(directFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back from a transient Yandex index gateway failure to exact direct XML", async () => {
+    const target = "https://reviews.yandex.ru/ugcpub/sitemap.xml";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === "https://ratings.example/api/internal/static-review-fetch"
+        ? new Response("temporary", { status: 502 })
+        : new Response("<sitemapindex></sitemapindex>", { headers: { "content-type": "application/xml" } })
+    );
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch", token: "internal-token"
+    });
+
+    expect(await (await routedFetch(target)).text()).toBe("<sitemapindex></sitemapindex>");
+    expect(new Request(directFetch.mock.calls.at(-1)?.[0]!).url).toBe(target);
+  });
+
   it("uses an exact translated Yandex Market card proof without acquiring Sandbox", async () => {
     const run = vi.fn(async () => undefined);
     const source = "https://market.yandex.ru/card/tikalizis-tabletki-po-plen-60mg-60sht/5052501058/reviews";
@@ -1424,5 +1475,44 @@ describe("ratings Agent browser lane scheduler", () => {
 
   it("rejects an invalid shared concurrency limit", () => {
     expect(() => createBrowserLaneScheduler(0)).toThrow(RangeError);
+  });
+});
+
+describe("ratings Agent static proxy scheduler", () => {
+  it("bounds the shared gateway while allowing two requests per host", async () => {
+    const schedule = createStaticProxyScheduler(4, 2);
+    let active = 0;
+    let maxActive = 0;
+    const activeByHost = new Map<string, number>();
+    const maxByHost = new Map<string, number>();
+    const releases: Array<() => void> = [];
+    const task = (host: string) => schedule(host, async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      const hostActive = (activeByHost.get(host) ?? 0) + 1;
+      activeByHost.set(host, hostActive);
+      maxByHost.set(host, Math.max(maxByHost.get(host) ?? 0, hostActive));
+      await new Promise<void>((resolve) => releases.push(resolve));
+      active -= 1;
+      activeByHost.set(host, (activeByHost.get(host) ?? 1) - 1);
+    });
+
+    const pending = [
+      task("a.example"), task("a.example"), task("a.example"),
+      task("b.example"), task("b.example"), task("b.example")
+    ];
+    await vi.waitFor(() => expect(releases).toHaveLength(4));
+    releases.splice(0).forEach((release) => release());
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases.splice(0).forEach((release) => release());
+    await Promise.all(pending);
+
+    expect(maxActive).toBe(4);
+    expect(maxByHost).toEqual(new Map([["a.example", 2], ["b.example", 2]]));
+  });
+
+  it("rejects invalid limits", () => {
+    expect(() => createStaticProxyScheduler(0, 1)).toThrow(RangeError);
+    expect(() => createStaticProxyScheduler(2, 3)).toThrow(RangeError);
   });
 });

@@ -395,6 +395,36 @@ describe("recovered first-party pharmacy adapters", () => {
     expect(fetchMock.mock.calls.some(([input]) => new URL(String(input)).hostname === "translate.google.com")).toBe(true);
   });
 
+  it("uses the exact ASNA launcher when fixed family routing reports unsupported 400", async () => {
+    const card = "https://www.asna.ru/cards/hloretta_2mg_30mkg_n21_tab.html";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www.asna.ru" && url.pathname.startsWith("/sitemap/")) {
+        return new Response("<urlset></urlset>");
+      }
+      if (url.hostname === "www-asna-ru.translate.goog") {
+        return new Response("unsupported fixed route", { status: 400 });
+      }
+      if (url.hostname === "translate.google.com") {
+        const source = new URL(url.searchParams.get("u")!);
+        const final = new URL(source.pathname, "https://www-asna-ru.translate.goog");
+        final.searchParams.set("_x_tr_sl", "ru");
+        final.searchParams.set("_x_tr_tl", "en");
+        final.searchParams.set("_x_tr_hl", "en");
+        const body = source.pathname.startsWith("/product/")
+          ? translated(source.toString(), `<a href="https://www-asna-ru.translate.goog${new URL(card).pathname}?_x_tr_sl=ru&amp;_x_tr_tl=en">Хлорэтта</a>`)
+          : asnaCard(card, "1703694605", 0, true, true);
+        return responseAt(body, final.toString(), { headers: { "content-type": "text/html" } });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    await expect(adapter.discover("Хлорэтта", { region: "Москва" })).resolves.toMatchObject([
+      { listingId: "1703694605", url: card }
+    ]);
+  });
+
   it("recovers all four exact Enterolactis ASNA cards through their current family routes", async () => {
     const cards = new Map([
       ["/cards/enterolaktis_plyus_kaps_n15_sofar_spa.html", "921517892"],

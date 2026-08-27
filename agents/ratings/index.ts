@@ -50,6 +50,49 @@ type ManagedBrowserFetch = YandexMarketCapableFetch & { dispose(): Promise<void>
 
 export type BrowserLane = "ozon" | "yandex" | "wildberries" | "generic";
 
+export function createStaticProxyScheduler(maxConcurrent = 4, maxPerHost = 2): <T>(
+  host: string,
+  operation: () => Promise<T>
+) => Promise<T> {
+  if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1 ||
+    !Number.isInteger(maxPerHost) || maxPerHost < 1 || maxPerHost > maxConcurrent) {
+    throw new RangeError("Static proxy concurrency limits are invalid");
+  }
+  let active = 0;
+  const activeByHost = new Map<string, number>();
+  const waiters: Array<{ host: string; start: () => void }> = [];
+
+  const drain = () => {
+    while (active < maxConcurrent) {
+      const index = waiters.findIndex(({ host }) => (activeByHost.get(host) ?? 0) < maxPerHost);
+      if (index < 0) return;
+      waiters.splice(index, 1)[0]!.start();
+    }
+  };
+
+  return <T>(host: string, operation: () => Promise<T>): Promise<T> => {
+    const lane = host.normalize("NFKC").trim().toLocaleLowerCase("en-US");
+    if (!lane) return Promise.reject(new TypeError("Static proxy host is required"));
+    return new Promise<T>((resolve, reject) => {
+      waiters.push({
+        host: lane,
+        start: () => {
+          active += 1;
+          activeByHost.set(lane, (activeByHost.get(lane) ?? 0) + 1);
+          Promise.resolve().then(operation).then(resolve, reject).finally(() => {
+            active -= 1;
+            const hostActive = (activeByHost.get(lane) ?? 1) - 1;
+            if (hostActive > 0) activeByHost.set(lane, hostActive);
+            else activeByHost.delete(lane);
+            drain();
+          });
+        }
+      });
+      drain();
+    });
+  };
+}
+
 export function createBrowserLaneScheduler(maxConcurrent = 3): <T>(
   lane: BrowserLane,
   operation: () => Promise<T>
@@ -312,13 +355,14 @@ export function browserFetch(
   staticProxy?: { endpoint: string; token: string }
 ): ManagedBrowserFetch {
   const runBrowserTask = createBrowserLaneScheduler(3);
+  const runStaticProxyTask = createStaticProxyScheduler(4, 2);
   let connected: Promise<Browser> | undefined;
   let ozonPage: Promise<Page> | undefined;
   let wildberriesPage: Promise<Page> | undefined;
   let sandboxAcquired = false;
   let disposed = false;
   const hardenedContexts = new Map<string, Promise<BrowserContext>>();
-  const fetchViaStaticProxy = async (url: URL, signal: AbortSignal) => {
+  const fetchViaStaticProxy = (url: URL, signal: AbortSignal) => runStaticProxyTask(url.hostname, async () => {
     if (!staticProxy) throw new Error("Static proxy is not configured");
     const attemptAbort = new AbortController();
     const combinedSignal = AbortSignal.any([signal, attemptAbort.signal]);
@@ -357,7 +401,7 @@ export function browserFetch(
     } finally {
       attemptAbort.abort();
     }
-  };
+  });
   const fetchVaptekeViaStaticProxy = async (request: Request) => {
     const url = new URL(request.url);
     if (request.method !== "POST" || url.pathname !== "/ajax/autocomplete") {
@@ -691,11 +735,13 @@ export function browserFetch(
           if ([
             "apteka-ru.translate.goog",
             "www-budzdorov-ru.translate.goog",
-            "www-asna-ru.translate.goog"
+            "www-asna-ru.translate.goog",
+            "okapteka-ru.translate.goog",
+            "polza-ru.translate.goog"
           ].includes(url.hostname)) {
             try {
               const direct = await fetch(request);
-              if (direct.ok) {
+              if (direct.ok || [404, 410].includes(direct.status)) {
                 await response.body?.cancel().catch(() => undefined);
                 return direct;
               }
@@ -753,7 +799,19 @@ export function browserFetch(
       // The fixed Function route is the proven collector path for these
       // allowlisted URLs, so use it immediately. Its response still passes
       // through the adapter's strict XML/product proof and fail-closed checks.
-      return fetchViaStaticProxy(url, request.signal);
+      const proxied = await fetchViaStaticProxy(url, request.signal);
+      if (!TRANSIENT_STATIC_PROXY_STATUSES.has(proxied.status)) return proxied;
+      try {
+        const direct = await fetch(request);
+        if (direct.ok || [404, 410].includes(direct.status)) {
+          await proxied.body?.cancel().catch(() => undefined);
+          return direct;
+        }
+        await direct.body?.cancel().catch(() => undefined);
+      } catch {
+        request.signal.throwIfAborted();
+      }
+      return proxied;
     }
     if (staticProxy && fixedZdravcityTarget) {
       try {
@@ -761,7 +819,7 @@ export function browserFetch(
         const shouldFallback = [403, 408, 425, 429].includes(direct.status) || direct.status >= 500;
         if (!shouldFallback) return direct;
         const proxied = await fetchViaStaticProxy(url, request.signal);
-        if (proxied.ok) {
+        if (proxied.ok || [404, 410].includes(proxied.status)) {
           await direct.body?.cancel().catch(() => undefined);
           return proxied;
         }
@@ -779,6 +837,7 @@ export function browserFetch(
       host === "megapteka.ru" ||
       host === "irecommend.ru" ||
       host === "otzovik.com" ||
+      host === "otzyv.pro" ||
       host === "vseotzyvy.ru" ||
       host === "pravogolosa.net" ||
       host === "ru.otzyv.com" ||
@@ -792,7 +851,7 @@ export function browserFetch(
       // Agent's ordinary egress before declaring the product uncollectable.
       // A failed fallback never becomes a zero or a successful observation.
       if (
-        !["vseotzyvy.ru", "pravogolosa.net"].includes(host) ||
+        !["vseotzyvy.ru", "pravogolosa.net", "otzyv.pro"].includes(host) ||
         !TRANSIENT_STATIC_PROXY_STATUSES.has(proxied.status)
       ) return proxied;
       try {

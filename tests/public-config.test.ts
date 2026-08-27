@@ -314,7 +314,7 @@ describe("new static collector gateways", () => {
     target.searchParams.set("lang", "ru-en");
     const redirect = new URL("https://translated.turbopages.org/proxy_u/signed-1/https/www.ozon.ru/api/composer-api.bx/page/json/v2");
     redirect.searchParams.set("url", sourcePath);
-    const categorySource = "/category/bady-6183/baktoblis-100260712/?brand_was_predicted=true&category_was_predicted=true&deny_category_prediction=true&from_global=true&text=Baktoblis";
+    const categorySource = "/category/bady-6183/baktoblis-100260712/?category_was_predicted=true&deny_category_prediction=true&from_global=true&text=Baktoblis";
     const categoryRedirect = new URL(redirect.origin + redirect.pathname);
     categoryRedirect.searchParams.set("page_changed", "true");
     categoryRedirect.searchParams.set("url", categorySource);
@@ -682,6 +682,48 @@ Markdown Content:
     expect(productProof).toContain("Оценка 5 из 5");
   });
 
+  it("accepts Ozon's exact category-only prediction redirect without a brand flag", async () => {
+    const sourcePath = "/search/?text=%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0&from_global=true";
+    const target = new URL("https://www-ozon-ru.translate.goog/api/composer-api.bx/page/json/v2");
+    target.searchParams.set("url", sourcePath);
+    target.searchParams.set("_x_tr_sl", "ru");
+    target.searchParams.set("_x_tr_tl", "en");
+    target.searchParams.set("_x_tr_hl", "en");
+    const categorySource = "/category/kontraceptivy-6168/?category_was_predicted=true&deny_category_prediction=true&from_global=true&text=" +
+      encodeURIComponent("Хлорэтта");
+    const redirect = new URL(target.origin + target.pathname);
+    redirect.searchParams.set("page_changed", "true");
+    redirect.searchParams.set("url", categorySource);
+    redirect.searchParams.set("_x_tr_sl", "ru");
+    redirect.searchParams.set("_x_tr_tl", "en");
+    redirect.searchParams.set("_x_tr_hl", "en");
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+      new URL(String(input)).toString() === target.toString()
+        ? new Response(null, { status: 302, headers: { location: redirect.toString() } })
+        : new Response('{"widgetStates":{}}', { headers: { "content-type": "application/json" } })
+    ));
+
+    const response = await callGateway(target.toString());
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-ozon-composer");
+  });
+
+  it("preserves a source-bound Megamarket visible no-results proof while compacting", async () => {
+    const source = "https://megamarket.ru/catalog/?q=%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      `<!doctype html><html><head><base href="${source}"><title>Results for the query Chloretta</title></head>` +
+      `<body><main><article class="listing-not-found-block"><p>We didn't find it.</p><p>Try writing it differently or look in the catalog</p></article></main></body></html>`,
+      { headers: { "content-type": "text/html; charset=utf-8" } }
+    )));
+
+    const response = await callGateway(`https://megamarket-ru.translate.goog/catalog/?q=${encodeURIComponent("Хлорэтта")}&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en`);
+    const proof = await response.text();
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-megamarket-compact");
+    expect(proof).toContain('<p data-ratings-empty="search">No products found</p>');
+    expect(proof).toContain(`<base href="${source}">`);
+  });
+
   it("fails closed when the reader source or declared result set is incomplete", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(`Title: Поиск: Кагоцел
 
@@ -835,9 +877,11 @@ describe("static Otzovik product gateway", () => {
       return new Response(`<!doctype html><html><head><base href="${source}"><link rel="canonical" href="${source}"></head><body>
         <div class="product-counter">3</div><div class="product-list">
           <div class="item sortable" data-pid="4948" data-reviews="394" data-rating="401394">
+            <span class="rating-score-2">4.01</span>
             <h3><a class="product-name" href="https://otzovik-com.translate.goog/reviews/gomeopaticheskoe_sredstvo_ot_grippa_i_prostudnih_zabolevaniy_buaron_ocillokokcinum/?_x_tr_sl=ru&amp;_x_tr_tl=en&amp;_x_tr_hl=en">Гомеопатический препарат Буарон "Оциллококцинум"</a></h3>
           </div>
           <div class="item sortable" data-pid="2620333" data-reviews="1" data-rating="50001">
+            <span class="rating-score-2">5</span>
             <h3><a class="product-name" href="https://otzovik.com/reviews/gomeopaticheskiy_preparat_boiron_ocillokokcinum_zaschita_ot_virusov/">Гомеопатический препарат Boiron "Оциллококцинум защита от вирусов"</a></h3>
           </div>
           <div class="item sortable" data-pid="999" data-reviews="7" data-rating="40007">
@@ -856,6 +900,8 @@ describe("static Otzovik product gateway", () => {
     expect(proof).toContain("https://otzovik.com/reviews/gomeopaticheskoe_sredstvo_ot_grippa_i_prostudnih_zabolevaniy_buaron_ocillokokcinum/");
     expect(proof).toContain("https://otzovik.com/reviews/gomeopaticheskiy_preparat_boiron_ocillokokcinum_zaschita_ot_virusov/");
     expect(proof).not.toContain("drug_analogue");
+    expect(proof).toContain('data-review-count="394" data-rating="4.01"');
+    expect(proof).toContain('data-review-count="1" data-rating="5"');
     expect(upstream).toHaveBeenCalledOnce();
   });
 
@@ -1207,6 +1253,30 @@ describe("static pharmacy Translate gateway", () => {
     const ambiguous = await callGateway(target.toString());
     expect(ambiguous.status).toBe(502);
     expect(await ambiguous.text()).toContain("did not prove the requested source and metrics");
+  });
+
+  it("accepts a translated Okapteka 404 only after the exact first-party group also returns 404", async () => {
+    const target = translated("okapteka-ru.translate.goog", "/pg/%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0/");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      return new Response("missing", { status: url.hostname === "okapteka.ru" ? 404 : 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const proven = await callGateway(target.toString());
+    expect(proven.status).toBe(200);
+    expect(proven.headers.get("x-ratings-source")).toBe("okapteka-first-party-missing");
+    expect(await proven.text()).toContain('data-ratings-empty="first-party-404"');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      return new Response(url.hostname === "okapteka.ru" ? "access blocked" : "translated missing", {
+        status: url.hostname === "okapteka.ru" ? 503 : 404
+      });
+    }));
+    const unproven = await callGateway(target.toString());
+    expect(unproven.status).toBe(404);
   });
 
   it("accepts and compacts source-bound Farmlend product metrics", async () => {
@@ -1818,6 +1888,18 @@ describe("fixed first-party collection egress", () => {
     const incomplete = await callBatch();
     expect(incomplete.status).toBe(502);
     expect(await incomplete.text()).not.toContain('"processed":2');
+  });
+
+  it("preserves an exact first-party 404 after the translated product route fails", async () => {
+    const upstream = vi.fn()
+      .mockResolvedValueOnce(new Response("translated failure", { status: 502 }))
+      .mockResolvedValueOnce(new Response("missing", { status: 404 }));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway("https://ru.otzyv.com/hloretta");
+    expect(response.status).toBe(404);
+    expect(response.headers.get("x-ratings-source")).toBe("direct-ru-otzyv-missing");
+    expect(new URL(String(upstream.mock.calls[1]?.[0])).toString()).toBe("https://ru.otzyv.com/hloretta");
   });
 
   it("proves a Yandex batch shard when exact XML tags and locations cross stream chunks", async () => {

@@ -72,6 +72,16 @@ const fixtures = {
 };
 
 describe("OkaptekaAdapter", () => {
+  it("keeps an unverified translated 404 blocked instead of publishing no results", async () => {
+    const missing = new OkaptekaAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response("missing", { status: 404 })) as unknown as typeof fetch);
+    await expect(missing.discover("Хлорэтта", context)).rejects.toBeInstanceOf(AdapterBlockedError);
+
+    const transient = new OkaptekaAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response("upstream failed", { status: 502 })) as unknown as typeof fetch);
+    await expect(transient.discover("Хлорэтта", context)).rejects.toBeInstanceOf(AdapterBlockedError);
+  });
+
   it("accepts only the exact current empty-product phrase as brand-scoped no results", async () => {
     const source = "https://okapteka.ru/pg/%D0%A2%D0%B8%D0%BA%D0%B0%D0%BB%D0%B8%D0%B7%D0%B8%D1%81/";
     const exact = `<!doctype html><html><head><base href="${source}"></head><body><main>Не найдено ни одного товара.</main></body></html>`;

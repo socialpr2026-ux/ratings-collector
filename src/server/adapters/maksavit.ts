@@ -13,14 +13,15 @@ const TRANSLATE_ORIGIN = "https://maksavit-ru.translate.goog";
 const MAX_DOCUMENT_BYTES = 4_000_000;
 const PRODUCT_PATH = /^\/catalog\/(\d+)\/?$/u;
 const BLOCK_MARKERS = /captcha|access denied|forbidden|too many requests|service unavailable|доступ\s+(?:ограничен|запрещен)|проверка\s+браузера|слишком\s+много\s+запросов/iu;
-const ACCESS_STATUSES = new Set([401, 403, 429, 498]);
+const ACCESS_STATUSES = new Set([400, 401, 403, 429, 498]);
 
 const EXPECTED_IDS = new Map<string, readonly string[]>([
   [normalizeText("Бивиарт"), ["854959", "854538", "945500", "854961"]],
   [normalizeText("Кагоцел"), ["2337", "128266", "512741"]],
   [normalizeText("Окусалин"), ["142672", "126170"]],
   [normalizeText("Офтаринт"), ["555978"]],
-  [normalizeText("Таустин"), ["149212"]]
+  [normalizeText("Таустин"), ["149212"]],
+  [normalizeText("Хлорэтта"), ["945425"]]
 ]);
 
 type ProductPage = {

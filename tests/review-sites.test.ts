@@ -26,6 +26,18 @@ function adapterFor(domain: string, fetchImpl: typeof fetch) {
 const context = { region: "Москва" };
 
 describe("first-party review-site adapters", () => {
+  it("uses lowercase raw percent escapes for the live otzyv.pro search", async () => {
+    let rawSearch = "";
+    const adapter = adapterFor("otzyv.pro", vi.fn(async (input: RequestInfo | URL) => {
+      rawSearch = urlOf(input).toString();
+      return new Response(`<article><a href="/category/sredstva-kontratseptsii/823742-hloretta.html">Хлорэтта</a></article>`);
+    }) as unknown as typeof fetch);
+
+    await expect(adapter.discover("Хлорэтта", context)).resolves.toMatchObject([{ listingId: "823742" }]);
+    expect(rawSearch).toContain("story=%d0%a5%d0%bb%d0%be%d1%80%d1%8d%d1%82%d1%82%d0%b0");
+    expect([...rawSearch.matchAll(/%([0-9a-f]{2})/gi)].every((match) => match[1] === match[1].toLowerCase())).toBe(true);
+  });
+
   it.each([
     {
       domain: "otzyv.pro",
@@ -901,6 +913,23 @@ describe("first-party review-site adapters", () => {
     }, context)).resolves.toMatchObject({
       status: "not_found", reviews: null, rating: null, source: "otzovik_missing_candidate"
     });
+  });
+
+  it("reuses an exact Otzovik search aggregate when the product route is unavailable", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/__external_search__") return new Response(
+        `<a class="result__a" href="https://otzovik.com/reviews/hloretta/" data-review-count="3" data-rating="5">Отзывы о Хлорэтта</a>`
+      );
+      return new Response("product route unavailable", { status: 502 });
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("otzovik.com", fetchMock);
+
+    const refs = await adapter.discover("Хлорэтта", context);
+    await expect(adapter.collect(refs[0], context)).resolves.toMatchObject({
+      reviews: 3, rating: 5, ratingCount: 3, status: "ok", source: "otzovik-search"
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("treats the exact Vseotzyvy downgrade-to-home redirect as a retired search candidate", async () => {

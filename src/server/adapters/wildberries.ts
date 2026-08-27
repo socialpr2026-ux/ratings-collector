@@ -264,7 +264,25 @@ function applySharedRootAggregate(
   return true;
 }
 
-function parseProductPage(payload: unknown): ProductPage {
+function explicitEmptySearch(payload: JsonObject, expectedBrand: string): boolean {
+  const name = typeof payload.name === "string" ? normalizeText(payload.name) : "";
+  const encoded = typeof payload.query === "string" ? payload.query.match(/^_st0=([A-Za-z0-9_-]+={0,2})$/)?.[1] : undefined;
+  const searchResult = payload.search_result;
+  const advertisedTotal = asNonnegativeInteger(payload.total);
+  const responseSize = asNonnegativeInteger(payload.rs);
+  if (!encoded || !isObject(searchResult) || Object.keys(searchResult).length !== 0 ||
+    payload.shardKey !== "merger" || typeof payload.filters !== "string" || !payload.filters.trim() ||
+    responseSize === undefined || responseSize < 1 || typeof payload.rmi !== "string" || !/^\d+$/u.test(payload.rmi) ||
+    advertisedTotal !== undefined && advertisedTotal !== 0 || name !== normalizeText(expectedBrand)) return false;
+  try {
+    const decoded = Buffer.from(encoded.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+    return normalizeText(decoded) === normalizeText(expectedBrand);
+  } catch {
+    return false;
+  }
+}
+
+function parseProductPage(payload: unknown, expectedSearchBrand?: string): ProductPage {
   if (!isObject(payload)) {
     throw new ParserChangedError("Wildberries returned a non-object payload");
   }
@@ -272,6 +290,12 @@ function parseProductPage(payload: unknown): ProductPage {
   const data = isObject(payload.data) ? payload.data : undefined;
   const productsValue = payload.products ?? data?.products;
   if (!Array.isArray(productsValue)) {
+    // Wildberries now emits this source-bound exact-empty schema for queries
+    // with no matches. Both the visible name and its encoded query must bind to
+    // the requested brand; a generic/malformed empty object remains blocked.
+    if (expectedSearchBrand && explicitEmptySearch(payload, expectedSearchBrand)) {
+      return { products: [], total: 0 };
+    }
     throw new ParserChangedError("Wildberries response no longer contains a products array");
   }
 
@@ -1315,7 +1339,7 @@ export class WildberriesAdapter implements SiteAdapter {
     url.searchParams.set("spp", "30");
     url.searchParams.set("suppressSpellcheck", "false");
     return {
-      ...parseProductPage(await this.requestJson(url, context)),
+      ...parseProductPage(await this.requestJson(url, context), brand),
       evidenceUrl: url.toString()
     };
   }

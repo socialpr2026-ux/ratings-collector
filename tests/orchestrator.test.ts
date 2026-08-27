@@ -209,8 +209,9 @@ describe("run orchestration and fail-closed QA", () => {
 
     expect(run.partitions).toMatchObject([{
       status: "blocked",
-      message: expect.stringMatching(/^blocked: blocked: .*HTTP 502$/)
+      message: expect.stringMatching(/^blocked: .*HTTP 502$/)
     }]);
+    expect(run.partitions[0]!.message).not.toMatch(/^blocked: blocked:/);
     expect(run.partitions[0]!.message).not.toContain("parser_changed");
   });
 
@@ -251,6 +252,9 @@ describe("run orchestration and fail-closed QA", () => {
     ]);
     expect(first.qa?.ok).toBe(false);
 
+    first.collectionStartedAt = "2020-01-01T00:00:00.000Z";
+    await repository.saveRun(first);
+
     const retried = await service.executeRun(created.id);
 
     expect(calls).toEqual(new Map([["example.com", 1], ["example.org", 2]]));
@@ -265,6 +269,8 @@ describe("run orchestration and fail-closed QA", () => {
     expect(retried.errors).toEqual([]);
     expect(retried.qa).toMatchObject({ ok: true, blockers: [] });
     expect(retried.payloadHash).not.toBe(firstHash);
+    expect(retried.collectionStartedAt).not.toBe("2020-01-01T00:00:00.000Z");
+    expect(Date.parse(retried.collectionFinishedAt!) - Date.parse(retried.collectionStartedAt!)).toBeLessThan(10_000);
   });
 
   it("does not retry a technically complete partition solely because product identity needs review", async () => {

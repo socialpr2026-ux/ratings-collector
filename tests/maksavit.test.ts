@@ -17,7 +17,8 @@ const PRODUCTS = new Map([
   ["142672", "ОКУСАЛИН р-р офтальмологич. амп. пласт. 3% 2 мл №10"],
   ["126170", "ОКУСАЛИН ГРОТЕКС капли глазные 3% амп. пласт. 1 мл №10"],
   ["555978", "ОФТАРИНТ капли глазные фл.- кап. 10 мл"],
-  ["149212", "ТАУСТИН ГРОТЕКС капли глазные 4% фл.- кап. 10 мл"]
+  ["149212", "ТАУСТИН ГРОТЕКС капли глазные 4% фл.- кап. 10 мл"],
+  ["945425", "ХЛОРЭТТА табл. №21"]
 ]);
 
 function productUrl(id: string): string {
@@ -87,25 +88,27 @@ function ref(id: string, brand: string) {
 }
 
 describe("MaksavitAdapter", () => {
-  it("discovers the complete bounded exact 4/2/1/1 product set", async () => {
+  it("discovers the complete bounded exact 4/2/1/1/1 product set", async () => {
     const fetchMock = exactFetch();
     const adapter = new MaksavitAdapter(new MemoryEvidenceStore(), fetchMock);
 
-    const [biviart, okusalin, oftarint, taustin] = await Promise.all([
+    const [biviart, okusalin, oftarint, taustin, chloretta] = await Promise.all([
       adapter.discover("Бивиарт", CONTEXT),
       adapter.discover("Окусалин", CONTEXT),
       adapter.discover("Офтаринт", CONTEXT),
-      adapter.discover("Таустин", CONTEXT)
+      adapter.discover("Таустин", CONTEXT),
+      adapter.discover("Хлорэтта", CONTEXT)
     ]);
 
     expect(biviart.map((item) => item.listingId)).toEqual(["854959", "854538", "945500", "854961"]);
     expect(okusalin.map((item) => item.listingId)).toEqual(["142672", "126170"]);
     expect(oftarint.map((item) => item.listingId)).toEqual(["555978"]);
     expect(taustin.map((item) => item.listingId)).toEqual(["149212"]);
-    expect([...biviart, ...okusalin, ...oftarint, ...taustin].every((item) =>
+    expect(chloretta.map((item) => item.listingId)).toEqual(["945425"]);
+    expect([...biviart, ...okusalin, ...oftarint, ...taustin, ...chloretta].every((item) =>
       item.url === productUrl(item.listingId) && item.title === PRODUCTS.get(item.listingId)
     )).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(8);
+    expect(fetchMock).toHaveBeenCalledTimes(9);
   });
 
   it("returns three source-bound no_reviews rows for the bounded Кагоцел products", async () => {
@@ -227,7 +230,7 @@ describe("MaksavitAdapter", () => {
   });
 
   it("classifies CAPTCHA and access, throttle, and server statuses as blocked rather than zero", async () => {
-    for (const status of [401, 403, 429, 498, 502]) {
+    for (const status of [400, 401, 403, 429, 498, 502]) {
       const fetchMock = exactFetch({ "149212": new Response("blocked", { status }) });
       await expect(new MaksavitAdapter(new MemoryEvidenceStore(), fetchMock).collect(
         ref("149212", "Таустин"), CONTEXT
@@ -240,6 +243,14 @@ describe("MaksavitAdapter", () => {
     await expect(new MaksavitAdapter(new MemoryEvidenceStore(), captcha).collect(
       ref("149212", "Таустин"), CONTEXT
     )).rejects.toBeInstanceOf(AdapterBlockedError);
+  });
+
+  it("reports translated HTTP 400 as an external block rather than parser drift", async () => {
+    const fetchMock = exactFetch({ "149212": new Response("origin access rejected", { status: 400 }) });
+    await expect(new MaksavitAdapter(new MemoryEvidenceStore(), fetchMock).healthCheck(CONTEXT)).resolves.toMatchObject({
+      ok: false,
+      message: expect.stringMatching(/^blocked_free_mode: .*HTTP 400$/)
+    });
   });
 
   it("reports healthy only after the exact source-bound canary proves the visible zero", async () => {

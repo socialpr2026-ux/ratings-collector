@@ -253,6 +253,61 @@ describe("WildberriesAdapter.discover", () => {
     );
   });
 
+  it("accepts the exact source-bound Wildberries empty-search schema", async () => {
+    const encoded = Buffer.from("Хлорэтта", "utf8").toString("base64url");
+    const fetchMock = vi.fn(async () => jsonResponse({
+      name: "хлорэтта",
+      query: `_st0=${encoded}`,
+      shardKey: "merger",
+      filters: "xsubject;brand",
+      rs: 70,
+      rmi: "4",
+      search_result: {}
+    })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock, { browserFallbackAppType: false });
+
+    await expect(adapter.discover("Хлорэтта", context())).resolves.toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an empty Wildberries search envelope not bound to the requested brand", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      name: "другой бренд",
+      query: `_st0=${Buffer.from("Хлорэтта", "utf8").toString("base64url")}`,
+      search_result: {}
+    })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock, { browserFallbackAppType: false });
+
+    await expect(adapter.discover("Хлорэтта", context())).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
+  it("rejects a brand-bound but incomplete Wildberries empty-search shell", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      name: "хлорэтта",
+      query: `_st0=${Buffer.from("Хлорэтта", "utf8").toString("base64url")}`,
+      search_result: {}
+    })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock, { browserFallbackAppType: false });
+
+    await expect(adapter.discover("Хлорэтта", context())).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
+  it("rejects a contradictory Wildberries empty envelope with a positive advertised total", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      name: "хлорэтта",
+      query: `_st0=${Buffer.from("Хлорэтта", "utf8").toString("base64url")}`,
+      shardKey: "merger",
+      filters: "xsubject;brand",
+      rs: 70,
+      rmi: "4",
+      total: 2,
+      search_result: {}
+    })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock, { browserFallbackAppType: false });
+
+    await expect(adapter.discover("Хлорэтта", context())).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
   it("paginates sequentially, applies strict trade-name matching, deduplicates nmId and adds registry IDs", async () => {
     const responses = [
       jsonResponse({

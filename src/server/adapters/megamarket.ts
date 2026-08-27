@@ -159,8 +159,9 @@ export class MegamarketAdapter implements SiteAdapter {
         .map((node) => Number(compact($(node).text())))
         .filter((value) => Number.isSafeInteger(value) && value > 0);
       const lastPage = pages.length ? Math.max(...pages) : 1;
-      const bodyText = compact($.root().text());
-      explicitEmpty = page === 1 && cards.length === 0 && /ничего не найдено|товары не найдены|no products found/i.test(bodyText);
+      const emptyProof = $("[data-ratings-empty='search']");
+      explicitEmpty = page === 1 && cards.length === 0 && emptyProof.length === 1 &&
+        compact(emptyProof.first().text()) === "No products found";
       if (page >= lastPage) break;
       if (page === MAX_PAGES) throw new AdapterBlockedError(`${DOMAIN}: pagination exceeded ${MAX_PAGES} pages`);
       if (pageRefs.size === 0) throw new ParserChangedError(`${DOMAIN}: pagination declared more pages without product cards`);

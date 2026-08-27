@@ -501,7 +501,12 @@ export const REVIEW_SITE_DEFINITIONS: readonly ReviewSiteDefinition[] = [
     domain: "otzyv.pro",
     origin: "https://otzyv.pro/",
     rateLimitMs: 700,
-    searchUrl: (brand) => `https://otzyv.pro/?do=search&subaction=search&story=${encodeURIComponent(brand)}`,
+    // The live search access rule distinguishes the raw percent-escape case:
+    // uppercase `%D0...` redirects to the same lowercase URL and loops, while
+    // the site's own lowercase form is stable.
+    searchUrl: (brand) => `https://otzyv.pro/?do=search&subaction=search&story=${
+      encodeURIComponent(brand).replace(/%[0-9A-F]{2}/g, (value) => value.toLowerCase())
+    }`,
     isProductUrl: (url) => /^\/category\/.+\/\d+-[^/]+\.html$/i.test(url.pathname),
     idFromUrl: (url) => pageId(/\/(\d+)-[^/]+\.html$/i, url),
     parse: (html, pageUrl, brand) => microdataMetrics(html, pageUrl, brand, REVIEW_SITE_DEFINITIONS[1])
@@ -927,6 +932,10 @@ export class ReviewSiteAdapter implements SiteAdapter {
         const slug = target.pathname.match(/^\/reviews\/([a-z0-9_-]+)(?:\/|$)/i)?.[1];
         if (!slug) return;
         const canonical = `https://otzovik.com/reviews/${slug}/`;
+        const reviewCount = integerFrom($(node).attr("data-review-count"));
+        const rating = numberFrom($(node).attr("data-rating"));
+        const exactAggregate = reviewCount !== undefined &&
+          (reviewCount === 0 || rating !== undefined && rating > 0 && rating <= 5);
         refs.set(canonical, {
           domain: this.definition.domain,
           platform: this.definition.domain,
@@ -934,7 +943,10 @@ export class ReviewSiteAdapter implements SiteAdapter {
           brand,
           url: canonical,
           title: text,
-          metadata: { source: "external-search" }
+          metadata: {
+            source: exactAggregate ? "otzovik-search" : "external-search",
+            ...(exactAggregate ? { reviewCount, ...(reviewCount > 0 ? { rating } : {}) } : {})
+          }
         });
       } catch { /* malformed external result */ }
     });
@@ -1314,15 +1326,17 @@ export class ReviewSiteAdapter implements SiteAdapter {
 
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {
     const capturedAt = new Date().toISOString();
-    // iRecommend's ProductTizer is itself the platform's aggregate product
-    // record: numeric node id, canonical product URL, title, written-review
-    // count and rating are present together. Once discovery has proved that
-    // complete tuple, a second request to the same product page adds no data
-    // and is substantially less reliable behind the site's CAPTCHA cache.
+    // These source-bound search cards are themselves aggregate product
+    // records. Once identity, count and rating are proved together, a second
+    // request adds no data and is less reliable behind the site's protection.
+    const exactSearchAggregate = (
+      this.definition.domain === "irecommend.ru" && ref.metadata.source === "irecommend-search" &&
+        /^\d+$/.test(ref.listingId) ||
+      this.definition.domain === "otzovik.com" && ref.metadata.source === "otzovik-search" &&
+        canonicalOtzovikProductUrl(ref.url) !== undefined
+    );
     if (
-      this.definition.domain === "irecommend.ru" &&
-      ref.metadata.source === "irecommend-search" &&
-      /^\d+$/.test(ref.listingId) &&
+      exactSearchAggregate &&
       Boolean(ref.title) &&
       matchesBrand(ref.title!, ref.brand) &&
       typeof ref.metadata.reviewCount === "number" &&
@@ -1362,12 +1376,12 @@ export class ReviewSiteAdapter implements SiteAdapter {
         rating,
         rawRating: rating,
         rawRatingScale: 5,
-        ratingCount: null,
+        ratingCount: this.definition.domain === "otzovik.com" ? reviews : null,
         status: reviews === 0 ? "no_reviews" : "ok",
         capturedAt,
         evidenceRef,
         productEvidence,
-        source: "irecommend-search"
+        source: String(ref.metadata.source)
       };
     }
     const { html, status, redirectLocation } = await this.request(

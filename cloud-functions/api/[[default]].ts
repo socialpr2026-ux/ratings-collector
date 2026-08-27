@@ -507,7 +507,12 @@ function compactMegamarketTranslateHtml(html: string, target: URL): string | und
       `<button class="pui-pagination-control">${page}</button>`
     ).join("");
     if ($("[data-test='product-item']").length > 0 && cards.length === 0) return undefined;
-    return `<html><head>${base}</head><body>${cards.join("")}${pagination}</body></html>`;
+    const mainText = $("main .listing-not-found-block, main.listing-not-found-block").first().text()
+      .normalize("NFKC").replace(/\s+/g, " ").trim();
+    const explicitEmpty = cards.length === 0 &&
+      /ничего не найдено|товары не найдены|no products found|we (?:did not|didn't) find (?:it|anything)/i.test(mainText);
+    const emptyProof = explicitEmpty ? '<p data-ratings-empty="search">No products found</p>' : "";
+    return `<html><head>${base}</head><body>${cards.join("")}${pagination}${emptyProof}</body></html>`;
   }
 
   const product = $("[itemscope][itemtype$='/Product']").first();
@@ -1669,7 +1674,7 @@ function compactOtzovikSearchHtml(html: string, requested: URL, brand: string): 
     return undefined;
   }
 
-  const results = new Map<string, string>();
+  const results = new Map<string, { title: string; reviewCount?: number; rating?: number }>();
   let malformed = false;
   items.each((_index, node) => {
     const item = $(node);
@@ -1695,14 +1700,28 @@ function compactOtzovikSearchHtml(html: string, requested: URL, brand: string): 
       malformed = true;
       return;
     }
-    if (matchesBrand(title, brand)) results.set(product.toString(), title);
+    if (matchesBrand(title, brand)) {
+      const reviewCount = Number(item.attr("data-reviews"));
+      const ratingText = item.find(".rating-score-2, [itemprop='ratingValue']").first().text()
+        .normalize("NFKC").replace(/\s+/g, "").replace(",", ".");
+      const rating = Number(ratingText);
+      const exactAggregate = Number.isSafeInteger(reviewCount) && reviewCount >= 0 &&
+        (reviewCount === 0 || Number.isFinite(rating) && rating > 0 && rating <= 5);
+      results.set(product.toString(), {
+        title,
+        ...(exactAggregate ? { reviewCount, ...(reviewCount > 0 ? { rating } : {}) } : {})
+      });
+    }
   });
   if (malformed || declaredCount > 0 && results.size === 0) return undefined;
   if (declaredCount === 0) {
     return `<!doctype html><html><head><title>${escapeHtml(brand)}</title></head><body><h1>No results found for ${escapeHtml(brand)}</h1></body></html>`;
   }
   return `<!doctype html><html><head><title>${escapeHtml(brand)}</title></head><body>${[...results]
-    .map(([url, title]) => `<a class="result__a" href="${escapeHtml(url)}">${escapeHtml(title)}</a>`).join("\n")}</body></html>`;
+    .map(([url, result]) => `<a class="result__a" href="${escapeHtml(url)}"${
+      result.reviewCount === undefined ? "" : ` data-review-count="${result.reviewCount}"`
+    }${result.rating === undefined ? "" : ` data-rating="${result.rating}"`}>${escapeHtml(result.title)}</a>`)
+    .join("\n")}</body></html>`;
 }
 
 function parsePharmacy009Target(target: URL): Pharmacy009Target | undefined {
@@ -2773,6 +2792,16 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
   const irecommendTarget = parseIrecommendTarget(target);
   const vseotzyvyTarget = parseVseotzyvyTarget(target);
   const ruOtzyvTarget = parseRuOtzyvTarget(target);
+  const otzyvProTarget = target.protocol === "https:" && host === "otzyv.pro" && !target.port &&
+    !target.username && !target.password && !target.hash && (
+      target.pathname === "/" && target.searchParams.get("do") === "search" &&
+        target.searchParams.get("subaction") === "search" && target.searchParams.getAll("story").length === 1 &&
+        (target.searchParams.get("story")?.trim().length ?? 0) >= 2 &&
+        (target.searchParams.get("story")?.trim().length ?? 0) <= 160 &&
+        [...target.searchParams.keys()].every((key) => ["do", "subaction", "story"].includes(key)) &&
+        [...target.searchParams.keys()].every((key) => target.searchParams.getAll(key).length === 1) ||
+      /^\/category\/(?:[a-z0-9-]+\/)+\d+-[a-z0-9-]+\.html$/i.test(target.pathname) && !target.search
+    );
   const utekaReviewsTarget = parseUtekaReviewsTarget(target);
   const pharmacy009Target = parsePharmacy009Target(target);
   const utekaSitemapTarget = target.protocol === "https:" && target.hostname === "uteka.ru" &&
@@ -2791,7 +2820,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     "megapteka.ru",
     "otzovik.com",
     "pravogolosa.net"
-  ]).has(host) || Boolean(irecommendTarget) || Boolean(vseotzyvyTarget) || Boolean(ruOtzyvTarget) ||
+  ]).has(host) || otzyvProTarget || Boolean(irecommendTarget) || Boolean(vseotzyvyTarget) || Boolean(ruOtzyvTarget) ||
     Boolean(utekaReviewsTarget) || utekaSitemapTarget || Boolean(pharmacy009Target);
   const medOtzyvSearchTarget = target.protocol === "https:" && host === "med-otzyv.ru" &&
     target.pathname === "/__external_search__" && !target.port && !target.username && !target.password && !target.hash &&
@@ -2968,7 +2997,8 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         /^\/category\/[a-z0-9-]+-\d{2,}(?:\/[a-z0-9-]+-\d{2,})?\/$/i.test(categorySource.pathname) &&
         !categorySource.hash && [...categorySource.searchParams.keys()].every((key) => allowedCategoryKeys.has(key)) &&
         [...categorySource.searchParams.keys()].every((key) => categorySource.searchParams.getAll(key).length === 1) &&
-        categorySource.searchParams.get("brand_was_predicted") === "true" &&
+        (categorySource.searchParams.get("brand_was_predicted") === null ||
+          categorySource.searchParams.get("brand_was_predicted") === "true") &&
         categorySource.searchParams.get("category_was_predicted") === "true" &&
         categorySource.searchParams.get("deny_category_prediction") === "true" &&
         categorySource.searchParams.get("from_global") === "true" &&
@@ -3069,7 +3099,8 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         /^\/category\/[a-z0-9-]+-\d{2,}(?:\/[a-z0-9-]+-\d{2,})?\/$/i.test(categorySource.pathname) &&
         !categorySource.hash && [...categorySource.searchParams.keys()].every((key) => allowedCategoryKeys.has(key)) &&
         [...categorySource.searchParams.keys()].every((key) => categorySource.searchParams.getAll(key).length === 1) &&
-        categorySource.searchParams.get("brand_was_predicted") === "true" &&
+        (categorySource.searchParams.get("brand_was_predicted") === null ||
+          categorySource.searchParams.get("brand_was_predicted") === "true") &&
         categorySource.searchParams.get("category_was_predicted") === "true" &&
         categorySource.searchParams.get("deny_category_prediction") === "true" &&
         categorySource.searchParams.get("from_global") === "true" &&
@@ -3382,6 +3413,26 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         }
       } catch { /* exact ASNA aggregate remains unavailable */ }
     }
+    // A Google Translate 404 is not authoritative for the source pharmacy.
+    // Only a matching terminal response from the exact first-party group URL
+    // may become a compact empty proof; every other outcome remains blocked.
+    if (!compactHtml && pharmacyTranslatedTarget.kind === "okapteka-group" &&
+      [404, 410].includes(upstream.status)) {
+      try {
+        const direct = await safeFetch(pharmacyTranslatedTarget.source.toString(), {
+          method: "GET",
+          redirect: "manual",
+          headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+        }, fetch, 0, 60_000);
+        const directHtml = await readTextBounded(direct, 12_000_000, 60_000);
+        if ([404, 410].includes(direct.status)) {
+          html = directHtml;
+          compactHtml = `<html><head><base href="${escapeHtml(pharmacyTranslatedTarget.source.toString())}"></head>` +
+            `<body><main><p data-ratings-empty="first-party-404">Не найдено ни одного товара.</p></main></body></html>`;
+          source = "okapteka-first-party-missing";
+        }
+      } catch { /* keep the translated response blocked */ }
+    }
     if (!upstream.ok && !compactHtml && pharmacyTranslatedTarget.kind !== "asna-product") {
       return new Response(html, {
         status: upstream.status,
@@ -3508,6 +3559,22 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     }, fetch, 0, 60_000);
     const html = await readTextBounded(upstream, 12_000_000, 60_000);
     if (!upstream.ok) {
+      if ([408, 425, 429, 498, 500, 502, 503, 504].includes(upstream.status)) {
+        try {
+          const source = await safeFetch(ruOtzyvTarget.source.toString(), {
+            method: "GET", redirect: "manual",
+            headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+          }, fetch, 0, 60_000);
+          const sourceBody = await readTextBounded(source, 1_000_000, 60_000);
+          if ([404, 410].includes(source.status)) {
+            return new Response(sourceBody, {
+              status: source.status,
+              headers: { "content-type": source.headers.get("content-type") ?? "text/html; charset=utf-8",
+                "x-ratings-source": "direct-ru-otzyv-missing" }
+            });
+          }
+        } catch { /* preserve the translated blocker below */ }
+      }
       return new Response(html, {
         status: upstream.status,
         headers: { "content-type": upstream.headers.get("content-type") ?? "text/html; charset=utf-8" }

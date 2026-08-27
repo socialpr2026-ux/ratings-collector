@@ -476,7 +476,10 @@ export class RatingsService {
     run.progress.totalPartitions = expectedPartitions.length;
     run.progress.completedPartitions = preservedPartitions.length;
     delete run.progress.current;
-    run.collectionStartedAt ??= new Date().toISOString();
+    // Duration is scoped to the current collection attempt. A failed-only
+    // retry must not inherit yesterday's start time and appear to run for the
+    // entire pause between employee actions.
+    run.collectionStartedAt = new Date().toISOString();
     run.collectionFinishedAt = undefined;
     const activity = new RunActivityTracker(run);
     activity.instant({
@@ -659,7 +662,7 @@ export class RatingsService {
               kind === "error" ? "error" : "blocked",
               0,
               0,
-              `${kind}: ${message}`
+              message.startsWith(`${kind}:`) ? message : `${kind}: ${message}`
             );
           }
           await saveProgress();
@@ -958,7 +961,7 @@ export class RatingsService {
               kind === "error" ? "error" : "blocked",
               0,
               0,
-              `${kind}: ${message}`
+              message.startsWith(`${kind}:`) ? message : `${kind}: ${message}`
             );
           }
           await saveProgress();

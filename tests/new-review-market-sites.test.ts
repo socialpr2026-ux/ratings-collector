@@ -38,6 +38,26 @@ function megaProduct(source: string, sku = "100024501619", title = "Оцилло
 }
 
 describe("Megamarket translated SSR adapter", () => {
+  it("accepts an exact source-bound visible no-results proof", async () => {
+    const source = "https://megamarket.ru/catalog/?q=%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0";
+    const adapter = new MegamarketAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(`<!doctype html><html><head><base href="${source}"></head><body>` +
+        `<main><p data-ratings-empty="search">No products found</p></main>` +
+        `</body></html>`, { headers: { "content-type": "text/html" } })) as unknown as typeof fetch);
+
+    await expect(adapter.discover("Хлорэтта", context)).resolves.toEqual([]);
+  });
+
+  it("does not accept a generic Megamarket shell phrase as an empty-search proof", async () => {
+    const source = "https://megamarket.ru/catalog/?q=%D0%A5%D0%BB%D0%BE%D1%80%D1%8D%D1%82%D1%82%D0%B0";
+    const adapter = new MegamarketAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(`<!doctype html><html><head><base href="${source}"></head><body>` +
+        `<footer>We didn't find it. Try writing it differently.</footer></body></html>`)
+    ) as unknown as typeof fetch);
+
+    await expect(adapter.discover("Хлорэтта", context)).rejects.toBeInstanceOf(AdapterBlockedError);
+  });
+
   it("checks the requested brand through operative discovery instead of an unrelated fixed product", async () => {
     const source = "https://megamarket.ru/catalog/?q=%D0%A6%D0%B5%D1%80%D0%B5%D1%82%D0%BE%D0%BD";
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
