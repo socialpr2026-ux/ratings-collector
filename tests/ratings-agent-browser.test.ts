@@ -654,6 +654,33 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(directFetch).not.toHaveBeenCalled();
   });
 
+  it("falls back from one exact blocked Maksavit Translate card to the dedicated browser lane", async () => {
+    const run = vi.fn(async () => { throw new Error("Sandbox quota exceeded"); });
+    const directFetch = vi.fn(async () => new Response("Google Translate shell", { status: 400 }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run));
+    const target = "https://maksavit-ru.translate.goog/catalog/945425/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+
+    await expect(routedFetch(target)).rejects.toBeInstanceOf(AdapterQuotaError);
+
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("never acquires the Maksavit browser for an unbounded translated path", async () => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async () => new Response("blocked", { status: 400 }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run));
+
+    const response = await routedFetch(
+      "https://maksavit-ru.translate.goog/catalog/private/export/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
+    );
+
+    expect(response.status).toBe(400);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("recovers a Megamarket product after two transient translated-route failures", async () => {
     const run = vi.fn(async () => undefined);
     const directFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => directFetch.mock.calls.length <= 2
@@ -1836,11 +1863,12 @@ describe("ratings Agent lazy Sandbox routing", () => {
       const requested = new Request(input).url;
       if (requested === target) return new Response("forbidden", { status: 403 });
       if (requested === staticEndpoint) return new Response("fixed route unavailable", { status: 502 });
-      expect(requested).toBe("https://zdravcity.ru/bff/query");
-      expect(init?.method).toBe("POST");
-      expect(JSON.parse(String(init?.body))).toMatchObject({
-        operationName: "ExactGroupPresence",
-        variables: { regionID: "moscowregion", code: "hloretta" }
+      const bff = new URL(requested);
+      expect(bff.origin + bff.pathname).toBe("https://zdravcity.ru/bff/query");
+      expect(init?.method).toBe("GET");
+      expect(bff.searchParams.get("operationName")).toBe("ExactGroupPresence");
+      expect(JSON.parse(bff.searchParams.get("variables") ?? "null")).toEqual({
+        regionID: "moscowregion", code: "hloretta"
       });
       return new Response(JSON.stringify({
         errors: [{
@@ -1860,6 +1888,38 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(response.status).toBe(404);
     expect(response.headers.get("x-ratings-source")).toBe("zdravcity-first-party-bff-missing");
     expect(directFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("recovers a Zdravcity missing proof through the exact translated BFF GET when direct BFF egress is blocked", async () => {
+    const target = "https://zdravcity.ru/g_hloretta/";
+    const staticEndpoint = "https://ratings.example/api/internal/static-review-fetch";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const requested = new URL(new Request(input).url);
+      if (requested.toString() === target) return new Response("forbidden", { status: 403 });
+      if (requested.toString() === staticEndpoint) return new Response("fixed route unavailable", { status: 502 });
+      if (requested.hostname === "zdravcity.ru" && requested.pathname === "/bff/query") {
+        return new Response("direct BFF forbidden", { status: 403 });
+      }
+      expect(requested.hostname).toBe("zdravcity-ru.translate.goog");
+      expect(requested.pathname).toBe("/bff/query");
+      return new Response(JSON.stringify({
+        errors: [{
+          message: "queryResolver.Group: catalog.Manager.Group: rpc error: code = NotFound desc = group.group: catalog.group by code hloretta: group not found",
+          path: ["group"], extensions: { code: 404 }
+        }],
+        data: null
+      }), { headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: staticEndpoint, token: "internal-token"
+    });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("x-ratings-source")).toBe("zdravcity-first-party-bff-missing");
+    expect(directFetch).toHaveBeenCalledTimes(4);
   });
 
   it("never accepts a Zdravcity BFF missing envelope bound to another slug", async () => {

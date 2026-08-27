@@ -2565,7 +2565,7 @@ describe("fixed first-party collection egress", () => {
       expect(await unconfirmed.json()).toEqual({
         error: "Zdravcity translated terminal status was not confirmed by first-party"
       });
-      expect(unconfirmedTranslated404).toHaveBeenCalledTimes(3);
+      expect(unconfirmedTranslated404).toHaveBeenCalledTimes(4);
     }
 
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
@@ -2599,6 +2599,36 @@ describe("fixed first-party collection egress", () => {
     expect(recovered.status).toBe(404);
     expect(recovered.headers.get("x-ratings-source")).toBe("zdravcity-first-party-bff-missing");
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("confirms a missing Zdravcity group through the translated exact BFF when direct BFF egress is blocked", async () => {
+    const target = "https://zdravcity.ru/g_hloretta/";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.startsWith("/g_") && url.hostname === "zdravcity-ru.translate.goog") {
+        return new Response("translated page blocked", { status: 502 });
+      }
+      if (url.pathname.startsWith("/g_")) return new Response("source page blocked", { status: 503 });
+      if (url.hostname === "zdravcity.ru" && url.pathname === "/bff/query") {
+        return new Response("direct BFF forbidden", { status: 403 });
+      }
+      expect(url.hostname).toBe("zdravcity-ru.translate.goog");
+      expect(url.pathname).toBe("/bff/query");
+      return new Response(JSON.stringify({
+        errors: [{
+          message: "queryResolver.Group: catalog.Manager.Group: rpc error: code = NotFound desc = group.group: catalog.group by code hloretta: group not found",
+          path: ["group"], extensions: { code: 404 }
+        }],
+        data: null
+      }), { headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const recovered = await callGateway(target);
+
+    expect(recovered.status).toBe(404);
+    expect(recovered.headers.get("x-ratings-source")).toBe("zdravcity-first-party-bff-missing");
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("compacts Zdravcity written reviews without inventing a missing star rating", async () => {

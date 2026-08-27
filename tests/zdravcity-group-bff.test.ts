@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   proveExactZdravcityGroupBff,
+  zdravcityGroupBffGetUrl,
   zdravcityGroupBffRequest,
   zdravcityGroupSlugFromUrl
 } from "../src/server/utils/zdravcity-group-bff.js";
@@ -22,6 +23,16 @@ describe("exact Zdravcity group BFF proof", () => {
       operationName: "ExactGroupPresence",
       variables: { regionID: "moscowregion", code: "hloretta" }
     });
+    const direct = new URL(zdravcityGroupBffGetUrl("hloretta"));
+    expect(direct.origin + direct.pathname).toBe("https://zdravcity.ru/bff/query");
+    expect(direct.searchParams.get("operationName")).toBe("ExactGroupPresence");
+    expect(JSON.parse(direct.searchParams.get("variables") ?? "null")).toEqual({
+      regionID: "moscowregion", code: "hloretta"
+    });
+    const translated = new URL(zdravcityGroupBffGetUrl("hloretta", true));
+    expect(translated.hostname).toBe("zdravcity-ru.translate.goog");
+    expect(translated.searchParams.get("_x_tr_sl")).toBe("ru");
+    expect(translated.searchParams.get("_x_tr_tl")).toBe("en");
   });
 
   it("accepts only the exact first-party missing envelope bound to the requested slug", () => {

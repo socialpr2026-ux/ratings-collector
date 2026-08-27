@@ -39,8 +39,7 @@ import { assertSafePublicDestination, readTextBounded, safeFetch } from "../../s
 import {
   proveExactZdravcityGroupBff,
   ZDRAVCITY_GROUP_BFF_MAX_BYTES,
-  ZDRAVCITY_GROUP_BFF_URL,
-  zdravcityGroupBffRequest,
+  zdravcityGroupBffGetUrl,
   zdravcityGroupSlugFromUrl
 } from "../../src/server/utils/zdravcity-group-bff.js";
 import { readerMarkdownToHtml, readerProxyUrl } from "../../src/server/utils/reader-proxy.js";
@@ -2109,34 +2108,39 @@ function aptekaStateRecord(value: unknown): Record<string, unknown> | undefined 
 async function fetchZdravcityGroupMissingProof(target: URL): Promise<Response | undefined> {
   const slug = zdravcityGroupSlugFromUrl(target);
   if (!slug) return undefined;
-  try {
-    const response = await safeFetch(ZDRAVCITY_GROUP_BFF_URL, {
-      method: "POST",
-      redirect: "manual",
-      headers: {
-        accept: "application/json",
-        "content-type": "application/json",
-        "user-agent": "Mozilla/5.0"
-      },
-      body: JSON.stringify(zdravcityGroupBffRequest(slug))
-    }, fetch, 0, 20_000);
-    if (response.status !== 200 || !/application\/json/iu.test(response.headers.get("content-type") ?? "")) {
-      await response.body?.cancel().catch(() => undefined);
-      return undefined;
-    }
-    const text = await readTextBounded(response, ZDRAVCITY_GROUP_BFF_MAX_BYTES, 20_000);
-    let value: unknown;
-    try { value = JSON.parse(text); }
-    catch { return undefined; }
-    if (proveExactZdravcityGroupBff(value, slug) !== "missing") return undefined;
-    return new Response(null, {
-      status: 404,
-      headers: {
-        "cache-control": "no-store",
-        "x-ratings-source": "zdravcity-first-party-bff-missing"
+  for (const endpoint of [zdravcityGroupBffGetUrl(slug), zdravcityGroupBffGetUrl(slug, true)]) {
+    try {
+      const response = await safeFetch(endpoint, {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          accept: "application/json",
+          "cache-control": "no-cache",
+          "user-agent": "Mozilla/5.0"
+        }
+      }, fetch, 0, 20_000);
+      if (response.status !== 200 || !/application\/json/iu.test(response.headers.get("content-type") ?? "")) {
+        await response.body?.cancel().catch(() => undefined);
+        continue;
       }
-    });
-  } catch { return undefined; }
+      const text = await readTextBounded(response, ZDRAVCITY_GROUP_BFF_MAX_BYTES, 20_000);
+      let value: unknown;
+      try { value = JSON.parse(text); }
+      catch { continue; }
+      const proof = proveExactZdravcityGroupBff(value, slug);
+      if (proof === "present") return undefined;
+      if (proof === "missing") {
+        return new Response(null, {
+          status: 404,
+          headers: {
+            "cache-control": "no-store",
+            "x-ratings-source": "zdravcity-first-party-bff-missing"
+          }
+        });
+      }
+    } catch { /* try the exact translated first-party representation */ }
+  }
+  return undefined;
 }
 
 function aptekaStateText(value: unknown): string {

@@ -2,6 +2,7 @@ const GROUP_SLUG = /^[a-z0-9][a-z0-9-]{0,79}$/u;
 const MISSING_MESSAGE = /^queryResolver\.Group: catalog\.Manager\.Group: rpc error: code = NotFound desc = group\.group: catalog\.group by code ([a-z0-9-]+): group not found$/u;
 
 export const ZDRAVCITY_GROUP_BFF_URL = "https://zdravcity.ru/bff/query";
+export const ZDRAVCITY_GROUP_BFF_TRANSLATE_ORIGIN = "https://zdravcity-ru.translate.goog";
 export const ZDRAVCITY_GROUP_BFF_MAX_BYTES = 32_000;
 export const ZDRAVCITY_GROUP_BFF_QUERY =
   "query ExactGroupPresence($regionID: ID!, $code: ID!) { group(regionID: $regionID, code: $code) { code name } }";
@@ -32,6 +33,20 @@ export function zdravcityGroupBffRequest(slug: string): {
     query: ZDRAVCITY_GROUP_BFF_QUERY,
     variables: { regionID: "moscowregion", code: slug }
   };
+}
+
+export function zdravcityGroupBffGetUrl(slug: string, translated = false): string {
+  const request = zdravcityGroupBffRequest(slug);
+  const url = new URL("/bff/query", translated ? ZDRAVCITY_GROUP_BFF_TRANSLATE_ORIGIN : ZDRAVCITY_GROUP_BFF_URL);
+  url.searchParams.set("operationName", request.operationName);
+  url.searchParams.set("query", request.query);
+  url.searchParams.set("variables", JSON.stringify(request.variables));
+  if (translated) {
+    url.searchParams.set("_x_tr_sl", "ru");
+    url.searchParams.set("_x_tr_tl", "en");
+    url.searchParams.set("_x_tr_hl", "en");
+  }
+  return url.toString();
 }
 
 /**

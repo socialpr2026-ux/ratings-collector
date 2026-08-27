@@ -21,8 +21,7 @@ import { assertSafePublicDestination, isPrivateNetworkAddress, readTextBounded }
 import {
   proveExactZdravcityGroupBff,
   ZDRAVCITY_GROUP_BFF_MAX_BYTES,
-  ZDRAVCITY_GROUP_BFF_URL,
-  zdravcityGroupBffRequest,
+  zdravcityGroupBffGetUrl,
   zdravcityGroupSlugFromUrl
 } from "../../src/server/utils/zdravcity-group-bff.js";
 
@@ -64,7 +63,7 @@ type YandexBatchCapableFetch = typeof fetch & {
 type YandexMarketCapableFetch = YandexBatchCapableFetch & { yandexMarketBrowserEndpoint?: string };
 type ManagedBrowserFetch = YandexMarketCapableFetch & { dispose(): Promise<void> };
 
-export type BrowserLane = "ozon" | "yandex" | "wildberries" | "generic";
+export type BrowserLane = "ozon" | "yandex" | "wildberries" | "maksavit" | "generic";
 
 export function createStaticProxyScheduler(maxConcurrent = 4, maxPerHost = 2): <T>(
   host: string,
@@ -551,42 +550,51 @@ export function browserFetch(
   const fetchZdravcityGroupMissingProof = async (url: URL, signal: AbortSignal): Promise<Response | undefined> => {
     const slug = zdravcityGroupSlugFromUrl(url);
     if (!slug) return undefined;
-    const attemptAbort = new AbortController();
-    const combinedSignal = AbortSignal.any([signal, attemptAbort.signal]);
-    try {
-      const response = await withDeadline(fetch(ZDRAVCITY_GROUP_BFF_URL, {
-        method: "POST",
-        redirect: "manual",
-        signal: combinedSignal,
-        headers: {
-          accept: "application/json",
-          "content-type": "application/json",
-          "user-agent": "Mozilla/5.0"
-        },
-        body: JSON.stringify(zdravcityGroupBffRequest(slug))
-      }), ZDRAVCITY_GROUP_BFF_TIMEOUT_MS, "Zdravcity exact group proof timed out");
-      if (response.status !== 200 || !/application\/json/iu.test(response.headers.get("content-type") ?? "")) {
-        await response.body?.cancel().catch(() => undefined);
-        return undefined;
-      }
-      const text = await readTextBounded(response, ZDRAVCITY_GROUP_BFF_MAX_BYTES, ZDRAVCITY_GROUP_BFF_TIMEOUT_MS);
-      let value: unknown;
-      try { value = JSON.parse(text); }
-      catch { return undefined; }
-      if (proveExactZdravcityGroupBff(value, slug) !== "missing") return undefined;
-      return new Response(null, {
-        status: 404,
-        headers: {
-          "cache-control": "no-store",
-          "x-ratings-source": "zdravcity-first-party-bff-missing"
+    // The POST route is blocked from some EdgeOne egress ranges while the same
+    // first-party GraphQL query is available as a cache-bypassed GET. Try that
+    // exact route first, then the source-bound Google renderer used by the
+    // existing Zdravcity adapter. Both bodies must pass the same slug-bound
+    // NotFound proof; an unknown or positive response can never become empty.
+    for (const endpoint of [zdravcityGroupBffGetUrl(slug), zdravcityGroupBffGetUrl(slug, true)]) {
+      const attemptAbort = new AbortController();
+      const combinedSignal = AbortSignal.any([signal, attemptAbort.signal]);
+      try {
+        const response = await withDeadline(fetch(endpoint, {
+          method: "GET",
+          redirect: "manual",
+          signal: combinedSignal,
+          headers: {
+            accept: "application/json",
+            "cache-control": "no-cache",
+            "user-agent": "Mozilla/5.0"
+          }
+        }), ZDRAVCITY_GROUP_BFF_TIMEOUT_MS, "Zdravcity exact group proof timed out");
+        if (response.status !== 200 || !/application\/json/iu.test(response.headers.get("content-type") ?? "")) {
+          await response.body?.cancel().catch(() => undefined);
+          continue;
         }
-      });
-    } catch (error) {
-      if (signal.aborted) throw error;
-      return undefined;
-    } finally {
-      attemptAbort.abort();
+        const text = await readTextBounded(response, ZDRAVCITY_GROUP_BFF_MAX_BYTES, ZDRAVCITY_GROUP_BFF_TIMEOUT_MS);
+        let value: unknown;
+        try { value = JSON.parse(text); }
+        catch { continue; }
+        const proof = proveExactZdravcityGroupBff(value, slug);
+        if (proof === "present") return undefined;
+        if (proof === "missing") {
+          return new Response(null, {
+            status: 404,
+            headers: {
+              "cache-control": "no-store",
+              "x-ratings-source": "zdravcity-first-party-bff-missing"
+            }
+          });
+        }
+      } catch (error) {
+        if (signal.aborted) throw error;
+      } finally {
+        attemptAbort.abort();
+      }
     }
+    return undefined;
   };
   const acquireSandbox = createLazySandboxAcquire(sandbox);
   const getBrowser = () => {
@@ -606,7 +614,7 @@ export function browserFetch(
     }
     return connected;
   };
-  const getContext = (key: "trusted-yandex" | "trusted-yandex-market" | "trusted-irecommend" | "trusted-ozon" | "trusted-wildberries" | "untrusted-static") => {
+  const getContext = (key: "trusted-yandex" | "trusted-yandex-market" | "trusted-irecommend" | "trusted-ozon" | "trusted-wildberries" | "trusted-maksavit" | "untrusted-static") => {
     const trustedDynamic = key !== "untrusted-static";
     let context = hardenedContexts.get(key);
     if (!context) {
@@ -770,6 +778,16 @@ export function browserFetch(
       url.searchParams.getAll("_x_tr_tl").length === 1 && url.searchParams.get("_x_tr_tl") === "en" &&
       url.searchParams.getAll("_x_tr_hl").length === 1 && url.searchParams.get("_x_tr_hl") === "en" &&
       [...url.searchParams.keys()].every((key) => ["_x_tr_sl", "_x_tr_tl", "_x_tr_hl"].includes(key));
+    const maksavitTranslatedMatch = url.pathname.match(/^\/catalog\/(\d+)\/$/u);
+    const fixedMaksavitTranslatedId = request.method === "GET" && url.protocol === "https:" &&
+      url.hostname === "maksavit-ru.translate.goog" && !url.port && !url.username && !url.password && !url.hash &&
+      maksavitTranslatedMatch &&
+      url.searchParams.getAll("_x_tr_sl").length === 1 && url.searchParams.get("_x_tr_sl") === "ru" &&
+      url.searchParams.getAll("_x_tr_tl").length === 1 && url.searchParams.get("_x_tr_tl") === "en" &&
+      url.searchParams.getAll("_x_tr_hl").length === 1 && url.searchParams.get("_x_tr_hl") === "en" &&
+      [...url.searchParams.keys()].every((key) => ["_x_tr_sl", "_x_tr_tl", "_x_tr_hl"].includes(key))
+      ? maksavitTranslatedMatch[1]
+      : undefined;
     const fixedAptekaTarget = request.method === "GET" && url.protocol === "https:" && url.hostname === "apteka.ru" &&
       !url.port && !url.username && !url.password && !url.hash && (
         !url.search && (
@@ -852,6 +870,71 @@ export function browserFetch(
         attemptAbort.abort();
         if (request.signal.aborted) throw error;
       }
+    }
+    if (fixedMaksavitTranslatedId) {
+      let translated: Response | undefined;
+      try {
+        translated = await fetch(request);
+        const shouldUseBrowser = translated.status === 400 ||
+          TRANSIENT_STATIC_PROXY_STATUSES.has(translated.status) || translated.status >= 500;
+        if (!shouldUseBrowser) return translated;
+        await translated.body?.cancel().catch(() => undefined);
+      } catch (error) {
+        if (request.signal.aborted) throw error;
+      }
+
+      return runBrowserTask("maksavit", async () => {
+        request.signal.throwIfAborted();
+        const source = await assertSafePublicDestination(`https://maksavit.ru/catalog/${fixedMaksavitTranslatedId}/`);
+        const context = await getContext("trusted-maksavit");
+        const page = await context.newPage();
+        let lastMainStatus: number | undefined;
+        const onResponse = (pageResponse: PlaywrightResponse) => {
+          if (pageResponse.request().isNavigationRequest() && pageResponse.frame() === page.mainFrame()) {
+            lastMainStatus = pageResponse.status();
+          }
+        };
+        page.on("response", onResponse);
+        try {
+          return await withPageNetworkGuard(page, async () => {
+            await page.route("**/*", async (route) => {
+              const targetText = route.request().url();
+              if (/^(?:data|blob):/iu.test(targetText)) return route.continue();
+              try {
+                const target = await assertSafePublicDestination(targetText);
+                return sameDomain(source.hostname, target.hostname)
+                  ? route.continue()
+                  : route.abort("blockedbyclient");
+              } catch {
+                return route.abort("blockedbyclient");
+              }
+            });
+            const navigation = await page.goto(source.toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
+            if (!navigation) throw new AdapterBlockedError("Maksavit browser returned no network response");
+            await assertActualServer(navigation);
+            await page.locator("section#feedback").waitFor({ state: "attached", timeout: 35_000 });
+            const final = await assertSafePublicDestination(page.url() || source.toString());
+            if (final.toString() !== source.toString() || lastMainStatus !== 200) {
+              throw new AdapterBlockedError(
+                `Maksavit browser did not reach the exact product (HTTP ${lastMainStatus ?? navigation.status()})`
+              );
+            }
+            const html = await page.content();
+            return new Response(html, {
+              status: 200,
+              headers: {
+                "content-type": "text/html; charset=utf-8",
+                "cache-control": "no-store",
+                "x-ratings-source": "maksavit-first-party-browser",
+                "x-ratings-source-url": final.toString()
+              }
+            });
+          });
+        } finally {
+          page.off("response", onResponse);
+          await page.close();
+        }
+      });
     }
     if (staticProxy && [
       "translate.yandex.ru",

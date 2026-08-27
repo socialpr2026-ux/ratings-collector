@@ -18,6 +18,13 @@ const PRODUCTS = new Map([
   ["126170", "ОКУСАЛИН ГРОТЕКС капли глазные 3% амп. пласт. 1 мл №10"],
   ["555978", "ОФТАРИНТ капли глазные фл.- кап. 10 мл"],
   ["149212", "ТАУСТИН ГРОТЕКС капли глазные 4% фл.- кап. 10 мл"],
+  ["826060", "БАКТОБЛИС ПЛЮС табл. д/рассас. №30"],
+  ["935299", "БАКТОБЛИС ДУО табл. д/рассас. №10"],
+  ["823739", "БАКТОБЛИС пор. внутр. пак.-саше №15"],
+  ["879295", "БАКТОБЛИС ПЛЮС табл. д/рассас. №90"],
+  ["862971", "БАКТОБЛИС пор. внутр. пак.-саше №30"],
+  ["893781", "БАКТОБЛИС табл. д/рассас. без сахара №30"],
+  ["142040", "БАКТОБЛИС табл. д/рассас. №30"],
   ["945425", "ХЛОРЭТТА табл. №21"]
 ]);
 
@@ -111,6 +118,19 @@ describe("MaksavitAdapter", () => {
     expect(fetchMock).toHaveBeenCalledTimes(9);
   });
 
+  it("keeps all seven independently verified Baktoblis cards in the bounded exact registry", async () => {
+    const fetchMock = exactFetch();
+    const adapter = new MaksavitAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    const refs = await adapter.discover("Бактоблис", CONTEXT);
+
+    expect(refs.map((item) => item.listingId)).toEqual([
+      "826060", "935299", "823739", "879295", "862971", "893781", "142040"
+    ]);
+    expect(refs.every((item) => item.url === productUrl(item.listingId) && item.title?.includes("БАКТОБЛИС"))).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+  });
+
   it("returns three source-bound no_reviews rows for the bounded Кагоцел products", async () => {
     const evidence = new MemoryEvidenceStore();
     const fetchMock = exactFetch();
@@ -184,6 +204,47 @@ describe("MaksavitAdapter", () => {
     expect([...evidence.items.values()][0]).toMatchObject({
       parsed: { ignoredTemplateAggregate: true, reviews: 0, rating: null }
     });
+  });
+
+  it("records a source-bound first-party browser recovery truthfully", async () => {
+    const evidence = new MemoryEvidenceStore();
+    const id = "945425";
+    const fetchMock = exactFetch({
+      [id]: new Response(productPage(id), {
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "x-ratings-source": "maksavit-first-party-browser",
+          "x-ratings-source-url": productUrl(id)
+        }
+      })
+    });
+
+    const observation = await new MaksavitAdapter(evidence, fetchMock).collect(ref(id, "Хлорэтта"), CONTEXT);
+
+    expect(observation).toMatchObject({
+      listingId: id,
+      reviews: 0,
+      rating: null,
+      source: "maksavit-visible-product-feedback:first-party-browser"
+    });
+    expect([...evidence.items.values()][0]).toMatchObject({
+      transportUrl: productUrl(id),
+      source: "maksavit-visible-product-feedback:first-party-browser"
+    });
+
+    const mismatched = exactFetch({
+      [id]: new Response(productPage(id), {
+        status: 200,
+        headers: {
+          "x-ratings-source": "maksavit-first-party-browser",
+          "x-ratings-source-url": productUrl("149212")
+        }
+      })
+    });
+    await expect(new MaksavitAdapter(new MemoryEvidenceStore(), mismatched).collect(
+      ref(id, "Хлорэтта"), CONTEXT
+    )).rejects.toBeInstanceOf(ParserChangedError);
   });
 
   it("rejects template AggregateRating 5/1 when the visible empty proof is absent", async () => {
@@ -284,21 +345,22 @@ describe("MaksavitAdapter", () => {
     });
   });
 
-  liveIt("proves all eleven exact live cards and their visible zero state", async () => {
+  liveIt("proves all eighteen exact live cards and their visible zero state", async () => {
     const adapter = new MaksavitAdapter(new MemoryEvidenceStore());
     const refsByBrand = await Promise.all([
       adapter.discover("Бивиарт", { region: "Москва", runId: "maksavit-live" }),
       adapter.discover("Кагоцел", { region: "Москва", runId: "maksavit-live" }),
       adapter.discover("Окусалин", { region: "Москва", runId: "maksavit-live" }),
       adapter.discover("Офтаринт", { region: "Москва", runId: "maksavit-live" }),
-      adapter.discover("Таустин", { region: "Москва", runId: "maksavit-live" })
+      adapter.discover("Таустин", { region: "Москва", runId: "maksavit-live" }),
+      adapter.discover("Бактоблис", { region: "Москва", runId: "maksavit-live" })
     ]);
-    expect(refsByBrand.map((refs) => refs.length)).toEqual([4, 3, 2, 1, 1]);
+    expect(refsByBrand.map((refs) => refs.length)).toEqual([4, 3, 2, 1, 1, 7]);
 
     const observations = await Promise.all(refsByBrand.flatMap((refs) => refs).map((product) =>
       adapter.collect(product, { region: "Москва", runId: "maksavit-live" })
     ));
-    expect(observations).toHaveLength(11);
+    expect(observations).toHaveLength(18);
     expect(observations.every((observation) =>
       observation.reviews === 0 &&
       observation.writtenReviewCount === 0 &&

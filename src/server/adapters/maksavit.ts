@@ -21,6 +21,7 @@ const EXPECTED_IDS = new Map<string, readonly string[]>([
   [normalizeText("Окусалин"), ["142672", "126170"]],
   [normalizeText("Офтаринт"), ["555978"]],
   [normalizeText("Таустин"), ["149212"]],
+  [normalizeText("Бактоблис"), ["826060", "935299", "823739", "879295", "862971", "893781", "142040"]],
   [normalizeText("Хлорэтта"), ["945425"]]
 ]);
 
@@ -31,6 +32,7 @@ type ProductPage = {
   status: number;
   title: string;
   ignoredTemplateAggregate: boolean;
+  transport: "google_translate" | "first_party_browser";
 };
 
 function compactText(value: string): string {
@@ -70,7 +72,13 @@ function isBlockedPage(html: string): boolean {
     /<(?:iframe|form|input)\b[^>]*(?:captcha|challenge)/iu.test(html.slice(0, 200_000));
 }
 
-function parseProductPage(html: string, listingId: string, requestUrl: string, status: number): ProductPage {
+function parseProductPage(
+  html: string,
+  listingId: string,
+  requestUrl: string,
+  status: number,
+  transport: ProductPage["transport"] = "google_translate"
+): ProductPage {
   const $ = load(html);
   const canonicalHref = $("link[rel='canonical']").first().attr("href") ?? "";
   const openGraphHref = $("meta[property='og:url']").first().attr("content") ?? "";
@@ -112,6 +120,7 @@ function parseProductPage(html: string, listingId: string, requestUrl: string, s
     requestUrl,
     status,
     title,
+    transport,
     // Maksavit currently emits a constant Product AggregateRating 5/1 even
     // beside the visible empty state. It is recorded only as rejected evidence.
     ignoredTemplateAggregate: /"aggregateRating"\s*:\s*\{[^}]*"ratingValue"\s*:\s*5(?:\.0+)?[^}]*"reviewCount"\s*:\s*1[^}]*\}/iu.test(html)
@@ -175,7 +184,7 @@ export class MaksavitAdapter implements SiteAdapter {
         title: page.title,
         metadata: {
           discovery: "maksavit-bounded-exact-allowlist",
-          transport: "google_translate",
+          transport: page.transport,
           translatedUrl: page.requestUrl
         }
       };
@@ -216,7 +225,7 @@ export class MaksavitAdapter implements SiteAdapter {
         ignoredTemplateAggregate: page.ignoredTemplateAggregate
       },
       productEvidence,
-      source: "maksavit-visible-product-feedback:google-translate"
+      source: `maksavit-visible-product-feedback:${page.transport === "first_party_browser" ? "first-party-browser" : "google-translate"}`
     });
 
     return {
@@ -236,7 +245,7 @@ export class MaksavitAdapter implements SiteAdapter {
       capturedAt,
       evidenceRef,
       productEvidence,
-      source: "maksavit-visible-product-feedback:google-translate"
+      source: `maksavit-visible-product-feedback:${page.transport === "first_party_browser" ? "first-party-browser" : "google-translate"}`
     };
   }
 
@@ -277,6 +286,17 @@ export class MaksavitAdapter implements SiteAdapter {
     if (!response.ok) {
       throw new ParserChangedError(`${DOMAIN}:${listingId}: unexpected product response HTTP ${response.status}`);
     }
-    return parseProductPage(html, listingId, requestUrl, response.status);
+    const source = response.headers.get("x-ratings-source");
+    let transport: ProductPage["transport"] = "google_translate";
+    let transportUrl = requestUrl;
+    if (source === "maksavit-first-party-browser") {
+      const finalUrl = response.headers.get("x-ratings-source-url") ?? "";
+      if (listingIdFromSourceUrl(finalUrl) !== listingId) {
+        throw new ParserChangedError(`${DOMAIN}:${listingId}: browser response is not bound to the exact product URL`);
+      }
+      transport = "first_party_browser";
+      transportUrl = finalUrl;
+    }
+    return parseProductPage(html, listingId, transportUrl, response.status, transport);
   }
 }
