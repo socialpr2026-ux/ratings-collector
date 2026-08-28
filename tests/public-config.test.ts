@@ -114,6 +114,83 @@ describe("new static collector gateways", () => {
     expect(upstream).toHaveBeenCalledTimes(2);
   });
 
+  it("compacts the live-shaped Otzyv.pro first-party aggregate before returning it to the Agent", async () => {
+    const target = "https://otzyv.pro/category/protivovirusnyie-preparatyi/173-kagocel.html";
+    const final = "https://otzyv.pro/category/krasota-i-zdorove/lekarstvennyie-sredstva/protivovirusnyie-preparatyi/173-kagocel.html";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe(target);
+      const response = new Response(`<html><body><h1>Кагоцел</h1><div itemprop="aggregateRating" itemscope>` +
+        `<meta itemprop="itemReviewed" content="Кагоцел - отзывы">` +
+        `<meta itemprop="bestRating" content="5"><meta itemprop="ratingValue" content="4.7">` +
+        `<meta itemprop="ratingCount" content="115"><meta itemprop="reviewCount" content="115">` +
+        `</div>${"large source payload ".repeat(20_000)}</body></html>`, {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+      Object.defineProperty(response, "url", { value: final });
+      return response;
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target);
+    const html = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("otzyv-pro-direct-compact");
+    expect(html.length).toBeLessThan(1_000);
+    expect(html).toContain('<link rel="canonical" href="https://otzyv.pro/category/protivovirusnyie-preparatyi/173-kagocel.html">');
+    expect(html).toContain('<h1 itemprop="name">Кагоцел</h1>');
+    expect(html).toContain('<meta itemprop="reviewCount" content="115">');
+    expect(html).toContain('<meta itemprop="ratingCount" content="115">');
+    expect(html).toContain('<meta itemprop="ratingValue" content="4.7">');
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      name: "redirected product id",
+      final: "https://otzyv.pro/category/protivovirusnyie-preparatyi/999-kagocel.html",
+      heading: "Кагоцел",
+      reviewed: "Кагоцел - отзывы",
+      ratingCount: "115",
+      reviewCount: "115"
+    },
+    {
+      name: "conflicting title",
+      final: "https://otzyv.pro/category/protivovirusnyie-preparatyi/173-kagocel.html",
+      heading: "Другой препарат",
+      reviewed: "Кагоцел - отзывы",
+      ratingCount: "115",
+      reviewCount: "115"
+    },
+    {
+      name: "conflicting aggregate counters",
+      final: "https://otzyv.pro/category/protivovirusnyie-preparatyi/173-kagocel.html",
+      heading: "Кагоцел",
+      reviewed: "Кагоцел - отзывы",
+      ratingCount: "116",
+      reviewCount: "115"
+    }
+  ])("rejects an Otzyv.pro direct proof with $name", async ({ final, heading, reviewed, ratingCount, reviewCount }) => {
+    const target = "https://otzyv.pro/category/protivovirusnyie-preparatyi/173-kagocel.html";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) !== target) return new Response("unproven reader response");
+      const response = new Response(`<html><body><h1>${heading}</h1><div itemprop="aggregateRating">` +
+        `<meta itemprop="itemReviewed" content="${reviewed}"><meta itemprop="bestRating" content="5">` +
+        `<meta itemprop="ratingValue" content="4.7"><meta itemprop="ratingCount" content="${ratingCount}">` +
+        `<meta itemprop="reviewCount" content="${reviewCount}"></div></body></html>`, {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+      Object.defineProperty(response, "url", { value: final });
+      return response;
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target);
+
+    expect(response.status).toBe(502);
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
   it("accepts the live underscore-shaped Otzyv.pro category and binds its product heading", async () => {
     const target = "https://otzyv.pro/category/raznoe_kras_zdor/758265-respiratornyy-probiotik-bactoblis-baktoblis.html";
     const upstream = vi.fn(async (input: RequestInfo | URL) => {

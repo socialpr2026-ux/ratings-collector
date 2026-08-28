@@ -1781,7 +1781,11 @@ describe("run orchestration and fail-closed QA", () => {
     const ready = await dedicated.executeRun((await dedicated.createRun(aggregateRequest)).id);
     expect(ready).toMatchObject({ qa: { ok: true, blockers: [] }, observations: [{ status: "ok" }] });
 
-    for (const title of ["Противовирусные средства Кагоцел", "Противовирусный препарат Кагоцел отзывы"]) {
+    for (const title of [
+      "Противовирусные средства Кагоцел",
+      "Противовирусный препарат Кагоцел отзывы",
+      "Противовирусный препарат Ниармедик плюс Кагоцел"
+    ]) {
       const category = makeService(undefined, () => title);
       const categoryRun = await category.executeRun((await category.createRun({
         ...aggregateRequest, brands: ["Кагоцел"]

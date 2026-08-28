@@ -8,6 +8,8 @@ import {
   hasExplicitWildberriesNoResults,
   hasExplicitYandexMarketNoResults,
   PHARMACY009_DIRECT_TIMEOUT_MS,
+  REVIEW_DIRECT_RECOVERY_MAX_BYTES,
+  REVIEW_DIRECT_RECOVERY_TIMEOUT_MS,
   OZON_LEASE_HEARTBEAT_MS,
   OZON_LEASE_MS,
   runWithRenewableLease,
@@ -1189,6 +1191,165 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(await response.text()).toBe("exact category aggregate");
     expect(directFetch).toHaveBeenCalledTimes(2);
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["https://irecommend.ru/srch?query=%D0%9A%D0%B0%D0%B3%D0%BE%D1%86%D0%B5%D0%BB", "irecommend exact search"],
+    ["https://irecommend.ru/content/protivovirusnyi-preparat-kagocel", "irecommend exact product"],
+    ["https://uteka.ru/sitemaps/sitemap-reviews.xml", "uteka exact sitemap"],
+    ["https://uteka.ru/lekarstvennye-sredstva/protivovirusnye/kagocel-/reviews/", "uteka exact product"],
+    ["https://megapteka.ru/", "megapteka exact home"],
+    ["https://megapteka.ru/tomsk/catalog/protivovirusnoe-dejstvie-70/kagocel-tab-12mg-901309", "megapteka exact product"]
+  ])("uses bounded Agent egress after a transient fixed-route failure: %s", async (target, proof) => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        return new Response("fixed route unavailable", { status: 502 });
+      }
+      expect(new Request(input).url).toBe(target);
+      expect(new Request(input, init).redirect).toBe("manual");
+      return new Response(proof, { headers: { "content-type": "text/html; charset=utf-8" } });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(target, target.includes("irecommend.ru") ? {
+      headers: { "x-ratings-browser": "1" }
+    } : undefined);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(proof);
+    expect(response.headers.get("x-ratings-route")).toBe("agent-direct-recovery");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it.each([403, 429, 498])("does not bypass a terminal or throttled fixed review response: HTTP %s", async (status) => {
+    const directFetch = vi.fn(async () => new Response("fixed route terminal", {
+      status,
+      headers: status === 429 ? { "retry-after": "120" } : undefined
+    }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch("https://uteka.ru/sitemaps/sitemap-reviews.xml");
+
+    expect(response.status).toBe(status);
+    expect(directFetch).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    "https://irecommend.ru/content/protivovirusnyi-preparat-kagocel",
+    "https://uteka.ru/lekarstvennye-sredstva/protivovirusnye/kagocel-/reviews/",
+    "https://megapteka.ru/tomsk/catalog/protivovirusnoe-dejstvie-70/kagocel-tab-12mg-901309"
+  ])("does not treat one recovered 404 as proof that an exact historical card disappeared: %s", async (target) => {
+    const directFetch = vi.fn(async (input: RequestInfo | URL) =>
+      input === "https://ratings.example/api/internal/static-review-fetch"
+        ? new Response("fixed route unavailable", { status: 502 })
+        : new Response("possibly masked bot block", { status: 404 })
+    );
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(502);
+    expect(await response.text()).toBe("fixed route unavailable");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    "https://irecommend.ru/srch?query=Кагоцел&extra=1",
+    "https://irecommend.ru/user/123",
+    "https://uteka.ru/sitemaps/sitemap-reviews.xml?brand=kagocel",
+    "https://uteka.ru/search/?query=kagocel",
+    "https://megapteka.ru/search?q=kagocel",
+    "https://megapteka.ru/tomsk/catalog/not-an-exact-product"
+  ])("does not direct-fallback an unallowlisted review route: %s", async (target) => {
+    const run = vi.fn(async () => undefined);
+    const directFetch = vi.fn(async (input: RequestInfo | URL) => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        return new Response("fixed route unavailable", { status: 502 });
+      }
+      return new Response("must not be reached");
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(502);
+    expect(await response.text()).toBe("fixed route unavailable");
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("preserves only an exact same-path VitaExpress geo redirect for cookie-aware safeFetch", async () => {
+    const target = "https://vitaexpress.ru/tag/kagotsel/";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) =>
+      input === "https://ratings.example/api/internal/static-review-fetch"
+        ? new Response("fixed route unavailable", { status: 502 })
+        : new Response(null, {
+          status: 301,
+          headers: {
+            location: `${target}?select_geo_city=7700000000000`,
+            "set-cookie": "selected_city=7700000000000; Path=/; Secure"
+          }
+        })
+    );
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(301);
+    expect(response.headers.get("location")).toBe(`${target}?select_geo_city=7700000000000`);
+    expect(response.headers.get("set-cookie")).toContain("selected_city=");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    "https://evil.example/tag/kagotsel/?select_geo_city=7700000000000",
+    "https://vitaexpress.ru/tag/other/?select_geo_city=7700000000000",
+    "https://vitaexpress.ru/tag/kagotsel/?select_geo_city=7700000000000&next=evil"
+  ])("rejects an unsafe VitaExpress direct redirect: %s", async (location) => {
+    const target = "https://vitaexpress.ru/tag/kagotsel/";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) =>
+      input === "https://ratings.example/api/internal/static-review-fetch"
+        ? new Response("fixed route unavailable", { status: 502 })
+        : new Response(null, { status: 301, headers: { location } })
+    );
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(502);
+    expect(await response.text()).toBe("fixed route unavailable");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("caps direct review recovery below the adapter body and request budgets", () => {
+    expect(REVIEW_DIRECT_RECOVERY_TIMEOUT_MS).toBeLessThan(45_000);
+    expect(REVIEW_DIRECT_RECOVERY_MAX_BYTES).toBeLessThanOrEqual(12_000_000);
   });
 
   it.each([

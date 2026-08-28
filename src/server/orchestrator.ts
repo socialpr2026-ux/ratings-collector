@@ -31,7 +31,7 @@ import {
 import { safeErrorMessage } from "./utils/error-message.js";
 import { matchesBrand, normalizeText } from "./utils/normalize.js";
 import { assertSafePublicUrl, extractSpreadsheetId } from "./utils/urls.js";
-import { analyzeProductIdentity } from "./utils/product-name.js";
+import { analyzeProductIdentity, canonicalProductDescriptor } from "./utils/product-name.js";
 import { titleProductEvidence } from "./utils/product-evidence.js";
 import { normalizeObservationFeedback } from "./feedback-count.js";
 import { failureEnvelope } from "./failure-envelope.js";
@@ -292,6 +292,7 @@ const GENERIC_AGGREGATE_TITLE_TOKENS = new Set([
 ]);
 
 function aggregateHasSpecificTitle(brand: string, product: string): boolean {
+  if (normalizeText(canonicalProductDescriptor(brand, product)) === "общая карточка бренда") return false;
   const brandTokens = new Set(normalizeText(brand).split(" ").filter(Boolean));
   return normalizeText(product).split(" ").some((token) =>
     token && !brandTokens.has(token) && !GENERIC_AGGREGATE_TITLE_TOKENS.has(token) &&

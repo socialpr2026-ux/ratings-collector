@@ -72,7 +72,7 @@ function isBlockPage(html: string): boolean {
   // A healthy iRecommend page preloads captcha-checker JavaScript. Only an
   // actual challenge element/page is blocking; a dormant script asset is not.
   const captcha = /<(?:input|iframe|form|img|div|section|body)\b[^>]*(?:id|class|name|src)=["'][^"']*(?:captcha|db-offline|in-maintenance)/i.test(sample) ||
-    /(?:подтвердите,?\s+что\s+вы\s+не\s+робот|проверка\s+браузера|verify\s+you\s+are\s+human)/iu.test(sample);
+    /(?:подтвердите,?\s+что\s+вы\s+не\s+робот|провер(?:ка|яем)\s+(?:ваш(?:е|его)\s+)?(?:браузера|соединение)|verify\s+you\s+are\s+human)/iu.test(sample);
   const aggregateMetrics = /itemprop=["']reviewCount["']/i.test(sample) || /"reviewCount"\s*:/i.test(sample);
   const searchMetrics = /ProductTizer/i.test(sample) && /read-all-reviews-link/i.test(sample) &&
     /average-rating/i.test(sample);

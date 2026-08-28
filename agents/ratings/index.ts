@@ -52,10 +52,13 @@ export const MAKSAVIT_YANDEX_TIMEOUT_MS = 30_000;
 export const MAKSAVIT_YANDEX_MAX_BYTES = 4_000_000;
 export const YANDEX_DIRECT_RECOVERY_TIMEOUT_MS = 8_000;
 export const YANDEX_DIRECT_RECOVERY_MAX_BYTES = 4_000_000;
+export const REVIEW_DIRECT_RECOVERY_TIMEOUT_MS = 15_000;
+export const REVIEW_DIRECT_RECOVERY_MAX_BYTES = 12_000_000;
 export const OZON_LEASE_MS = 120_000;
 export const OZON_LEASE_HEARTBEAT_MS = 40_000;
 
 const TRANSIENT_STATIC_PROXY_STATUSES = new Set([403, 408, 425, 429, 498, 502, 503, 504]);
+const DIRECT_RECOVERY_PROXY_STATUSES = new Set([408, 425, 500, 502, 503, 504]);
 const YANDEX_BATCH_ENDPOINT = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
 const YANDEX_MARKET_STATIC_RETRY_DELAY_MS = 200;
 // The singleton fixed Function owns a 55-second exact-shard budget and the
@@ -443,6 +446,36 @@ export function browserFetch(
       attemptAbort.abort();
     }
   });
+  const fetchBoundedDirectRecovery = async (request: Request): Promise<Response | undefined> => {
+    const attemptAbort = new AbortController();
+    const signal = AbortSignal.any([request.signal, attemptAbort.signal]);
+    const startedAt = Date.now();
+    try {
+      const response = await withDeadline(fetch(request, {
+        method: "GET",
+        redirect: "manual",
+        signal
+      }), REVIEW_DIRECT_RECOVERY_TIMEOUT_MS,
+      `Review direct recovery exceeded ${REVIEW_DIRECT_RECOVERY_TIMEOUT_MS} ms`);
+      const remaining = Math.max(1, REVIEW_DIRECT_RECOVERY_TIMEOUT_MS - (Date.now() - startedAt));
+      const bytes = await readBytesBounded(response, REVIEW_DIRECT_RECOVERY_MAX_BYTES, remaining);
+      const headers = new Headers(response.headers);
+      headers.delete("content-encoding");
+      headers.delete("content-length");
+      headers.delete("transfer-encoding");
+      headers.set("x-ratings-route", "agent-direct-recovery");
+      return new Response(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, {
+        status: response.status,
+        statusText: response.statusText,
+        headers
+      });
+    } catch (error) {
+      if (request.signal.aborted) throw error;
+      return undefined;
+    } finally {
+      attemptAbort.abort();
+    }
+  };
   const fetchYandexDirectRecovery = async (request: Request): Promise<Response | undefined> => {
     const attemptAbort = new AbortController();
     const signal = AbortSignal.any([request.signal, attemptAbort.signal]);
@@ -839,6 +872,30 @@ export function browserFetch(
       url.hostname === "vitaexpress.ru" && !url.port && !url.username && !url.password && !url.search && !url.hash && (
         /^\/product\/[a-z0-9_]+\/?$/i.test(url.pathname) || /^\/tag\/[a-z0-9-]+\/?$/i.test(url.pathname)
       );
+    const irecommendSearchQuery = url.searchParams.get("query")?.normalize("NFKC").trim() ?? "";
+    const fixedIrecommendSearchTarget = request.method === "GET" && url.protocol === "https:" &&
+      url.hostname === "irecommend.ru" && !url.port && !url.username && !url.password && !url.hash &&
+      url.pathname === "/srch" && url.searchParams.getAll("query").length === 1 &&
+      [...url.searchParams.keys()].every((key) => key === "query") &&
+      irecommendSearchQuery.length >= 2 && irecommendSearchQuery.length <= 160;
+    const fixedIrecommendProductTarget = request.method === "GET" && url.protocol === "https:" &&
+      url.hostname === "irecommend.ru" && !url.port && !url.username && !url.password && !url.hash && !url.search &&
+      /^\/content\/[a-z0-9][a-z0-9-]*\/?$/i.test(url.pathname);
+    const fixedIrecommendDirectTarget = fixedIrecommendSearchTarget || fixedIrecommendProductTarget;
+    const fixedUtekaSitemapTarget = request.method === "GET" && url.protocol === "https:" &&
+      url.hostname === "uteka.ru" && !url.port && !url.username && !url.password && !url.hash && !url.search &&
+      url.pathname === "/sitemaps/sitemap-reviews.xml";
+    const fixedUtekaProductTarget = request.method === "GET" && url.protocol === "https:" &&
+      url.hostname === "uteka.ru" && !url.port && !url.username && !url.password && !url.hash && !url.search &&
+      url.pathname.length <= 512 && /^\/(?:[a-z0-9-]+\/)+reviews\/$/i.test(url.pathname);
+    const fixedUtekaDirectTarget = fixedUtekaSitemapTarget || fixedUtekaProductTarget;
+    const fixedMegaptekaHomeTarget = request.method === "GET" && url.protocol === "https:" &&
+      url.hostname === "megapteka.ru" && !url.port && !url.username && !url.password && !url.hash && !url.search &&
+      url.pathname === "/";
+    const fixedMegaptekaProductTarget = request.method === "GET" && url.protocol === "https:" &&
+      url.hostname === "megapteka.ru" && !url.port && !url.username && !url.password && !url.hash && !url.search &&
+      url.pathname.length <= 512 && /^\/(?:[a-z0-9-]+\/)?catalog\/.+-\d+\/?$/i.test(url.pathname);
+    const fixedMegaptekaDirectTarget = fixedMegaptekaHomeTarget || fixedMegaptekaProductTarget;
     const fixedPharmacy009Target = request.method === "GET" && url.protocol === "https:" && url.hostname === "009.xn--p1ai" &&
       !url.port && !url.username && !url.password && !url.hash && !url.search && (
         url.pathname === "/sitemap.xml" ||
@@ -1369,22 +1426,47 @@ export function browserFetch(
       // and the adapter's explicit exact-results/no-results proof. A failed
       // fallback never becomes a zero.
       const boundedDirectFallback = fixedVitaExpressTarget || fixedRuOtzyvDirectTarget ||
+        fixedIrecommendDirectTarget || fixedUtekaDirectTarget || fixedMegaptekaDirectTarget ||
         ["vseotzyvy.ru", "pravogolosa.net", "otzyv.pro"].includes(host);
-      if (!boundedDirectFallback || !TRANSIENT_STATIC_PROXY_STATUSES.has(proxied.status)) return proxied;
+      if (!boundedDirectFallback || !DIRECT_RECOVERY_PROXY_STATUSES.has(proxied.status)) return proxied;
       try {
-        const direct = await fetch(
-          request,
-          fixedRuOtzyvDirectTarget || fixedVitaExpressTarget ? { redirect: "manual" } : undefined
-        );
-        if (direct.ok || (fixedRuOtzyvProductTarget && [404, 410].includes(direct.status))) {
+        const direct = await fetchBoundedDirectRecovery(request);
+        // Only ru.otzyv.com has a source-specific terminal missing contract.
+        // A lone 404/410 from the newly recovered routes can itself be an
+        // anti-bot response, so it must not erase a historical exact card.
+        const exactProductMissing = direct !== undefined && fixedRuOtzyvProductTarget &&
+          [404, 410].includes(direct.status);
+        let safeVitaGeoRedirect = false;
+        if (direct && fixedVitaExpressTarget && [301, 302, 303, 307, 308].includes(direct.status)) {
+          const location = direct.headers.get("location");
+          if (location) {
+            try {
+              const redirected = new URL(location, url);
+              safeVitaGeoRedirect = redirected.protocol === "https:" && redirected.hostname === url.hostname &&
+                !redirected.port && !redirected.username && !redirected.password && !redirected.hash &&
+                redirected.pathname.replace(/\/$/, "") === url.pathname.replace(/\/$/, "") &&
+                redirected.searchParams.getAll("select_geo_city").length === 1 &&
+                /^\d+$/.test(redirected.searchParams.get("select_geo_city") ?? "") &&
+                [...redirected.searchParams.keys()].every((key) => key === "select_geo_city");
+            } catch { /* malformed redirect remains blocked */ }
+          }
+        }
+        if (direct && (direct.ok || exactProductMissing || safeVitaGeoRedirect)) {
           await proxied.body?.cancel().catch(() => undefined);
           return direct;
         }
-        await direct.body?.cancel().catch(() => undefined);
+        await direct?.body?.cancel().catch(() => undefined);
       } catch {
         request.signal.throwIfAborted();
       }
-      return proxied;
+      if (fixedIrecommendDirectTarget && shouldUseHardenedBrowser(request)) {
+        // iRecommend already requested a browser-capable route. If both fixed
+        // and exact Agent egress are blocked, continue to that existing
+        // hardened route instead of hiding it behind the stale proxy 502.
+        await proxied.body?.cancel().catch(() => undefined);
+      } else {
+        return proxied;
+      }
     }
     if (!shouldUseHardenedBrowser(request)) {
       return fetch(request);

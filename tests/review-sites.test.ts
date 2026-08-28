@@ -1055,6 +1055,19 @@ describe("first-party review-site adapters", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("classifies the live Vseotzyvy connection-check shell as blocked, never as an empty aggregate", async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      `<html><head><title>Xess</title></head><body><main>Проверяем ваше соединение с сайтом</main></body></html>`
+    )) as unknown as typeof fetch;
+    const adapter = adapterFor("vseotzyvy.ru", fetchMock);
+
+    await expect(adapter.healthCheck(context)).resolves.toMatchObject({
+      ok: false,
+      message: expect.stringContaining("Защитная страница")
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("uses direct brand pages on both Otzyv domains and never replaces their slug identity", async () => {
     for (const domain of ["otzyvru.com", "ru.otzyv.com"]) {
       const origin = domain === "otzyvru.com" ? "https://www.otzyvru.com" : "https://ru.otzyv.com";

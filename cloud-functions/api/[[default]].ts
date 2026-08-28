@@ -1450,6 +1450,61 @@ function compactOtzyvProReaderProof(markdown: string, requested: URL): string | 
     `</div></body></html>`;
 }
 
+function otzyvProProductId(url: URL): string | undefined {
+  if (url.protocol !== "https:" || url.hostname !== "otzyv.pro" || url.port || url.username || url.password ||
+    url.search || url.hash) return undefined;
+  return url.pathname.match(/^\/category\/(?:[a-z0-9_-]+\/)+(\d+)-[a-z0-9_-]+\.html$/i)?.[1];
+}
+
+function compactOtzyvProDirectProof(html: string, requested: URL, finalUrl: string | undefined): string | undefined {
+  const requestedId = otzyvProProductId(requested);
+  if (!requestedId) return undefined;
+  let final = requested;
+  if (finalUrl) {
+    try { final = new URL(finalUrl); }
+    catch { return undefined; }
+  }
+  if (otzyvProProductId(final) !== requestedId) return undefined;
+  const $ = load(html);
+  const headings = $("h1").toArray().map((node) => $(node).text().normalize("NFKC").replace(/\s+/gu, " ").trim())
+    .filter(Boolean);
+  const aggregates = $("[itemprop='aggregateRating']").toArray();
+  if (headings.length !== 1 || headings[0]!.length > 320 || aggregates.length !== 1) return undefined;
+  const aggregate = $(aggregates[0]!);
+  const exactMeta = (property: string): string | undefined => {
+    const values = aggregate.find(`[itemprop='${property}']`).toArray()
+      .map((node) => ($(node).attr("content") ?? $(node).text()).normalize("NFKC").replace(/\s+/gu, " ").trim())
+      .filter(Boolean);
+    return values.length === 1 ? values[0] : undefined;
+  };
+  const itemReviewed = exactMeta("itemReviewed");
+  const reviewsText = exactMeta("reviewCount");
+  const ratingsText = exactMeta("ratingCount");
+  const ratingText = exactMeta("ratingValue");
+  const bestText = exactMeta("bestRating");
+  if (!itemReviewed || !/^\d+$/.test(reviewsText ?? "") || !/^\d+$/.test(ratingsText ?? "") ||
+    reviewsText !== ratingsText) return undefined;
+  const normalizeTitle = (value: string) => value.toLocaleLowerCase("ru-RU")
+    .replace(/[^\p{L}\p{N}]+/gu, " ").replace(/(?:^|\s)отзывы?(?:\s|$)/gu, " ").replace(/\s+/gu, " ").trim();
+  const heading = headings[0]!;
+  const headingKey = normalizeTitle(heading);
+  const reviewedKey = normalizeTitle(itemReviewed);
+  if (!headingKey || reviewedKey !== headingKey) return undefined;
+  const reviews = Number(reviewsText);
+  const rating = Number((ratingText ?? "").replace(",", "."));
+  const best = Number((bestText ?? "5").replace(",", "."));
+  if (!Number.isSafeInteger(reviews) || reviews < 0 || best !== 5 ||
+    (reviews > 0 && (!Number.isFinite(rating) || rating <= 0 || rating > 5)) ||
+    (reviews === 0 && ratingText !== undefined && rating !== 0)) return undefined;
+  return `<html><head><title>${escapeHtml(heading)}</title>` +
+    `<link rel="canonical" href="${escapeHtml(requested.toString())}"></head><body>` +
+    `<h1 itemprop="name">${escapeHtml(heading)}</h1>` +
+    `<div itemprop="aggregateRating"><meta itemprop="itemReviewed" content="${escapeHtml(itemReviewed)}">` +
+    `<meta itemprop="reviewCount" content="${reviews}"><meta itemprop="ratingCount" content="${reviews}">` +
+    `${reviews > 0 ? `<meta itemprop="ratingValue" content="${rating}"><meta itemprop="bestRating" content="5">` : ""}` +
+    `</div></body></html>`;
+}
+
 function exactWildberriesCardTarget(target: URL): { ids: string[] } | undefined {
   if (target.protocol !== "https:" || target.hostname !== "card.wb.ru" || target.port ||
     target.username || target.password || target.hash || target.pathname !== "/cards/v4/detail" ||
@@ -4222,9 +4277,13 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       }, fetch, 4, 15_000);
       const directBody = await readTextBounded(direct, 12_000_000, 30_000);
       if (direct.ok && /(?:text\/html|application\/xhtml\+xml)/iu.test(direct.headers.get("content-type") ?? "")) {
-        return new Response(directBody, { status: 200, headers: {
-          "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-ratings-source": "otzyv-pro-direct"
-        } });
+        const compact = compactOtzyvProDirectProof(directBody, target, direct.url || undefined);
+        if (compact && compact.length <= 100_000) {
+          return new Response(compact, { status: 200, headers: {
+            "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
+            "x-ratings-source": "otzyv-pro-direct-compact"
+          } });
+        }
       }
     } catch { /* use the exact source-bound reader below */ }
     const reader = await safeFetch(readerProxyUrl(target).toString(), {
