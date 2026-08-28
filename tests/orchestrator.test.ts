@@ -1836,6 +1836,48 @@ describe("run orchestration and fail-closed QA", () => {
     expect(run.qa?.ok).toBe(false);
   });
 
+  it("requires one explicit choice when a platform returns conflicting ratings for one exact SKU", async () => {
+    const domain = "market.yandex.ru";
+    const brand = "Тирзетта";
+    const service = new RatingsService(new MemoryRepository(), async () => ({
+      id: "duplicate-sku",
+      supportedDomains: [domain],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(): Promise<ProductRef[]> {
+        return ["103813703115", "103817601472"].map((listingId) => ({
+          domain, platform: "yandex", listingId, brand,
+          url: `https://market.yandex.ru/card/tirzetta/${listingId}/reviews`,
+          title: "Тирзетта раствор для подкожного введения 2,5 мг 0,5 мл №4",
+          metadata: {}
+        }));
+      },
+      async collect(ref: ProductRef): Promise<Observation> {
+        return {
+          domain, platform: "yandex", listingId: ref.listingId, brand,
+          canonicalUrl: ref.url, product: ref.title!,
+          reviews: ref.listingId === "103813703115" ? 301 : 457,
+          rating: ref.listingId === "103813703115" ? 4.9 : 4.8,
+          status: "ok", capturedAt: new Date().toISOString(),
+          productEvidence: {
+            scope: "listing", signals: [{ source: "title", text: ref.title! }], variants: [],
+            identifiers: [{ type: "model_id", value: ref.listingId }], imageUrls: [], instructionUrls: []
+          }
+        };
+      }
+    }));
+
+    const run = await service.executeRun((await service.createRun({
+      ...request, domains: [domain], brands: [brand]
+    })).id);
+
+    expect(new Set(run.observations.map((item) => item.productIdentity?.canonicalVariantId)).size).toBe(1);
+    expect(run.observations.map((item) => item.status)).toEqual(["needs_review", "needs_review"]);
+    expect(run.observations.every((item) =>
+      item.productIdentity?.reasons.some((reason) => reason.includes("выберите одну карточку"))
+    )).toBe(true);
+    expect(run.qa?.ok).toBe(false);
+  });
+
   it.each([
     ["generic profile", { profileVersion: 1 }],
     ["listing evidence", { evidenceScope: "listing" }],

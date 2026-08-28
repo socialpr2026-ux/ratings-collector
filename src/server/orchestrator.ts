@@ -334,9 +334,43 @@ function canAutoAcceptDedicatedReviewAggregate(observation: Observation): boolea
   // source-generated variants=[title] hint is not independent membership
   // proof and must not bypass this gate.
   const yandexSourceBound = observation.domain === "market.yandex.ru" || observation.domain === "reviews.yandex.ru";
-  if (!yandexSourceBound && aggregateHasSpecificTitle(observation.brand, observation.product)) return false;
+  const normalizedBrand = normalizeText(observation.brand);
+  const normalizedProduct = normalizeText(observation.product);
+  const knownInjectableFamilyDescriptor = ["тирзетта", "седжаро"].includes(normalizedBrand) && (
+    /раствор для подкожного введения/u.test(normalizedProduct) ||
+    /инъекц(?:ии|ия|ий) для похудения/u.test(normalizedProduct)
+  );
+  if (!yandexSourceBound && aggregateHasSpecificTitle(observation.brand, observation.product) && !knownInjectableFamilyDescriptor) return false;
   return yandexSourceBound ||
     observation.productEvidence?.scope === "product_family";
+}
+
+function markConflictingExactSkuObservations(observations: Observation[]): void {
+  const groups = new Map<string, Observation[]>();
+  for (const observation of observations) {
+    const identity = observation.productIdentity;
+    if (!identity || identity.granularity !== "variant" || identity.confidence !== "exact" ||
+      !["ok", "no_reviews"].includes(observation.status)) continue;
+    const semanticId = identity.canonicalVariantId ?? `label:${normalizeText(identity.label)}`;
+    const key = `${observation.domain}\u0000${normalizeText(observation.brand)}\u0000${semanticId}`;
+    const members = groups.get(key) ?? [];
+    members.push(observation);
+    groups.set(key, members);
+  }
+  for (const members of groups.values()) {
+    if (members.length < 2) continue;
+    const metrics = new Set(members.map((item) => `${item.reviews ?? "null"}:${item.rating ?? "null"}`));
+    if (metrics.size <= 1) continue;
+    for (const item of members) {
+      item.status = "needs_review";
+      if (item.productIdentity) {
+        item.productIdentity.reasons = [...new Set([
+          ...item.productIdentity.reasons,
+          "Площадка вернула несколько карточек одного SKU с различными рейтингами; выберите одну карточку"
+        ])];
+      }
+    }
+  }
 }
 
 function reusablePublishedProductIdentity(
@@ -1129,6 +1163,7 @@ export class RatingsService {
         a.product.localeCompare(b.product, "ru") || a.listingId.localeCompare(b.listingId)
       );
       run.observations = reconcileProductCatalog(run.observations, catalogProducts);
+      markConflictingExactSkuObservations(run.observations);
       for (const observation of run.observations) {
         if (!["ok", "no_reviews"].includes(observation.status)) continue;
         const partition = run.partitions.find((item) =>
@@ -1265,6 +1300,7 @@ export class RatingsService {
       (await this.repository.listProducts(spreadsheetId))
         .filter((product) => requestedBrandKeys.has(normalizeText(product.brand)))
     );
+    markConflictingExactSkuObservations(run.observations);
     run.qa = validateRun(run);
     run.payloadHash = stableHash({ request: run.request, observations: run.observations });
     await this.touch(run);

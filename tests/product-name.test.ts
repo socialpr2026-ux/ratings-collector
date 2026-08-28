@@ -172,6 +172,32 @@ describe("canonical product descriptors", () => {
       .toBe("таблетки 12 мг 16 г №10");
   });
 
+  it("treats Sedjaro needle quantity as accessory metadata, not a medicine pack", () => {
+    const products = [
+      "Седжаро раствор для подкожного введ 5 мг/доза шприц-ручка 2,4 мл 1 шт+иглы 4 шт",
+      "Седжаро, 5 мг/доза, раствор для подкожного введения, шприц-ручка 2,4 мл + 4 иглы",
+      "Седжаро 5 мг/доза 2,4 мл раствор для п/к введения №4 (шприц-ручка) (+ иглы №4)",
+      "Седжаро 5 мг/доза 2,4 мл р-р для п/к введения №4 (шприц-ручка) (+ иглы №4)"
+    ];
+
+    expect(products.map((product) => canonicalProductDescriptor("Седжаро", product)))
+      .toEqual(Array(4).fill("раствор 5 мг/доза 2,4 мл"));
+    expect(new Set(canonicalProductVariants(products.map((product) => ({ brand: "Седжаро", product })))
+      .map((item) => item.variantKey)).size).toBe(1);
+  });
+
+  it("rejects explicit non-injectable Tirzetta and Sedjaro marketplace collisions", () => {
+    for (const [brand, product] of [
+      ["Тирзетта", "Тирзетта таблетки для похудения 5 мг №30"],
+      ["Седжаро", "Седжаро капсулы для похудения №20"]
+    ] as const) {
+      expect(analyzeProductIdentity({ brand, product })).toMatchObject({
+        granularity: "not_product",
+        confidence: "exact"
+      });
+    }
+  });
+
   it("never fills complementary partial names from neighbouring listings", () => {
     const values = canonicalProductDescriptors([
       { brand: "Кагоцел", product: "Кагоцел табл. 10" },

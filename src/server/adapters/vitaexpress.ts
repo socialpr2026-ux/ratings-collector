@@ -26,7 +26,7 @@ const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(reso
 
 type ExactProduct = {
   id: string;
-  brand: "\u0411\u0438\u0432\u0438\u0430\u0440\u0442" | "\u041e\u043a\u0443\u0441\u0430\u043b\u0438\u043d" | "\u041e\u0444\u0442\u0430\u0440\u0438\u043d\u0442" | "\u0422\u0430\u0443\u0441\u0442\u0438\u043d" | "Бактоблис" | "Энтеролактис" | "Хлорэтта";
+  brand: "\u0411\u0438\u0432\u0438\u0430\u0440\u0442" | "\u041e\u043a\u0443\u0441\u0430\u043b\u0438\u043d" | "\u041e\u0444\u0442\u0430\u0440\u0438\u043d\u0442" | "\u0422\u0430\u0443\u0441\u0442\u0438\u043d" | "Бактоблис" | "Энтеролактис" | "Хлорэтта" | "Тирзетта" | "Седжаро";
   url: string;
   requiredPhrases: readonly string[];
 };
@@ -113,6 +113,31 @@ const EXACT_PRODUCTS: readonly ExactProduct[] = [
     brand: "Хлорэтта",
     url: `${ORIGIN}/product/khloretta_tab__ppo_2mg_0_03mg__21_3/`,
     requiredPhrases: ["хлорэтта", "таблетки", "2мг 0 03мг", "no63"]
+  },
+  ...[
+    ["206090", "2_5", "2 5мг"],
+    ["206091", "5", "5мг"],
+    ["206092", "7_5", "7 5мг"],
+    ["206093", "10", "10мг"],
+    ["206094", "12_5", "12 5мг"],
+    ["206095", "15", "15мг"]
+  ].map(([id, slugDose, phraseDose]): ExactProduct => ({
+    id: id!,
+    brand: "Тирзетта",
+    url: `${ORIGIN}/product/tirzetta_r_r_dpk_vved__${slugDose}mg_0_5ml__4_shpr__v_avtoinzhekt_/`,
+    requiredPhrases: ["тирзетта", "раствор для подкожного введения", phraseDose!, "0 5мл", "no4"]
+  })),
+  {
+    id: "207078",
+    brand: "Седжаро",
+    url: `${ORIGIN}/product/sedzharo_r_r_dpk_vved__2_5mgdoza_2_4ml__1_shpr__ruchk____igly__4_v_kompl_/`,
+    requiredPhrases: ["седжаро", "раствор для подкожного введения", "2 5мг доза", "2 4мл", "no1", "4иглы"]
+  },
+  {
+    id: "207079",
+    brand: "Седжаро",
+    url: `${ORIGIN}/product/sedzharo_r_r_dpk_vved__5mgdoza_2_4ml__1_shpr__ruchk____igly__4_v_kompl_/`,
+    requiredPhrases: ["седжаро", "раствор для подкожного введения", "5мг доза", "2 4мл", "no1", "4иглы"]
   },
   {
     id: "203657",
@@ -291,7 +316,7 @@ function explicitlyUnavailableReviewChannel($: CheerioAPI, product: ExactProduct
   return String(payload.ID) === product.id && String(payload.XML_ID) === product.id &&
     payload.DETAIL_PAGE_URL === expectedUrl.pathname &&
     typeof payload.NAME === "string" && matchesExactTitle(payload.NAME, product) &&
-    payload.APLAUT === 0 && payload.SHOW_REVIEW === 1;
+    payload.APLAUT === 0 && (payload.SHOW_REVIEW === 0 || payload.SHOW_REVIEW === 1);
 }
 
 function productEvidence(product: ExactProduct, title: string): ProductEvidence {
@@ -519,8 +544,10 @@ function parseExactPage(body: string, product: ExactProduct): ParsedPage {
   const reviewComponents = $("product-reviews");
   const reviews = reviewComponents.first();
   if (reviewComponents.length === 0 && explicitlyUnavailableReviewChannel($, product)) {
+    const header = $("product-detail-header").first();
+    const payload = parseJsonAttribute(header.attr(":product"), "product", product.id) as Record<string, unknown>;
     throw new AdapterBlockedError(
-      `${DOMAIN}:${product.id}: review_channel_unavailable: exact product has APLAUT=0 and SHOW_REVIEW=1`
+      `${DOMAIN}:${product.id}: review_channel_unavailable: exact product has APLAUT=0 and SHOW_REVIEW=${payload.SHOW_REVIEW}`
     );
   }
   if (reviewComponents.length !== 1 || reviews.attr(":id") !== product.id ||

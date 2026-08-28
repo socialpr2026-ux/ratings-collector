@@ -271,6 +271,36 @@ function collapseSharedAggregateRows(products: readonly RowProduct[], months: re
   });
 }
 
+function collapseIdenticalExactVariantRows(products: readonly RowProduct[], months: readonly string[]): RowProduct[] {
+  const groups = new Map<string, RowProduct[]>();
+  for (const item of products) {
+    const identity = item.productIdentity;
+    const semanticId = identity?.granularity === "variant" && identity.confidence === "exact"
+      ? identity.canonicalVariantId
+      : undefined;
+    const key = semanticId
+      ? `${item.domain}\u0000${normalizeText(item.brand)}\u0000${semanticId}\u0000${item.aggregateGroupId ?? ""}`
+      : `${item.domain}\u0000${normalizeText(item.brand)}\u0000listing:${item.listingId}`;
+    const members = groups.get(key) ?? [];
+    members.push(item);
+    groups.set(key, members);
+  }
+  return [...groups.values()].flatMap((members) => {
+    if (members.length < 2) return members;
+    const sameMetrics = months.every((month) => {
+      const fingerprints = new Set(members.map((item) => {
+        const metric = item.metrics[month];
+        return metric ? `${metric.reviews ?? "null"}:${metric.rating ?? "null"}` : "missing";
+      }));
+      return fingerprints.size === 1;
+    });
+    if (!sameMetrics) return members;
+    return [members.slice().sort((left, right) =>
+      left.listingId.localeCompare(right.listingId, "ru", { numeric: true })
+    )[0]!];
+  });
+}
+
 function parseLegacy(existing: ExistingSheet, request: RunRequest): { products: RowProduct[]; months: string[] } {
   const values = existing.values;
   const reportTitle = normalizeText(String(values[0]?.[0] ?? ""));
@@ -412,7 +442,7 @@ export function buildSheetDocument(
   });
   const domainOrder = [...new Set([...request.domains, ...deduplicated.map((item) => item.domain).filter((domain) => !request.domains.includes(domain)).sort()])];
   const brandOrder = [...new Set([...request.brands, ...deduplicated.map((item) => item.brand).filter((brand) => !request.brands.includes(brand)).sort((a, b) => a.localeCompare(b, "ru"))])];
-  const ordered = collapseSharedAggregateRows(deduplicated.sort((a, b) =>
+  const ordered = collapseSharedAggregateRows(collapseIdenticalExactVariantRows(deduplicated, months).sort((a, b) =>
     SHEET_CATEGORIES.findIndex((category) => category.id === sheetCategory(a.domain).id) -
       SHEET_CATEGORIES.findIndex((category) => category.id === sheetCategory(b.domain).id) ||
     domainOrder.indexOf(a.domain) - domainOrder.indexOf(b.domain) ||

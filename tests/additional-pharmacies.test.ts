@@ -187,7 +187,11 @@ describe("additional pharmacy adapters", () => {
       const url = new URL(String(input));
       if (url.pathname === "/catalog/search/") throw new Error("search must not run after exact family proof");
       expect(url.toString()).toBe(familyUrl);
-      return new Response(`<html><body><h1>${brand}</h1></body></html>`, {
+      return new Response(`<html><body><h1>${brand}</h1><div id="feedbackAnchor">
+        <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="1">
+          <meta itemprop="ratingCount" content="1"><meta itemprop="ratingValue" content="5">
+          <article itemprop="review">Отзыв</article>
+        </div></div></body></html>`, {
         status: 200,
         headers: { "content-type": "text/html" }
       });
@@ -304,6 +308,61 @@ describe("additional pharmacy adapters", () => {
     });
   });
 
+  it("falls back from a current exact family without an aggregate and accepts only a product-bound NEXT_DATA zero", async () => {
+    const brand = "Тирзетта";
+    const productId = "406652";
+    const path = "/catalog/product/tirzetta-rastvor-shprits-25-mg-shpr05-ml-4-sht/";
+    const productUrl = `https://ozerki.ru${path}`;
+    const title = "Тирзетта 2,5 мг раствор для инъекций шприц 0,5 мл 4 шт";
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.startsWith("/alphabet/")) {
+        return new Response(`<html><body><h1>${brand}</h1></body></html>`, {
+          status: 200,
+          headers: { "content-type": "text/html" }
+        });
+      }
+      if (url.pathname === "/catalog/search/") {
+        return new Response(ozerkiSearchPage(brand, [{
+          productId: Number(productId), id: productId, name: title, href: path
+        }]), { status: 200, headers: { "content-type": "text/html" } });
+      }
+      expect(url.toString()).toBe(productUrl);
+      return new Response(`<!doctype html><html><head><link rel="canonical" href="${productUrl}">
+        <script type="application/ld+json">${JSON.stringify({
+          "@type": "Product", sku: productId, name: title, url: productUrl
+        })}</script><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
+          props: { pageProps: { data: { componentData: {
+            productCard: { product: { productId: Number(productId), id: productId, name: title, href: path } },
+            initialReviews: {
+              data: [],
+              meta: { current_page: 1, from: null, last_page: 1, per_page: 4, to: null, total: 0 },
+              rates: { average: null, total: 0, filterByValue: { "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 } }
+            }
+          } } } }
+        })}</script></head><body><h1>${title}</h1></body></html>`, {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const adapter = new OzerkiAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
+
+    const refs = await adapter.discover(brand, context);
+    expect(refs).toEqual([expect.objectContaining({
+      listingId: productId,
+      url: productUrl,
+      metadata: { discovery: "ozerki-complete-search" }
+    })]);
+    await expect(adapter.collect(refs[0]!, context)).resolves.toMatchObject({
+      listingId: productId,
+      reviews: 0,
+      ratingCount: 0,
+      rating: null,
+      status: "no_reviews",
+      source: "ozerki-visible-product-empty-state"
+    });
+  });
+
   it("fails closed when Ozerki family counts are not backed by exact review markup", async () => {
     const brand = "\u0410\u043a\u0432\u0430\u041e\u043f\u0442\u0438\u043a";
     const familyUrl = "https://ozerki.ru/alphabet/a/akvaoptik/";
@@ -396,9 +455,12 @@ describe("additional pharmacy adapters", () => {
           name: match.title, url: match.url
         })}</script><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
           props: { pageProps: { data: { componentData: { initialReviews: {
-            data: [], meta: { total: 0 },
+            data: [], meta: { current_page: 1, from: null, last_page: 1, per_page: 4, to: null, total: 0 },
             rates: { average: null, total: 0, filterByValue: { "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 } }
-          } } } } }
+          }, productCard: { product: {
+            productId: Number(match.id), id: match.id, name: match.title,
+            href: new URL(match.url).pathname
+          } } } } } }
         })}</script></head><body>
         <h1>${match.title} в Москве</h1><div id="feedbackAnchor">
           <div class="Reviews_noReviewsBlock__proof">
@@ -478,7 +540,11 @@ describe("additional pharmacy adapters", () => {
     const familyUrl = "https://ozerki.ru/alphabet/a/akvaoptik/";
     const fetchSpy = vi.fn(async (input: string | URL | Request) => {
       expect(new URL(String(input)).toString()).toBe(familyUrl);
-      return new Response("<html><body><h1>АкваОптик</h1></body></html>", { status: 200 });
+      return new Response(`<html><body><h1>АкваОптик</h1><div id="feedbackAnchor">
+        <div itemprop="aggregateRating"><meta itemprop="reviewCount" content="1">
+          <meta itemprop="ratingCount" content="1"><meta itemprop="ratingValue" content="5">
+          <article itemprop="review">Отзыв</article>
+        </div></div></body></html>`, { status: 200 });
     });
     const adapter = new OzerkiAdapter(new MemoryEvidenceStore(), fetchSpy as unknown as typeof fetch);
 

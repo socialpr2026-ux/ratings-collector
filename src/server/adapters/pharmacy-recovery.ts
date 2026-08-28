@@ -561,7 +561,44 @@ function asnaPreviousRefs(brand: string, context: AdapterContext): ProductRef[] 
   return [...refs.values()];
 }
 
+const ASNA_TIRZEPATIDE_STRENGTHS: Readonly<Record<string, string>> = {
+  "25": "2,5",
+  "5": "5",
+  "75": "7,5",
+  "10": "10",
+  "125": "12,5",
+  "15": "15"
+};
+
+/**
+ * ASNA removes decimal separators from a small, source-stable family of
+ * medicine slugs (25mg means 2.5 mg, 05ml means 0.5 ml). Decode only the
+ * exact official Tirzetta/Sedjaro route shapes; applying this rule to an
+ * arbitrary medicine would silently manufacture a dose.
+ */
+function asnaStrictInjectableTitle(url: string, brand: string): string | undefined {
+  const pathSlug = new URL(url).pathname.match(/^\/cards\/([a-z0-9_.-]+)\.html$/i)?.[1] ?? "";
+  const normalizedBrand = normalizeText(brand);
+  if (normalizedBrand === "тирзетта") {
+    const match = pathSlug.match(/^tirzetta_(25|5|75|10|125|15)mg_05ml_n4_r-r_dlya_pk_vvedeniya_(?:shpritsy_v_avtoinzhektorakh|shprits-ruchka)(?:_|$)/i);
+    const strength = match ? ASNA_TIRZEPATIDE_STRENGTHS[match[1]] : undefined;
+    return strength
+      ? `${brand} раствор для подкожного введения ${strength} мг 0,5 мл №4`
+      : undefined;
+  }
+  if (normalizedBrand === "седжаро") {
+    const match = pathSlug.match(/^sedzharo_(25|5|75|10|125|15)mgdoza_24ml_r-r_dlya_pk_vvedeniya_shprits-ruchka_v_komplekte_s_iglami_4_sht(?:_|$)/i);
+    const strength = match ? ASNA_TIRZEPATIDE_STRENGTHS[match[1]] : undefined;
+    return strength
+      ? `${brand} раствор для подкожного введения ${strength} мг/доза 2,4 мл шприц-ручка`
+      : undefined;
+  }
+  return undefined;
+}
+
 function asnaTitle(url: string, brand: string, slugs: readonly string[]): string {
+  const strictInjectable = asnaStrictInjectableTitle(url, brand);
+  if (strictInjectable) return strictInjectable;
   const pathSlug = new URL(url).pathname.match(/^\/cards\/([a-z0-9_.-]+)\.html$/i)?.[1] ?? "";
   const brandSlug = [...slugs].sort((left, right) => right.length - left.length).find((slug) =>
     pathSlug === slug || pathSlug.startsWith(`${slug}_`)
@@ -730,9 +767,10 @@ export class AsnaAdapter implements SiteAdapter {
           if (existingId !== parsed.listingId && existing.url === parsed.canonicalUrl) refs.delete(existingId);
         }
         const sourceTitle = $("h1").first().text().normalize("NFKC").replace(/\s+/g, " ").trim();
-        const title = sourceTitle && normalizeText(sourceTitle).includes(normalizeText(brand))
+        const strictInjectableTitle = asnaStrictInjectableTitle(parsed.canonicalUrl, brand);
+        const title = strictInjectableTitle ?? (sourceTitle && normalizeText(sourceTitle).includes(normalizeText(brand))
           ? sourceTitle
-          : asnaTitle(parsed.canonicalUrl, brand, slugs);
+          : asnaTitle(parsed.canonicalUrl, brand, slugs));
         refs.set(parsed.listingId, {
           domain: "asna.ru", platform: "asna.ru", listingId: parsed.listingId, brand,
           url: parsed.canonicalUrl, title,

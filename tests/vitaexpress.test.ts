@@ -39,6 +39,26 @@ const PRODUCTS = [
     id: "211590", brand: "Хлорэтта", title: "Хлорэтта Таблетки, покрытые пленочной оболочкой 2мг+0,03мг, №63",
     path: "/product/khloretta_tab__ppo_2mg_0_03mg__21_3/"
   },
+  ...[
+    ["206090", "2_5", "2,5"],
+    ["206091", "5", "5"],
+    ["206092", "7_5", "7,5"],
+    ["206093", "10", "10"],
+    ["206094", "12_5", "12,5"],
+    ["206095", "15", "15"]
+  ].map(([id, slugDose, titleDose]) => ({
+    id: id!, brand: "Тирзетта" as const,
+    title: `Тирзетта Раствор для подкожного введения, ${titleDose}мг, 0,5мл, №4`,
+    path: `/product/tirzetta_r_r_dpk_vved__${slugDose}mg_0_5ml__4_shpr__v_avtoinzhekt_/`
+  })),
+  {
+    id: "207078", brand: "Седжаро", title: "Седжаро Раствор для подкожного введения 2,5мг/доза, 2,4мл №1+4иглы",
+    path: "/product/sedzharo_r_r_dpk_vved__2_5mgdoza_2_4ml__1_shpr__ruchk____igly__4_v_kompl_/"
+  },
+  {
+    id: "207079", brand: "Седжаро", title: "Седжаро Раствор для подкожного введения 5мг/доза, 2,4мл №1+4иглы",
+    path: "/product/sedzharo_r_r_dpk_vved__5mgdoza_2_4ml__1_shpr__ruchk____igly__4_v_kompl_/"
+  },
   {
     id: "203657", brand: "Бактоблис", title: "Бактоблис таблетки для рассасывания, №30 без сахара",
     path: "/product/baktoblis_plyus_tab__drassas___30_bsakhara_bad/"
@@ -322,6 +342,21 @@ describe("VitaExpressAdapter", () => {
     ]);
   });
 
+  it("registers current Tirzetta and Sedjaro cards and reports their disabled review channel precisely", async () => {
+    const adapter = new VitaExpressAdapter(new MemoryEvidenceStore(), fetchProducts(Object.fromEntries(
+      PRODUCTS.filter((product) => ["Тирзетта", "Седжаро"].includes(product.brand)).map((product) => [
+        product.id,
+        new Response(unavailableReviewPage(product, { SHOW_REVIEW: 0 }), {
+          status: 200, headers: { "content-type": "text/html; charset=utf-8" }
+        })
+      ])
+    )));
+    await expect(adapter.discover("Тирзетта", { ...CONTEXT, runId: "discover-tirzetta" }))
+      .rejects.toThrow(/vitaexpress\.ru:20609[0-5]: review_channel_unavailable/u);
+    await expect(adapter.discover("Седжаро", { ...CONTEXT, runId: "discover-sedjaro" }))
+      .rejects.toThrow(/vitaexpress\.ru:20707[89]: review_channel_unavailable/u);
+  });
+
   it("discovers and collects all three exact Enterolactis cards with proven empty reviews", async () => {
     const evidence = new MemoryEvidenceStore();
     const adapter = new VitaExpressAdapter(evidence, fetchProducts());
@@ -583,7 +618,7 @@ describe("VitaExpressAdapter", () => {
     ["another product ID", { ID: 211590 }],
     ["another product name", { NAME: "Тирзетта таблетки 10 мг №4" }],
     ["APLAUT other than numeric zero", { APLAUT: "0" }],
-    ["SHOW_REVIEW other than numeric one", { SHOW_REVIEW: 0 }]
+    ["SHOW_REVIEW outside the explicit zero-or-one channel state", { SHOW_REVIEW: 2 }]
   ])("does not classify a non-source-bound %s payload as review_channel_unavailable", async (_label, override) => {
     const product = productById("211589");
     const adapter = new VitaExpressAdapter(new MemoryEvidenceStore(), fetchProducts({

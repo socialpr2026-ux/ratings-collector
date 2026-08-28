@@ -5,7 +5,7 @@ import type {
   ProductRef,
   SiteAdapter
 } from "../../shared/types.js";
-import { matchesBrand } from "../utils/normalize.js";
+import { matchesWildberriesProductBrand } from "./wildberries.js";
 import {
   AdapterBlockedError,
   AdapterQuotaError,
@@ -157,7 +157,7 @@ function parseListing(value: unknown, brand: string): ParsedListing | null {
 
   // Search can contain semantically adjacent products. Only a token-aware
   // match in the public product name qualifies the nmId for this brand.
-  if (!matchesBrand(title, brand)) return null;
+  if (!matchesWildberriesProductBrand(title, brand)) return null;
 
   return { listingId, title, url, rating, reviews };
 }
@@ -360,7 +360,7 @@ export class WildberriesApifyAdapter implements SiteAdapter {
     if (!listingId) throw new ParserChangedError("Wildberries Apify ProductRef has no valid nmId");
     const product = asTitle(ref.title);
     if (!product) throw new ParserChangedError(`Wildberries Apify ProductRef ${listingId} has no product name`);
-    if (!matchesBrand(product, ref.brand)) {
+    if (!matchesWildberriesProductBrand(product, ref.brand)) {
       throw new ParserChangedError(`Wildberries Apify ProductRef ${listingId} no longer matches brand ${ref.brand}`);
     }
     const reviews = asReviewCount(ref.metadata.reviewCount);

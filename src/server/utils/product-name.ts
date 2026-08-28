@@ -39,7 +39,7 @@ const FORM_RULES: Array<{ value: string; pattern: RegExp }> = [
   { value: "порошок", pattern: /(?<![\p{L}\p{N}])(?:пор(?:ошок|ошка)?\.?)(?![\p{L}\p{N}])/iu },
   { value: "гранулы гомеопатические", pattern: /(?<![\p{L}\p{N}])гран(?:\.|ул(?:ы|а|ах)?)\s*гомеопатическ(?:ие|их|ими)?(?![\p{L}\p{N}])/iu },
   { value: "гранулы", pattern: /(?<![\p{L}\p{N}])гран(?:\.|ул(?:ы|а|ах)?)(?![\p{L}\p{N}])/iu },
-  { value: "раствор", pattern: /(?<![\p{L}\p{N}])раствор(?:а|ом)?(?![\p{L}\p{N}])/iu },
+  { value: "раствор", pattern: /(?<![\p{L}\p{N}])(?:раствор(?:а|ом)?|р[.\s-]*р)(?![\p{L}\p{N}])/iu },
   { value: "сироп", pattern: /(?<![\p{L}\p{N}])сироп(?:а|ом)?(?![\p{L}\p{N}])/iu },
   { value: "суспензия", pattern: /(?<![\p{L}\p{N}])суспензи(?:я|и|ю|ей)(?![\p{L}\p{N}])/iu },
   { value: "спрей", pattern: /(?<![\p{L}\p{N}])спре(?:й|я|ем)(?![\p{L}\p{N}])/iu },
@@ -484,19 +484,29 @@ function parseProduct(brand: string, rawProduct: string, url?: string): ProductP
     .replace(/(?<![\p{L}\p{N}])ниармедик\s+плюс(?![\p{L}\p{N}])/giu, " ")
     .replace(/^[-—–,.:;\s]+|[-—–,.:;\s]+$/g, "")
     .trim();
-  const count = countFromText(withoutBrand);
+  const sourceCount = countFromText(withoutBrand);
   // Some configured brand labels intentionally include the dosage-form suffix
   // (for example "Хондрогард р-р"). Keep that source-bound form after brand
   // removal, but never infer one from an unrelated neighbouring listing.
   const extractedForm = formFromText(withoutBrand) ?? formFromText(`${brand} ${withoutBrand}`);
-  const extractedDoses = extractDoses(brand, withoutBrand, extractedForm, count);
+  const extractedDoses = extractDoses(brand, withoutBrand, extractedForm, sourceCount);
   const equivalence = normalizeKnownProductEquivalence(brand, withoutBrand, {
     form: extractedForm,
     doses: extractedDoses,
-    count
+    count: sourceCount
   }, sourceWithoutVendor);
   const form = equivalence.form;
   const doses = equivalence.doses;
+  // Sedjaro is one multi-dose 2.4 ml pen supplied with four needles. Catalogs
+  // variously spell that accessory as "№4", "4 шт" or even place it before
+  // "шприц-ручка". It is neither four medicine packs nor four pens. Keep this
+  // narrow to the official source-bound form/dose/volume combination.
+  const sedjaroSinglePen = normalizeText(brand) === "седжаро" &&
+    Boolean(form?.startsWith("раствор")) &&
+    doses.some((dose) => /\sмг\/доза$/u.test(dose)) &&
+    doses.some((dose) => normalizeText(dose) === "2 4 мл") &&
+    /шприц[\s‐‑‒–—−-]*ручк/iu.test(sourceWithoutVendor);
+  const count = sedjaroSinglePen ? undefined : sourceCount;
   const bundleMatch = withoutBrand.match(/(?:[xх×]\s*|(?<![\p{L}\p{N}]))(\d+)\s*(?:уп(?:аковк)?\.?|упаков(?:ки|ок|ка))(?![\p{L}\p{N}])/iu);
   const bundleQuantity = bundleMatch ? Number(bundleMatch[1]) : undefined;
   const sourceHasBaktoblisPlus = normalizeText(brand) === "бактоблис"
@@ -788,6 +798,21 @@ export function analyzeProductIdentity(item: ProductNameInput): ProductIdentity 
   const primary = candidates[0] ?? parseProduct(item.brand, item.product, item.url);
   const evidenceVariants = item.evidence?.variants ?? [];
   const aggregateScope = item.evidence?.scope === "product_family";
+
+  // These two registered trade names currently exist only as injectable
+  // solutions. Broad marketplace search also returns unofficial slimming
+  // tablets that merely repeat the brand text. An explicit incompatible form
+  // is a hard negative and must never become a zero-review medicine SKU.
+  if (["тирзетта", "седжаро"].includes(normalizeText(item.brand)) &&
+    primary.form && !primary.form.startsWith("раствор")) {
+    return {
+      label: "Не товарная карточка",
+      granularity: "not_product",
+      confidence: "exact",
+      missing: [],
+      reasons: ["Форма товара противоречит зарегистрированной инъекционной линейке бренда"]
+    };
+  }
 
   if (aggregateScope) {
     const variantGroups = new Map<string, ProductParts>();

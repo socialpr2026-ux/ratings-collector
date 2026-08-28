@@ -409,6 +409,24 @@ function visibleReviewCount(value: string): number | undefined {
   return match ? exactInteger(match[1]) : undefined;
 }
 
+function provesVisibleFiveStarScale(
+  product: JsonObject,
+  reviewRoot: ReturnType<CheerioAPI>,
+  reviews: number,
+  rating: number
+): boolean {
+  if (!Number.isInteger(rating) || reviews !== 1 || rating !== 1) return false;
+  const stars = reviewRoot.find(".drugReviews__ratingStars .ratingStar");
+  if (stars.length !== 5 || stars.filter(".ratingStar--filled").length !== 1 ||
+      stars.filter(".ratingStar--empty").length !== 4) return false;
+  const reviewItems = Array.isArray(product.review) ? product.review : [product.review];
+  if (reviewItems.length !== 1 || !reviewItems[0] || typeof reviewItems[0] !== "object" ||
+      Array.isArray(reviewItems[0])) return false;
+  const reviewRating = (reviewItems[0] as JsonObject).reviewRating;
+  return Boolean(reviewRating && typeof reviewRating === "object" && !Array.isArray(reviewRating) &&
+    exactRating((reviewRating as JsonObject).ratingValue) === rating);
+}
+
 function exactVariants($: CheerioAPI, familyTitle: string, brand: string): string[] {
   const variants = new Map<string, string>();
   const descriptorFree = descriptorFreeBrand(brand);
@@ -658,7 +676,11 @@ export class Pharmacy009Adapter implements SiteAdapter {
         const rating = exactRating(record.ratingValue);
         const visibleRating = exactRating(reviewRoot.find(".drugReviews__ratingValue").first().text());
         const visibleCount = visibleReviewCount(reviewRoot.find(".drugReviews__count").first().text());
-        if (record["@type"] !== "AggregateRating" || exactRating(record.bestRating) !== 5 || reviews === undefined ||
+        const standardScale = exactRating(record.bestRating) === 5;
+        const sourceScaleBugIsProven = normalizeText(ref.brand) === "седжаро" &&
+          exactRating(record.bestRating) === 1 && exactRating(record.worstRating) === 1 &&
+          reviews !== undefined && rating !== undefined && provesVisibleFiveStarScale(product, reviewRoot, reviews, rating);
+        if (record["@type"] !== "AggregateRating" || !standardScale && !sourceScaleBugIsProven || reviews === undefined ||
           ratingCount === undefined || rating === undefined ||
           reviews <= 0 || ratingCount !== reviews || visibleRating !== rating || visibleCount !== reviews) {
           throw new ParserChangedError(`${DOMAIN}:${ref.listingId}: structured and visible family aggregate disagree`);

@@ -37,11 +37,14 @@ function positiveFamily(url: string, options: {
   structuredCount?: number;
   visibleCount?: number;
   bestRating?: number;
+  ratingValue?: number;
 } = {}): string {
   const canonical = options.canonical ?? url;
   const heading = options.heading ?? "ЛИРИКА ОТЗЫВЫ";
   const structuredCount = options.structuredCount ?? 19;
   const visibleCount = options.visibleCount ?? 19;
+  const ratingValue = options.ratingValue ?? 4.4;
+  const malformedScale = options.bestRating === 1;
   return `<!doctype html><html><head><title>ЛИРИКА отзывы</title><link rel="canonical" href="${canonical}"></head><body>
     <h1 class="reviewsPage__h1">${heading}</h1>
     <section class="drugReviews">
@@ -52,14 +55,22 @@ function positiveFamily(url: string, options: {
         brand: { "@type": "Brand", name: "ЛИРИКА" },
         aggregateRating: {
           "@type": "AggregateRating",
-          ratingValue: 4.4,
+          ratingValue,
           bestRating: options.bestRating ?? 5,
-          worstRating: 4,
+          worstRating: malformedScale ? 1 : 4,
           ratingCount: structuredCount,
           reviewCount: structuredCount
-        }
+        },
+        ...(malformedScale ? { review: [{
+          "@type": "Review",
+          reviewRating: { "@type": "Rating", ratingValue }
+        }] } : {})
       })}</script>
-      <div class="drugReviews__ratingValue">4,4</div>
+      <div class="drugReviews__ratingValue">${String(ratingValue).replace(".", ",")}</div>
+      ${malformedScale ? `<div class="drugReviews__ratingStars">
+        <svg class="ratingStar ratingStar--filled"></svg>
+        ${Array.from({ length: 4 }, () => '<svg class="ratingStar ratingStar--empty"></svg>').join("")}
+      </div>` : ""}
       <div class="drugReviews__count">Основано на ${visibleCount} отзывах</div>
       <div class="reviewsList">
         <a class="reviewsList__drugName" href="/product/lirika_kapsuly_25_mg_n14">ЛИРИКА КАПСУЛЫ 25 МГ №14</a>
@@ -423,6 +434,32 @@ describe("Pharmacy009Adapter", () => {
       new Response(positiveFamily(family, options))
     ) as unknown as typeof fetch);
     await expect(adapter.collect(ref("Лирика", "lirika"), context)).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
+  it("accepts Sedjaro's proven one-star aggregate despite its malformed JSON-LD bestRating", async () => {
+    const family = `${ORIGIN}/kupit-sedzharo/otzyvy`;
+    const html = positiveFamily(family, {
+      heading: "СЕДЖАРО ОТЗЫВЫ",
+      structuredCount: 1,
+      visibleCount: 1,
+      bestRating: 1,
+      ratingValue: 1
+    }).replaceAll("ЛИРИКА", "СЕДЖАРО");
+    const adapter = new Pharmacy009Adapter(new MemoryEvidenceStore(), vi.fn(async () =>
+      new Response(html)
+    ) as unknown as typeof fetch);
+
+    await expect(adapter.collect(ref("Седжаро", "sedzharo"), {
+      ...context, runId: "sedjaro-source-scale-bug", brands: ["Седжаро"]
+    })).resolves.toMatchObject({
+      product: "СЕДЖАРО",
+      reviews: 1,
+      writtenReviewCount: 1,
+      ratingCount: 1,
+      rating: 1,
+      rawRatingScale: 5,
+      status: "ok"
+    });
   });
 
   it("does not claim no results when any advertised sitemap shard is incomplete", async () => {

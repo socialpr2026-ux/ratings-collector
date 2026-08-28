@@ -42,10 +42,18 @@ function polzaReviewProof(reviews: number, productId: string): string {
     <div class="reviews__list"><div class="reviews__item review-item">Проверенный отзыв</div></div></div>`;
 }
 
-function asnaCard(source: string, sku: string, reviews: number, visibleReviews = true, explicitEmpty = false): string {
+function asnaCard(
+  source: string,
+  sku: string,
+  reviews: number,
+  visibleReviews = true,
+  explicitEmpty = false,
+  title?: string
+): string {
   return translated(source, `
     <link rel="canonical" href="${source}">
     <div class="productPage__content product__item" itemscope itemtype="http://schema.org/Product">
+      ${title ? `<h1>${title}</h1>` : ""}
       <meta itemprop="sku" content="${sku}">
       <div itemprop="aggregateRating" itemscope>
         <meta itemprop="ratingValue" content="5"><meta itemprop="reviewCount" content="${reviews}">
@@ -582,6 +590,57 @@ describe("recovered first-party pharmacy adapters", () => {
         granularity: "variant",
         confidence: "exact"
       });
+    }
+  });
+
+  it("restores only the exact ASNA Tirzetta and Sedjaro compact decimal slugs", async () => {
+    const cards = [
+      {
+        brand: "Тирзетта", id: "1462224499",
+        url: "https://www.asna.ru/cards/tirzetta_25mg_05ml_n4_r-r_dlya_pk_vvedeniya_shpritsy_v_avtoinzhektorakh_biokhimik_ao.html",
+        sourceTitle: "Тирзетта 25 мг 05 мл №4",
+        expected: "Тирзетта раствор для подкожного введения 2,5 мг 0,5 мл №4"
+      },
+      {
+        brand: "Седжаро", id: "1509210236",
+        url: "https://www.asna.ru/cards/sedzharo_25mgdoza_24ml_r-r_dlya_pk_vvedeniya_shprits-ruchka_v_komplekte_s_iglami_4_sht_gerofarm_ooo.html",
+        sourceTitle: "Седжаро 25mgdoza 24 мл r-r",
+        expected: "Седжаро раствор для подкожного введения 2,5 мг/доза 2,4 мл шприц-ручка"
+      }
+    ];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www.asna.ru" && url.pathname.endsWith("sitemap_cards.xml")) {
+        return new Response(`<urlset>${cards.map((card) => `<url><loc>${card.url}</loc></url>`).join("")}</urlset>`);
+      }
+      if (url.hostname === "www.asna.ru" && url.pathname.endsWith("sitemap_cards1.xml")) {
+        return new Response("<urlset></urlset>");
+      }
+      if (url.hostname === "www-asna-ru.translate.goog" && url.pathname.startsWith("/product/")) {
+        return new Response(translated(`https://www.asna.ru${url.pathname}`, ""));
+      }
+      if (url.hostname === "www-asna-ru.translate.goog") {
+        const source = `https://www.asna.ru${url.pathname}`;
+        const card = cards.find((candidate) => new URL(candidate.url).pathname === url.pathname);
+        if (!card) throw new Error(`unexpected ASNA card ${url.pathname}`);
+        return new Response(asnaCard(source, card.id, 4, true, false, card.sourceTitle), {
+          headers: { "content-type": "text/html" }
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch;
+    const adapter = new AsnaAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    for (const card of cards) {
+      const refs = await adapter.discover(card.brand, { region: "Москва" });
+      expect(refs).toContainEqual(expect.objectContaining({
+        listingId: card.id,
+        title: card.expected,
+        url: card.url
+      }));
+      const identity = analyzeProductIdentity({ brand: card.brand, product: card.expected, url: card.url });
+      expect(identity).toMatchObject({ granularity: "variant", confidence: "exact" });
+      if (card.brand === "Седжаро") expect(identity.label).not.toContain("№4");
     }
   });
 

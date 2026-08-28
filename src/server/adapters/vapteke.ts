@@ -129,7 +129,7 @@ function jsonLdProducts(html: string): JsonObject[] {
   return products;
 }
 
-function parseAutocomplete(body: string, brand: string): AutocompleteHit[] {
+function parseAutocomplete(body: string, brand: string): { hits: AutocompleteHit[]; total: number } {
   let root: JsonObject;
   try { root = objectValue(JSON.parse(body)) ?? {}; }
   catch { throw new ParserChangedError(`${DOMAIN}: autocomplete returned invalid JSON`); }
@@ -169,10 +169,60 @@ function parseAutocomplete(body: string, brand: string): AutocompleteHit[] {
     idBySlug.set(slug, productId);
   }
 
-  if (exactById.size !== totalValue) {
+  if (exactById.size > totalValue) {
     throw new ParserChangedError(
-      `${DOMAIN}: autocomplete exact total ${totalValue} does not match ${exactById.size} unique exact hits`
+      `${DOMAIN}: autocomplete returned ${exactById.size} exact hits for advertised total ${totalValue}`
     );
+  }
+  return { hits: [...exactById.values()], total: totalValue };
+}
+
+function parseCompleteSearchPage(html: string, brand: string, expectedTotal: number): AutocompleteHit[] {
+  const $ = load(html);
+  const heading = $("h2.main__title");
+  const headingBrand = compactText(heading.find(".main__title-word").text());
+  const countMatch = compactText(heading.find(".main__title-count").text())
+    .match(/^(\d+)\s+товар(?:а|ов)?$/iu);
+  const advertisedTotal = safeInteger(countMatch?.[1]);
+  if (heading.length !== 1 || normalizeText(headingBrand) !== normalizeText(brand) ||
+      advertisedTotal === undefined || advertisedTotal !== expectedTotal) {
+    throw new ParserChangedError(`${DOMAIN}: complete search is not bound to the exact autocomplete total`);
+  }
+
+  const cards = $(".product-card");
+  if (cards.length !== expectedTotal) {
+    throw new ParserChangedError(`${DOMAIN}: complete search returned ${cards.length} cards for total ${expectedTotal}`);
+  }
+  const exactById = new Map<string, AutocompleteHit>();
+  const idBySlug = new Map<string, string>();
+  cards.each((index, node) => {
+    const card = $(node);
+    const link = card.children("a.product-card__link[href]");
+    const titleNode = card.find(".product-card__body-title");
+    const favorite = card.find(".product-card__favorite[data-id]");
+    const dataKey = safeInteger(card.attr("data-key"));
+    const name = compactText(titleNode.text());
+    const rawHref = link.attr("href") ?? "";
+    let url: URL;
+    try { url = new URL(rawHref, ORIGIN); }
+    catch { throw new ParserChangedError(`${DOMAIN}: complete search contains an invalid product URL`); }
+    const productId = listingIdFromUrl(url);
+    const slug = url.pathname.replace(/^\/product\//u, "").replace(/\/$/u, "");
+    if (link.length !== 1 || titleNode.length !== 1 || favorite.length !== 1 || dataKey !== index ||
+        !productId || favorite.attr("data-id") !== productId || !matchesBrand(name, brand) ||
+        url.search || url.hash || !productUrlFromSlug(slug, productId)) {
+      throw new ParserChangedError(`${DOMAIN}: complete search contains an unbound or incomplete exact card`);
+    }
+    const existing = exactById.get(productId);
+    const existingSlugId = idBySlug.get(slug);
+    if (existing || existingSlugId) {
+      throw new ParserChangedError(`${DOMAIN}: complete search contains duplicate product identity`);
+    }
+    exactById.set(productId, { productId, name, slug });
+    idBySlug.set(slug, productId);
+  });
+  if (exactById.size !== expectedTotal) {
+    throw new ParserChangedError(`${DOMAIN}: complete search did not prove every exact product`);
   }
   return [...exactById.values()];
 }
@@ -268,7 +318,17 @@ export class VaptekeAdapter implements SiteAdapter {
       body
     }, MAX_API_BYTES);
     this.assertApiResponse(result.response, result.body);
-    return parseAutocomplete(result.body, brand)
+    const autocomplete = parseAutocomplete(result.body, brand);
+    const searchUrl = `${ORIGIN}/search?s=${encodeURIComponent(brand)}`;
+    let discovery = "vapteke-exact-autocomplete";
+    let hits = autocomplete.hits;
+    if (hits.length < autocomplete.total) {
+      const search = await this.request(searchUrl, context, "text/html,application/xhtml+xml");
+      this.assertProductResponse(search.response, search.body, searchUrl);
+      hits = parseCompleteSearchPage(search.body, brand, autocomplete.total);
+      discovery = "vapteke-complete-search-fallback";
+    }
+    return hits
       .map((hit): ProductRef => ({
         domain: DOMAIN,
         platform: DOMAIN,
@@ -276,7 +336,7 @@ export class VaptekeAdapter implements SiteAdapter {
         brand,
         url: productUrlFromSlug(hit.slug, hit.productId)!,
         title: hit.name,
-        metadata: { discovery: "vapteke-exact-autocomplete", searchUrl: `${ORIGIN}/search?s=${encodeURIComponent(brand)}` }
+        metadata: { discovery, searchUrl }
       }))
       .sort((left, right) => (left.title ?? "").localeCompare(right.title ?? "", "ru") || Number(left.listingId) - Number(right.listingId));
   }

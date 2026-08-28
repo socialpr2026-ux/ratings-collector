@@ -17,6 +17,19 @@ function hit(productId: number, name: string, slug: string, overrides: Record<st
   return { product_id: productId, name, slug, is_active: true, ...overrides };
 }
 
+function completeSearchHtml(brand: string, items: Array<{ productId: number; name: string; slug: string }>, total = items.length): string {
+  return `<!doctype html><html><body><main>
+    <h2 class="main__title">По запросу <span class="main__title-word">${brand}</span> найдено
+      <span class="main__title-count">${total} товаров</span></h2>
+    ${items.map((item, index) => `<div class="product-card" data-key="${index}">
+      <a class="product-card__link" href="/product/${item.slug}">
+        <div class="product-card__favorite" data-id="${item.productId}"></div>
+        <div class="product-card__body-title">${item.name}</div>
+      </a>
+    </div>`).join("")}
+  </main></body></html>`;
+}
+
 function productHtml(input: {
   id: string;
   brand: string;
@@ -94,6 +107,47 @@ describe("VaptekeAdapter", () => {
   ])("fails closed when autocomplete is %s", async (_label, response) => {
     const adapter = new VaptekeAdapter(new MemoryEvidenceStore(), vi.fn(async () => response) as unknown as typeof fetch);
     await expect(adapter.discover("Бивиарт", context)).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
+  it("recovers every exact product from the complete search when autocomplete is capped at ten", async () => {
+    const brand = "Тирзетта";
+    const items = Array.from({ length: 16 }, (_unused, index) => ({
+      productId: 761000 + index,
+      name: `${brand} р-р для п/к введ. ${index + 1} мг 0.5 мл 4 шт.`,
+      slug: `tirzetta-${index + 1}-mg-05-ml-${761000 + index}`
+    }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestedUrl(input);
+      return url.pathname === "/ajax/autocomplete"
+        ? autocompleteResponse(items.slice(0, 10).map((item) => hit(item.productId, item.name, item.slug)), 16)
+        : new Response(completeSearchHtml(brand, items), {
+          status: 200,
+          headers: { "content-type": "text/html; charset=UTF-8" }
+        });
+    }) as unknown as typeof fetch;
+
+    const refs = await new VaptekeAdapter(new MemoryEvidenceStore(), fetchMock).discover(brand, context);
+    expect(refs).toHaveLength(16);
+    expect(refs.every((ref) => ref.metadata.discovery === "vapteke-complete-search-fallback")).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["wrong search brand", completeSearchHtml("Седжаро", [
+      { productId: 761000, name: "Тирзетта 2.5 мг", slug: "tirzetta-25-mg-761000" }
+    ], 2)],
+    ["truncated search cards", completeSearchHtml("Тирзетта", [
+      { productId: 761000, name: "Тирзетта 2.5 мг", slug: "tirzetta-25-mg-761000" }
+    ], 2)]
+  ])("fails closed on %s after a capped autocomplete", async (_label, searchHtml) => {
+    const autocomplete = autocompleteResponse([
+      hit(761000, "Тирзетта 2.5 мг", "tirzetta-25-mg-761000")
+    ], 2);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => requestedUrl(input).pathname === "/ajax/autocomplete"
+      ? autocomplete
+      : new Response(searchHtml, { status: 200, headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
+    await expect(new VaptekeAdapter(new MemoryEvidenceStore(), fetchMock).discover("Тирзетта", context))
+      .rejects.toBeInstanceOf(ParserChangedError);
   });
 
   it("collects a source-bound 3.6/5 vote aggregate without claiming written reviews", async () => {

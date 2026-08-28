@@ -1178,17 +1178,21 @@ const OZERKI_BOUNDED_PRODUCTS = [
   }
 ] as const;
 
-function ozerkiProductEmptyReviewProof(page: HtmlPage): boolean {
+function ozerkiProductEmptyReviewProof(
+  page: HtmlPage,
+  expected: { id: string; title: string; url: string; brand: string }
+): boolean {
   const feedback = page.$("#feedbackAnchor");
   const emptyBlocks = page.$("[class*='Reviews_noReviewsBlock__']");
-  if (feedback.length !== 1 || emptyBlocks.length !== 1 ||
-      page.$("[itemprop='aggregateRating'], [itemprop='review']").length !== 0) return false;
-
-  const text = normalizeText(emptyBlocks.first().text());
-  const hasVisibleEmptyState = text.includes("вы использовали этот товар") &&
-    text.includes("поделитесь своим мнением о нем");
-  const hasFailureMarker = /\b(?:loading|error)\b|\u043e\u0448\u0438\u0431\u043a|\u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c|\u043f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435/iu.test(feedback.text());
-  if (!hasVisibleEmptyState || hasFailureMarker) return false;
+  if (page.$("[itemprop='aggregateRating'], [itemprop='review']").length !== 0) return false;
+  if (feedback.length > 1 || emptyBlocks.length > 1 || feedback.length !== emptyBlocks.length) return false;
+  if (feedback.length === 1) {
+    const text = normalizeText(emptyBlocks.first().text());
+    const hasVisibleEmptyState = text.includes("вы использовали этот товар") &&
+      text.includes("поделитесь своим мнением о нем");
+    const hasFailureMarker = /\b(?:loading|error)\b|\u043e\u0448\u0438\u0431\u043a|\u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c|\u043f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435/iu.test(feedback.text());
+    if (!hasVisibleEmptyState || hasFailureMarker) return false;
+  }
 
   const stateScripts = page.$("script#__NEXT_DATA__[type='application/json']");
   if (stateScripts.length !== 1) return false;
@@ -1201,13 +1205,26 @@ function ozerkiProductEmptyReviewProof(page: HtmlPage): boolean {
     const props = record(payload)?.props;
     const pageProps = record(props)?.pageProps;
     const data = record(pageProps)?.data;
-    const componentData = record(data)?.componentData;
-    const reviews = record(componentData)?.initialReviews;
+    const componentData = record(record(data)?.componentData);
+    const productCard = record(componentData?.productCard);
+    const product = record(productCard?.product);
+    const reviews = componentData?.initialReviews;
     const meta = record(record(reviews)?.meta);
     const rates = record(record(reviews)?.rates);
     const distribution = record(rates?.filterByValue);
-    return Array.isArray(record(reviews)?.data) && (record(reviews)?.data as unknown[]).length === 0 &&
-      exactInteger(meta?.total) === 0 && rates?.average === null && exactInteger(rates?.total) === 0 &&
+    const productId = exactInteger(product?.productId);
+    const id = exactInteger(product?.id);
+    const title = typeof product?.name === "string" ? compactText(product.name) : "";
+    const sourceRef = typeof product?.href === "string"
+      ? ozerkiCanonicalProductRef(product.href, expected.id, true)
+      : undefined;
+    return productId !== undefined && id === productId && String(productId) === expected.id &&
+      normalizeText(title) === normalizeText(expected.title) && matchesBrand(title, expected.brand) &&
+      sourceRef?.url === expected.url &&
+      Array.isArray(record(reviews)?.data) && (record(reviews)?.data as unknown[]).length === 0 &&
+      exactInteger(meta?.current_page) === 1 && meta?.from === null && exactInteger(meta?.last_page) === 1 &&
+      exactInteger(meta?.per_page) !== undefined && meta?.to === null && exactInteger(meta?.total) === 0 &&
+      rates?.average === null && exactInteger(rates?.total) === 0 &&
       ["1", "2", "3", "4", "5"].every((score) => exactInteger(distribution?.[score]) === 0);
   } catch {
     return false;
@@ -1512,6 +1529,18 @@ export class OzerkiAdapter extends AdditionalPharmacyAdapter {
       }
       const parsed = ozerkiFamilyRef(source.toString());
       if (!parsed) throw new ParserChangedError(`${OZERKI_DOMAIN}: invalid exact family URL`);
+      const feedback = page.$("#feedbackAnchor");
+      const aggregate = feedback.find("[itemprop='aggregateRating']");
+      if (aggregate.length === 0 && page.$("[itemprop='aggregateRating']").length === 0) {
+        return discoverOzerkiSearch(brand, context, this.fetchImpl);
+      }
+      if (feedback.length !== 1 || aggregate.length !== 1 ||
+          exactInteger(aggregate.find("meta[itemprop='reviewCount']").first().attr("content")) === undefined ||
+          exactInteger(aggregate.find("meta[itemprop='ratingCount']").first().attr("content")) === undefined ||
+          exactRating(aggregate.find("meta[itemprop='ratingValue']").first().attr("content")) === undefined ||
+          feedback.find("[itemprop='review']").length === 0) {
+        throw new ParserChangedError(`${OZERKI_DOMAIN}: exact family feedback proof is incomplete`);
+      }
       previous.set(parsed.id, {
         domain: OZERKI_DOMAIN,
         platform: OZERKI_DOMAIN,
@@ -1559,7 +1588,12 @@ export class OzerkiAdapter extends AdditionalPharmacyAdapter {
 
       const aggregate = product.aggregateRating;
       if (!aggregate || typeof aggregate !== "object") {
-        if (!ozerkiProductEmptyReviewProof(page)) {
+        if (!ozerkiProductEmptyReviewProof(page, {
+          id: productRef.id,
+          title,
+          url: productRef.url,
+          brand: ref.brand
+        })) {
           throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: source-bound product aggregate is missing`);
         }
         return observation(this.evidence, ref, page, {

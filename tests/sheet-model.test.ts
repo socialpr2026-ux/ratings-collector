@@ -460,6 +460,30 @@ describe("Google Sheets model", () => {
     expect(rows[0]?.slice(4)).toEqual([2, 5]);
   });
 
+  it("collapses identical duplicate platform cards for one exact canonical variant", () => {
+    const brand = "Седжаро";
+    const canonicalVariantId = "variant:v1:sedjaro-5";
+    const items = ["4391694230", "4723192930"].map((listingId): Observation => ({
+      domain: "market.yandex.ru", platform: "yandex", listingId, brand,
+      canonicalUrl: `https://market.yandex.ru/card/sedzharo/${listingId}/reviews`,
+      product: "Седжаро раствор для подкожного введения 5 мг/доза 2,4 мл шприц-ручка",
+      reviews: 253, rating: 4.8, status: "ok", capturedAt: "2026-07-15T00:00:00.000Z",
+      productIdentity: {
+        label: "раствор 5 мг/доза 2,4 мл", granularity: "variant", confidence: "exact",
+        missing: [], reasons: [], canonicalVariantId, variantKeyVersion: 1, resolutionMethod: "source_facts"
+      }
+    }));
+    const document = buildSheetDocument({ values: [] }, {
+      ...request, domains: ["market.yandex.ru"], brands: [brand]
+    }, [], {
+      "2026-07": Object.fromEntries(items.map((item) => [`${item.domain}:${item.listingId}`, item]))
+    });
+
+    const rows = document.values.filter((_row, index) => document.rowKinds[index] === "product");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.slice(2, 6)).toEqual(["раствор 5 мг/доза 2,4 мл", null, 253, 4.8]);
+  });
+
   it("renders only three report sections and preserves platform order inside each section", () => {
     const domains = [
       "wildberries.ru", "otzovik.com", "ozon.ru", "uteka.ru", "irecommend.ru", "eapteka.ru"

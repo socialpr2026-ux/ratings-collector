@@ -51,6 +51,47 @@ function createAdapter(
 }
 
 describe("WildberriesAdapter.discover", () => {
+  it("filters Sedjaro slimming keyword collisions before card collection", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      total: 3,
+      products: [
+        {
+          id: 822659474,
+          root: 907000001,
+          brand: "Седжаро",
+          name: "Седжаро раствор для подкожного введ 5 мг/доза шприц-ручка 2,4 мл 1 шт+иглы 4 шт",
+          nmReviewRating: 4.89,
+          nmFeedbacks: 277
+        },
+        {
+          id: 1431292712,
+          root: 3733869913,
+          brand: "",
+          subjectId: 361,
+          name: "Седжаро для похудения 5",
+          nmReviewRating: 0,
+          nmFeedbacks: 0
+        },
+        {
+          id: 1431292713,
+          root: 3733869914,
+          brand: "",
+          subjectId: 361,
+          name: "Иглы для шприц-ручки Седжаро 4 шт",
+          nmReviewRating: 5,
+          nmFeedbacks: 9
+        }
+      ]
+    })) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+
+    await expect(adapter.discover("Седжаро", context({ runId: "sedjaro-hard-negative" })))
+      .resolves.toMatchObject([{
+        listingId: "822659474",
+        title: expect.stringContaining("раствор для подкожного введ")
+      }]);
+  });
+
   it("falls back from blocked v14 to free v18 before requesting browser Sandbox", async () => {
     const requests: Array<{ url: URL; browser: boolean }> = [];
     const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {

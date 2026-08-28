@@ -126,6 +126,33 @@ describe("WildberriesApifyAdapter discovery", () => {
     await expect(adapter.discover("Кагоцел", CONTEXT)).resolves.toEqual([]);
   });
 
+  it("filters Tirzetta and Sedjaro keyword collisions before fallback collection", async () => {
+    const adapter = new WildberriesApifyAdapter(options({
+      fetch: vi.fn(async () => jsonResponse([
+        listing(822667833, "Седжаро раствор для подкожного введения 2,5 мг/доза шприц-ручка 2,4 мл", 4.88, 325),
+        listing(1431292712, "Седжаро для похудения 5", 5, 12),
+        listing(1431292713, "Иглы для шприц-ручки Седжаро 4 шт", 4.9, 8)
+      ])) as unknown as typeof fetch
+    }));
+
+    const refs = await adapter.discover("Седжаро", CONTEXT);
+    expect(refs.map((ref) => ref.listingId)).toEqual(["822667833"]);
+    await expect(adapter.collect(refs[0]!, CONTEXT)).resolves.toMatchObject({
+      listingId: "822667833",
+      reviews: 325,
+      rating: 4.88
+    });
+    await expect(adapter.collect({
+      domain: "wildberries.ru",
+      platform: "wildberries",
+      listingId: "1431292712",
+      brand: "Седжаро",
+      url: "https://www.wildberries.ru/catalog/1431292712/detail.aspx",
+      title: "Седжаро для похудения 5",
+      metadata: { collector: "wildberries-apify", rating: 5, reviewCount: 12 }
+    }, CONTEXT)).rejects.toBeInstanceOf(ParserChangedError);
+  });
+
   it("fails closed when the raw dataset reaches the configured cap", async () => {
     const adapter = new WildberriesApifyAdapter(options({
       maxItems: 2,
