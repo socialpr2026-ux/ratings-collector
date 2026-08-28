@@ -518,7 +518,7 @@ describe("collector runtime fallback integration", () => {
       }
       if (url.toString() === modelMapUrl) {
         return new Response(
-          `<?xml version="1.0"?><urlset><url><loc>${productUrl}</loc></url></urlset>`,
+          `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${productUrl}</loc></url></urlset>`,
           { status: 200, headers: { "content-type": "application/xml" } }
         );
       }

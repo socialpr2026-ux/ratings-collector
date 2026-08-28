@@ -291,6 +291,14 @@ const GENERIC_AGGREGATE_TITLE_TOKENS = new Set([
   "отзыв", "отзывы", "рейтинг", "оценка", "оценки", "препарат", "лекарство", "средство", "продукт", "бренд"
 ]);
 
+function aggregateHasSpecificTitle(brand: string, product: string): boolean {
+  const brandTokens = new Set(normalizeText(brand).split(" ").filter(Boolean));
+  return normalizeText(product).split(" ").some((token) =>
+    token && !brandTokens.has(token) && !GENERIC_AGGREGATE_TITLE_TOKENS.has(token) &&
+      !/^(?:противовирусн|лекарственн|медицинск|фармацевтическ|препарат|средств|товар|категор|мнен|голос)/u.test(token)
+  );
+}
+
 function partitionKey(domain: string, brand: string): string {
   return `${domain}\u0000${brand}`;
 }
@@ -305,11 +313,7 @@ function collapsesDistinctProductPages(
   if (discoveredCount <= 1 || !identity || !["family", "line"].includes(identity.granularity)) return false;
   if (identity.confidence === "exact" || (identity.variantCount ?? 0) > 1) return false;
   if (evidence?.scope !== "product_family" || (evidence.variants?.length ?? 0) > 0) return false;
-  const brandTokens = new Set(normalizeText(brand).split(" ").filter(Boolean));
-  const specificTokens = normalizeText(product).split(" ").filter((token) =>
-    token && !brandTokens.has(token) && !GENERIC_AGGREGATE_TITLE_TOKENS.has(token)
-  );
-  return specificTokens.length > 0;
+  return aggregateHasSpecificTitle(brand, product);
 }
 
 function canAutoAcceptDedicatedReviewAggregate(observation: Observation): boolean {
@@ -323,8 +327,14 @@ function canAutoAcceptDedicatedReviewAggregate(observation: Observation): boolea
   if (!sourceBoundDedicated) return false;
   // A Yandex Reviews model is already source-bound by its stable model_id.
   // Other review sites need explicit family-page evidence; a listing/profile
-  // result is never enough for automatic publication.
-  return observation.domain === "market.yandex.ru" || observation.domain === "reviews.yandex.ru" ||
+  // result is never enough for automatic publication. Likewise, a newly
+  // encountered named line (for example an unofficial "Forte" page) remains
+  // manual until Product Master or an operator establishes that line. A
+  // source-generated variants=[title] hint is not independent membership
+  // proof and must not bypass this gate.
+  const yandexSourceBound = observation.domain === "market.yandex.ru" || observation.domain === "reviews.yandex.ru";
+  if (!yandexSourceBound && aggregateHasSpecificTitle(observation.brand, observation.product)) return false;
+  return yandexSourceBound ||
     observation.productEvidence?.scope === "product_family";
 }
 

@@ -11,14 +11,18 @@ import type {
 import type { EvidenceStore } from "../evidence.js";
 import { matchesBrand, normalizeText } from "../utils/normalize.js";
 import { readTextBounded, safeFetch } from "../utils/safe-fetch.js";
-import { AdapterBlockedError, ParserChangedError } from "./errors.js";
+import { AdapterBlockedError, AdapterQuotaError, ParserChangedError } from "./errors.js";
 
 const DOMAIN = "vitaexpress.ru";
 const ORIGIN = `https://${DOMAIN}`;
 const MAX_DOCUMENT_BYTES = 1_500_000;
 const BLOCKED_STATUSES = new Set([401, 403, 429, 498]);
+const TRANSIENT_STATUSES = new Set([408, 425, 499, 500, 502, 503, 504]);
 const BLOCK_MARKERS = /captcha|access denied|forbidden|cloudflare|qrator|temporarily unavailable|\u0434\u043e\u0441\u0442\u0443\u043f (?:\u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d|\u0437\u0430\u043f\u0440\u0435\u0449[\u0435\u0451]\u043d)|\u0441\u043b\u0438\u0448\u043a\u043e\u043c \u043c\u043d\u043e\u0433\u043e \u0437\u0430\u043f\u0440\u043e\u0441\u043e\u0432|\u043f\u0440\u043e\u0432\u0435\u0440(?:\u043a\u0430|\u044c\u0442\u0435),? \u0447\u0442\u043e \u0432\u044b \u043d\u0435 \u0440\u043e\u0431\u043e\u0442|\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u0435,? \u0447\u0442\u043e \u0432\u044b \u0447\u0435\u043b\u043e\u0432\u0435\u043a/iu;
+const TERMINAL_RETRY_BODY = /monthly\s+sandbox[\s\S]{0,80}gb-s|(?:quota|limit)[\s\S]{0,80}(?:exceeded|exhausted|reached)|(?:лимит|квот\w*)[\s\S]{0,80}(?:исчерпан\w*|превышен\w*|законч\w*)/iu;
+const TRANSIENT_TRANSPORT_ERROR = /fetch\s+failed|network|socket|econn|etimedout|headers?\s+timeout|request\s+exceeded|чтение\s+ответа\s+превысило|таймаут\s+внешнего\s+запроса|operation\s+was\s+aborted\s+due\s+to\s+timeout/iu;
 const EMPTY_REVIEW_TEXT = "\u0432\u0430\u0448 \u043e\u0442\u0437\u044b\u0432 \u043e \u0442\u043e\u0432\u0430\u0440\u0435 \u0441\u0442\u0430\u043d\u0435\u0442 \u043f\u0435\u0440\u0432\u044b\u043c";
+const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 type ExactProduct = {
   id: string;
@@ -798,26 +802,41 @@ export class VitaExpressAdapter implements SiteAdapter {
   }
 
   private async loadFamily(family: ExactFamily, context: AdapterContext): Promise<FetchedFamilyPage> {
-    let response: Response;
-    try {
-      response = await safeFetch(family.url, {
-        headers: {
-          accept: "text/html,application/xhtml+xml",
-          "accept-language": "ru-RU,ru;q=0.9",
-          "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
-        },
-        signal: context.signal
-      }, context.fetch ?? this.fetchImpl, 4, 20_000, {
-        forwardSameDomainCookies: ["ngx_s_id", "PHPSESSID", "ChoosenCityForCart", "ChoosenCityForCartNewCity", "user_city_info", "user_city"]
-      });
-    } catch (error) {
-      throw new AdapterBlockedError(`${DOMAIN}:${family.id}: request failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-
-    let body: string;
-    try { body = await readTextBounded(response, MAX_DOCUMENT_BYTES); }
-    catch (error) {
-      throw new AdapterBlockedError(`${DOMAIN}:${family.id}: response could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    let response!: Response;
+    let body = "";
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        response = await safeFetch(family.url, {
+          headers: {
+            accept: "text/html,application/xhtml+xml",
+            "accept-language": "ru-RU,ru;q=0.9",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
+          },
+          signal: context.signal
+        }, context.fetch ?? this.fetchImpl, 4, 20_000, {
+          forwardSameDomainCookies: ["ngx_s_id", "PHPSESSID", "ChoosenCityForCart", "ChoosenCityForCartNewCity", "user_city_info", "user_city"]
+        });
+        body = await readTextBounded(response, MAX_DOCUMENT_BYTES);
+      } catch (error) {
+        const terminal = error instanceof AdapterQuotaError ||
+          TERMINAL_RETRY_BODY.test(error instanceof Error ? error.message : String(error));
+        const transient = TRANSIENT_TRANSPORT_ERROR.test(error instanceof Error ? error.message : String(error));
+        if (attempt === 1 && !context.signal?.aborted && !terminal && transient &&
+          !(error instanceof AdapterBlockedError) && !(error instanceof ParserChangedError)) {
+          await delay(100 + Math.floor(Math.random() * 151));
+          continue;
+        }
+        if (error instanceof AdapterQuotaError) throw error;
+        throw new AdapterBlockedError(`${DOMAIN}:${family.id}: request failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (!response.ok && TERMINAL_RETRY_BODY.test(body.slice(0, 200_000))) {
+        throw new AdapterQuotaError(`${DOMAIN}:${family.id}: provider quota is exhausted`);
+      }
+      const retryable = attempt === 1 && TRANSIENT_STATUSES.has(response.status) &&
+        !isBlockedBody(body) && !TERMINAL_RETRY_BODY.test(body.slice(0, 200_000));
+      if (!retryable) break;
+      await delay(100 + Math.floor(Math.random() * 151));
+      context.signal?.throwIfAborted();
     }
 
     if (BLOCKED_STATUSES.has(response.status) || response.status >= 500 || isBlockedBody(body)) {

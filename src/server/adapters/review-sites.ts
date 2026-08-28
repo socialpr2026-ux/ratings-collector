@@ -7,7 +7,7 @@ import { aliasesForBrand, matchesBrand, normalizeRating } from "../utils/normali
 import { readTextBounded, safeFetch } from "../utils/safe-fetch.js";
 import { canonicalizeUrl } from "../utils/urls.js";
 import { extractPageProductEvidence, titleProductEvidence } from "../utils/product-evidence.js";
-import { AdapterBlockedError, ParserChangedError } from "./errors.js";
+import { AdapterBlockedError, AdapterQuotaError, ParserChangedError } from "./errors.js";
 
 const MAX_SEARCH_PAGES = 20;
 const MAX_PRODUCTS = 500;
@@ -15,6 +15,22 @@ const MEGAPTEKA_SEARCH_PAGE_SIZE = 40;
 const BLOCK_MARKERS = /captcha|access denied|temporarily unavailable|доступ (?:ограничен|запрещен)|проверка браузера|не робот/i;
 const PHARMACEUTICAL_REVIEW_TITLE = /(?:лекарственн|противовирусн|препарат|медицинск|ноотропн|гомеопат|средств|таблет|капсул|сироп|суспенз|раствор|спрей|мазь)/iu;
 const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const TRANSIENT_HTML_STATUSES = new Set([408, 425, 429, 499, 500, 502, 503, 504]);
+const TERMINAL_RETRY_BODY = /captcha|access denied|forbidden|проверка\s+браузера|не\s+робот/iu;
+const QUOTA_BODY = /monthly\s+sandbox[\s\S]{0,80}gb-s|(?:quota|limit)[\s\S]{0,80}(?:exceeded|exhausted|reached)|(?:лимит|квот\w*)[\s\S]{0,80}(?:исчерпан\w*|превышен\w*|законч\w*)/iu;
+const TRANSIENT_TRANSPORT_ERROR = /fetch\s+failed|network|socket|econn|etimedout|headers?\s+timeout|request\s+exceeded|чтение\s+ответа\s+превысило|таймаут\s+внешнего\s+запроса|operation\s+was\s+aborted\s+due\s+to\s+timeout/iu;
+
+function retryDelay(response: Response): number | undefined {
+  const value = response.headers.get("retry-after")?.trim();
+  if (value) {
+    const seconds = Number(value);
+    const milliseconds = Number.isFinite(seconds)
+      ? seconds * 1_000
+      : Date.parse(value) - Date.now();
+    if (Number.isFinite(milliseconds) && milliseconds > 0) return milliseconds <= 2_000 ? milliseconds : undefined;
+  }
+  return 100 + Math.floor(Math.random() * 151);
+}
 
 type ParsedMetrics = {
   title?: string;
@@ -658,20 +674,47 @@ async function readHtml(
   dynamicBrowser = false,
   captureUnsafeRedirect = false
 ): Promise<{ html: string; status: number; redirectLocation?: string }> {
-  const response = await safeFetch(url, {
-    signal: context.signal,
-    headers: dynamicBrowser
-      ? { "x-ratings-browser": "1", "x-ratings-scroll": "1" }
-      : undefined
-  }, context.fetch ?? fallbackFetch, 4, dynamicBrowser ? 90_000 : 45_000, {
-    returnUnsafeRedirectResponse: captureUnsafeRedirect
-  });
-  const html = await readTextBounded(response, 12_000_000, 60_000);
-  return {
-    html,
-    status: response.status,
-    redirectLocation: response.headers.get("location") ?? undefined
-  };
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const response = await safeFetch(url, {
+        signal: context.signal,
+        headers: dynamicBrowser
+          ? { "x-ratings-browser": "1", "x-ratings-scroll": "1" }
+          : undefined
+      }, context.fetch ?? fallbackFetch, 4, dynamicBrowser ? 90_000 : 45_000, {
+        returnUnsafeRedirectResponse: captureUnsafeRedirect
+      });
+      const html = await readTextBounded(response, 12_000_000, 60_000);
+      if (!response.ok && QUOTA_BODY.test(html.slice(0, 200_000))) {
+        throw new AdapterQuotaError(`${new URL(url).hostname}: provider quota is exhausted`);
+      }
+      const backoff = retryDelay(response);
+      const retryable = attempt === 1 && TRANSIENT_HTML_STATUSES.has(response.status) &&
+        !TERMINAL_RETRY_BODY.test(html.slice(0, 200_000)) && backoff !== undefined;
+      if (retryable) {
+        await delay(backoff);
+        context.signal?.throwIfAborted();
+        continue;
+      }
+      return {
+        html,
+        status: response.status,
+        redirectLocation: response.headers.get("location") ?? undefined
+      };
+    } catch (error) {
+      lastError = error;
+      const terminal = error instanceof AdapterQuotaError ||
+        TERMINAL_RETRY_BODY.test(error instanceof Error ? error.message : String(error)) ||
+        QUOTA_BODY.test(error instanceof Error ? error.message : String(error));
+      const transient = TRANSIENT_TRANSPORT_ERROR.test(error instanceof Error ? error.message : String(error));
+      if (attempt === 2 || context.signal?.aborted || terminal || error instanceof AdapterBlockedError ||
+        error instanceof ParserChangedError || !transient) throw error;
+      await delay(100 + Math.floor(Math.random() * 151));
+      context.signal?.throwIfAborted();
+    }
+  }
+  throw lastError;
 }
 
 function isRetiredVseotzyvyRedirect(requestedUrl: string, location: string | undefined): boolean {

@@ -158,6 +158,20 @@ describe("canonical product descriptors", () => {
       .toBe("Форте таблетки 12 мг №10");
   });
 
+  it("does not turn Kagocel logistics weight into another official SKU", () => {
+    expect([
+      canonicalProductDescriptor("Кагоцел", "Кагоцел таблетки 12 мг 16 г №10"),
+      canonicalProductDescriptor("Кагоцел", "Кагоцел таблетки 12 мг 16 г №20"),
+      canonicalProductDescriptor("Кагоцел", "Кагоцел таблетки 12 мг 16 г №30")
+    ]).toEqual([
+      "таблетки 12 мг №10",
+      "таблетки 12 мг №20",
+      "таблетки 12 мг №30"
+    ]);
+    expect(canonicalProductDescriptor("Другой препарат", "Другой препарат таблетки 12 мг 16 г №10"))
+      .toBe("таблетки 12 мг 16 г №10");
+  });
+
   it("never fills complementary partial names from neighbouring listings", () => {
     const values = canonicalProductDescriptors([
       { brand: "Кагоцел", product: "Кагоцел табл. 10" },

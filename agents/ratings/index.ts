@@ -18,7 +18,8 @@ import {
   OKAPTEKA_MISSING_HTML_MAX_BYTES,
   provesExactOkaptekaMissingHtml
 } from "../../src/server/utils/okapteka-missing.js";
-import { assertSafePublicDestination, isPrivateNetworkAddress, readTextBounded } from "../../src/server/utils/safe-fetch.js";
+import { assertSafePublicDestination, isPrivateNetworkAddress, readBytesBounded, readTextBounded } from "../../src/server/utils/safe-fetch.js";
+import { proveCompleteYandexModelSitemap } from "../../src/shared/yandex-sitemaps.js";
 import {
   proveExactZdravcityGroupBff,
   ZDRAVCITY_GROUP_BFF_MAX_BYTES,
@@ -49,6 +50,8 @@ export const OKAPTEKA_DIRECT_TIMEOUT_MS = 15_000;
 export const ZDRAVCITY_GROUP_BFF_TIMEOUT_MS = 15_000;
 export const MAKSAVIT_YANDEX_TIMEOUT_MS = 30_000;
 export const MAKSAVIT_YANDEX_MAX_BYTES = 4_000_000;
+export const YANDEX_DIRECT_RECOVERY_TIMEOUT_MS = 8_000;
+export const YANDEX_DIRECT_RECOVERY_MAX_BYTES = 4_000_000;
 export const OZON_LEASE_MS = 120_000;
 export const OZON_LEASE_HEARTBEAT_MS = 40_000;
 
@@ -385,6 +388,8 @@ export function browserFetch(
   let wildberriesPage: Promise<Page> | undefined;
   let sandboxAcquired = false;
   let disposed = false;
+  let yandexDirectRecoveryAvailable: boolean | undefined;
+  let yandexDirectRecoveryProbe: Promise<Response | undefined> | undefined;
   const hardenedContexts = new Map<string, Promise<BrowserContext>>();
   const fetchViaStaticProxy = (url: URL, signal: AbortSignal) => runStaticProxyTask(url.hostname, async () => {
     if (!staticProxy) throw new Error("Static proxy is not configured");
@@ -438,6 +443,61 @@ export function browserFetch(
       attemptAbort.abort();
     }
   });
+  const fetchYandexDirectRecovery = async (request: Request): Promise<Response | undefined> => {
+    const attemptAbort = new AbortController();
+    const signal = AbortSignal.any([request.signal, attemptAbort.signal]);
+    const startedAt = Date.now();
+    try {
+      const direct = await withDeadline(fetch(new Request(request, {
+        method: "GET",
+        redirect: "manual",
+        signal
+      })), YANDEX_DIRECT_RECOVERY_TIMEOUT_MS, `Yandex direct recovery exceeded ${YANDEX_DIRECT_RECOVERY_TIMEOUT_MS} ms`);
+      const remaining = Math.max(1, YANDEX_DIRECT_RECOVERY_TIMEOUT_MS - (Date.now() - startedAt));
+      const bytes = await readBytesBounded(direct, YANDEX_DIRECT_RECOVERY_MAX_BYTES, remaining);
+      const body = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      const headers = new Headers(direct.headers);
+      headers.delete("content-encoding");
+      headers.delete("content-length");
+      headers.delete("transfer-encoding");
+      headers.set("x-ratings-route", "yandex-agent-direct");
+      const bodyBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+      if ([404, 410].includes(direct.status)) {
+        return new Response(bodyBuffer, { status: direct.status, headers });
+      }
+      const completeModelXml = direct.ok &&
+        /(?:application|text)\/(?:[\w.+-]*\+)?xml/iu.test(headers.get("content-type") ?? "") &&
+        proveCompleteYandexModelSitemap(body, request.url).ok;
+      return completeModelXml ? new Response(bodyBuffer, { status: direct.status, headers }) : undefined;
+    } catch (error) {
+      if (request.signal.aborted) throw error;
+      return undefined;
+    } finally {
+      attemptAbort.abort();
+    }
+  };
+  const tryYandexDirectRecovery = async (request: Request): Promise<Response | undefined> => {
+    if (yandexDirectRecoveryAvailable === false) return undefined;
+    if (yandexDirectRecoveryAvailable === true) {
+      const response = await fetchYandexDirectRecovery(request);
+      if (!response) yandexDirectRecoveryAvailable = false;
+      return response;
+    }
+    if (!yandexDirectRecoveryProbe) {
+      yandexDirectRecoveryProbe = fetchYandexDirectRecovery(request);
+      try {
+        const response = await yandexDirectRecoveryProbe;
+        yandexDirectRecoveryAvailable = Boolean(response);
+        return response;
+      } finally {
+        yandexDirectRecoveryProbe = undefined;
+      }
+    }
+    const available = Boolean(await yandexDirectRecoveryProbe);
+    if (!available) return undefined;
+    yandexDirectRecoveryAvailable = true;
+    return fetchYandexDirectRecovery(request);
+  };
   const fetchVaptekeViaStaticProxy = async (request: Request) => {
     const url = new URL(request.url);
     if (request.method !== "POST" || url.pathname !== "/ajax/autocomplete") {
@@ -745,7 +805,7 @@ export function browserFetch(
     return wildberriesPage;
   };
   const routedFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const request = new Request(input, init);
+    let request = new Request(input, init);
     const url = new URL(request.url);
     const host = url.hostname.toLocaleLowerCase("en-US").replace(/^www\./, "");
     const fixedYandexBatchTarget = staticProxy && request.method === "POST" &&
@@ -1213,6 +1273,18 @@ export function browserFetch(
         if (proxied) return proxied;
         throw error;
       }
+    }
+    if (staticProxy && fixedYandexTarget && request.headers.get("x-ratings-yandex-direct-recovery") === "1") {
+      // Probe the free Agent egress once per run before paying for Sandbox.
+      // Complete XML is still parsed and proven by the adapter. A timeout,
+      // malformed body or transient response disables this route for the rest
+      // of the run, after which the existing serial Yandex browser lane owns
+      // recovery without repeating the failed probe for every shard.
+      const direct = await tryYandexDirectRecovery(request);
+      if (direct) return direct;
+      const browserHeaders = new Headers(request.headers);
+      browserHeaders.set("x-ratings-browser", "1");
+      request = new Request(request, { headers: browserHeaders });
     }
     if (staticProxy && fixedYandexTarget && request.headers.get("x-ratings-yandex-direct-recovery") !== "1") {
       // EdgeOne's direct egress can leave an exact Yandex sitemap or product

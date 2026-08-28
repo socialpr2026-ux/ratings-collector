@@ -74,6 +74,57 @@ describe("Megamarket translated SSR adapter", () => {
     })).resolves.toMatchObject({ ok: true, message: "megamarket.ru: operative discovery found 1 product card(s)" });
   });
 
+  it("reuses one successful run-scoped search between health and discovery", async () => {
+    const source = "https://megamarket.ru/catalog/?q=%D0%A6%D0%B5%D1%80%D0%B5%D1%82%D0%BE%D0%BD";
+    const fetchMock = vi.fn(async () => new Response(megaSearch(source)
+      .replaceAll("Оциллококцинум", "Церетон")
+      .replaceAll("ocillokokcinum", "cereton"))) as unknown as typeof fetch;
+    const adapter = new MegamarketAdapter(new MemoryEvidenceStore(), fetchMock);
+    const runContext = { ...context, runId: "megamarket-single-flight", brands: ["Церетон"] };
+
+    await expect(adapter.healthCheck(runContext)).resolves.toMatchObject({ ok: true });
+    await expect(adapter.discover("Церетон", runContext)).resolves.toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("merges a historical exact card after a health cache hit", async () => {
+    const source = "https://megamarket.ru/catalog/?q=%D0%A6%D0%B5%D1%80%D0%B5%D1%82%D0%BE%D0%BD";
+    const fetchMock = vi.fn(async () => new Response(megaSearch(source)
+      .replaceAll("Оциллококцинум", "Церетон")
+      .replaceAll("ocillokokcinum", "cereton"))) as unknown as typeof fetch;
+    const adapter = new MegamarketAdapter(new MemoryEvidenceStore(), fetchMock);
+    const runContext = { ...context, runId: "megamarket-history-cache", brands: ["Церетон"] };
+    await adapter.healthCheck(runContext);
+
+    const refs = await adapter.discover("Церетон", {
+      ...runContext,
+      previousRefs: [{
+        listingId: "100024509999",
+        url: "https://megamarket.ru/catalog/details/cereton-history-100024509999/"
+      }]
+    });
+
+    expect(refs.map((ref) => ref.listingId)).toEqual(["100024501619", "100024509999"]);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("never caches a blocked Megamarket discovery", async () => {
+    const source = "https://megamarket.ru/catalog/?q=%D0%A6%D0%B5%D1%80%D0%B5%D1%82%D0%BE%D0%BD";
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response("temporary gateway failure", { status: 502 })
+        : new Response(megaSearch(source).replaceAll("Оциллококцинум", "Церетон").replaceAll("ocillokokcinum", "cereton"));
+    }) as unknown as typeof fetch;
+    const adapter = new MegamarketAdapter(new MemoryEvidenceStore(), fetchMock);
+    const runContext = { ...context, runId: "megamarket-no-failure-cache", brands: ["Церетон"] };
+
+    await expect(adapter.healthCheck(runContext)).resolves.toMatchObject({ ok: false });
+    await expect(adapter.discover("Церетон", runContext)).resolves.toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("deduplicates seller offers by goods id and collects the product review aggregate", async () => {
     const sourceSearch = "https://megamarket.ru/catalog/?q=%D0%9E%D1%86%D0%B8%D0%BB%D0%BB%D0%BE%D0%BA%D0%BE%D0%BA%D1%86%D0%B8%D0%BD%D1%83%D0%BC";
     const productSource = "https://megamarket.ru/catalog/details/ocillokokcinum-granuly-1-g-1-doz-12-sht-100024501619/";

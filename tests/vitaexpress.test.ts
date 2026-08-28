@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AdapterBlockedError, ParserChangedError } from "../src/server/adapters/errors.js";
+import { AdapterBlockedError, AdapterQuotaError, ParserChangedError } from "../src/server/adapters/errors.js";
 import { VitaExpressAdapter } from "../src/server/adapters/vitaexpress.js";
 import { MemoryEvidenceStore } from "../src/server/evidence.js";
 
@@ -400,6 +400,32 @@ describe("VitaExpressAdapter", () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(evidence.items.size).toBe(1);
+  });
+
+  it("retries one transient Kagocel family 502 without losing exact family proof", async () => {
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response("temporary gateway failure; Лимит покупки — 2 упаковки", { status: 502 })
+        : new Response(familyPage(), { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+    }) as unknown as typeof fetch;
+    const adapter = new VitaExpressAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    await expect(adapter.discover(KAGOCEL_FAMILY.brand, { ...CONTEXT, runId: "kagocel-transient-502" }))
+      .resolves.toMatchObject([{ listingId: KAGOCEL_FAMILY.id }]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a typed quota while loading the Kagocel family", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new AdapterQuotaError("Monthly sandbox quota exceeded");
+    }) as unknown as typeof fetch;
+    const adapter = new VitaExpressAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    await expect(adapter.discover(KAGOCEL_FAMILY.brand, { ...CONTEXT, runId: "kagocel-quota" }))
+      .rejects.toBeInstanceOf(AdapterQuotaError);
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("collects the live-proven Ingavirin family registry as one aggregate row", async () => {

@@ -95,6 +95,14 @@ function ref(id: string, brand: string) {
 }
 
 describe("MaksavitAdapter", () => {
+  it("fails closed for a brand outside the bounded exact registry", async () => {
+    const fetchMock = exactFetch();
+    const adapter = new MaksavitAdapter(new MemoryEvidenceStore(), fetchMock);
+
+    await expect(adapter.discover("Новый бренд", CONTEXT)).rejects.toBeInstanceOf(ParserChangedError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("discovers the complete bounded exact 4/2/1/1/1 product set", async () => {
     const fetchMock = exactFetch();
     const adapter = new MaksavitAdapter(new MemoryEvidenceStore(), fetchMock);

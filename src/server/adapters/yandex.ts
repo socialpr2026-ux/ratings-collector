@@ -6,10 +6,10 @@ import type {
   ProductRef,
   SiteAdapter
 } from "../../shared/types.js";
-import { isKnownYandexIndexTombstoneSitemap } from "../../shared/yandex-sitemaps.js";
+import { isKnownYandexIndexTombstoneSitemap, proveCompleteYandexModelSitemap } from "../../shared/yandex-sitemaps.js";
 import { isSourceBoundYandexCard } from "../../shared/yandex-source.js";
 import { aliasesForBrand, matchesBrand, normalizeRating, normalizeText } from "../utils/normalize.js";
-import { readTextBounded } from "../utils/safe-fetch.js";
+import { readBytesBounded, readTextBounded } from "../utils/safe-fetch.js";
 import { canonicalizeUrl } from "../utils/urls.js";
 import { extractPageProductEvidence, titleProvesProductVariant } from "../utils/product-evidence.js";
 import { analyzeProductIdentity } from "../utils/product-name.js";
@@ -911,8 +911,7 @@ export class YandexAdapter implements SiteAdapter {
           if (delayMs > 0) await this.sleep(delayMs);
           context.signal?.throwIfAborted();
           if (directRecoverySupported) {
-            const directFailures: PendingGatewayChunk[] = [];
-            for (const item of failed) {
+            const recoveryResults = await mapWithConcurrency(failed, YANDEX_BATCH_CONCURRENCY, async (item) => {
               try {
                 await processDirectRecovery(item.sitemaps[0]!);
                 completedSitemaps += 1;
@@ -930,13 +929,17 @@ export class YandexAdapter implements SiteAdapter {
                     detail: `Проверено карт индекса: ${completedSitemaps} из ${resume.totalSitemaps}`
                   });
                 }
+                return undefined;
               } catch (error) {
                 if (callerAborted || batchAbort.signal.aborted) {
                   throw context.signal?.reason ?? error;
                 }
-                directFailures.push({ ...item, error });
+                return { ...item, error };
               }
-            }
+            });
+            const directFailures = recoveryResults
+              .filter((item) => item !== undefined)
+              .sort((left, right) => left.index - right.index);
             if (directFailures.length === 0) {
               failure = undefined;
               await reportActivity(context, {
@@ -1501,7 +1504,8 @@ export class YandexAdapter implements SiteAdapter {
           response,
           this.maxDocumentBytes,
           url,
-          this.sitemapReadTimeoutMs
+          this.sitemapReadTimeoutMs,
+          true
         );
         if (looksBlocked(xml)) {
           throw new AdapterBlockedError(`Yandex blocked ${kind === "index" ? "sitemap index access" : `model sitemap ${url}`}`);
@@ -1635,13 +1639,22 @@ async function readBoundedBody(
   response: Response,
   maxBytes: number,
   url: string,
-  timeoutMs?: number
+  timeoutMs?: number,
+  fatalUtf8 = false
 ): Promise<string> {
   const contentLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(contentLength) && contentLength > maxBytes) {
     throw new ParserChangedError(`Yandex response exceeds the ${maxBytes}-byte safety limit: ${url}`);
   }
   try {
+    if (fatalUtf8) {
+      const bytes = await readBytesBounded(response, maxBytes, timeoutMs);
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        throw new ParserChangedError(`Yandex response is not valid UTF-8: ${url}`);
+      }
+    }
     return await readTextBounded(response, maxBytes, timeoutMs);
   } catch (error) {
     if ((error as Error).message.includes("превышает лимит")) {
@@ -1696,29 +1709,8 @@ function isAllowedYandexSitemapUrl(url: URL): boolean {
 }
 
 function assertCompleteModelSitemap(xml: string, sitemap: string): void {
-  const requested = new URL(sitemap);
-  const range = requested.pathname.match(/sitemap_model_(\d+)-(\d+)-\d+\.xml/i);
-  const locations = parseXmlLocs(xml);
-  const declared = xml.match(/<url\b/gi)?.length ?? 0;
-  if (!range || locations.length !== declared || new Set(locations).size !== locations.length) {
-    throw new ParserChangedError(`Yandex model sitemap is incomplete: ${sitemap}`);
-  }
-  const minimumId = BigInt(range[1]!);
-  const maximumId = BigInt(range[2]!);
-  for (const location of locations) {
-    let product: URL;
-    try { product = new URL(location); }
-    catch { throw new ParserChangedError(`Yandex model sitemap contains an invalid URL: ${sitemap}`); }
-    const modelId = product.pathname.match(/^\/product\/(?:[a-z0-9][a-z0-9_-]*)?--(\d+)$/i)?.[1];
-    if (product.protocol !== "https:" || product.hostname !== "reviews.yandex.ru" || product.port ||
-      product.username || product.password || product.search || product.hash || !modelId) {
-      throw new ParserChangedError(`Yandex model sitemap contains an unknown product route: ${sitemap}`);
-    }
-    const numericId = BigInt(modelId);
-    if (numericId < minimumId || numericId > maximumId) {
-      throw new ParserChangedError(`Yandex model sitemap contains a cross-range product: ${sitemap}`);
-    }
-  }
+  const proof = proveCompleteYandexModelSitemap(xml, sitemap);
+  if (!proof.ok) throw new ParserChangedError(`Yandex model sitemap ${proof.reason}: ${sitemap}`);
 }
 
 function isAllowedProductUrl(input: string): boolean {

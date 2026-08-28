@@ -174,7 +174,9 @@ export class MaksavitAdapter implements SiteAdapter {
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const ids = expectedIds(brand);
-    if (!ids) return [];
+    if (!ids) {
+      throw new ParserChangedError(`${DOMAIN}: brand ${brand} is outside the bounded exact registry`);
+    }
 
     const pages = await Promise.all(ids.map((listingId) => this.page(listingId, context)));
     return pages.map((page, index) => {

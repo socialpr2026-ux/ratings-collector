@@ -1756,7 +1756,7 @@ describe("run orchestration and fail-closed QA", () => {
   it("keeps a fully proved dedicated aggregate ready without manual review", async () => {
     const domain = "irecommend.ru";
     const aggregateRequest = { ...request, domains: [domain] };
-    const makeService = (profileVersion?: number) => new RatingsService(new MemoryRepository(), async () => ({
+    const makeService = (profileVersion?: number, productForBrand = (brand: string) => `${brand} отзывы`) => new RatingsService(new MemoryRepository(), async () => ({
       id: profileVersion === undefined ? "dedicated-aggregate" : "generic-aggregate",
       supportedDomains: [domain],
       async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
@@ -1766,7 +1766,7 @@ describe("run orchestration and fail-closed QA", () => {
       async collect(ref: ProductRef): Promise<Observation> {
         return {
           domain, platform: domain, listingId: ref.listingId, brand: ref.brand,
-          canonicalUrl: ref.url, product: `${ref.brand} отзывы`, reviews: 12, rating: 4.8,
+          canonicalUrl: ref.url, product: productForBrand(ref.brand), reviews: 12, rating: 4.8,
           status: "ok", capturedAt: new Date().toISOString(), evidenceRef: "memory://aggregate-proof",
           source: "json-ld", ...(profileVersion === undefined ? {} : { profileVersion }),
           productEvidence: {
@@ -1781,13 +1781,21 @@ describe("run orchestration and fail-closed QA", () => {
     const ready = await dedicated.executeRun((await dedicated.createRun(aggregateRequest)).id);
     expect(ready).toMatchObject({ qa: { ok: true, blockers: [] }, observations: [{ status: "ok" }] });
 
+    for (const title of ["Противовирусные средства Кагоцел", "Противовирусный препарат Кагоцел отзывы"]) {
+      const category = makeService(undefined, () => title);
+      const categoryRun = await category.executeRun((await category.createRun({
+        ...aggregateRequest, brands: ["Кагоцел"]
+      })).id);
+      expect(categoryRun.observations[0]).toMatchObject({ product: title, status: "ok" });
+    }
+
     const generic = makeService(1);
     const review = await generic.executeRun((await generic.createRun(aggregateRequest)).id);
     expect(review.observations[0].status).toBe("needs_review");
     expect(review.qa?.ok).toBe(false);
   });
 
-  it("auto-accepts separate source-bound review pages even when a family label looks like a collapsed line", async () => {
+  it("keeps an unverified named review line manual while accepting the proven brand family", async () => {
     const domain = "vseotzyvy.ru";
     const brand = "Kagocel";
     const service = new RatingsService(new MemoryRepository(), async () => ({
@@ -1797,7 +1805,7 @@ describe("run orchestration and fail-closed QA", () => {
       async discover(): Promise<ProductRef[]> {
         return [
           { domain, platform: domain, listingId: "49555", brand, url: `https://${domain}/item/49555/reviews-kagocel/`, title: brand, metadata: {} },
-          { domain, platform: domain, listingId: "59343", brand, url: `https://${domain}/item/59343/reviews-kagocel-forte/`, title: `${brand} Forte`, metadata: {} }
+          { domain, platform: domain, listingId: "59343", brand, url: `https://${domain}/item/59343/reviews-kagocel-forte/`, title: `${brand} Forte tablets`, metadata: {} }
         ];
       },
       async collect(ref: ProductRef): Promise<Observation> {
@@ -1807,7 +1815,8 @@ describe("run orchestration and fail-closed QA", () => {
           rating: ref.listingId === "59343" ? 4.9 : 5, status: "ok", capturedAt: new Date().toISOString(),
           evidenceRef: `${ref.url}#aggregate-rating`, source: "vseotzyvy-product-aggregate",
           productEvidence: {
-            scope: "product_family", signals: [{ source: "title", text: ref.title! }], variants: [],
+            scope: "product_family", signals: [{ source: "title", text: ref.title! }],
+            variants: ref.listingId === "59343" ? [ref.title!] : [],
             identifiers: [{ type: "product_id", value: ref.listingId }], imageUrls: [], instructionUrls: []
           }
         };
@@ -1818,9 +1827,9 @@ describe("run orchestration and fail-closed QA", () => {
 
     expect(run.observations).toHaveLength(2);
     expect(run.observations.map((item) => [item.listingId, item.status])).toEqual([
-      ["49555", "ok"], ["59343", "ok"]
+      ["49555", "ok"], ["59343", "needs_review"]
     ]);
-    expect(run.qa).toMatchObject({ ok: true, blockers: [] });
+    expect(run.qa?.ok).toBe(false);
   });
 
   it.each([

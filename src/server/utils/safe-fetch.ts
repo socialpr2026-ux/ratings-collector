@@ -133,6 +133,14 @@ export async function readTextBounded(
   maxBytes: number,
   timeoutMs = DEFAULT_OUTBOUND_TIMEOUT_MS
 ): Promise<string> {
+  return new TextDecoder().decode(await readBytesBounded(response, maxBytes, timeoutMs));
+}
+
+export async function readBytesBounded(
+  response: Response,
+  maxBytes: number,
+  timeoutMs = DEFAULT_OUTBOUND_TIMEOUT_MS
+): Promise<Uint8Array> {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) {
     throw new Error("Некорректный таймаут чтения ответа");
   }
@@ -141,7 +149,7 @@ export async function readTextBounded(
     await response.body?.cancel(`Ответ превышает лимит ${maxBytes} байт`).catch(() => undefined);
     throw new Error(`Ответ превышает лимит ${maxBytes} байт`);
   }
-  if (!response.body) return "";
+  if (!response.body) return new Uint8Array();
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -167,5 +175,5 @@ export async function readTextBounded(
   const bytes = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  return new TextDecoder().decode(bytes);
+  return bytes;
 }

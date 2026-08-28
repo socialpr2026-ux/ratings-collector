@@ -13,7 +13,9 @@ import {
   runWithRenewableLease,
   STATIC_PROXY_MAX_BYTES,
   STATIC_PROXY_REQUEST_TIMEOUT_MS,
-  YANDEX_BATCH_GATEWAY_TIMEOUT_MS
+  YANDEX_BATCH_GATEWAY_TIMEOUT_MS,
+  YANDEX_DIRECT_RECOVERY_MAX_BYTES,
+  YANDEX_DIRECT_RECOVERY_TIMEOUT_MS
 } from "../agents/ratings/index.js";
 import { AdapterBlockedError, AdapterQuotaError } from "../src/server/adapters/errors.js";
 import { VaptekeAdapter } from "../src/server/adapters/vapteke.js";
@@ -2037,6 +2039,124 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(translatedRequest.pathname).toBe("/search");
     expect(translatedRequest.searchParams.get("text")).toBe("Энтеролактис");
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("uses complete free Agent-direct XML before Yandex browser recovery", async () => {
+    const run = vi.fn(async () => undefined);
+    const target = "https://reviews.yandex.ru/ugcpub/sitemap_model_1790000000-1799999999-0.xml";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const request = input instanceof Request ? input : new Request(input);
+      expect(request.url).toBe(target);
+      expect(request.headers.get("x-ratings-yandex-direct-recovery")).toBe("1");
+      return new Response(
+        `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://reviews.yandex.ru/product/kagotsel--1792372750</loc></url></urlset>`,
+        { headers: { "content-type": "application/xml; charset=utf-8" } }
+      );
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    const response = await routedFetch(target, {
+      headers: { "x-ratings-yandex-direct-recovery": "1" }
+    });
+
+    expect(response.ok).toBe(true);
+    expect(response.headers.get("x-ratings-route")).toBe("yandex-agent-direct");
+    expect(await response.text()).toContain("kagotsel--1792372750");
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(run).not.toHaveBeenCalled();
+    expect(YANDEX_DIRECT_RECOVERY_TIMEOUT_MS).toBeLessThan(STATIC_PROXY_REQUEST_TIMEOUT_MS);
+    expect(YANDEX_DIRECT_RECOVERY_MAX_BYTES).toBeLessThan(STATIC_PROXY_MAX_BYTES);
+  });
+
+  it.each([
+    ["wrapped XML", `<html><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset></html>`],
+    ["cross-range XML", `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` +
+      `<url><loc>https://reviews.yandex.ru/product/kagotsel--260000000</loc></url></urlset>`],
+    ["non-UTF-8 declaration", `<?xml version="1.0" encoding="UTF-16"?>` +
+      `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>`]
+  ])("falls through to protected browser recovery for %s", async (_case, xml) => {
+    const run = vi.fn(async () => { throw new Error("Sandbox quota exceeded"); });
+    const directFetch = vi.fn(async () => new Response(xml, {
+      headers: { "content-type": "application/xml; charset=utf-8" }
+    }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const target = "https://reviews.yandex.ru/ugcpub/sitemap_model_0-9999999-0.xml";
+
+    await expect(routedFetch(target, {
+      headers: { "x-ratings-yandex-direct-recovery": "1" }
+    })).rejects.toBeInstanceOf(AdapterQuotaError);
+
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("falls through to protected browser recovery for invalid UTF-8 direct bytes", async () => {
+    const prefix = new TextEncoder().encode(
+      `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><!--`
+    );
+    const suffix = new TextEncoder().encode(`--></urlset>`);
+    const bytes = new Uint8Array(prefix.length + 1 + suffix.length);
+    bytes.set(prefix);
+    bytes[prefix.length] = 0xFF;
+    bytes.set(suffix, prefix.length + 1);
+    const directFetch = vi.fn(async () => new Response(bytes, {
+      headers: { "content-type": "application/xml; charset=utf-8" }
+    }));
+    vi.stubGlobal("fetch", directFetch);
+    const run = vi.fn(async () => { throw new Error("Sandbox quota exceeded"); });
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const target = "https://reviews.yandex.ru/ugcpub/sitemap_model_0-9999999-0.xml";
+
+    await expect(routedFetch(target, {
+      headers: { "x-ratings-yandex-direct-recovery": "1" }
+    })).rejects.toBeInstanceOf(AdapterQuotaError);
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("aborts one stalled direct canary and sticky-disables it for the run", async () => {
+    vi.useFakeTimers();
+    let aborted = false;
+    const directFetch = vi.fn((input: RequestInfo | URL) => {
+      const request = input instanceof Request ? input : new Request(input);
+      return new Promise<Response>((_resolve, reject) => {
+        request.signal.addEventListener("abort", () => {
+          aborted = true;
+          reject(request.signal.reason);
+        }, { once: true });
+      });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const run = vi.fn(async () => { throw new Error("Sandbox quota exceeded"); });
+    const routedFetch = browserFetch(sandbox(run), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const target = "https://reviews.yandex.ru/ugcpub/sitemap_model_0-9999999-0.xml";
+    const first = expect(routedFetch(target, {
+      headers: { "x-ratings-yandex-direct-recovery": "1" }
+    })).rejects.toBeInstanceOf(AdapterQuotaError);
+
+    await vi.advanceTimersByTimeAsync(YANDEX_DIRECT_RECOVERY_TIMEOUT_MS + 1);
+    await first;
+    await expect(routedFetch(target, {
+      headers: { "x-ratings-yandex-direct-recovery": "1" }
+    })).rejects.toBeInstanceOf(AdapterQuotaError);
+
+    expect(aborted).toBe(true);
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledOnce();
   });
 
   it("recovers Polza through one bounded direct Translate request after fixed egress 502", async () => {

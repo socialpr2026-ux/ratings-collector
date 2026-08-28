@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { load } from "cheerio";
 import type { AdapterContext, AdapterHealth, Observation, ProductRef, SiteAdapter } from "../../shared/types.js";
 import type { EvidenceStore } from "../evidence.js";
-import { matchesBrand } from "../utils/normalize.js";
+import { matchesBrand, normalizeText } from "../utils/normalize.js";
 import { titleProductEvidence } from "../utils/product-evidence.js";
 import { readTextBounded, safeFetch } from "../utils/safe-fetch.js";
 import { canonicalizeUrl } from "../utils/urls.js";
@@ -103,6 +103,7 @@ async function requestHtml(url: URL, context: AdapterContext, fetchImpl: typeof 
 export class MegamarketAdapter implements SiteAdapter {
   readonly id = "megamarket:translated-ssr-v1";
   readonly supportedDomains = [DOMAIN] as const;
+  private readonly successfulDiscoveries = new Map<string, Promise<{ refs: ProductRef[]; explicitEmpty: boolean }>>();
 
   constructor(private readonly evidence: EvidenceStore, private readonly fetchImpl: typeof fetch = fetch) {}
 
@@ -120,6 +121,42 @@ export class MegamarketAdapter implements SiteAdapter {
   }
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
+    const current = await this.currentDiscovery(brand, context);
+    const refs = new Map(current.refs.map((ref) => [ref.listingId, { ...ref, metadata: { ...ref.metadata } }]));
+    for (const previous of context.previousRefs ?? []) {
+      const parsed = productFromUrl(previous.url);
+      if (!parsed || parsed.id !== previous.listingId || refs.has(parsed.id)) continue;
+      refs.set(parsed.id, {
+        domain: DOMAIN, platform: DOMAIN, listingId: parsed.id, brand, url: parsed.url,
+        metadata: { source: "historical-registry" }
+      });
+    }
+    if (!refs.size && !current.explicitEmpty) {
+      throw new AdapterBlockedError(`${DOMAIN}: search did not prove products or their absence`);
+    }
+    return [...refs.values()];
+  }
+
+  private currentDiscovery(brand: string, context: AdapterContext): Promise<{ refs: ProductRef[]; explicitEmpty: boolean }> {
+    if (!context.runId) return this.loadDiscovery(brand, context);
+    const key = `${context.runId}:${normalizeText(brand)}`;
+    const cached = this.successfulDiscoveries.get(key);
+    if (cached) return cached;
+    let pending!: Promise<{ refs: ProductRef[]; explicitEmpty: boolean }>;
+    pending = this.loadDiscovery(brand, context).catch((error) => {
+      if (this.successfulDiscoveries.get(key) === pending) this.successfulDiscoveries.delete(key);
+      throw error;
+    });
+    this.successfulDiscoveries.set(key, pending);
+    while (this.successfulDiscoveries.size > 8) {
+      const oldest = this.successfulDiscoveries.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.successfulDiscoveries.delete(oldest);
+    }
+    return pending;
+  }
+
+  private async loadDiscovery(brand: string, context: AdapterContext): Promise<{ refs: ProductRef[]; explicitEmpty: boolean }> {
     const refs = new Map<string, ProductRef>();
     let explicitEmpty = false;
     for (let page = 1; page <= MAX_PAGES; page += 1) {
@@ -166,18 +203,7 @@ export class MegamarketAdapter implements SiteAdapter {
       if (page === MAX_PAGES) throw new AdapterBlockedError(`${DOMAIN}: pagination exceeded ${MAX_PAGES} pages`);
       if (pageRefs.size === 0) throw new ParserChangedError(`${DOMAIN}: pagination declared more pages without product cards`);
     }
-    for (const previous of context.previousRefs ?? []) {
-      const parsed = productFromUrl(previous.url);
-      if (!parsed || parsed.id !== previous.listingId || refs.has(parsed.id)) continue;
-      refs.set(parsed.id, {
-        domain: DOMAIN, platform: DOMAIN, listingId: parsed.id, brand, url: parsed.url,
-        metadata: { source: "historical-registry" }
-      });
-    }
-    if (!refs.size && !explicitEmpty) {
-      throw new AdapterBlockedError(`${DOMAIN}: search did not prove products or their absence`);
-    }
-    return [...refs.values()];
+    return { refs: [...refs.values()], explicitEmpty };
   }
 
   async collect(ref: ProductRef, context: AdapterContext): Promise<Observation> {

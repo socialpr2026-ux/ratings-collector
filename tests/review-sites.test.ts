@@ -10,6 +10,7 @@ import {
   createReviewSiteAdapters
 } from "../src/server/adapters/review-sites.js";
 import { canConfirmObservation } from "../src/client/review-copy.js";
+import { AdapterBlockedError, AdapterQuotaError } from "../src/server/adapters/errors.js";
 import { analyzeProductIdentity } from "../src/server/utils/product-name.js";
 import { hasDeterministicAggregateProof } from "../src/shared/review-aggregates.js";
 
@@ -26,6 +27,52 @@ function adapterFor(domain: string, fetchImpl: typeof fetch) {
 const context = { region: "Москва" };
 
 describe("first-party review-site adapters", () => {
+  it("retries one transient HTML 502 and preserves the recovered exact result", async () => {
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) return new Response("temporary gateway failure; Лимит покупки — 2 упаковки", { status: 502 });
+      return new Response(`<article><a href="/category/sredstva-kontratseptsii/823742-hloretta.html">Хлорэтта</a></article>`);
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("otzyv.pro", fetchMock);
+
+    await expect(adapter.discover("Хлорэтта", context)).resolves.toMatchObject([{ listingId: "823742" }]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a quota response disguised as HTTP 502", async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      "Monthly sandbox GB-s quota exceeded", { status: 502 }
+    )) as unknown as typeof fetch;
+    const adapter = adapterFor("otzyv.pro", fetchMock);
+
+    await expect(adapter.discover("Хлорэтта", context)).rejects.toBeInstanceOf(AdapterQuotaError);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("does not retry a typed provider quota failure", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new AdapterQuotaError("Monthly sandbox quota exceeded");
+    }) as unknown as typeof fetch;
+    const adapter = adapterFor("otzyv.pro", fetchMock);
+
+    await expect(adapter.discover("Хлорэтта", context)).rejects.toBeInstanceOf(AdapterQuotaError);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("does not retry a deterministic typed block or violate a long Retry-After", async () => {
+    const typedBlock = vi.fn(async () => { throw new AdapterBlockedError("SSRF destination is forbidden"); }) as unknown as typeof fetch;
+    await expect(adapterFor("otzyv.pro", typedBlock).discover("Хлорэтта", context))
+      .rejects.toBeInstanceOf(AdapterBlockedError);
+    expect(typedBlock).toHaveBeenCalledOnce();
+
+    const throttled = vi.fn(async () => new Response("slow down", {
+      status: 429, headers: { "retry-after": "120" }
+    })) as unknown as typeof fetch;
+    await expect(adapterFor("otzyv.pro", throttled).discover("Хлорэтта", context)).rejects.toThrow(/HTTP 429/);
+    expect(throttled).toHaveBeenCalledOnce();
+  });
+
   it("uses lowercase raw percent escapes for the live otzyv.pro search", async () => {
     let rawSearch = "";
     const adapter = adapterFor("otzyv.pro", vi.fn(async (input: RequestInfo | URL) => {

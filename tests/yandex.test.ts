@@ -870,11 +870,17 @@ describe("YandexAdapter discovery", () => {
       `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
     );
     const directSitemaps: string[] = [];
+    let activeDirect = 0;
+    let maxActiveDirect = 0;
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : input.toString();
       if (url === INDEX) return xmlResponse(sitemapIndex(maps));
       if (maps.includes(url) && new Headers(init?.headers).get("x-ratings-yandex-direct-recovery") === "1") {
         directSitemaps.push(url);
+        activeDirect += 1;
+        maxActiveDirect = Math.max(maxActiveDirect, activeDirect);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        activeDirect -= 1;
         return xmlResponse(modelSitemap([]));
       }
       if (url !== batchEndpoint) throw new Error(`Unexpected request: ${url}`);
@@ -897,6 +903,7 @@ describe("YandexAdapter discovery", () => {
     expect(gatewayCalls.length).toBeGreaterThanOrEqual(4);
     expect(gatewayCalls.length).toBeLessThan(maps.length);
     expect(new Set(directSitemaps)).toEqual(new Set(maps));
+    expect(maxActiveDirect).toBe(2);
   });
 
   it("propagates the caller deadline instead of returning partial sitemap matches", async () => {
@@ -1505,6 +1512,27 @@ describe("YandexAdapter discovery", () => {
       sitemapRetryAttempts: 3,
       sitemapRetryBaseMs: 0
     });
+
+    await expect(adapter.discover("kagotsel", context())).rejects.toBeInstanceOf(ParserChangedError);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects invalid UTF-8 sitemap bytes without retrying or accepting replacement characters", async () => {
+    const prefix = new TextEncoder().encode(
+      `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><!--`
+    );
+    const suffix = new TextEncoder().encode(
+      `--><url><loc>https://reviews.yandex.ru/product/kagotsel--111</loc></url></urlset>`
+    );
+    const bytes = new Uint8Array(prefix.length + 1 + suffix.length);
+    bytes.set(prefix);
+    bytes[prefix.length] = 0xFF;
+    bytes.set(suffix, prefix.length + 1);
+    const fetch = routeFetch({
+      [INDEX]: xmlResponse(sitemapIndex([MAP_A])),
+      [MAP_A]: new Response(bytes, { headers: { "content-type": "application/xml" } })
+    });
+    const adapter = new YandexAdapter({ fetch, sitemapRetryAttempts: 3, sitemapRetryBaseMs: 0 });
 
     await expect(adapter.discover("kagotsel", context())).rejects.toBeInstanceOf(ParserChangedError);
     expect(fetch).toHaveBeenCalledTimes(2);
@@ -2326,7 +2354,7 @@ function sitemapIndexWithLastmod(entries: Array<[url: string, lastmod: string]>)
 }
 
 function modelSitemap(urls: string[]): string {
-  return `<?xml version="1.0"?><urlset>${urls.map((url) => `<url><loc><![CDATA[${url}]]></loc></url>`).join("")}</urlset>`;
+  return `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.map((url) => `<url><loc><![CDATA[${url}]]></loc></url>`).join("")}</urlset>`;
 }
 
 function productHtml({ canonical, product }: { canonical: string; product: unknown }): string {

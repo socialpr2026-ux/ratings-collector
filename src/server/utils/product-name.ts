@@ -302,6 +302,24 @@ function normalizeKnownProductEquivalence(
     };
   }
 
+  // Current official Kagocel presentations are 12 mg tablets in packs of
+  // 10, 20 or 30. Some marketplace/review titles also expose "16 g" as a
+  // logistics/package-weight field. It is not a drug strength and must not
+  // split the same official SKU into another product. Keep this deliberately
+  // brand-, form-, strength- and pack-bound so legitimate gram strengths for
+  // other products remain untouched.
+  const kagocelPackageWeight = normalizedBrand === "кагоцел" &&
+    parts.form === "таблетки" &&
+    parts.count !== undefined && [10, 20, 30].includes(parts.count) &&
+    parts.doses.some((dose) => normalizeText(dose) === "12 мг") &&
+    parts.doses.some((dose) => normalizeText(dose) === "16 г");
+  if (kagocelPackageWeight) {
+    return {
+      form: parts.form,
+      doses: parts.doses.filter((dose) => normalizeText(dose) !== "16 г")
+    };
+  }
+
   // Oscillococcinum's sellable tube dose is consistently catalogued as either
   // "1 dose", "1 g" or "1000 mg".  Normalize only when one of those values is
   // present on the current listing. A bare "granules No.12" remains bare: this
