@@ -352,6 +352,34 @@ describe("Ozon browser collector", () => {
       .resolves.toHaveLength(3);
   });
 
+  it("recovers Baktoblis through its verified category when the translated entry search is transiently blocked", async () => {
+    const paths: string[] = [];
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      const endpoint = new URL(String(input));
+      const source = sourceUrlFromTranslate(endpoint);
+      paths.push(source.pathname);
+      if (source.pathname === "/search/") return new Response("temporary failure", { status: 502 });
+      if (source.pathname.startsWith("/product/")) {
+        return new Response(translatedProductHtml(
+          source, "152369287", "BaktoBLIS+ lozenges No. 30", 4.9, 6894
+        ), { headers: { "content-type": "text/html; charset=utf-8" } });
+      }
+      expect(source.pathname).toBe("/category/bady-6183/baktoblis-100260712/");
+      expect(source.searchParams.get("category_was_predicted")).toBe("true");
+      expect(source.searchParams.get("text")).toBe("Бактоблис");
+      return new Response(translatedHtml(source, [
+        translatedTile("152369287", "BaktoBLIS+ lozenges No. 30", "4.9", 6894)
+      ], 1), { headers: { "content-type": "text/html; charset=utf-8" } });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({ fetch, detailDelayMs: 0 });
+
+    const refs = await adapter.discover("Бактоблис", { ...context, brands: ["Бактоблис"] });
+
+    expect(paths.slice(0, 2)).toEqual(["/search/", "/category/bady-6183/baktoblis-100260712/"]);
+    expect(paths[2]).toMatch(/^\/product\//);
+    expect(refs).toMatchObject([{ listingId: "152369287", title: "BaktoBLIS+ lozenges No. 30" }]);
+  });
+
   it("exhausts both Biviart query paginations, merges duplicate SKUs, and excludes foreign alias results", async () => {
     const brand = "\u0411\u0438\u0432\u0438\u0430\u0440\u0442";
     const searchCalls: string[] = [];

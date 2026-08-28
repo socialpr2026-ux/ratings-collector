@@ -33,6 +33,14 @@ const DISCOVERY_QUERY_ALIASES: Readonly<Record<string, readonly string[]>> = {
   "\u043a\u0430\u0433\u043e\u0446\u0435\u043b": ["Kagocel", "Kagotsel"]
 };
 
+/** Exact Ozon brand-prediction crosswalks observed from a source-bound redirect. */
+const VERIFIED_CATEGORY_PATHS: Readonly<Record<string, { path: string; verifiedAt: string }>> = {
+  "бактоблис": {
+    path: "/category/bady-6183/baktoblis-100260712/",
+    verifiedAt: "2026-08-28"
+  }
+};
+
 type ExactProductSeed = Pick<SearchTile, "listingId" | "title" | "url">;
 
 const EXACT_PRODUCT_SEEDS: Readonly<Record<string, readonly ExactProductSeed[]>> = {
@@ -103,6 +111,19 @@ function discoveryQueries(brand: string): string[] {
 
 function exactProductSeeds(brand: string): readonly ExactProductSeed[] {
   return EXACT_PRODUCT_SEEDS[brand.normalize("NFKC").toLocaleLowerCase("ru-RU").trim()] ?? [];
+}
+
+function verifiedCategoryTarget(brand: string, page: number): URL | undefined {
+  const entry = VERIFIED_CATEGORY_PATHS[brand.normalize("NFKC").toLocaleLowerCase("ru-RU").trim()];
+  if (!entry) return undefined;
+  const target = new URL(entry.path, "https://www.ozon.ru");
+  target.searchParams.set("brand_was_predicted", "true");
+  target.searchParams.set("category_was_predicted", "true");
+  target.searchParams.set("deny_category_prediction", "true");
+  target.searchParams.set("from_global", "true");
+  target.searchParams.set("text", brand);
+  if (page > 1) target.searchParams.set("page", String(page));
+  return target;
 }
 
 function exactAggregateMemberIds(value: string | undefined): string[] | undefined {
@@ -1667,6 +1688,19 @@ export class OzonBrowserAdapter implements SiteAdapter {
           ? error
           : new ParserChangedError(`Ozon translated search failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
       }
+      const verifiedCategory = verifiedCategoryTarget(brand, page);
+      if (verifiedCategory) {
+        try {
+          const translated = await this.fetchTranslatedSearchPage(brand, page, context, stage, verifiedCategory);
+          if (stage === "health_check") this.searchPageCache.set(cacheKey, translated);
+          return translated;
+        } catch (error) {
+          if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
+          translateFailure = error instanceof ParserChangedError || error instanceof AdapterBlockedError
+            ? error
+            : new ParserChangedError(`Ozon verified category failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
     }
 
     try {
@@ -1814,20 +1848,23 @@ export class OzonBrowserAdapter implements SiteAdapter {
     brand: string,
     page: number,
     context: AdapterContext,
-    stage: "health_check" | "discovery"
+    stage: "health_check" | "discovery",
+    initialTarget?: URL
   ): Promise<SearchPage> {
     return withActivity(context, {
-      operationId: `ozon:translate-search:${page}`,
+      operationId: `ozon:translate-${initialTarget ? "verified-category" : "search"}:${page}`,
       stage,
-      label: "Google Translate · выдача Ozon",
+      label: initialTarget ? "Google Translate · проверенная категория Ozon" : "Google Translate · выдача Ozon",
       channels: ["google_translate"],
-      detail: `Страница ${page}`
+      detail: initialTarget
+        ? `Страница ${page} · crosswalk подтверждён ${VERIFIED_CATEGORY_PATHS[brand.normalize("NFKC").toLocaleLowerCase("ru-RU").trim()]?.verifiedAt}`
+        : `Страница ${page}`
     }, async () => {
     const search = new URL("https://www.ozon.ru/search/");
     search.searchParams.set("text", brand);
     search.searchParams.set("from_global", "true");
     if (page > 1) search.searchParams.set("page", String(page));
-    let target = search;
+    let target = initialTarget ?? search;
 
     for (let redirectCount = 0; redirectCount <= MAX_TRANSLATE_REDIRECTS; redirectCount += 1) {
       validateTranslatedTarget(target, brand, page);
