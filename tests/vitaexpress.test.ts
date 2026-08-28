@@ -354,6 +354,22 @@ describe("VitaExpressAdapter", () => {
       .resolves.toHaveLength(5);
   });
 
+  it.each(["203657", "197583", "175303"])(
+    "accepts Vita's current д/рассасывания abbreviation on exact Baktoblis card %s",
+    async (productId) => {
+      const product = productById(productId);
+      const boundName = product.title.replace("для рассасывания", "д/рассасывания");
+      const adapter = new VitaExpressAdapter(new MemoryEvidenceStore(), fetchProducts({
+        [product.id]: new Response(page(product, { boundName }), {
+          status: 200, headers: { "content-type": "text/html; charset=utf-8" }
+        })
+      }));
+
+      await expect(adapter.discover("Бактоблис", { ...CONTEXT, runId: `abbreviated-${product.id}` }))
+        .resolves.toHaveLength(5);
+    }
+  );
+
   it("publishes one Kagocel family row from six exact stars instead of duplicating its variants", async () => {
     const evidence = new MemoryEvidenceStore();
     const fetchMock = fetchFamilyPage(familyPage());

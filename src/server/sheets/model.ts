@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Observation, ProductRecord, RunRequest } from "../../shared/types.js";
+import { yandexSourceListing } from "../../shared/yandex-source.js";
 import { normalizeText } from "../utils/normalize.js";
 import { analyzeProductIdentity, canonicalProductVariants } from "../utils/product-name.js";
 import { productKey } from "../repository.js";
@@ -43,10 +44,11 @@ function legacyMonthKey(label: unknown, fallbackYear: number): string | undefine
 }
 function inferListing(url: string): { domain: string; listingId: string } {
   const parsed = new URL(url);
-  const domain = parsed.hostname.replace(/^www\./, "").replace(/^reviews\./, "market.");
+  const yandex = yandexSourceListing(url);
+  if (yandex) return { domain: yandex.domain, listingId: yandex.listingId };
+  const domain = parsed.hostname.replace(/^www\./, "");
   const ozon = parsed.pathname.match(/-(\d+)\/?$/); if (domain === "ozon.ru" && ozon) return { domain, listingId: ozon[1] };
   const wb = parsed.pathname.match(/\/catalog\/(\d+)/); if (domain === "wildberries.ru" && wb) return { domain, listingId: wb[1] };
-  const yandex = parsed.pathname.match(/--(\d+)/); if ((domain === "market.yandex.ru" || domain === "yandex.ru") && yandex) return { domain: "market.yandex.ru", listingId: yandex[1] };
   return { domain, listingId: createHash("sha256").update(url).digest("hex").slice(0, 20) };
 }
 function inferBrand(url: string, product: string, brands: string[]): string {

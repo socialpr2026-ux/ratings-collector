@@ -6,7 +6,10 @@ import type {
   SiteAdapter
 } from "../../shared/types.js";
 import { matchesBrand, normalizeText } from "../utils/normalize.js";
-import { AdapterBlockedError, ParserChangedError } from "./errors.js";
+import {
+  AdapterBlockedError,
+  ParserChangedError
+} from "./errors.js";
 
 // The buyer v18 route currently rate-limits ordinary cloud/static egress even
 // when the same bounded query succeeds through v14 with an identical product
@@ -866,10 +869,33 @@ export class WildberriesAdapter implements SiteAdapter {
     reportRootProgress: (done: number, total: number) => Promise<void>
   ): Promise<Map<string, unknown>> {
     const cards = new Map<string, { product: JsonObject; evidenceRef: string }>();
+    const failures = new Map<string, unknown>();
     for (let offset = 0; offset < refs.length; offset += MAX_CARD_BATCH_SIZE) {
       const chunk = refs.slice(offset, offset + MAX_CARD_BATCH_SIZE);
       const expected = new Set(chunk.map((ref) => ref.listingId));
-      const { page, evidenceUrl } = await this.fetchCardBatch([...expected], context);
+      let page: ProductPage;
+      let evidenceUrl: string;
+      try {
+        ({ page, evidenceUrl } = await this.fetchCardBatch([...expected], context));
+      } catch (error) {
+        if (context.signal?.aborted || !(error instanceof AdapterBlockedError)) throw error;
+        // Search discovery is already a first-party, source-bound snapshot.
+        // Reuse it only when every exact identity and nm/root metric required
+        // by exactSearchFallbackCard is present. A blocked card endpoint is
+        // never treated as an empty or zero-review proof.
+        for (const ref of chunk) {
+          const fallback = exactSearchFallbackCard(ref);
+          if (fallback) {
+            cards.set(ref.listingId, {
+              product: fallback,
+              evidenceRef: metadataString(ref.metadata, "searchEvidenceUrl")!
+            });
+          } else {
+            failures.set(ref.listingId, error);
+          }
+        }
+        continue;
+      }
       for (const product of page.products) {
         const listingId = firstDefinedId(product, ["id", "nmId", "nmID"]);
         if (!listingId || !expected.has(listingId)) {
@@ -882,7 +908,24 @@ export class WildberriesAdapter implements SiteAdapter {
       }
       const missing = [...expected].filter((listingId) => !cards.has(listingId));
       for (const listingId of missing) {
-        const { page: singleton, evidenceUrl: singletonEvidenceUrl } = await this.fetchCard(listingId, context);
+        let singleton: ProductPage;
+        let singletonEvidenceUrl: string;
+        try {
+          ({ page: singleton, evidenceUrl: singletonEvidenceUrl } = await this.fetchCard(listingId, context));
+        } catch (error) {
+          if (context.signal?.aborted || !(error instanceof AdapterBlockedError)) throw error;
+          const ref = chunk.find((candidate) => candidate.listingId === listingId);
+          const fallback = ref ? exactSearchFallbackCard(ref) : undefined;
+          if (fallback) {
+            cards.set(listingId, {
+              product: fallback,
+              evidenceRef: metadataString(ref!.metadata, "searchEvidenceUrl")!
+            });
+          } else {
+            failures.set(listingId, error);
+          }
+          continue;
+        }
         for (const product of singleton.products) {
           const returnedId = firstDefinedId(product, ["id", "nmId", "nmID"]);
           if (returnedId !== listingId || cards.has(returnedId)) {
@@ -891,7 +934,7 @@ export class WildberriesAdapter implements SiteAdapter {
           cards.set(listingId, { product, evidenceRef: singletonEvidenceUrl });
         }
       }
-      const stillMissing = missing.filter((listingId) => !cards.has(listingId));
+      const stillMissing = missing.filter((listingId) => !cards.has(listingId) && !failures.has(listingId));
       for (const listingId of stillMissing) {
         const ref = chunk.find((candidate) => candidate.listingId === listingId);
         const fallback = ref ? exactSearchFallbackCard(ref) : undefined;
@@ -903,9 +946,10 @@ export class WildberriesAdapter implements SiteAdapter {
       }
       const unproven = stillMissing.filter((listingId) => !cards.has(listingId));
       if (unproven.length > 0) {
-        throw new AdapterBlockedError(
+        const error = new AdapterBlockedError(
           `Wildberries card batch, singleton retry and exact search fallback omitted ${unproven.length} requested nmIds: ${unproven.join(",")}`
         );
+        for (const listingId of unproven) failures.set(listingId, error);
       }
     }
 
@@ -913,7 +957,10 @@ export class WildberriesAdapter implements SiteAdapter {
     const missingNmMetricsByRoot = new Map<string, ProductRef[]>();
     for (const ref of refs) {
       const card = cards.get(ref.listingId);
-      if (!card) throw new AdapterBlockedError(`Wildberries card batch omitted requested nmId ${ref.listingId}`);
+      if (!card) {
+        if (failures.has(ref.listingId)) continue;
+        throw new AdapterBlockedError(`Wildberries card batch omitted requested nmId ${ref.listingId}`);
+      }
       const title = asNonemptyString(card.product.name) ?? asNonemptyString(card.product.title);
       if (!title) throw new ParserChangedError(`Wildberries card ${ref.listingId} has no first-party title`);
       const identity = exactFirstPartyIdentity(card.product, title, ref.brand);
@@ -968,7 +1015,6 @@ export class WildberriesAdapter implements SiteAdapter {
       }
     }
 
-    const failures = new Map<string, unknown>();
     let verifiedRoots = 0;
     for (const [rootId, members] of refsByRoot) {
       try {

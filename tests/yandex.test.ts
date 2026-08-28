@@ -1261,7 +1261,7 @@ describe("YandexAdapter discovery", () => {
 
   it("retains an exact saved Market reviews URL for a known-first collection", async () => {
     const fetch = vi.fn(async () => { throw new Error("discovery must not fetch"); }) as unknown as typeof globalThis.fetch;
-    const adapter = new YandexAdapter({ fetch });
+    const adapter = new YandexAdapter({ fetch, source: "market" });
     const marketUrl = "https://market.yandex.ru/card/mikroginon-tab-po/103544271955/reviews";
 
     const refs = await adapter.discover("Микрогинон", context({
@@ -1280,6 +1280,42 @@ describe("YandexAdapter discovery", () => {
       metadata: { discovery: "previous_registry" }
     }]);
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not reuse a saved Reviews URL as a Market card", async () => {
+    const endpoint = "https://market.yandex.ru/search";
+    const query = `${endpoint}?text=${encodeURIComponent("Бактоблис")}`;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url !== query) throw new Error(`Unexpected URL: ${url}`);
+      return new Response(JSON.stringify({
+        query: "Бактоблис",
+        page: 1,
+        hasNext: false,
+        products: [{
+          id: "103259424620",
+          name: "Бактоблис Плюс таблетки для рассасывания №30",
+          url: "https://market.yandex.ru/card/baktoblis-plyus-tabletki/103259424620"
+        }]
+      }), { headers: { "content-type": "application/json" } });
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & { yandexMarketBrowserEndpoint?: string };
+    fetch.yandexMarketBrowserEndpoint = endpoint;
+    const adapter = new YandexAdapter({ fetch, source: "market" });
+
+    const refs = await adapter.discover("Бактоблис", context({
+      previousIds: ["4609418276"],
+      previousRefs: [{
+        listingId: "4609418276",
+        url: "https://reviews.yandex.ru/product/baktoblis-plius--4609418276"
+      }]
+    }));
+
+    expect(refs).toMatchObject([{
+      listingId: "103259424620",
+      url: "https://market.yandex.ru/card/baktoblis-plyus-tabletki/103259424620/reviews"
+    }]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("checks saved models without the index and scans for new cards only on explicit refresh", async () => {

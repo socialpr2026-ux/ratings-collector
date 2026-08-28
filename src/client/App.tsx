@@ -29,6 +29,7 @@ import {
   countCustomDomains,
   parseRunnableDomainList,
   parseTemporarilyBlockedDomainList,
+  selectedYandexSourceDomains,
   updateDomainSelection
 } from "./site-catalog.js";
 import {
@@ -613,7 +614,9 @@ export function App() {
   }
 
   async function searchNewYandexCards() {
-    if (!run || !run.request.domains.includes("market.yandex.ru")) return;
+    if (!run) return;
+    const yandexDomains = selectedYandexSourceDomains(run.request.domains);
+    if (yandexDomains.length === 0) return;
     setBusyAction("refresh");
     setError("");
     setSelected(new Set());
@@ -623,7 +626,7 @@ export function App() {
         method: "POST",
         body: JSON.stringify({
           ...run.request,
-          domains: ["market.yandex.ru"],
+          domains: yandexDomains,
           discoveryMode: "refresh"
         })
       }) as RunState;
@@ -1228,7 +1231,7 @@ export function App() {
 
       {(busy || run) && <section className={`card progress-card ${run && (pendingStatuses.has(run.status) || collectionIsContinuing) ? "progress-active" : ""}`} aria-labelledby="progress-title" aria-busy={Boolean(run && (pendingStatuses.has(run.status) || collectionIsContinuing))}>
         <div className="card-heading compact">
-          <div><p className="section-number">Шаг 2</p><h2 id="progress-title">{busyAction === "resume" ? "Восстанавливаем последний запуск" : busyAction === "continue" ? `Автоматически продолжаем сбор · ${automaticContinuation?.attempt ?? 1}/${automaticContinuation?.maxAttempts ?? 3}` : busyAction === "refresh" ? "Ищем новые карточки Яндекса" : busyAction === "retry" ? "Повторяем неуспешные площадки" : cleanReviewReady ? "Сбор готов" : run ? runStatusLabels[run.status] : "Создаём запуск"}</h2><p>{busyAction === "resume" ? "Загружаем сохранённый результат и актуальный статус площадок." : busyAction === "continue" ? `Сохранено ${automaticContinuation?.completedPartitions ?? run?.progress.completedPartitions ?? 0} из ${automaticContinuation?.totalPartitions ?? run?.progress.totalPartitions ?? 0} проверок. Готовые площадки остаются на месте; продолжаются только незавершённые.` : busyAction === "refresh" ? "Это отдельная проверка полного индекса; уже записанные данные остаются на месте." : busyAction === "retry" ? "Уже собранные данные сохранены. Обновляем только площадки с ошибками." : cleanReviewReady ? "Данные собраны и проверены. Можно записывать их в таблицу." : run?.progress.current ? "Получаем страницы, извлекаем рейтинг и сверяем продукт." : pendingStatuses.has(run?.status ?? "queued") ? "Можно перейти в другую вкладку — этот экран обновится автоматически." : "Сбор завершён. Ниже можно проверить результат."}</p></div>
+          <div><p className="section-number">Шаг 2</p><h2 id="progress-title">{busyAction === "resume" ? "Восстанавливаем последний запуск" : busyAction === "continue" ? `Автоматически продолжаем сбор · ${automaticContinuation?.attempt ?? 1}/${automaticContinuation?.maxAttempts ?? 3}` : busyAction === "refresh" ? "Обновляем карточки выбранных площадок Яндекса" : busyAction === "retry" ? "Повторяем неуспешные площадки" : cleanReviewReady ? "Сбор готов" : run ? runStatusLabels[run.status] : "Создаём запуск"}</h2><p>{busyAction === "resume" ? "Загружаем сохранённый результат и актуальный статус площадок." : busyAction === "continue" ? `Сохранено ${automaticContinuation?.completedPartitions ?? run?.progress.completedPartitions ?? 0} из ${automaticContinuation?.totalPartitions ?? run?.progress.totalPartitions ?? 0} проверок. Готовые площадки остаются на месте; продолжаются только незавершённые.` : busyAction === "refresh" ? "Яндекс Маркет и Яндекс Отзывы проверяются отдельно; уже записанные данные остаются на месте." : busyAction === "retry" ? "Уже собранные данные сохранены. Обновляем только площадки с ошибками." : cleanReviewReady ? "Данные собраны и проверены. Можно записывать их в таблицу." : run?.progress.current ? "Получаем страницы, извлекаем рейтинг и сверяем продукт." : pendingStatuses.has(run?.status ?? "queued") ? "Можно перейти в другую вкладку — этот экран обновится автоматически." : "Сбор завершён. Ниже можно проверить результат."}</p></div>
           <div className="progress-value"><strong>{run ? `${progress}%` : "…"}</strong><small>{run ? `${run.progress.completedPartitions} из ${run.progress.totalPartitions}` : "подготовка"}</small></div>
         </div>
         <div className="progress-track" role="progressbar" aria-label="Ход сбора" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
@@ -1404,8 +1407,8 @@ export function App() {
           <div><p className="section-number">Шаг 4</p><h2 id="publish-title">{run.status === "published" ? "Готово — таблица обновлена" : partialPublicationCompleted ? "Готовые результаты записаны" : canPublishCompletedOnly ? "Готовые результаты можно записать" : run.qa.ok ? "Всё готово к записи" : "Сначала устраните замечания"}</h2><p>{run.status === "published" ? `Данные за ${formatMonth(run.request.month)} сохранены в ${brandSheetDestinationText(publicationSummary.brands)}: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")}.` : partialPublicationCompleted ? `${publicationSummary.cards} ${plural(publicationSummary.cards, "готовая карточка уже записана", "готовые карточки уже записаны", "готовых карточек уже записаны")}. Повторите ${failedPartitionCount} ${plural(failedPartitionCount, "неуспешную проверку", "неуспешные проверки", "неуспешных проверок")}; восстановленные данные можно будет дописать без потерь и дублей.` : canPublishCompletedOnly ? `Будут записаны ${publicationSummary.cards} ${plural(publicationSummary.cards, "готовая карточка", "готовые карточки", "готовых карточек")} из ${successfulPartitionCount} ${plural(successfulPartitionCount, "успешно завершённой проверки", "успешно завершённых проверок", "успешно завершённых проверок")}. Неуспешные сочетания площадок и брендов останутся пустыми за текущий месяц; их ошибки не станут нулями.` : run.qa.ok ? `Будет записано: ${publicationSummary.cards} ${plural(publicationSummary.cards, "карточка", "карточки", "карточек")}, ${publicationSummary.brands} ${plural(publicationSummary.brands, "бренд", "бренда", "брендов")}, ${publicationSummary.domains} ${plural(publicationSummary.domains, "площадка", "площадки", "площадок")} за ${formatMonth(run.request.month)} ${BRAND_SHEET_COLUMNS_TEXT}` : "Разберите отмеченные карточки или повторите проблемные площадки."}</p></div>
         </div>
 
-        {run.status === "published" && run.request.domains.includes("market.yandex.ru") && run.request.discoveryMode !== "refresh" && <div className="discovery-followup">
-          <div><strong>Проверить новые карточки Яндекса</strong><p>Текущие данные уже записаны. Полный поиск можно запустить отдельно.</p></div>
+        {run.status === "published" && selectedYandexSourceDomains(run.request.domains).length > 0 && run.request.discoveryMode !== "refresh" && <div className="discovery-followup">
+          <div><strong>Проверить новые карточки выбранных площадок Яндекса</strong><p>Текущие данные уже записаны. Маркет и Отзывы будут обновлены как отдельные источники.</p></div>
           <button className="text-button" type="button" disabled={busy} onClick={searchNewYandexCards}>Найти новые</button>
         </div>}
 

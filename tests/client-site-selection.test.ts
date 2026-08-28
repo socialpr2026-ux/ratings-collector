@@ -7,6 +7,7 @@ import {
   parseDomainList,
   parseRunnableDomainList,
   parseTemporarilyBlockedDomainList,
+  selectedYandexSourceDomains,
   updateDomainSelection
 } from "../src/client/site-catalog.js";
 import { INITIAL_DOMAINS } from "../src/shared/constants.js";
@@ -76,6 +77,16 @@ describe("site picker catalog", () => {
   it("selects every runnable catalog site in a new collection by default", () => {
     expect(INITIAL_DOMAINS).toEqual(SELECTABLE_CATALOG_DOMAINS);
     expect(INITIAL_DOMAINS).toHaveLength(29);
+  });
+
+  it("keeps Yandex Market and Yandex Reviews as separate refresh targets", () => {
+    expect(selectedYandexSourceDomains([
+      "ozon.ru",
+      "reviews.yandex.ru",
+      "market.yandex.ru",
+      "reviews.yandex.ru"
+    ])).toEqual(["reviews.yandex.ru", "market.yandex.ru"]);
+    expect(selectedYandexSourceDomains(["ozon.ru"])).toEqual([]);
   });
 
   it("shows the complete requested pharmacy list alongside additional connected pharmacies", () => {

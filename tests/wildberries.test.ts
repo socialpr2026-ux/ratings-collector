@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { AdapterContext, ProductRef } from "../src/shared/types.js";
-import { AdapterBlockedError, ParserChangedError } from "../src/server/adapters/errors.js";
+import {
+  AdapterBlockedError,
+  ParserChangedError
+} from "../src/server/adapters/errors.js";
 import { WildberriesAdapter } from "../src/server/adapters/wildberries.js";
 import { analyzeProductIdentity } from "../src/server/utils/product-name.js";
 
@@ -523,6 +526,52 @@ describe("WildberriesAdapter.discover", () => {
       { listingId: "702", reviews: 3, rating: 5, source: "wildberries-search-exact-fallback" }
     ]);
     expect(refs.every((ref) => ref.metadata.cardBatchVerified === true)).toBe(true);
+  });
+
+  it("uses exact search proof when every card route is blocked", async () => {
+    const searchProducts = [701, 702, 703].map((id) => ({
+      id,
+      root: 9000 + id,
+      brand: "BrandX",
+      name: `BrandX capsules ${id}`,
+      nmReviewRating: 5,
+      nmFeedbacks: 1
+    }));
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: searchProducts.length, products: searchProducts });
+      if (url.hostname === "card.wb.ru") throw new AdapterBlockedError("Wildberries card routes returned HTTP 502");
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("BrandX", context({ runId: "blocked-card-batch" }));
+
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, context())));
+
+    expect(observations).toMatchObject([
+      { listingId: "701", reviews: 1, rating: 5, status: "ok", source: "wildberries-search-exact-fallback" },
+      { listingId: "702", reviews: 1, rating: 5, status: "ok", source: "wildberries-search-exact-fallback" },
+      { listingId: "703", reviews: 1, rating: 5, status: "ok", source: "wildberries-search-exact-fallback" }
+    ]);
+    expect(refs.every((ref) => ref.metadata.cardBatchVerified === true)).toBe(true);
+  });
+
+  it("keeps a card blocked when neither the card API nor exact search metrics prove it", async () => {
+    const searchProduct = { id: 704, brand: "BrandX", name: "BrandX capsules without metrics" };
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname === "search.wb.ru") return jsonResponse({ total: 1, products: [searchProduct] });
+      if (url.hostname === "card.wb.ru") throw new AdapterBlockedError("Wildberries card routes returned HTTP 502");
+      throw new Error(`Unexpected request ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = createAdapter(fetchMock);
+    const refs = await adapter.discover("BrandX", context({ runId: "blocked-unproven-card" }));
+
+    await expect(adapter.collect(refs[0]!, context())).rejects.toMatchObject({
+      code: "blocked",
+      message: expect.stringContaining("Wildberries card routes returned HTTP 502")
+    });
+    expect(refs[0]?.metadata.cardBatchVerified).not.toBe(true);
   });
 
   it("fails closed when batch and singleton verification both omit an nmId", async () => {

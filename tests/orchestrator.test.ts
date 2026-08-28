@@ -7,7 +7,11 @@ import type {
   RunState,
   SiteAdapter
 } from "../src/shared/types.js";
-import { AdapterBlockedError, AdapterQuotaError } from "../src/server/adapters/errors.js";
+import {
+  AdapterBlockedError,
+  AdapterPartitionBlockedError,
+  AdapterQuotaError
+} from "../src/server/adapters/errors.js";
 import { DEFAULT_DOMAIN_CONCURRENCY, RatingsService } from "../src/server/orchestrator.js";
 import { MemoryRepository } from "../src/server/repository.js";
 import { hasDeterministicAggregateProof, isKnownReviewAggregateDomain } from "../src/shared/review-aggregates.js";
@@ -626,6 +630,74 @@ describe("run orchestration and fail-closed QA", () => {
     expect(recovered.partitions).toMatchObject([{ status: "complete", discovered: 3, collected: 3 }]);
     expect(recovered.observations.map((item) => item.listingId)).toEqual(["1", "2", "3"]);
     expect(new Set(recovered.observations.map((item) => item.listingId)).size).toBe(3);
+  });
+
+  it("stops a partition after one shared collection blocker instead of repeating it for every card", async () => {
+    let collectCalls = 0;
+    const service = new RatingsService(new MemoryRepository(), async () => ({
+      id: "shared-card-proof-blocker",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        return Array.from({ length: 100 }, (_, index) => ({
+          domain: "example.com", platform: "example.com", listingId: String(index + 1), brand,
+          url: `https://example.com/p/${index + 1}`, metadata: {}
+        }));
+      },
+      async collect() {
+        collectCalls += 1;
+        throw new AdapterPartitionBlockedError("общий batch-proof вернул HTTP 502");
+      }
+    }));
+
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    expect(collectCalls).toBe(1);
+    expect(run.observations).toEqual([]);
+    expect(run.errors).toEqual([{
+      partition: "example.com/Бренд",
+      message: "1: blocked: общий batch-proof вернул HTTP 502"
+    }]);
+    expect(run.partitions).toMatchObject([{
+      status: "blocked",
+      discovered: 100,
+      collected: 0,
+      message: "1: blocked: общий batch-proof вернул HTTP 502"
+    }]);
+  });
+
+  it("compacts repeated per-card blockers without losing the discovered or collected counts", async () => {
+    let collectCalls = 0;
+    const service = new RatingsService(new MemoryRepository(), async () => ({
+      id: "repeated-card-blocker",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover(brand) {
+        return Array.from({ length: 100 }, (_, index) => ({
+          domain: "example.com", platform: "example.com", listingId: String(index + 1), brand,
+          url: `https://example.com/p/${index + 1}`, metadata: {}
+        }));
+      },
+      async collect() {
+        collectCalls += 1;
+        throw new AdapterBlockedError("общий upstream вернул HTTP 502");
+      }
+    }));
+
+    const run = await service.executeRun((await service.createRun(request)).id);
+
+    expect(collectCalls).toBe(100);
+    expect(run.observations).toEqual([]);
+    expect(run.errors).toEqual([{
+      partition: "example.com/Бренд",
+      message: "100 карточек (1, 2, 3, ещё 97): blocked: общий upstream вернул HTTP 502"
+    }]);
+    expect(run.partitions).toMatchObject([{
+      status: "blocked",
+      discovered: 100,
+      collected: 0,
+      message: "100 карточек (1, 2, 3, ещё 97): blocked: общий upstream вернул HTTP 502"
+    }]);
   });
 
   it("checkpoints proven cards from a partial discovery and merges a failed-only retry", async () => {
@@ -1907,10 +1979,10 @@ describe("run orchestration and fail-closed QA", () => {
 
   it("excludes a new Yandex candidate only after the adapter proves its Reviews page missing", async () => {
     class MissingYandexCandidateAdapter extends FakeAdapter {
-      override supportedDomains = ["market.yandex.ru"];
+      override supportedDomains = ["reviews.yandex.ru"];
       override async discover(brand: string): Promise<ProductRef[]> {
         return [{
-          domain: "market.yandex.ru", platform: "yandex", listingId: "1", brand,
+          domain: "reviews.yandex.ru", platform: "yandex", listingId: "1", brand,
           url: "https://reviews.yandex.ru/product/model--1", metadata: {}
         }];
       }
@@ -1937,12 +2009,12 @@ describe("run orchestration and fail-closed QA", () => {
 
     const run = await service.executeRun((await service.createRun({
       ...request,
-      domains: ["market.yandex.ru"]
+      domains: ["reviews.yandex.ru"]
     })).id);
 
     expect(run.observations).toEqual([]);
     expect(run.partitions).toMatchObject([{
-      domain: "market.yandex.ru",
+      domain: "reviews.yandex.ru",
       status: "no_results",
       discovered: 0,
       collected: 0
@@ -2236,8 +2308,28 @@ describe("run orchestration and fail-closed QA", () => {
     expect(maximumActive).toBe(1);
   });
 
-  it("retains collected Yandex model IDs before publication and reuses them on the next brand run", async () => {
+  it("ignores legacy Reviews refs in Market state and reuses only source-bound Market cards", async () => {
     const repository = new MemoryRepository();
+    await repository.saveSourceCards("test_sheet", [{
+      key: "market.yandex.ru:4609418276",
+      domain: "reviews.yandex.ru",
+      listingId: "4609418276",
+      brand: "Бактоблис",
+      canonicalUrl: "https://reviews.yandex.ru/product/baktoblis-plius--4609418276",
+      firstSeenAt: "2026-08-01T00:00:00.000Z",
+      lastSeenAt: "2026-08-01T00:00:00.000Z"
+    }]);
+    await repository.saveProducts("test_sheet", [{
+      key: "market.yandex.ru:4688158593",
+      domain: "market.yandex.ru",
+      listingId: "4688158593",
+      brand: "Бактоблис",
+      canonicalUrl: "https://reviews.yandex.ru/product/baktoblis-sashe--4688158593",
+      product: "Бактоблис саше №30",
+      platform: "yandex",
+      firstSeenMonth: "2026-07",
+      lastSeenMonth: "2026-07"
+    }]);
     const discoveryContexts: AdapterContext[] = [];
     const healthContexts: AdapterContext[] = [];
     const adapter: SiteAdapter = {
@@ -2251,14 +2343,14 @@ describe("run orchestration and fail-closed QA", () => {
         discoveryContexts.push(context);
         return [{
           domain: "market.yandex.ru", platform: "yandex", listingId: "1746647533", brand,
-          url: "https://reviews.yandex.ru/product/baktoblis--1746647533", metadata: {}
+          url: "https://market.yandex.ru/card/baktoblis-tabletki/1746647533/reviews", metadata: {}
         }];
       },
       async collect(ref) {
         return {
           domain: ref.domain, platform: ref.platform, listingId: ref.listingId, brand: ref.brand,
           canonicalUrl: ref.url, product: `${ref.brand} таблетки 100 мг №10`, reviews: 12, rating: 4.8,
-          status: "ok", capturedAt: new Date().toISOString(), source: "yandex_reviews_direct"
+          status: "ok", capturedAt: new Date().toISOString(), source: "yandex_market_json_ld_browser"
         };
       }
     };
@@ -2268,11 +2360,14 @@ describe("run orchestration and fail-closed QA", () => {
     const first = await service.executeRun((await service.createRun(yandexRequest)).id);
     expect(first.collectionStartedAt).toBeTruthy();
     expect(first.collectionFinishedAt).toBeTruthy();
-    expect(await repository.listSourceCards("test_sheet")).toMatchObject([{
+    expect(healthContexts[0]?.previousIds).toEqual([]);
+    expect(discoveryContexts[0]?.previousIds).toEqual([]);
+    expect(await repository.listSourceCards("test_sheet")).toContainEqual(expect.objectContaining({
+      domain: "market.yandex.ru",
       listingId: "1746647533",
       brand: "Бактоблис",
-      canonicalUrl: "https://reviews.yandex.ru/product/baktoblis--1746647533"
-    }]);
+      canonicalUrl: "https://market.yandex.ru/card/baktoblis-tabletki/1746647533/reviews"
+    }));
 
     await service.executeRun((await service.createRun(yandexRequest)).id);
     expect(healthContexts[1]?.previousIds).toEqual(["1746647533"]);
@@ -2288,19 +2383,19 @@ describe("run orchestration and fail-closed QA", () => {
     });
   });
 
-  it("checkpoints every exact Yandex discovery before a later product collection fails", async () => {
+  it("checkpoints every exact Yandex Reviews discovery before a later product collection fails", async () => {
     const repository = new MemoryRepository();
     const discoveryContexts: AdapterContext[] = [];
     let firstAttempt = true;
     const adapter: SiteAdapter = {
-      id: "market.yandex.ru:discovery-checkpoint",
-      supportedDomains: ["market.yandex.ru"],
+      id: "reviews.yandex.ru:discovery-checkpoint",
+      supportedDomains: ["reviews.yandex.ru"],
       async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
       async discover(brand, context) {
         discoveryContexts.push(context);
         return ["1426906540", "1441119989"].map((listingId) => ({
-          domain: "market.yandex.ru", platform: "yandex", listingId, brand,
-          url: `https://reviews.yandex.ru/product/${listingId}`, metadata: {}
+          domain: "reviews.yandex.ru", platform: "yandex", listingId, brand,
+          url: `https://reviews.yandex.ru/product/velgiia-eko--${listingId}`, metadata: {}
         }));
       },
       async collect(ref) {
@@ -2317,7 +2412,7 @@ describe("run orchestration and fail-closed QA", () => {
     const service = new RatingsService(repository, async () => adapter);
     const created = await service.createRun({
       ...request,
-      domains: ["market.yandex.ru"],
+      domains: ["reviews.yandex.ru"],
       brands: ["Велгия Эко"]
     });
 

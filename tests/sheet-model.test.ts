@@ -130,6 +130,30 @@ describe("Google Sheets model", () => {
     });
   });
 
+  it("round-trips Yandex Market and Yandex Reviews as separate source rows", () => {
+    const reviewsUrl = "https://reviews.yandex.ru/product/baktoblis--1746647533";
+    const marketUrl = "https://market.yandex.ru/card/baktoblis-tabletki/1746647533/reviews";
+    const existing = { values: [
+      ["Рейтинги"],
+      ["Площадка", "Ссылка", "Продукт", null, "Июль 2026"],
+      [null, null, null, null, "Отзывы / оценки", "Рейтинг"],
+      ["Яндекс Отзывы", reviewsUrl, "Бактоблис — общий рейтинг", null, 12, 4.8],
+      ["Яндекс Маркет", marketUrl, "Бактоблис — таблетки №30", null, 55, 4.9]
+    ] };
+
+    const document = buildSheetDocument(existing, {
+      ...request,
+      domains: ["market.yandex.ru", "reviews.yandex.ru"],
+      brands: ["Бактоблис"]
+    }, [], { "2026-07": {} });
+    const rows = document.values.filter((_row, index) => document.rowKinds[index] === "product");
+
+    expect(rows.map((row) => [row[0], row[1]])).toEqual([
+      ["Яндекс Отзывы", reviewsUrl],
+      ["Яндекс Маркет", marketUrl]
+    ]);
+  });
+
   it("merges a legacy URL-hash row into a new stable platform ID without losing history", () => {
     const irecRequest: RunRequest = {
       ...request,

@@ -68,6 +68,27 @@ describe("new static collector gateways", () => {
     { INTERNAL_AGENT_TOKEN: token }
   );
 
+  it("allows only the exact Otzyv.pro root used by the adapter health check", async () => {
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe("https://otzyv.pro/");
+      return new Response("<html><title>Отзывы</title><body>Каталог отзывов</body></html>", {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    expect((await callGateway("https://otzyv.pro/")).status).toBe(200);
+    for (const unsafe of [
+      "https://otzyv.pro/?tracking=1",
+      "https://otzyv.pro/#fragment",
+      "https://www.otzyv.pro/",
+      "https://user@otzyv.pro/"
+    ]) {
+      expect((await callGateway(unsafe)).status).toBe(400);
+    }
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
   it("proxies only one exact Wildberries root-feedback route", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       expect(String(input)).toBe("https://feedbacks1.wb.ru/feedbacks/v2/214718282?appType=1");

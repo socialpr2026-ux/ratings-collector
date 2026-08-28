@@ -116,6 +116,12 @@ export const SELECTABLE_CATALOG_DOMAINS = SITE_CATALOG.flatMap((group) =>
   group.sites.filter((site) => site.availability !== "temporarily_blocked").map((site) => site.domain)
 );
 
+const YANDEX_SOURCE_DOMAINS = new Set(["market.yandex.ru", "reviews.yandex.ru"]);
+
+export function selectedYandexSourceDomains(domains: readonly string[]) {
+  return [...new Set(domains.map(normalizeDomain).filter((domain) => YANDEX_SOURCE_DOMAINS.has(domain)))];
+}
+
 function rawDomainLines(value: string) {
   return value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
 }

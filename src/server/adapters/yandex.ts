@@ -7,6 +7,7 @@ import type {
   SiteAdapter
 } from "../../shared/types.js";
 import { isKnownYandexIndexTombstoneSitemap } from "../../shared/yandex-sitemaps.js";
+import { isSourceBoundYandexCard } from "../../shared/yandex-source.js";
 import { aliasesForBrand, matchesBrand, normalizeRating, normalizeText } from "../utils/normalize.js";
 import { readTextBounded } from "../utils/safe-fetch.js";
 import { canonicalizeUrl } from "../utils/urls.js";
@@ -326,7 +327,7 @@ export class YandexAdapter implements SiteAdapter {
         ? { ok: true, checkedAt, message: "Yandex Market exact search route is configured" }
         : { ok: false, checkedAt, message: "Yandex Market exact search route is unavailable" };
     }
-    const knownModelIds = previousModelIds(context.previousIds ?? []);
+    const knownModelIds = previousRegistryForSource(this.source, context).knownIds;
     if (knownModelIds.length > 0 && !context.refreshDiscovery) {
       return {
         ok: true,
@@ -355,13 +356,10 @@ export class YandexAdapter implements SiteAdapter {
 
   async discover(brand: string, context: AdapterContext): Promise<ProductRef[]> {
     const refs = new Map<string, ProductRef>();
-    const knownIds = previousModelIds(context.previousIds ?? []);
+    const previousRegistry = previousRegistryForSource(this.source, context);
+    const knownIds = previousRegistry.knownIds;
     const knownSet = new Set(knownIds);
-    const previousRefs = new Map((context.previousRefs ?? []).flatMap((previous) => {
-      const listingId = normalizeListingId(previous.listingId) ?? extractModelId(previous.url) ??
-        extractMarketCardId(previous.url);
-      return listingId ? [[listingId, previous] as const] : [];
-    }));
+    const previousRefs = previousRegistry.refs;
 
     for (const listingId of knownIds) {
       refs.set(listingId, this.sourceRef(productRefFromPreviousId(listingId, brand, previousRefs.get(listingId))));
@@ -1789,6 +1787,32 @@ function previousModelIds(previousIds: string[]): string[] {
     if (id) result.push(id);
   }
   return [...new Set(result)];
+}
+
+function previousRegistryForSource(
+  source: "market" | "reviews" | "legacy",
+  context: Pick<AdapterContext, "previousIds" | "previousRefs">
+): {
+  knownIds: string[];
+  refs: Map<string, { listingId: string; url: string; title?: string }>;
+} {
+  const refs = new Map<string, { listingId: string; url: string; title?: string }>();
+  for (const previous of context.previousRefs ?? []) {
+    const listingId = normalizeListingId(previous.listingId) ?? extractModelId(previous.url) ??
+      extractMarketCardId(previous.url);
+    if (!listingId) continue;
+    if (source !== "legacy") {
+      const domain = source === "market" ? "market.yandex.ru" : "reviews.yandex.ru";
+      if (!isSourceBoundYandexCard(domain, listingId, previous.url)) continue;
+    }
+    refs.set(listingId, previous);
+  }
+  return {
+    // Production source-specific adapters require the exact URL proof above.
+    // Bare numeric IDs remain accepted only by the legacy test-compatible mode.
+    knownIds: source === "legacy" ? previousModelIds(context.previousIds ?? []) : [...refs.keys()],
+    refs
+  };
 }
 
 function productRefFromPreviousId(

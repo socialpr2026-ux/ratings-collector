@@ -15,13 +15,19 @@ import type {
 import { observationSchema, productRefSchema, runRequestSchema } from "../shared/types.js";
 import { isFailedOnlyRetryTarget } from "../shared/partition-retry.js";
 import { hasDeterministicAggregateProof, isKnownReviewAggregateDomain } from "../shared/review-aggregates.js";
+import { isSourceBoundYandexCard, isYandexSourceDomain } from "../shared/yandex-source.js";
 import type { EvidenceStore } from "./evidence.js";
 import { GenericSiteAdapter } from "./generic/adapter.js";
 import { profileSite } from "./generic/profiler.js";
 import { validateRun } from "./qa.js";
 import { AttemptConflictError, productKey, type Repository } from "./repository.js";
 import { observationsForPublication } from "./publication-scope.js";
-import { AdapterBlockedError, AdapterQuotaError, ParserChangedError } from "./adapters/errors.js";
+import {
+  AdapterBlockedError,
+  AdapterPartitionBlockedError,
+  AdapterQuotaError,
+  ParserChangedError
+} from "./adapters/errors.js";
 import { safeErrorMessage } from "./utils/error-message.js";
 import { matchesBrand, normalizeText } from "./utils/normalize.js";
 import { assertSafePublicUrl, extractSpreadsheetId } from "./utils/urls.js";
@@ -35,6 +41,7 @@ import { compactProductCatalogEvidence, reconcileProductCatalog } from "./utils/
 import { STALE_COLLECTION_CHECKPOINT_MS } from "./collection-checkpoint.js";
 
 const RUN_SOFT_DEADLINE_MS = 26 * 60 * 1000;
+const MAX_PARTITION_FAILURE_MESSAGE_CHARS = 4_000;
 export const DEFAULT_DOMAIN_CONCURRENCY = 12;
 export const DEFAULT_ACTIVITY_CHECKPOINT_INTERVAL_MS = 5_000;
 
@@ -119,6 +126,9 @@ function validateDiscoveredRefs(candidates: readonly unknown[], domain: string, 
     if (ref.domain !== domain || normalizeText(ref.brand) !== normalizeText(brand)) {
       throw new ParserChangedError(`${domain}: поиск вернул карточку из другого раздела`);
     }
+    if (isYandexSourceDomain(domain) && !isSourceBoundYandexCard(domain, ref.listingId, ref.url)) {
+      throw new ParserChangedError(`${domain}:${ref.listingId}: поиск вернул карточку другой Яндекс-площадки`);
+    }
     const key = productKey(ref.domain, ref.listingId);
     if (!result.has(key)) result.set(key, ref);
   }
@@ -138,7 +148,18 @@ function validateCollectedObservation(candidate: unknown, ref: ProductRef, domai
   ) {
     throw new ParserChangedError(`${domain}:${ref.listingId}: сборщик вернул другую карточку или бренд`);
   }
+  if (
+    isYandexSourceDomain(domain) &&
+    !isSourceBoundYandexCard(domain, observation.listingId, observation.canonicalUrl)
+  ) {
+    throw new ParserChangedError(`${domain}:${ref.listingId}: сборщик вернул карточку другой Яндекс-площадки`);
+  }
   return observation;
+}
+
+function isReusableSourceRecord(record: { domain: string; listingId: string; canonicalUrl: string }): boolean {
+  return !isYandexSourceDomain(record.domain) ||
+    isSourceBoundYandexCard(record.domain, record.listingId, record.canonicalUrl);
 }
 
 function earlierMonth(left: string | undefined, right: string): string {
@@ -196,6 +217,43 @@ function healthCheckFailure(message: string): AdapterBlockedError | AdapterQuota
     return new AdapterBlockedError(message);
   }
   return new ParserChangedError(message);
+}
+
+function collectionFailureDetails(failures: readonly {
+  listingId: string;
+  kind: ReturnType<typeof errorStatus>;
+  message: string;
+}[]): string[] {
+  const grouped = new Map<string, { kind: ReturnType<typeof errorStatus>; message: string; listingIds: string[] }>();
+  for (const failure of failures) {
+    const key = `${failure.kind}\u001e${failure.message}`;
+    const group = grouped.get(key) ?? { kind: failure.kind, message: failure.message, listingIds: [] };
+    group.listingIds.push(failure.listingId);
+    grouped.set(key, group);
+  }
+  return [...grouped.values()].map(({ kind, message, listingIds }) => {
+    if (listingIds.length === 1) return `${listingIds[0]}: ${kind}: ${message}`;
+    const examples = listingIds.slice(0, 3).join(", ");
+    const remaining = listingIds.length - 3;
+    return `${listingIds.length} карточек (${examples}${remaining > 0 ? `, ещё ${remaining}` : ""}): ${kind}: ${message}`;
+  });
+}
+
+function boundedPartitionFailureMessage(details: readonly string[]): string {
+  let message = "";
+  for (let index = 0; index < details.length; index += 1) {
+    const separator = message ? "; " : "";
+    const candidate = `${message}${separator}${details[index]}`;
+    if (candidate.length <= MAX_PARTITION_FAILURE_MESSAGE_CHARS) {
+      message = candidate;
+      continue;
+    }
+    const omitted = details.length - index;
+    if (!message) return `${details[index]!.slice(0, MAX_PARTITION_FAILURE_MESSAGE_CHARS - 1)}…`;
+    const suffix = `; ещё ${omitted} причин`;
+    return `${message.slice(0, MAX_PARTITION_FAILURE_MESSAGE_CHARS - suffix.length)}${suffix}`;
+  }
+  return message;
 }
 
 async function forEachWithConcurrency<T>(
@@ -646,9 +704,13 @@ export class RatingsService {
         const executeDomain = async () => {
         domainStarted = true;
         const previousDomainRecords = [
-          ...sourceCards.filter((item) => item.domain === domain && retryBrandKeys.has(normalizeText(item.brand)))
+          ...sourceCards.filter((item) =>
+            item.domain === domain && retryBrandKeys.has(normalizeText(item.brand)) && isReusableSourceRecord(item)
+          )
             .map((item) => ({ listingId: item.listingId, url: item.canonicalUrl })),
-          ...products.filter((item) => item.domain === domain && retryBrandKeys.has(normalizeText(item.brand)))
+          ...products.filter((item) =>
+            item.domain === domain && retryBrandKeys.has(normalizeText(item.brand)) && isReusableSourceRecord(item)
+          )
             .map((item) => ({ listingId: item.listingId, url: item.canonicalUrl, title: item.product }))
         ];
         const previousDomainRefs = [...new Map(previousDomainRecords.map((item) => [item.listingId, item])).values()];
@@ -723,10 +785,10 @@ export class RatingsService {
         await forEachWithConcurrency(retryBrands, brandConcurrency(domain), async (brand) => {
           run.progress.current = `${domain} / ${brand}`;
           const previousRecords = products.filter((item) =>
-            item.domain === domain && normalizeText(item.brand) === normalizeText(brand)
+            item.domain === domain && normalizeText(item.brand) === normalizeText(brand) && isReusableSourceRecord(item)
           );
           const previousSourceCards = sourceCards.filter((item) =>
-            item.domain === domain && normalizeText(item.brand) === normalizeText(brand)
+            item.domain === domain && normalizeText(item.brand) === normalizeText(brand) && isReusableSourceRecord(item)
           );
           const previousRefs = [...new Map([
             ...previousSourceCards.map((item) => ({ listingId: item.listingId, url: item.canonicalUrl })),
@@ -791,7 +853,7 @@ export class RatingsService {
               await saveProgress();
               return;
             }
-            if (domain === "market.yandex.ru" && !partialFailure) {
+            if (isYandexSourceDomain(domain) && !partialFailure) {
               const discoveredAt = new Date().toISOString();
               // A complete exact Yandex discovery is expensive. Persist every
               // proven model before reading the first product so a dead Agent
@@ -910,7 +972,7 @@ export class RatingsService {
                 }
               }
               if (
-                domain === "market.yandex.ru" &&
+                isYandexSourceDomain(domain) &&
                 ["ok", "no_reviews"].includes(observation.status) &&
                 matchesBrand(observation.product, brand)
               ) {
@@ -930,6 +992,7 @@ export class RatingsService {
               activeNormalization = undefined;
               } catch (error) {
                 deadline.signal.throwIfAborted();
+                const stopPartition = error instanceof AdapterPartitionBlockedError;
                 const kind = errorStatus(error);
                 const message = safeErrorMessage(error);
                 collectionFailures.push({
@@ -943,16 +1006,15 @@ export class RatingsService {
                 if (activeNormalization) activity.warn(activeNormalization, { detail: message });
                 activeCollection = undefined;
                 activeNormalization = undefined;
+                if (stopPartition) break;
               }
             }
             if (partialFailure || collectionFailures.length > 0) {
               const failureDetails = [
                 ...(partialFailure ? [`${partialFailure.status}: ${partialFailure.message}`] : []),
-                ...collectionFailures.map((failure) =>
-                  `${failure.listingId}: ${failure.kind}: ${failure.message}`
-                )
+                ...collectionFailureDetails(collectionFailures)
               ];
-              const message = failureDetails.join("; ");
+              const message = boundedPartitionFailureMessage(failureDetails);
               run.errors.push({ partition: `${domain}/${brand}`, message });
               const retainedCount = [...seen.values()].filter((observation) =>
                 observation.domain === domain && normalizeText(observation.brand) === normalizeText(brand)

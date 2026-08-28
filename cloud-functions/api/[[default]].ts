@@ -3026,7 +3026,10 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
   const irecommendTarget = parseIrecommendTarget(target);
   const vseotzyvyTarget = parseVseotzyvyTarget(target);
   const ruOtzyvTarget = parseRuOtzyvTarget(target);
-  const otzyvProTarget = target.protocol === "https:" && host === "otzyv.pro" && !target.port &&
+  const otzyvProRootTarget = target.protocol === "https:" && target.hostname === "otzyv.pro" &&
+    !target.port && !target.username && !target.password && !target.search && !target.hash && target.pathname === "/";
+  const otzyvProTarget = otzyvProRootTarget || (
+    target.protocol === "https:" && host === "otzyv.pro" && !target.port &&
     !target.username && !target.password && !target.hash && (
       target.pathname === "/" && target.searchParams.get("do") === "search" &&
         target.searchParams.get("subaction") === "search" && target.searchParams.getAll("story").length === 1 &&
@@ -3035,7 +3038,8 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         [...target.searchParams.keys()].every((key) => ["do", "subaction", "story"].includes(key)) &&
         [...target.searchParams.keys()].every((key) => target.searchParams.getAll(key).length === 1) ||
       /^\/category\/(?:[a-z0-9-]+\/)+\d+-[a-z0-9-]+\.html$/i.test(target.pathname) && !target.search
-    );
+    )
+  );
   const utekaReviewsTarget = parseUtekaReviewsTarget(target);
   const pharmacy009Target = parsePharmacy009Target(target);
   const utekaSitemapTarget = target.protocol === "https:" && target.hostname === "uteka.ru" &&

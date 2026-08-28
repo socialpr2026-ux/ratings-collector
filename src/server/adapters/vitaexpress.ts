@@ -263,10 +263,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function normalizeVitaIdentityText(value: string): string {
+  // Vita currently abbreviates only the component-bound form name while the
+  // exact H1 keeps the long spelling. Expand this one proven phrase locally;
+  // every product ID, brand, modifier, dosage, pack and URL check remains strict.
+  return normalizeText(value).replace(/(^| )д рассасывания(?= |$)/gu, "$1для рассасывания");
+}
+
 function matchesExactTitle(title: string, product: ExactProduct): boolean {
   if (!matchesBrand(title, product.brand)) return false;
-  const normalized = ` ${normalizeText(title)} `;
-  return product.requiredPhrases.every((phrase) => normalized.includes(` ${normalizeText(phrase)} `));
+  const normalized = ` ${normalizeVitaIdentityText(title)} `;
+  return product.requiredPhrases.every((phrase) =>
+    normalized.includes(` ${normalizeVitaIdentityText(phrase)} `)
+  );
 }
 
 function explicitlyUnavailableReviewChannel($: CheerioAPI, product: ExactProduct): boolean {
