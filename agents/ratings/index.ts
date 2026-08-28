@@ -949,48 +949,52 @@ export function browserFetch(
       const yandexTranslate = new URL("https://translate.yandex.ru/translate");
       yandexTranslate.searchParams.set("url", source.toString());
       yandexTranslate.searchParams.set("lang", "ru-en");
-      const yandexAbort = new AbortController();
-      try {
-        const yandexResponse = await withDeadline(fetch(yandexTranslate, {
-          method: "GET",
-          redirect: "follow",
-          signal: AbortSignal.any([request.signal, yandexAbort.signal]),
-          headers: {
-            accept: "text/html,application/xhtml+xml",
-            "accept-language": "ru-RU,ru;q=0.9,en;q=0.7"
-          }
-        }), MAKSAVIT_YANDEX_TIMEOUT_MS, `Maksavit Yandex Translate request exceeded ${MAKSAVIT_YANDEX_TIMEOUT_MS} ms`);
-        const declaredLength = Number(yandexResponse.headers.get("content-length") ?? "0");
-        const htmlResponse = /(?:text\/html|application\/xhtml\+xml)/iu.test(
-          yandexResponse.headers.get("content-type") ?? ""
-        );
-        if (yandexResponse.ok && htmlResponse &&
-          (!Number.isFinite(declaredLength) || declaredLength <= 0 || declaredLength <= MAKSAVIT_YANDEX_MAX_BYTES)) {
-          const html = await readTextBounded(
-            yandexResponse,
-            MAKSAVIT_YANDEX_MAX_BYTES,
-            MAKSAVIT_YANDEX_TIMEOUT_MS
+      const yandexRecovered = await runStaticProxyTask(yandexTranslate.hostname, async () => {
+        const yandexAbort = new AbortController();
+        try {
+          const yandexResponse = await withDeadline(fetch(yandexTranslate, {
+            method: "GET",
+            redirect: "follow",
+            signal: AbortSignal.any([request.signal, yandexAbort.signal]),
+            headers: {
+              accept: "text/html,application/xhtml+xml",
+              "accept-language": "ru-RU,ru;q=0.9,en;q=0.7"
+            }
+          }), MAKSAVIT_YANDEX_TIMEOUT_MS, `Maksavit Yandex Translate request exceeded ${MAKSAVIT_YANDEX_TIMEOUT_MS} ms`);
+          const declaredLength = Number(yandexResponse.headers.get("content-length") ?? "0");
+          const htmlResponse = /(?:text\/html|application\/xhtml\+xml)/iu.test(
+            yandexResponse.headers.get("content-type") ?? ""
           );
-          const bound = bindExactMaksavitYandexHtml(html, source);
-          if (bound) {
-            return new Response(bound, {
-              status: 200,
-              headers: {
-                "content-type": "text/html; charset=utf-8",
-                "cache-control": "no-store",
-                "x-ratings-source": "maksavit-yandex-translate",
-                "x-ratings-source-url": source.toString()
-              }
-            });
+          if (yandexResponse.ok && htmlResponse &&
+            (!Number.isFinite(declaredLength) || declaredLength <= 0 || declaredLength <= MAKSAVIT_YANDEX_MAX_BYTES)) {
+            const html = await readTextBounded(
+              yandexResponse,
+              MAKSAVIT_YANDEX_MAX_BYTES,
+              MAKSAVIT_YANDEX_TIMEOUT_MS
+            );
+            const bound = bindExactMaksavitYandexHtml(html, source);
+            if (bound) {
+              return new Response(bound, {
+                status: 200,
+                headers: {
+                  "content-type": "text/html; charset=utf-8",
+                  "cache-control": "no-store",
+                  "x-ratings-source": "maksavit-yandex-translate",
+                  "x-ratings-source-url": source.toString()
+                }
+              });
+            }
+          } else {
+            await yandexResponse.body?.cancel().catch(() => undefined);
           }
-        } else {
-          await yandexResponse.body?.cancel().catch(() => undefined);
+        } catch (error) {
+          if (request.signal.aborted) throw error;
+        } finally {
+          yandexAbort.abort();
         }
-      } catch (error) {
-        if (request.signal.aborted) throw error;
-      } finally {
-        yandexAbort.abort();
-      }
+        return undefined;
+      });
+      if (yandexRecovered) return yandexRecovered;
 
       return runBrowserTask("maksavit", async () => {
         request.signal.throwIfAborted();

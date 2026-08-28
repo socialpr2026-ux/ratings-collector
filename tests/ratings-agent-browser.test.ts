@@ -792,6 +792,42 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("bounds concurrent Maksavit Yandex recovery to two source-bound cards", async () => {
+    const run = vi.fn(async () => { throw new Error("Sandbox must stay idle"); });
+    let activeYandex = 0;
+    let maxActiveYandex = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const raw = input instanceof Request ? input.url : String(input);
+      const url = new URL(raw);
+      if (url.hostname !== "translate.yandex.ru") {
+        return new Response("Google Translate shell", { status: 400 });
+      }
+      activeYandex += 1;
+      maxActiveYandex = Math.max(maxActiveYandex, activeYandex);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      activeYandex -= 1;
+      const source = url.searchParams.get("url")!;
+      const id = new URL(source).pathname.match(/\/(\d+)\/$/u)?.[1];
+      return new Response(`<!doctype html><html><head>
+        <meta content="${source}" property="og:url">
+        <link href="https://translated.turbopages.org/${id}" rel="canonical"></head><body>
+        <h1>БАКТОБЛИС ${id}</h1><section id="feedback"></section></body></html>`, {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const routedFetch = browserFetch(sandbox(run));
+    const ids = ["826060", "935299", "142040"];
+
+    const responses = await Promise.all(ids.map((id) => routedFetch(
+      `https://maksavit-ru.translate.goog/catalog/${id}/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en`
+    )));
+
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(maxActiveYandex).toBe(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("uses bounded Agent egress when the VitaExpress fixed gateway has a transient failure", async () => {
     const run = vi.fn(async () => { throw new Error("Sandbox must stay idle"); });
     const target = "https://vitaexpress.ru/product/baktoblis_tabletki_bad_30/";
