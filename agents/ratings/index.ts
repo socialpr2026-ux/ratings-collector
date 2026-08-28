@@ -41,6 +41,7 @@ type AgentContext = {
 };
 
 export const STATIC_PROXY_REQUEST_TIMEOUT_MS = 55_000;
+export const OZON_DIRECT_MAX_BYTES = 15_000_000;
 export const PHARMACY009_DIRECT_TIMEOUT_MS = 15_000;
 export const OKAPTEKA_DIRECT_TIMEOUT_MS = 15_000;
 export const ZDRAVCITY_GROUP_BFF_TIMEOUT_MS = 15_000;
@@ -958,15 +959,31 @@ export function browserFetch(
         const attemptAbort = new AbortController();
         const signal = AbortSignal.any([request.signal, attemptAbort.signal]);
         try {
-          return await withDeadline(fetch(url, {
-            method: "GET",
-            redirect: "manual",
-            signal,
-            headers: {
-              accept: "text/html,application/xhtml+xml",
-              "accept-language": "ru-RU,ru;q=0.9,en;q=0.7"
+          return await withDeadline((async () => {
+            const response = await fetch(url, {
+              method: "GET",
+              redirect: "manual",
+              signal,
+              headers: {
+                accept: "text/html,application/xhtml+xml",
+                "accept-language": "ru-RU,ru;q=0.9,en;q=0.7"
+              }
+            });
+            const declaredLength = Number(response.headers.get("content-length") ?? 0);
+            if (declaredLength > OZON_DIRECT_MAX_BYTES) {
+              await response.body?.cancel().catch(() => undefined);
+              return undefined;
             }
-          }), STATIC_PROXY_REQUEST_TIMEOUT_MS, `Ozon direct request exceeded ${STATIC_PROXY_REQUEST_TIMEOUT_MS} ms`);
+            const body = await response.arrayBuffer();
+            if (body.byteLength > OZON_DIRECT_MAX_BYTES) return undefined;
+            // The per-attempt signal is disposed in finally. Return a detached
+            // response so the adapter can still read the proof afterwards.
+            return new Response(body, {
+              status: response.status,
+              statusText: response.statusText,
+              headers: response.headers
+            });
+          })(), STATIC_PROXY_REQUEST_TIMEOUT_MS, `Ozon direct request exceeded ${STATIC_PROXY_REQUEST_TIMEOUT_MS} ms`);
         } catch {
           request.signal.throwIfAborted();
           return undefined;

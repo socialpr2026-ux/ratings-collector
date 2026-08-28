@@ -143,6 +143,31 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("buffers the Ozon direct proof before disposing its per-attempt signal", async () => {
+    const target = "https://www-ozon-ru.translate.goog/product/hloretta-21sht-4499023625/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const directFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === "https://ratings.example/api/internal/static-review-fetch") {
+        return new Response("fixed failure", { status: 502 });
+      }
+      const signal = init?.signal;
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("detached exact proof"));
+          setTimeout(() => signal?.aborted
+            ? controller.error(new DOMException("aborted", "AbortError"))
+            : controller.close(), 0);
+        }
+      }), { status: 200, headers: { "content-type": "text/html" } });
+    });
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    await expect((await routedFetch(target)).text()).resolves.toBe("detached exact proof");
+  });
+
   it("recovers one bounded Ozon translated GET after fixed-egress transport failure", async () => {
     const run = vi.fn(async () => undefined);
     const target = "https://www-ozon-ru.translate.goog/product/hloretta-21sht-4499023625/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
