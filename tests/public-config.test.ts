@@ -1403,10 +1403,13 @@ describe("static Ozon Translate gateway", () => {
     const redirect = "https://www.ozon.ru/category/lekarstvennye-sredstva-30000/arbidol-87397189/" +
       "?brand_was_predicted=true&category_was_predicted=true&deny_category_prediction=true&from_global=true&text=" +
       encodeURIComponent("Арбидол");
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(
-      `<html><script>location.replace(${JSON.stringify(redirect)})</script></html>`,
-      { headers: { "content-type": "text/html; charset=utf-8" } }
-    )));
+    const upstream = vi.fn()
+      .mockResolvedValueOnce(new Response("temporary transport failure", { status: 502 }))
+      .mockResolvedValueOnce(new Response(
+        `<html><script>location.replace(${JSON.stringify(redirect)})</script></html>`,
+        { headers: { "content-type": "text/html; charset=utf-8" } }
+      ));
+    vi.stubGlobal("fetch", upstream);
 
     const response = await callGateway(target.toString());
     const proof = await response.text();
@@ -1414,6 +1417,7 @@ describe("static Ozon Translate gateway", () => {
     expect(response.status).toBe(200);
     expect(proof).toContain("brand_was_predicted=true");
     expect(proof.length).toBeLessThan(1_000);
+    expect(upstream).toHaveBeenCalledTimes(2);
   });
 
   it("rejects unbounded Ozon Translate queries before fetch and fails closed on wrong source HTML", async () => {

@@ -4029,13 +4029,25 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     });
   }
   if (ozonTranslatedTarget) {
-    try {
-      const upstream = await safeFetch(target.toString(), {
-        method: "GET",
-        redirect: "manual",
-        headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
-      }, fetch, 0, 60_000);
-      const html = await readTextBounded(upstream, 12_000_000, 60_000);
+    // Google Translate intermittently returns a transport 5xx for the small
+    // initial /search/ document even while its exact predicted category is
+    // healthy. One bounded retry lets the adapter receive and validate that
+    // redirect; semantic/parser failures still fall through without retry.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let upstream: Response;
+      try {
+        upstream = await safeFetch(target.toString(), {
+          method: "GET",
+          redirect: "manual",
+          headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+        }, fetch, 0, 60_000);
+      } catch {
+        if (attempt === 0) continue;
+        break;
+      }
+      let html: string;
+      try { html = await readTextBounded(upstream, 12_000_000, 60_000); }
+      catch { break; }
       if (upstream.ok && /(?:text\/html|application\/xhtml\+xml)/i.test(upstream.headers.get("content-type") ?? "") &&
         !/(?:incidentId|Antibot Captcha|abt-challenge|Target URL returned error 403)/i.test(html) &&
         provesOzonTranslateHtml(html, ozonTranslatedTarget)) {
@@ -4053,7 +4065,8 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
           });
         }
       }
-    } catch { /* use the exact source-bound reader for non-empty search only */ }
+      if (![408, 425, 500, 502, 503, 504].includes(upstream.status)) break;
+    }
 
     if (ozonTranslatedTarget.kind !== "product") {
       try {
