@@ -293,10 +293,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function normalizeVitaIdentityText(value: string): string {
-  // Vita currently abbreviates only the component-bound form name while the
-  // exact H1 keeps the long spelling. Expand this one proven phrase locally;
+  // Vita currently abbreviates component-bound form names while the exact H1
+  // keeps the long spelling. Expand only the two live-proven phrases locally;
   // every product ID, brand, modifier, dosage, pack and URL check remains strict.
-  return normalizeText(value).replace(/(^| )д рассасывания(?= |$)/gu, "$1для рассасывания");
+  return normalizeText(value)
+    .replace(/(^| )д рассасывания(?= |$)/gu, "$1для рассасывания")
+    .replace(/(^| )д п к введ(?= |$)/gu, "$1для подкожного введения");
 }
 
 function matchesExactTitle(title: string, product: ExactProduct): boolean {

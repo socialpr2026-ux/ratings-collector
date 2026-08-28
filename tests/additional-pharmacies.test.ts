@@ -329,9 +329,7 @@ describe("additional pharmacy adapters", () => {
       }
       expect(url.toString()).toBe(productUrl);
       return new Response(`<!doctype html><html><head><link rel="canonical" href="${productUrl}">
-        <script type="application/ld+json">${JSON.stringify({
-          "@type": "Product", sku: productId, name: title, url: productUrl
-        })}</script><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
+        <script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
           props: { pageProps: { data: { componentData: {
             productCard: { product: { productId: Number(productId), id: productId, name: title, href: path } },
             initialReviews: {
@@ -359,7 +357,7 @@ describe("additional pharmacy adapters", () => {
       ratingCount: 0,
       rating: null,
       status: "no_reviews",
-      source: "ozerki-visible-product-empty-state"
+      source: "ozerki-next-data-product-empty-state"
     });
   });
 

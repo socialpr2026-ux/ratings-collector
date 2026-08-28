@@ -357,6 +357,26 @@ describe("VitaExpressAdapter", () => {
       .rejects.toThrow(/vitaexpress\.ru:20707[89]: review_channel_unavailable/u);
   });
 
+  it.each([
+    ["206091", "Тирзетта  раствор д/п/к введ., 5мг, 0,5мл, №4"],
+    ["207078", "Седжаро раствор д/п/к введ. 2,5мг/доза, 2,4мл №1+4иглы"]
+  ])("accepts Vita's live first-party subcutaneous abbreviation for %s", async (id, boundName) => {
+    const product = productById(id);
+    const html = unavailableReviewPage(product, { NAME: boundName, SHOW_REVIEW: 0 })
+      .replace(`data-name="${product.title}"`, `data-name="${boundName}"`);
+    const adapter = new VitaExpressAdapter(new MemoryEvidenceStore(), fetchProducts({
+      [product.id]: new Response(html, {
+        status: 200, headers: { "content-type": "text/html; charset=utf-8" }
+      })
+    }));
+
+    const error = await adapter.collect(ref(product), { ...CONTEXT, runId: `live-abbreviation-${id}` })
+      .then(() => undefined, (reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(AdapterBlockedError);
+    expect((error as Error).message).toContain("review_channel_unavailable");
+  });
+
   it("discovers and collects all three exact Enterolactis cards with proven empty reviews", async () => {
     const evidence = new MemoryEvidenceStore();
     const adapter = new VitaExpressAdapter(evidence, fetchProducts());

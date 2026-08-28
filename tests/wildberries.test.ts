@@ -1209,6 +1209,30 @@ describe("WildberriesAdapter.collect", () => {
     expect(never).toHaveBeenCalledTimes(1);
   });
 
+  it("repairs the source-bound Tirzetta 10 mg volume typo only for the proven WB nmId", async () => {
+    const adapter = createAdapter(vi.fn(async () => {
+      throw new Error("no buyer fallback is needed");
+    }) as unknown as typeof globalThis.fetch, { productInfoFetch: false });
+    const observation = await adapter.collect(productRef({
+      listingId: "822668151",
+      brand: "Тирзетта",
+      title: "Тирзетта раствор для подкожного введения 10 мг 5 мл №4",
+      metadata: {
+        source: "wildberries-search-v18",
+        nmFeedbacks: 70,
+        nmReviewRating: 4.94
+      }
+    }), context({ runId: "run-tirzetta-volume-typo" }));
+
+    expect(observation).toMatchObject({
+      listingId: "822668151",
+      product: "Тирзетта раствор для подкожного введения 10 мг 0,5 мл №4",
+      reviews: 70,
+      rating: 4.94,
+      status: "ok"
+    });
+  });
+
   it("bounds a product-info response whose body never finishes", async () => {
     const stalledBody = vi.fn(async () => new Response(new ReadableStream({ start() {} }), {
       status: 200,

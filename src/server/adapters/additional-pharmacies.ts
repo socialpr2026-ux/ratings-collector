@@ -1571,6 +1571,29 @@ export class OzerkiAdapter extends AdditionalPharmacyAdapter {
 
       const products = jsonLdProducts(page.$).filter((item) => String(item.sku ?? "") === productRef.id);
       if (products.length !== 1) {
+        const fallbackTitle = compactText(ref.title ?? page.$("h1").first().text());
+        if (products.length === 0 && matchesBrand(fallbackTitle, ref.brand) &&
+          ozerkiProductEmptyReviewProof(page, {
+            id: productRef.id,
+            title: fallbackTitle,
+            url: productRef.url,
+            brand: ref.brand
+          })) {
+          return observation(this.evidence, ref, page, {
+            domain: OZERKI_DOMAIN,
+            title: fallbackTitle,
+            canonicalUrl: productRef.url,
+            reviews: 0,
+            rating: null,
+            ratingCount: 0,
+            source: "ozerki-next-data-product-empty-state",
+            productEvidence: titleProductEvidence(
+              fallbackTitle,
+              { type: "product_id", value: productRef.id },
+              productRef.url
+            )
+          });
+        }
         throw new ParserChangedError(`${OZERKI_DOMAIN}:${ref.listingId}: exact Product JSON-LD is missing or ambiguous`);
       }
       const product = products[0];

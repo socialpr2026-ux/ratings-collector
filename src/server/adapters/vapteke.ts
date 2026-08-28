@@ -435,6 +435,15 @@ export class VaptekeAdapter implements SiteAdapter {
         context.signal?.throwIfAborted();
         continue;
       }
+      // The exact, bounded search page is healthy from a normal browser, but
+      // Vapteke can answer EdgeOne's static route with a deterministic 400.
+      // Retrying the same static request cannot change that route decision, so
+      // use the already-protected browser transport immediately. The browser
+      // response still passes the full exact count/card proof below and a
+      // second 400 remains an explicit block rather than becoming no_results.
+      if (wantsHtml && direct.response.status === 400) {
+        return this.requestOnce(url, context, accept, browserInit, maxBytes);
+      }
       if (!wantsHtml || !blockedStatus(direct.response.status) && !isBlockedBody(direct.body)) return direct;
       if (attempt === 1) return this.requestOnce(url, context, accept, browserInit, maxBytes);
       context.signal?.throwIfAborted();

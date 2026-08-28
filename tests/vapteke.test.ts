@@ -132,6 +132,36 @@ describe("VaptekeAdapter", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("uses the browser route when EdgeOne's static complete search returns HTTP 400", async () => {
+    const brand = "Тирзетта";
+    const items = Array.from({ length: 16 }, (_unused, index) => ({
+      productId: 761000 + index,
+      name: `${brand} р-р для п/к введ. ${index + 1} мг 0.5 мл 4 шт.`,
+      slug: `tirzetta-${index + 1}-mg-05-ml-${761000 + index}`
+    }));
+    const searchRoutes: Array<string | null> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestedUrl(input);
+      if (url.pathname === "/ajax/autocomplete") {
+        return autocompleteResponse(items.slice(0, 10).map((item) => hit(item.productId, item.name, item.slug)), 16);
+      }
+      const browser = new Headers(init?.headers).get("x-ratings-browser");
+      searchRoutes.push(browser);
+      return browser === "1"
+        ? new Response(completeSearchHtml(brand, items), {
+            status: 200,
+            headers: { "content-type": "text/html; charset=UTF-8" }
+          })
+        : new Response("static route rejected", { status: 400 });
+    }) as unknown as typeof fetch;
+
+    const refs = await new VaptekeAdapter(new MemoryEvidenceStore(), fetchMock).discover(brand, context);
+
+    expect(refs).toHaveLength(16);
+    expect(refs.every((ref) => ref.metadata.discovery === "vapteke-complete-search-fallback")).toBe(true);
+    expect(searchRoutes).toEqual([null, "1"]);
+  });
+
   it.each([
     ["wrong search brand", completeSearchHtml("Седжаро", [
       { productId: 761000, name: "Тирзетта 2.5 мг", slug: "tirzetta-25-mg-761000" }
@@ -200,7 +230,7 @@ describe("VaptekeAdapter", () => {
     }, context)).rejects.toBeInstanceOf(ParserChangedError);
   });
 
-  it.each([401, 403, 429, 498, 502])("never turns HTTP %s into zero feedback", async (status) => {
+  it.each([400, 401, 403, 429, 498, 502])("never turns HTTP %s into zero feedback", async (status) => {
     const adapter = new VaptekeAdapter(new MemoryEvidenceStore(), vi.fn(async () =>
       new Response("blocked", { status })
     ) as unknown as typeof fetch);

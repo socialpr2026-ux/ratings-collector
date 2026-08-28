@@ -422,8 +422,21 @@ function preferProductTitle(primary: string, alternative: string | undefined): s
   return primary;
 }
 
-function recoverEnterolactisCatalogTitle(title: string, brand: string, sourceBrand?: string): string {
-  if (normalizeText(brand) !== "энтеролактис") return title;
+function recoverCatalogTitle(
+  title: string,
+  brand: string,
+  sourceBrand?: string,
+  listingId?: string
+): string {
+  const normalizedBrand = normalizeText(brand);
+  if (normalizedBrand === "тирзетта" && listingId === "822668151" &&
+    matchesWildberriesProductBrand(title, brand, sourceBrand)) {
+    // WB currently exposes this exact official 10 mg card with a source-title
+    // typo of 5 ml. Bind the repair to the immutable nmId and full medicine
+    // identity so no unrelated volume is inferred or rewritten.
+    return title.replace(/(?<![\d,.])5\s*мл/iu, "0,5 мл");
+  }
+  if (normalizedBrand !== "энтеролактис") return title;
   const normalized = normalizeText(title);
   const sourceProvesBrand = matchesWildberriesProductBrand(title, brand, sourceBrand);
   if (!sourceProvesBrand) return title;
@@ -482,7 +495,7 @@ function exactSearchFallbackCard(ref: ProductRef): JsonObject | undefined {
   const evidenceUrl = metadataString(ref.metadata, "searchEvidenceUrl");
   const sourceTitle = asNonemptyString(ref.title);
   const sourceBrand = metadataString(ref.metadata, "sourceBrand");
-  const title = sourceTitle ? recoverEnterolactisCatalogTitle(sourceTitle, ref.brand, sourceBrand) : undefined;
+  const title = sourceTitle ? recoverCatalogTitle(sourceTitle, ref.brand, sourceBrand, ref.listingId) : undefined;
   const sourceMatchesBrand = matchesWildberriesProductBrand(title ?? "", ref.brand, sourceBrand);
   if (!evidenceUrl || !title || TRUNCATED_TITLE.test(title) || !sourceMatchesBrand) return undefined;
   let url: URL;
@@ -528,7 +541,7 @@ function observationFromSearchMetadata(
   const sourceTitle = asNonemptyString(ref.title);
   const sourceBrand = metadataString(ref.metadata, "sourceBrand");
   const title = sourceTitle
-    ? recoverEnterolactisCatalogTitle(sourceTitle, ref.brand, sourceBrand)
+    ? recoverCatalogTitle(sourceTitle, ref.brand, sourceBrand, listingId)
     : undefined;
   const reviews = metadataInteger(ref.metadata, "resolvedFeedbackCount") ??
     metadataInteger(ref.metadata, "nmFeedbacks");
@@ -1233,10 +1246,11 @@ export class WildberriesAdapter implements SiteAdapter {
     if (!apiTitle) throw new ParserChangedError(`Wildberries card ${listingId} has no product title`);
     const sourceBrand = asNonemptyString(product.brand) ?? metadataString(ref.metadata, "sourceBrand");
     const bestKnownTitle = preferProductTitle(apiTitle, asNonemptyString(ref.title));
-    const title = recoverEnterolactisCatalogTitle(
+    const title = recoverCatalogTitle(
       await this.enrichProductTitle(listingId, ref.brand, bestKnownTitle, context),
       ref.brand,
-      sourceBrand
+      sourceBrand,
+      listingId
     );
 
     const groupId =
