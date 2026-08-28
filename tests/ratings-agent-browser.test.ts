@@ -717,14 +717,21 @@ describe("ratings Agent lazy Sandbox routing", () => {
 
   it("falls back from one exact blocked Maksavit Translate card to the dedicated browser lane", async () => {
     const run = vi.fn(async () => { throw new Error("Sandbox quota exceeded"); });
-    const directFetch = vi.fn(async () => new Response("Google Translate shell", { status: 400 }));
+    const directFetch = vi.fn(async (_input: RequestInfo | URL) =>
+      new Response("Google Translate shell", { status: 400 }));
     vi.stubGlobal("fetch", directFetch);
     const routedFetch = browserFetch(sandbox(run));
     const target = "https://maksavit-ru.translate.goog/catalog/945425/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
 
     await expect(routedFetch(target)).rejects.toBeInstanceOf(AdapterQuotaError);
 
-    expect(directFetch).toHaveBeenCalledOnce();
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(directFetch.mock.calls.map(([input]) => new URL(
+      input instanceof Request ? input.url : String(input)
+    ).hostname)).toEqual([
+      "maksavit-ru.translate.goog",
+      "translate.yandex.ru"
+    ]);
     expect(run).toHaveBeenCalledOnce();
   });
 
@@ -745,6 +752,43 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toContain("Бактоблис");
     expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("recovers an exact Maksavit card through Yandex Translate before spending Sandbox quota", async () => {
+    const run = vi.fn(async () => { throw new Error("Sandbox must stay idle"); });
+    const target = "https://maksavit-ru.translate.goog/catalog/826060/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const source = "https://maksavit.ru/catalog/826060/";
+    const endpoint = "https://ratings.example/api/internal/static-review-fetch";
+    const yandexHtml = `<!doctype html><html><head>
+      <link rel="canonical" href="https://translated.turbopages.org/proxy_u/ru-en/test/https/maksavit.ru/catalog/826060/">
+      <meta property="og:url" content="${source}"></head><body>
+      <h1>БАКТОБЛИС ПЛЮС табл. д/рассас. №30</h1>
+      <section id="feedback"><h2>Отзывы покупателей БАКТОБЛИС ПЛЮС табл. д/рассас. №30</h2>
+      <div class="product-feedback-main__overview">Отзывы на препарат отсутствуют.</div>
+      <div class="product-feedback-aside--empty"></div></section></body></html>`;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (String(input) === endpoint) return new Response("fixed egress unavailable", { status: 502 });
+      if (url.hostname === "translate.yandex.ru") {
+        expect(url.searchParams.get("url")).toBe(source);
+        expect(init?.redirect).toBe("follow");
+        return new Response(yandexHtml, { headers: { "content-type": "text/html; charset=utf-8" } });
+      }
+      return new Response("Google Translate shell", { status: 400 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const routedFetch = browserFetch(sandbox(run), { endpoint, token: "internal-token" });
+
+    const response = await routedFetch(target);
+    const html = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("maksavit-yandex-translate");
+    expect(response.headers.get("x-ratings-source-url")).toBe(source);
+    expect(html).toContain(`<link rel="canonical" href="${source}">`);
+    expect(html).not.toContain("translated.turbopages.org");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(run).not.toHaveBeenCalled();
   });
 

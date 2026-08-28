@@ -32,8 +32,14 @@ type ProductPage = {
   status: number;
   title: string;
   ignoredTemplateAggregate: boolean;
-  transport: "google_translate" | "first_party_browser";
+  transport: "google_translate" | "yandex_translate" | "first_party_browser";
 };
+
+function transportSource(transport: ProductPage["transport"]): string {
+  if (transport === "first_party_browser") return "first-party-browser";
+  if (transport === "yandex_translate") return "yandex-translate";
+  return "google-translate";
+}
 
 function compactText(value: string): string {
   return value.replace(/[\s\u00a0\u202f]+/gu, " ").trim();
@@ -225,7 +231,7 @@ export class MaksavitAdapter implements SiteAdapter {
         ignoredTemplateAggregate: page.ignoredTemplateAggregate
       },
       productEvidence,
-      source: `maksavit-visible-product-feedback:${page.transport === "first_party_browser" ? "first-party-browser" : "google-translate"}`
+      source: `maksavit-visible-product-feedback:${transportSource(page.transport)}`
     });
 
     return {
@@ -245,7 +251,7 @@ export class MaksavitAdapter implements SiteAdapter {
       capturedAt,
       evidenceRef,
       productEvidence,
-      source: `maksavit-visible-product-feedback:${page.transport === "first_party_browser" ? "first-party-browser" : "google-translate"}`
+      source: `maksavit-visible-product-feedback:${transportSource(page.transport)}`
     };
   }
 
@@ -289,12 +295,12 @@ export class MaksavitAdapter implements SiteAdapter {
     const source = response.headers.get("x-ratings-source");
     let transport: ProductPage["transport"] = "google_translate";
     let transportUrl = requestUrl;
-    if (source === "maksavit-first-party-browser") {
+    if (source === "maksavit-first-party-browser" || source === "maksavit-yandex-translate") {
       const finalUrl = response.headers.get("x-ratings-source-url") ?? "";
       if (listingIdFromSourceUrl(finalUrl) !== listingId) {
-        throw new ParserChangedError(`${DOMAIN}:${listingId}: browser response is not bound to the exact product URL`);
+        throw new ParserChangedError(`${DOMAIN}:${listingId}: recovered response is not bound to the exact product URL`);
       }
-      transport = "first_party_browser";
+      transport = source === "maksavit-first-party-browser" ? "first_party_browser" : "yandex_translate";
       transportUrl = finalUrl;
     }
     return parseProductPage(html, listingId, transportUrl, response.status, transport);

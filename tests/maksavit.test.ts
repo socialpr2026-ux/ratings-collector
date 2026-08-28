@@ -247,6 +247,34 @@ describe("MaksavitAdapter", () => {
     )).rejects.toBeInstanceOf(ParserChangedError);
   });
 
+  it("records a source-bound Yandex Translate recovery truthfully", async () => {
+    const evidence = new MemoryEvidenceStore();
+    const id = "826060";
+    const fetchMock = exactFetch({
+      [id]: new Response(productPage(id), {
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "x-ratings-source": "maksavit-yandex-translate",
+          "x-ratings-source-url": productUrl(id)
+        }
+      })
+    });
+
+    const observation = await new MaksavitAdapter(evidence, fetchMock).collect(ref(id, "Бактоблис"), CONTEXT);
+
+    expect(observation).toMatchObject({
+      listingId: id,
+      reviews: 0,
+      rating: null,
+      source: "maksavit-visible-product-feedback:yandex-translate"
+    });
+    expect([...evidence.items.values()][0]).toMatchObject({
+      transportUrl: productUrl(id),
+      source: "maksavit-visible-product-feedback:yandex-translate"
+    });
+  });
+
   it("rejects template AggregateRating 5/1 when the visible empty proof is absent", async () => {
     const fetchMock = exactFetch({
       "555978": new Response(productPage("555978", { includeFeedback: false }), { status: 200 })
