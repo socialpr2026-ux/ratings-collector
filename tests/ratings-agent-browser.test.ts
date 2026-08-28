@@ -788,6 +788,41 @@ describe("ratings Agent lazy Sandbox routing", () => {
     expect(response.headers.get("x-ratings-source-url")).toBe(source);
     expect(html).toContain(`<link rel="canonical" href="${source}">`);
     expect(html).not.toContain("translated.turbopages.org");
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("recovers Maksavit through compact fixed Yandex egress before direct translation", async () => {
+    const run = vi.fn(async () => { throw new Error("Sandbox must stay idle"); });
+    const target = "https://maksavit-ru.translate.goog/catalog/935299/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const source = "https://maksavit.ru/catalog/935299/";
+    const endpoint = "https://ratings.example/api/internal/static-review-fetch";
+    const compact = `<!doctype html><html><head><link rel="canonical" href="${source}">
+      <meta property="og:url" content="${source}"></head><body>
+      <h1>БАКТОБЛИС ДУО табл. д/рассас. №10</h1>
+      <section id="feedback"><h2>Отзывы покупателей БАКТОБЛИС ДУО табл. д/рассас. №10</h2>
+      <div class="product-feedback-main__overview">Отзывы на препарат отсутствуют.</div>
+      <div class="product-feedback-aside--empty"></div></section></body></html>`;
+    const directHosts: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const raw = input instanceof Request ? input.url : String(input);
+      if (raw === endpoint) {
+        const proxied = new URL(JSON.parse(String(init?.body)).url as string);
+        return proxied.hostname === "translate.yandex.ru"
+          ? new Response(compact, { headers: { "content-type": "text/html; charset=utf-8" } })
+          : new Response("fixed Google egress unavailable", { status: 502 });
+      }
+      directHosts.push(new URL(raw).hostname);
+      return new Response("Google Translate shell", { status: 400 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const routedFetch = browserFetch(sandbox(run), { endpoint, token: "internal-token" });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source-url")).toBe(source);
+    expect(directHosts).toEqual(["maksavit-ru.translate.goog"]);
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(run).not.toHaveBeenCalled();
   });

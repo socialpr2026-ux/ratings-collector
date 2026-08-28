@@ -11,6 +11,7 @@ import { safeErrorMessage } from "../../src/server/utils/error-message.js";
 import { loadPlaywright } from "../../src/server/utils/playwright-runtime.js";
 import { playwrightCdpBaseUrl } from "../../src/server/utils/sandbox-cdp.js";
 import { collectorPublicEndpoint } from "../../src/server/utils/collector-public-endpoint.js";
+import { compactExactMaksavitYandexHtml } from "../../src/server/utils/maksavit-yandex.js";
 import {
   bindExactOkaptekaFirstPartyHtml,
   OKAPTEKA_FIRST_PARTY_HTML_MAX_BYTES,
@@ -224,34 +225,8 @@ export function hasExplicitWildberriesNoResults(bodyText: string, query: string)
   );
 }
 
-function htmlAttribute(tag: string, name: string): string | undefined {
-  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  const match = tag.match(new RegExp(
-    `\\s${escapedName}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>]+))`,
-    "iu"
-  ));
-  return match?.[1] ?? match?.[2] ?? match?.[3];
-}
-
 export function bindExactMaksavitYandexHtml(html: string, source: URL): string | undefined {
-  if (!/<\/body\s*>\s*<\/html\s*>\s*$/iu.test(html)) return undefined;
-  const head = html.match(/<head\b[^>]*>/iu)?.[0];
-  if (!head) return undefined;
-  const exactOpenGraph = [...html.matchAll(/<meta\b[^>]*>/giu)].some((match) => {
-    const tag = match[0];
-    return htmlAttribute(tag, "property")?.trim().toLocaleLowerCase("en-US") === "og:url" &&
-      htmlAttribute(tag, "content")?.trim() === source.toString();
-  });
-  if (!exactOpenGraph) return undefined;
-
-  const withoutForeignCanonical = html.replace(/<link\b[^>]*>/giu, (tag) => {
-    const relations = htmlAttribute(tag, "rel")?.toLocaleLowerCase("en-US").split(/\s+/u) ?? [];
-    return relations.includes("canonical") ? "" : tag;
-  });
-  return withoutForeignCanonical.replace(
-    /<head\b[^>]*>/iu,
-    `${head}<link rel="canonical" href="${source.toString()}">`
-  );
+  return compactExactMaksavitYandexHtml(html, source);
 }
 
 async function withDeadline<T>(promise: Promise<T>, milliseconds: number, message: string): Promise<T> {
@@ -949,6 +924,42 @@ export function browserFetch(
       const yandexTranslate = new URL("https://translate.yandex.ru/translate");
       yandexTranslate.searchParams.set("url", source.toString());
       yandexTranslate.searchParams.set("lang", "ru-en");
+      const acceptYandexRecovery = async (response: Response): Promise<Response | undefined> => {
+        const declaredLength = Number(response.headers.get("content-length") ?? "0");
+        const htmlResponse = /(?:text\/html|application\/xhtml\+xml)/iu.test(
+          response.headers.get("content-type") ?? ""
+        );
+        if (!response.ok || !htmlResponse ||
+          Number.isFinite(declaredLength) && declaredLength > MAKSAVIT_YANDEX_MAX_BYTES) {
+          await response.body?.cancel().catch(() => undefined);
+          return undefined;
+        }
+        const html = await readTextBounded(
+          response,
+          MAKSAVIT_YANDEX_MAX_BYTES,
+          MAKSAVIT_YANDEX_TIMEOUT_MS
+        );
+        const bound = bindExactMaksavitYandexHtml(html, source);
+        if (!bound) return undefined;
+        return new Response(bound, {
+          status: 200,
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store",
+            "x-ratings-source": "maksavit-yandex-translate",
+            "x-ratings-source-url": source.toString()
+          }
+        });
+      };
+      if (staticProxy) {
+        try {
+          const fixedYandex = await fetchViaStaticProxy(yandexTranslate, request.signal);
+          const accepted = await acceptYandexRecovery(fixedYandex);
+          if (accepted) return accepted;
+        } catch (error) {
+          if (request.signal.aborted) throw error;
+        }
+      }
       const yandexRecovered = await runStaticProxyTask(yandexTranslate.hostname, async () => {
         const yandexAbort = new AbortController();
         try {
@@ -961,32 +972,7 @@ export function browserFetch(
               "accept-language": "ru-RU,ru;q=0.9,en;q=0.7"
             }
           }), MAKSAVIT_YANDEX_TIMEOUT_MS, `Maksavit Yandex Translate request exceeded ${MAKSAVIT_YANDEX_TIMEOUT_MS} ms`);
-          const declaredLength = Number(yandexResponse.headers.get("content-length") ?? "0");
-          const htmlResponse = /(?:text\/html|application\/xhtml\+xml)/iu.test(
-            yandexResponse.headers.get("content-type") ?? ""
-          );
-          if (yandexResponse.ok && htmlResponse &&
-            (!Number.isFinite(declaredLength) || declaredLength <= 0 || declaredLength <= MAKSAVIT_YANDEX_MAX_BYTES)) {
-            const html = await readTextBounded(
-              yandexResponse,
-              MAKSAVIT_YANDEX_MAX_BYTES,
-              MAKSAVIT_YANDEX_TIMEOUT_MS
-            );
-            const bound = bindExactMaksavitYandexHtml(html, source);
-            if (bound) {
-              return new Response(bound, {
-                status: 200,
-                headers: {
-                  "content-type": "text/html; charset=utf-8",
-                  "cache-control": "no-store",
-                  "x-ratings-source": "maksavit-yandex-translate",
-                  "x-ratings-source-url": source.toString()
-                }
-              });
-            }
-          } else {
-            await yandexResponse.body?.cancel().catch(() => undefined);
-          }
+          return await acceptYandexRecovery(yandexResponse);
         } catch (error) {
           if (request.signal.aborted) throw error;
         } finally {

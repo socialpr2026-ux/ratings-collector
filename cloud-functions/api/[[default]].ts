@@ -37,6 +37,10 @@ import {
 } from "../../src/server/utils/okapteka-missing.js";
 import { assertSafePublicDestination, readTextBounded, safeFetch } from "../../src/server/utils/safe-fetch.js";
 import {
+  compactExactMaksavitYandexHtml,
+  maksavitSourceFromYandexTranslateUrl
+} from "../../src/server/utils/maksavit-yandex.js";
+import {
   proveExactZdravcityGroupBff,
   ZDRAVCITY_GROUP_BFF_MAX_BYTES,
   zdravcityGroupBffGetUrl,
@@ -3258,6 +3262,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     !target.port && !target.username && !target.password && !target.hash &&
     /^\/catalog\/\d+\/$/u.test(target.pathname) && exactTranslateParameters(target) &&
     [...target.searchParams.keys()].every((key) => PHARMACY_TRANSLATE_PARAMETERS.has(key) && target.searchParams.getAll(key).length === 1);
+  const maksavitYandexSource = maksavitSourceFromYandexTranslateUrl(target);
   const yandexTarget = target.protocol === "https:" && target.hostname === "reviews.yandex.ru" &&
     !target.port && !target.username && !target.password && !target.hash && !target.search && (
       target.pathname === "/ugcpub/sitemap.xml" ||
@@ -3295,7 +3300,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         [...target.searchParams.keys()].every((key) => key === "url") && (safeSearch || safeProduct);
     } catch { /* invalid nested Ozon search URL */ }
   }
-  if (target.protocol !== "https:" || !(yandexBatch || reviewTarget || vitaExpressTarget || maksavitTranslatedTarget || vaptekeAutocompleteTarget || vaptekeProductTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget || asnaSitemapTarget || yandexMarketTranslatedTarget)) {
+  if (target.protocol !== "https:" || !(yandexBatch || reviewTarget || vitaExpressTarget || maksavitTranslatedTarget || maksavitYandexSource || vaptekeAutocompleteTarget || vaptekeProductTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget || asnaSitemapTarget || yandexMarketTranslatedTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
   }
   if (vaptekeAutocompleteTarget) {
@@ -3326,6 +3331,38 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     } catch (error) {
       return json({ error: safeErrorMessage(error) }, 502);
     }
+  }
+  if (maksavitYandexSource) {
+    const upstream = await safeFetch(target.toString(), {
+      method: "GET",
+      redirect: "follow",
+      headers: {
+        accept: "text/html,application/xhtml+xml",
+        "accept-language": "ru-RU,ru;q=0.9,en;q=0.7"
+      }
+    }, fetch, 4, 60_000);
+    const html = await readTextBounded(upstream, 4_000_000, 60_000);
+    if (!upstream.ok || !/(?:text\/html|application\/xhtml\+xml)/iu.test(upstream.headers.get("content-type") ?? "")) {
+      return new Response(html, {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "text/html; charset=utf-8" }
+      });
+    }
+    const compact = compactExactMaksavitYandexHtml(html, maksavitYandexSource);
+    if (!compact || compact.length > 150_000) {
+      return json({ error: "Yandex Translate did not prove the exact Maksavit product feedback" }, 502);
+    }
+    return new Response(compact, {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-ratings-source": "yandex-translate-maksavit-exact",
+        "x-ratings-source-url": maksavitYandexSource.toString(),
+        "x-ratings-original-bytes": String(new TextEncoder().encode(html).byteLength),
+        "x-ratings-proof-bytes": String(new TextEncoder().encode(compact).byteLength)
+      }
+    });
   }
   if (yandexMarketTranslatedTarget) {
     const upstream = await safeFetch(target.toString(), {

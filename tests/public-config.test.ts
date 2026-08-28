@@ -179,6 +179,46 @@ describe("new static collector gateways", () => {
     expect(upstream).toHaveBeenCalledOnce();
   });
 
+  it("compacts only an exact source-bound Maksavit Yandex translation", async () => {
+    const source = "https://maksavit.ru/catalog/935299/";
+    const target = new URL("https://translate.yandex.ru/translate");
+    target.searchParams.set("url", source);
+    target.searchParams.set("lang", "ru-en");
+    const largeNoise = "x".repeat(250_000);
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe(target.toString());
+      return new Response(`<!doctype html><html><head>
+        <link rel="canonical" href="https://translated.turbopages.org/proxy/source">
+        <meta content="${source}" property="og:url"></head><body>${largeNoise}
+        <h1>БАКТОБЛИС ДУО табл. д/рассас. №10</h1>
+        <section data-v-test="" id="feedback"><h2>Отзывы покупателей БАКТОБЛИС ДУО табл. д/рассас. №10</h2>
+        <div class="product-feedback-main__overview">Отзывы на препарат отсутствуют.</div>
+        <div class="product-feedback-aside--empty"></div></section></body></html>`, {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target.toString());
+    const compact = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("yandex-translate-maksavit-exact");
+    expect(response.headers.get("x-ratings-source-url")).toBe(source);
+    expect(Number(response.headers.get("x-ratings-proof-bytes"))).toBeLessThan(2_000);
+    expect(compact).toContain(`<link rel="canonical" href="${source}">`);
+    expect(compact).not.toContain("translated.turbopages.org");
+    expect(compact).not.toContain(largeNoise);
+
+    const wrongSource = new URL(target);
+    wrongSource.searchParams.set("url", "https://example.com/catalog/935299/");
+    const extraParameter = new URL(target);
+    extraParameter.searchParams.set("debug", "1");
+    expect((await callGateway(wrongSource.toString())).status).toBe(400);
+    expect((await callGateway(extraParameter.toString())).status).toBe(400);
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
   it("recovers an exact complete Wildberries card batch through the source-bound reader", async () => {
     const target = "https://card.wb.ru/cards/v4/detail?appType=1&curr=rub&dest=-1257786&lang=ru&locale=ru&nm=11%3B22";
     const products = [

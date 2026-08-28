@@ -129,7 +129,8 @@ function parseProductPage(
     transport,
     // Maksavit currently emits a constant Product AggregateRating 5/1 even
     // beside the visible empty state. It is recorded only as rejected evidence.
-    ignoredTemplateAggregate: /"aggregateRating"\s*:\s*\{[^}]*"ratingValue"\s*:\s*5(?:\.0+)?[^}]*"reviewCount"\s*:\s*1[^}]*\}/iu.test(html)
+    ignoredTemplateAggregate: /"aggregateRating"\s*:\s*\{[^}]*"ratingValue"\s*:\s*5(?:\.0+)?[^}]*"reviewCount"\s*:\s*1[^}]*\}/iu.test(html) ||
+      $("meta[name='ratings:ignored-template-aggregate'][content='5/1']").length === 1
   };
 }
 
