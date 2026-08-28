@@ -58,6 +58,43 @@ const EXACT_PRODUCT_SEEDS: Readonly<Record<string, readonly ExactProductSeed[]>>
   ]
 };
 
+type VerifiedExactListingCandidate = Pick<SearchTile, "listingId" | "title" | "url">;
+
+type VerifiedExactListingCandidateRegistry = {
+  version: number;
+  brands: Readonly<Record<string, {
+    verifiedAt: string;
+    candidates: readonly VerifiedExactListingCandidate[];
+  }>>;
+};
+
+/**
+ * Versioned listing-level recovery hints. Unlike EXACT_PRODUCT_SEEDS these are
+ * not evidence of one shared aggregate and never replace exhaustive search.
+ * Every candidate still has to pass the normal exact product composer proof
+ * during the current run before it can become a completed observation.
+ */
+const VERIFIED_EXACT_LISTING_CANDIDATES: VerifiedExactListingCandidateRegistry = {
+  version: 1,
+  brands: {
+    "тирзетта": {
+      verifiedAt: "2026-08-28",
+      candidates: [
+        {
+          listingId: "2899925302",
+          title: "Тирзетта 2,5 мг раствор для инъекций шприц 0,5 мл 4 шт",
+          url: "https://www.ozon.ru/product/tirzetta-2-5-mg-rastvor-dlya-inektsiy-shprits-0-5-ml-4-sht-2899925302/"
+        },
+        {
+          listingId: "2899925038",
+          title: "Тирзетта 12,5 мг раствор для инъекций шприц 0,5 мл 4 шт",
+          url: "https://www.ozon.ru/product/tirzetta-12-5-mg-rastvor-dlya-inektsiy-shprits-0-5-ml-4-sht-2899925038/"
+        }
+      ]
+    }
+  }
+};
+
 type JsonObject = Record<string, unknown>;
 
 type ActivityInput = Omit<AdapterActivityEvent, "status">;
@@ -96,6 +133,10 @@ type SearchTile = {
   rawRating: unknown;
   rawReviewCount: unknown;
   source: typeof SOURCE | typeof TRANSLATE_SOURCE;
+  exactCandidate?: {
+    registryVersion: number;
+    verifiedAt: string;
+  };
 };
 
 type SearchPage = {
@@ -111,6 +152,21 @@ function discoveryQueries(brand: string): string[] {
 
 function exactProductSeeds(brand: string): readonly ExactProductSeed[] {
   return EXACT_PRODUCT_SEEDS[brand.normalize("NFKC").toLocaleLowerCase("ru-RU").trim()] ?? [];
+}
+
+function verifiedExactListingCandidates(brand: string): readonly (VerifiedExactListingCandidate & {
+  registryVersion: number;
+  verifiedAt: string;
+})[] {
+  const entry = VERIFIED_EXACT_LISTING_CANDIDATES.brands[
+    brand.normalize("NFKC").toLocaleLowerCase("ru-RU").trim()
+  ];
+  if (!entry) return [];
+  return entry.candidates.map((candidate) => ({
+    ...candidate,
+    registryVersion: VERIFIED_EXACT_LISTING_CANDIDATES.version,
+    verifiedAt: entry.verifiedAt
+  }));
 }
 
 function verifiedCategoryTarget(brand: string, page: number): URL | undefined {
@@ -939,16 +995,33 @@ export class OzonBrowserAdapter implements SiteAdapter {
     if (!requestedBrand) throw new TypeError("brand must not be empty");
     const runScope = `${context.runId ?? "unscoped"}\u0000${requestedBrand.toLocaleLowerCase("ru-RU")}`;
     const seeds = exactProductSeeds(requestedBrand);
+    const exactCandidates = verifiedExactListingCandidates(requestedBrand);
     let matchedProducts = this.discoveryTileCache.get(runScope);
     if (!matchedProducts) {
-      const products = new Map<string, SearchTile>(seeds.map((seed) => [seed.listingId, {
-        ...seed,
-        reviews: null,
-        rating: null,
-        rawRating: null,
-        rawReviewCount: null,
-        source: TRANSLATE_SOURCE
-      }]));
+      const products = new Map<string, SearchTile>([
+        ...seeds.map((seed): [string, SearchTile] => [seed.listingId, {
+          ...seed,
+          reviews: null,
+          rating: null,
+          rawRating: null,
+          rawReviewCount: null,
+          source: TRANSLATE_SOURCE
+        }]),
+        ...exactCandidates.map((candidate): [string, SearchTile] => [candidate.listingId, {
+          listingId: candidate.listingId,
+          title: candidate.title,
+          url: candidate.url,
+          reviews: null,
+          rating: null,
+          rawRating: null,
+          rawReviewCount: null,
+          source: SOURCE,
+          exactCandidate: {
+            registryVersion: candidate.registryVersion,
+            verifiedAt: candidate.verifiedAt
+          }
+        }])
+      ]);
       for (const query of seeds.length ? [] : discoveryQueries(requestedBrand)) {
         let previousPageIds: string | undefined;
         let declaredTotalPages: number | undefined;
@@ -1032,6 +1105,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
       metricFrequency.set(key, (metricFrequency.get(key) ?? 0) + 1);
     }
     const needsExactPrefetch = (product: SearchTile): boolean => {
+      if (product.exactCandidate) return true;
       if (product.source === TRANSLATE_SOURCE) return true;
       if (!this.googleComposerEnabled) return false;
       const incomplete = product.reviews === null || (
@@ -1194,40 +1268,44 @@ export class OzonBrowserAdapter implements SiteAdapter {
       const exact = exactMetrics.get(product.listingId);
       const searchTileFallback = searchTileFallbacks.get(product.listingId);
       return {
-      domain: PLATFORM_DOMAIN,
-      platform: PLATFORM_ID,
-      listingId: product.listingId,
-      brand: requestedBrand,
-      url: product.url,
-      title: exact?.product ?? product.title,
-      metadata: {
-        collector: "ozon-composer",
-        rating: exact ? exact.rawRating : product.rating,
-        reviewCount: exact ? exact.reviews : product.reviews,
-        rawRating: exact ? exact.rawRating : product.rawRating,
-        rawReviewCount: product.rawReviewCount,
-         capturedAt,
-         source: product.source,
-        ...(partialFailure ? {
-          partialDiscoveryStatus: partialFailure instanceof AdapterQuotaError
-            ? "quota_exceeded"
-            : partialFailure instanceof ParserChangedError ? "parser_changed" : "blocked",
-          partialDiscoveryMessage: partialFailure.message,
-          partialDiscoveryTotal: matchedProducts.length
-        } : {}),
-        ...(searchTileFallback ? {
-          exactProductFallback: "search_tile",
-          exactProductFallbackReason: searchTileFallback
-        } : {}),
-        ...(exact ? {
-          exactProductTitle: exact.product,
-          exactProductListingId: product.listingId,
-          exactProductProof: exact.proof ?? EXACT_TRANSLATE_PROOF,
-          ...(exact.ratingUnavailable ? { exactProductRatingUnavailable: true } : {}),
-          ...(exact.aggregateGroupId ? { exactProductAggregateGroupId: exact.aggregateGroupId } : {})
-        } : {})
-      }
-    };
+        domain: PLATFORM_DOMAIN,
+        platform: PLATFORM_ID,
+        listingId: product.listingId,
+        brand: requestedBrand,
+        url: product.url,
+        title: exact?.product ?? product.title,
+        metadata: {
+          collector: "ozon-composer",
+          rating: exact ? exact.rawRating : product.rating,
+          reviewCount: exact ? exact.reviews : product.reviews,
+          rawRating: exact ? exact.rawRating : product.rawRating,
+          rawReviewCount: product.rawReviewCount,
+          capturedAt,
+          source: product.source,
+          ...(product.exactCandidate ? {
+            exactCandidateRegistryVersion: product.exactCandidate.registryVersion,
+            exactCandidateVerifiedAt: product.exactCandidate.verifiedAt
+          } : {}),
+          ...(partialFailure ? {
+            partialDiscoveryStatus: partialFailure instanceof AdapterQuotaError
+              ? "quota_exceeded"
+              : partialFailure instanceof ParserChangedError ? "parser_changed" : "blocked",
+            partialDiscoveryMessage: partialFailure.message,
+            partialDiscoveryTotal: matchedProducts.length
+          } : {}),
+          ...(searchTileFallback ? {
+            exactProductFallback: "search_tile",
+            exactProductFallbackReason: searchTileFallback
+          } : {}),
+          ...(exact ? {
+            exactProductTitle: exact.product,
+            exactProductListingId: product.listingId,
+            exactProductProof: exact.proof ?? EXACT_TRANSLATE_PROOF,
+            ...(exact.ratingUnavailable ? { exactProductRatingUnavailable: true } : {}),
+            ...(exact.aggregateGroupId ? { exactProductAggregateGroupId: exact.aggregateGroupId } : {})
+          } : {})
+        }
+      };
     });
   }
 

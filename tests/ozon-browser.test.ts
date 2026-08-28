@@ -152,6 +152,23 @@ const HLORETTA_SEEDS = [
   }
 ] as const;
 
+const TIRZETTA_CANDIDATES = [
+  {
+    sku: "2899925302",
+    title: "Тирзетта 2,5 мг раствор для инъекций шприц 0,5 мл 4 шт",
+    url: "https://www.ozon.ru/product/tirzetta-2-5-mg-rastvor-dlya-inektsiy-shprits-0-5-ml-4-sht-2899925302/",
+    reviews: 82,
+    rating: 4.5
+  },
+  {
+    sku: "2899925038",
+    title: "Тирзетта 12,5 мг раствор для инъекций шприц 0,5 мл 4 шт",
+    url: "https://www.ozon.ru/product/tirzetta-12-5-mg-rastvor-dlya-inektsiy-shprits-0-5-ml-4-sht-2899925038/",
+    reviews: 15,
+    rating: 4.4
+  }
+] as const;
+
 function seededOzonProductHtml(
   source: URL,
   sku: string,
@@ -206,6 +223,138 @@ function seededOzonAdapter(
 }
 
 describe("Ozon browser collector", () => {
+  it("proves a verified Tirzetta candidate omitted from exhaustive search and merges the visible tile without a duplicate", async () => {
+    const searchCalls: string[] = [];
+    const detailCalls: string[] = [];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const endpoint = new URL(String(input));
+      expect(endpoint.pathname).toBe("/api/composer-api.bx/page/json/v2");
+      const source = new URL(endpoint.searchParams.get("url")!, "https://www.ozon.ru");
+      if (source.pathname === "/search/") {
+        searchCalls.push(source.searchParams.get("text")!);
+        return new Response(JSON.stringify(page([
+          tile(
+            Number(TIRZETTA_CANDIDATES[0].sku),
+            TIRZETTA_CANDIDATES[0].title,
+            String(TIRZETTA_CANDIDATES[0].rating),
+            String(TIRZETTA_CANDIDATES[0].reviews)
+          )
+        ], 1)), { headers: { "content-type": "application/json" } });
+      }
+      const candidate = TIRZETTA_CANDIDATES.find((item) => source.pathname.endsWith(`-${item.sku}/`));
+      expect(candidate).toBeDefined();
+      detailCalls.push(candidate!.sku);
+      return new Response(JSON.stringify(productComposerPage(
+        candidate!.sku, candidate!.title, candidate!.rating, candidate!.reviews
+      )), { headers: { "content-type": "application/json" } });
+    }) as unknown as typeof globalThis.fetch;
+    const adapter = new OzonBrowserAdapter({
+      fetch: fetchMock,
+      googleComposerEnabled: true,
+      detailConcurrency: 2,
+      detailDelayMs: 0
+    });
+    const runContext = { ...context, runId: "tirzetta-exact-candidates", brands: ["Тирзетта"] };
+
+    const refs = await adapter.discover("Тирзетта", runContext);
+    const observations = await Promise.all(refs.map((ref) => adapter.collect(ref, runContext)));
+
+    expect(searchCalls).toEqual(["Тирзетта"]);
+    expect(detailCalls.sort()).toEqual(TIRZETTA_CANDIDATES.map((item) => item.sku).sort());
+    expect(refs).toHaveLength(2);
+    expect(refs.map((ref) => ref.listingId)).toEqual(TIRZETTA_CANDIDATES.map((item) => item.sku));
+    expect(refs).toEqual(expect.arrayContaining(TIRZETTA_CANDIDATES.map((candidate) => expect.objectContaining({
+      listingId: candidate.sku,
+      url: candidate.url,
+      title: candidate.title,
+      metadata: expect.objectContaining({
+        exactCandidateRegistryVersion: 1,
+        exactCandidateVerifiedAt: "2026-08-28",
+        exactProductListingId: candidate.sku,
+        exactProductProof: "ozon:product-composer-json"
+      })
+    }))));
+    expect(observations).toEqual(expect.arrayContaining(TIRZETTA_CANDIDATES.map((candidate) => expect.objectContaining({
+      listingId: candidate.sku,
+      reviews: candidate.reviews,
+      rating: candidate.rating,
+      status: "ok"
+    }))));
+  });
+
+  it.each(["blocked", "quota", "parser"] as const)(
+    "keeps Tirzetta candidate %s proof failure as a partial discovery",
+    async (failureKind) => {
+      const searchCalls: string[] = [];
+      const detailCalls: string[] = [];
+      const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+        const endpoint = new URL(String(input));
+        const nested = endpoint.searchParams.get("url");
+        const source = nested ? new URL(nested, "https://www.ozon.ru") : sourceUrlFromTranslate(endpoint);
+        if (source.pathname === "/search/") {
+          searchCalls.push(source.searchParams.get("text")!);
+          return new Response(JSON.stringify(page([
+            tile(
+              Number(TIRZETTA_CANDIDATES[0].sku),
+              TIRZETTA_CANDIDATES[0].title,
+              String(TIRZETTA_CANDIDATES[0].rating),
+              String(TIRZETTA_CANDIDATES[0].reviews)
+            )
+          ], 1)), { headers: { "content-type": "application/json" } });
+        }
+        const candidate = TIRZETTA_CANDIDATES.find((item) => source.pathname.endsWith(`-${item.sku}/`));
+        expect(candidate).toBeDefined();
+        detailCalls.push(candidate!.sku);
+        if (candidate!.sku === TIRZETTA_CANDIDATES[1].sku) {
+          if (failureKind === "quota") throw new AdapterQuotaError("EdgeOne Sandbox monthly GB-s quota exceeded");
+          if (failureKind === "parser") {
+            return new Response(JSON.stringify(productComposerPage(
+              "2899925999", "Тирзетта неизвестная карточка", 5, 1
+            )), { headers: { "content-type": "application/json" } });
+          }
+          return new Response("challenge", { status: 403, headers: { "content-type": "text/plain" } });
+        }
+        return new Response(JSON.stringify(productComposerPage(
+          candidate!.sku, candidate!.title, candidate!.rating, candidate!.reviews
+        )), { headers: { "content-type": "application/json" } });
+      }) as unknown as typeof globalThis.fetch;
+      const adapter = new OzonBrowserAdapter({
+        fetch: fetchMock,
+        googleComposerEnabled: true,
+        detailConcurrency: 2,
+        detailDelayMs: 0,
+        detailRetryDelayMs: 0
+      });
+      const runContext = {
+        ...context,
+        runId: `tirzetta-exact-candidate-${failureKind}`,
+        brands: ["Тирзетта"]
+      };
+
+      const refs = await adapter.discover("Тирзетта", runContext);
+
+      expect(searchCalls).toEqual(["Тирзетта"]);
+      expect(detailCalls).toContain(TIRZETTA_CANDIDATES[1].sku);
+      expect(refs).toHaveLength(1);
+      expect(refs[0]).toMatchObject({
+        listingId: TIRZETTA_CANDIDATES[0].sku,
+        metadata: {
+          partialDiscoveryStatus: failureKind === "quota"
+            ? "quota_exceeded"
+            : failureKind === "parser" ? "parser_changed" : "blocked",
+          partialDiscoveryTotal: 2,
+          exactCandidateRegistryVersion: 1
+        }
+      });
+      await expect(adapter.collect(refs[0]!, runContext)).resolves.toMatchObject({
+        listingId: TIRZETTA_CANDIDATES[0].sku,
+        reviews: TIRZETTA_CANDIDATES[0].reviews,
+        rating: TIRZETTA_CANDIDATES[0].rating,
+        status: "ok"
+      });
+    }
+  );
+
   it("uses exact Хлорэтта seeds and product proofs without search or Sandbox discovery", async () => {
     const seeds = [
       {

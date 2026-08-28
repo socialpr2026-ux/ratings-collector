@@ -934,6 +934,10 @@ export class YandexAdapter implements SiteAdapter {
                 if (callerAborted || batchAbort.signal.aborted) {
                   throw context.signal?.reason ?? error;
                 }
+                // Account/provider quota applies to every remaining recovery
+                // shard. Let mapWithConcurrency open its shared circuit so no
+                // new browser work starts beyond the active workers.
+                if (error instanceof AdapterQuotaError) throw error;
                 return { ...item, error };
               }
             });
@@ -1471,6 +1475,10 @@ export class YandexAdapter implements SiteAdapter {
         );
       } catch (error) {
         if (context.signal?.aborted) throw error;
+        // Provider/account quota is terminal for the whole recovery lane. A
+        // per-shard retry cannot restore it and would multiply the same paid
+        // browser failure before the shared concurrency circuit can stop.
+        if (error instanceof AdapterQuotaError) throw error;
         lastTransient = error;
         if (attempt < this.sitemapRetryAttempts) {
           await this.waitBeforeSitemapRetry(attempt, context);
@@ -1562,7 +1570,8 @@ export class YandexAdapter implements SiteAdapter {
         }
       }, this.productRequestTimeoutMs, `Yandex product request for ${url}`);
     } catch (error) {
-      if (error instanceof AdapterBlockedError || error instanceof ParserChangedError) throw error;
+      if (error instanceof AdapterBlockedError || error instanceof AdapterQuotaError ||
+        error instanceof ParserChangedError) throw error;
       if (context.signal?.aborted) throw error;
       throw new AdapterBlockedError(`Yandex request failed for ${url}: ${errorMessage(error)}`);
     }

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { AdapterActivityEvent, AdapterContext, ProductRef } from "../src/shared/types.js";
-import { AdapterBlockedError, ParserChangedError } from "../src/server/adapters/errors.js";
+import { AdapterBlockedError, AdapterQuotaError, ParserChangedError } from "../src/server/adapters/errors.js";
 import { mapWithConcurrency, YandexAdapter } from "../src/server/adapters/yandex.js";
 import {
   InMemoryYandexShardProofStore,
@@ -904,6 +904,66 @@ describe("YandexAdapter discovery", () => {
     expect(gatewayCalls.length).toBeLessThan(maps.length);
     expect(new Set(directSitemaps)).toEqual(new Set(maps));
     expect(maxActiveDirect).toBe(2);
+  });
+
+  it("stops direct shard recovery at its concurrency boundary when Sandbox quota is exhausted", async () => {
+    const batchEndpoint = "https://reviews.yandex.ru/ugcpub/__ratings_batch__";
+    const maps = Array.from({ length: 24 }, (_value, index) =>
+      `https://reviews.yandex.ru/ugcpub/sitemap_model_${index * 10_000_000}-${index * 10_000_000 + 9_999_999}-0.xml`
+    );
+    let directRecoveryRequests = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === INDEX) return xmlResponse(sitemapIndex(maps));
+      if (maps.includes(url) && new Headers(init?.headers).get("x-ratings-yandex-direct-recovery") === "1") {
+        directRecoveryRequests += 1;
+        throw new AdapterQuotaError("EdgeOne Sandbox monthly GB-s quota exceeded");
+      }
+      if (url !== batchEndpoint) throw new Error(`Unexpected request: ${url}`);
+      const request = JSON.parse(String(init?.body)) as { sitemaps: string[]; brands: Array<{ brand: string }> };
+      if (request.sitemaps[0] === maps[0]) {
+        return new Response(JSON.stringify({
+          processed: 1,
+          firstSitemap: maps[0],
+          lastSitemap: maps[0],
+          verifiedSitemaps: [maps[0]],
+          matches: [{
+            brand: request.brands[0]!.brand,
+            url: "https://reviews.yandex.ru/product/kagotsel--111",
+            sitemap: maps[0]
+          }]
+        }), { headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ error: "fixed gateway shard is unavailable" }), {
+        status: 502,
+        headers: { "content-type": "application/json" }
+      });
+    });
+    const fetch = fetchMock as unknown as typeof globalThis.fetch & {
+      yandexBatchEndpoint?: string;
+      yandexDirectRecovery?: boolean;
+    };
+    fetch.yandexBatchEndpoint = batchEndpoint;
+    fetch.yandexDirectRecovery = true;
+    const adapter = new YandexAdapter({
+      fetch,
+      maxSitemaps: maps.length,
+      sitemapRetryAttempts: 3,
+      sitemapRetryBaseMs: 0
+    });
+
+    let partialResult: ProductRef[] | undefined;
+    let failure: unknown;
+    try {
+      partialResult = await adapter.discover("Кагоцел", context());
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(AdapterQuotaError);
+    expect(partialResult).toBeUndefined();
+    expect(directRecoveryRequests).toBeGreaterThan(0);
+    expect(directRecoveryRequests).toBeLessThanOrEqual(2);
   });
 
   it("propagates the caller deadline instead of returning partial sitemap matches", async () => {
