@@ -2194,6 +2194,65 @@ function compactOzonTranslateHtml(html: string, requested: OzonTranslateTarget):
     `<script>window.__NUXT__={};window.__NUXT__.state={}</script></body></html>`;
 }
 
+function compactOzonTranslateReaderSearch(
+  markdown: string,
+  requestedUrl: URL,
+  requested: OzonTranslateTarget
+): string | undefined {
+  if (requested.kind === "product") return undefined;
+  const body = exactReaderMarkdownBody(markdown, requestedUrl);
+  const documentTitle = markdown.match(/^Title:\s*(.+)$/mi)?.[1]
+    ?.normalize("NFKC").replace(/\s+/gu, " ").trim();
+  const brand = requested.source.searchParams.get("text")?.normalize("NFKC").trim() ?? "";
+  // The footer proves that the reader completed this finite SSR document.
+  // Reader output is never allowed to prove an empty Ozon result: at least
+  // one exact product tile is mandatory and every tile must match the query.
+  if (!body || !documentTitle || !brand || !matchesBrand(documentTitle, brand) ||
+    !/Internet Solutions LLC/iu.test(body) || !/Recommendation technologies/iu.test(body)) return undefined;
+
+  const products = new Map<string, { href: string; title: string }>();
+  const linkPattern = /\[([^\]\n]{2,320})\]\((https:\/\/www-ozon-ru\.translate\.goog\/product\/[a-z0-9-]+-\d+\/?\?[^)\s]+)\)/giu;
+  for (const match of body.matchAll(linkPattern)) {
+    const title = match[1]!.normalize("NFKC").replace(/\s+/gu, " ").trim();
+    if (/^Image\s+\d+/iu.test(title) || !matchesBrand(title, brand)) continue;
+    let translated: URL;
+    try { translated = new URL(match[2]!.replace(/&amp;/giu, "&")); }
+    catch { return undefined; }
+    const sku = translated.pathname.match(/^\/product\/[a-z0-9-]*-(\d+)\/?$/i)?.[1];
+    if (!sku || translated.hostname !== OZON_TRANSLATE_HOST || translated.hash ||
+      singleSearchParameter(translated, "_x_tr_sl") !== "ru" ||
+      singleSearchParameter(translated, "_x_tr_tl") !== "en" ||
+      singleSearchParameter(translated, "_x_tr_hl") !== "en" ||
+      [...translated.searchParams.keys()].some((key) => !OZON_TRANSLATE_PARAMETERS.has(key) && key !== "at") ||
+      [...translated.searchParams.keys()].some((key) => translated.searchParams.getAll(key).length !== 1)) return undefined;
+    const href = new URL(translated.pathname.replace(/\/?$/, "/"), `https://${OZON_SOURCE_HOST}`).toString();
+    const existing = products.get(sku);
+    if (existing && existing.title !== title) return undefined;
+    products.set(sku, { href, title });
+  }
+  if (products.size === 0 || products.size > 100) return undefined;
+
+  const currentPage = Number(requested.source.searchParams.get("page") ?? "1");
+  let totalPages = currentPage;
+  for (const match of body.matchAll(/\[[^\]\n]*\]\((https:\/\/www-ozon-ru\.translate\.goog\/[^)\s]+)\)/giu)) {
+    try {
+      const link = new URL(match[1]!.replace(/&amp;/giu, "&"));
+      const page = Number(link.searchParams.get("page") ?? "1");
+      if (link.hostname === OZON_TRANSLATE_HOST && link.pathname === requestedUrl.pathname &&
+        link.searchParams.get("text") === brand && link.searchParams.get("from_global") === "true" &&
+        Number.isSafeInteger(page) && page >= currentPage && page <= 100) totalPages = Math.max(totalPages, page);
+    } catch { /* unrelated footer/navigation link */ }
+  }
+
+  const tiles = [...products.values()].map(({ href, title }) =>
+    `<div class="tile-root"><a href="${escapeHtml(href)}"><span>${escapeHtml(title)}</span></a></div>`
+  ).join("");
+  return `<html><head><base href="${escapeHtml(requested.source.toString())}"></head><body>` +
+    `<div data-widget="tileGridDesktop">${tiles}</div>` +
+    `<script>window.__NUXT__={};window.__NUXT__.state={"totalPages":${totalPages}}</script>` +
+    `</body></html>`;
+}
+
 function aptekaStateRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -3970,37 +4029,51 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     });
   }
   if (ozonTranslatedTarget) {
-    const upstream = await safeFetch(target.toString(), {
-      method: "GET",
-      redirect: "manual",
-      headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
-    }, fetch, 0, 60_000);
-    const html = await readTextBounded(upstream, 12_000_000, 60_000);
-    if (!upstream.ok) {
-      return new Response(html, {
-        status: upstream.status,
-        headers: { "content-type": upstream.headers.get("content-type") ?? "text/html; charset=utf-8" }
-      });
-    }
-    if (!/(?:text\/html|application\/xhtml\+xml)/i.test(upstream.headers.get("content-type") ?? "") ||
-      /(?:incidentId|Antibot Captcha|abt-challenge|Target URL returned error 403)/i.test(html) ||
-      !provesOzonTranslateHtml(html, ozonTranslatedTarget)) {
-      return json({ error: "Ozon translated page did not prove the requested source and product semantics" }, 502);
-    }
-    const compactHtml = compactOzonTranslateHtml(html, ozonTranslatedTarget);
-    if (compactHtml.length > 350_000) {
-      return json({ error: "Ozon translated proof exceeded the internal transfer safety limit" }, 502);
-    }
-    return new Response(compactHtml, {
-      status: 200,
-      headers: {
-        "content-type": "text/html; charset=utf-8",
-        "cache-control": "no-store",
-        "x-ratings-source": "google-translate-ozon-ssr",
-        "x-ratings-original-bytes": String(new TextEncoder().encode(html).byteLength),
-        "x-ratings-proof-bytes": String(new TextEncoder().encode(compactHtml).byteLength)
+    try {
+      const upstream = await safeFetch(target.toString(), {
+        method: "GET",
+        redirect: "manual",
+        headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+      }, fetch, 0, 60_000);
+      const html = await readTextBounded(upstream, 12_000_000, 60_000);
+      if (upstream.ok && /(?:text\/html|application\/xhtml\+xml)/i.test(upstream.headers.get("content-type") ?? "") &&
+        !/(?:incidentId|Antibot Captcha|abt-challenge|Target URL returned error 403)/i.test(html) &&
+        provesOzonTranslateHtml(html, ozonTranslatedTarget)) {
+        const compactHtml = compactOzonTranslateHtml(html, ozonTranslatedTarget);
+        if (compactHtml.length <= 350_000) {
+          return new Response(compactHtml, {
+            status: 200,
+            headers: {
+              "content-type": "text/html; charset=utf-8",
+              "cache-control": "no-store",
+              "x-ratings-source": "google-translate-ozon-ssr",
+              "x-ratings-original-bytes": String(new TextEncoder().encode(html).byteLength),
+              "x-ratings-proof-bytes": String(new TextEncoder().encode(compactHtml).byteLength)
+            }
+          });
+        }
       }
-    });
+    } catch { /* use the exact source-bound reader for non-empty search only */ }
+
+    if (ozonTranslatedTarget.kind !== "product") {
+      try {
+        const reader = await safeFetch(readerProxyUrl(target).toString(), {
+          method: "GET", redirect: "follow",
+          headers: { accept: "text/plain; charset=utf-8", "x-return-format": "markdown", dnt: "1" }
+        });
+        const markdown = await readTextBounded(reader, 2_000_000, 60_000);
+        const compact = reader.ok
+          ? compactOzonTranslateReaderSearch(markdown, target, ozonTranslatedTarget)
+          : undefined;
+        if (compact && compact.length <= 350_000) {
+          return new Response(compact, { status: 200, headers: {
+            "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
+            "x-ratings-source": "google-translate-ozon-reader"
+          } });
+        }
+      } catch { /* preserve an explicit blocker below */ }
+    }
+    return json({ error: "Ozon translated page did not prove the requested source and product semantics" }, 502);
   }
   if (ruOtzyvTarget?.kind === "search") {
     const attempts = [

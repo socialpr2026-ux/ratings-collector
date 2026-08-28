@@ -224,6 +224,50 @@ describe("new static collector gateways", () => {
     expect(await response.text()).not.toContain('"nmFeedbacks":0');
   });
 
+  it("recovers a non-empty exact Ozon translated category through its completed reader document", async () => {
+    const target = "https://www-ozon-ru.translate.goog/category/bady-6183/baktoblis-100260712/" +
+      "?brand_was_predicted=true&category_was_predicted=true&deny_category_prediction=true&from_global=true" +
+      "&text=%D0%91%D0%B0%D0%BA%D1%82%D0%BE%D0%B1%D0%BB%D0%B8%D1%81&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const productOne = "https://www-ozon-ru.translate.goog/product/baktoblis-tabletki-152369287/" +
+      "?at=proof-one&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const productTwo = "https://www-ozon-ru.translate.goog/product/baktoblis-duo-4026191700/" +
+      "?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => String(input) === target
+      ? Promise.reject(new TypeError("fetch failed"))
+      : new Response(`Title: Бактоблис - купить на OZON\n\nURL Source: ${target}\n\nMarkdown Content:\n` +
+        `[![Image 1: Sale](${productOne})](${productOne})\n` +
+        `[BaktoBLIS+ lozenges No. 30](${productOne})\n\n4.9 6894 Ozon\n\n` +
+        `[Bactoblis DUO lozenges 950 mg No. 10](${productTwo})\n\n` +
+        `[1998–2026 Internet Solutions LLC](https://example.invalid/terms)\n` +
+        `[Recommendation technologies](https://example.invalid/algorithms)\n`));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target);
+    const html = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("google-translate-ozon-reader");
+    expect(html).toContain('href="https://www.ozon.ru/product/baktoblis-tabletki-152369287/"');
+    expect(html).toContain('href="https://www.ozon.ru/product/baktoblis-duo-4026191700/"');
+    expect(html).toContain('"totalPages":1');
+    expect(html).not.toContain("6894");
+  });
+
+  it("never turns an empty or source-mismatched Ozon reader page into no results", async () => {
+    const target = "https://www-ozon-ru.translate.goog/search/?text=%D0%91%D0%B0%D0%BA%D1%82%D0%BE%D0%B1%D0%BB%D0%B8%D1%81" +
+      "&from_global=true&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => String(input) === target
+      ? new Response("unavailable", { status: 502 })
+      : new Response(`Title: Бактоблис - купить на OZON\nURL Source: https://www-ozon-ru.translate.goog/search/?text=Other&from_global=true&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en\n` +
+        `Markdown Content:\n1998–2026 Internet Solutions LLC\nRecommendation technologies\n`));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target);
+
+    expect(response.status).toBe(502);
+    expect(await response.text()).not.toContain("catalog.searchEmptyState");
+  });
+
   it("proxies only one exact Wildberries root-feedback route", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       expect(String(input)).toBe("https://feedbacks1.wb.ru/feedbacks/v2/214718282?appType=1");
