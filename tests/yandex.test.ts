@@ -1610,6 +1610,137 @@ describe("YandexAdapter discovery", () => {
 });
 
 describe("YandexAdapter collection", () => {
+  it("repairs the proven Tirzetta 10 mg decimal-volume typo without leaving conflicting identity evidence", async () => {
+    const listingId = "4607896120";
+    const url = `https://reviews.yandex.ru/product/tirzetta-rastvor-dlia-podkozhnogo-vved-10-mg--${listingId}`;
+    const sourceTitle = "Тирзетта раствор для подкожного введ 10 мг шприцы в автоинжекторах 5 мл 4 шт";
+    const html = productHtml({
+      canonical: url,
+      product: {
+        "@type": "Product",
+        productID: listingId,
+        name: sourceTitle,
+        brand: "Тирзетта",
+        aggregateRating: { "@type": "AggregateRating", reviewCount: 12, ratingCount: 18, ratingValue: 4.8 }
+      }
+    }).replace("</body>", `
+      <div class="Review-ReasonToTrustText">Товар — ${sourceTitle}</div>
+    </body>`);
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }), source: "reviews" });
+
+    const observation = await adapter.collect(ref({ listingId, brand: "Тирзетта", url }), context());
+    const identity = analyzeProductIdentity({
+      brand: observation.brand,
+      product: observation.product,
+      url: observation.canonicalUrl,
+      evidence: observation.productEvidence
+    });
+
+    expect(observation).toMatchObject({
+      domain: "reviews.yandex.ru",
+      listingId,
+      product: "Тирзетта раствор для подкожного введ 10 мг шприцы в автоинжекторах 0,5 мл 4 шт",
+      reviews: 12,
+      ratingCount: 18,
+      rating: 4.8,
+      status: "ok"
+    });
+    expect(observation.productEvidence?.signals.some((signal) =>
+      /(?<![\d,.])5\s*мл/iu.test(signal.text)
+    )).toBe(false);
+    expect(identity).toMatchObject({
+      label: "раствор 10 мг 0,5 мл №4",
+      granularity: "variant",
+      confidence: "exact"
+    });
+  });
+
+  it("passes through the already-correct Tirzetta model title", async () => {
+    const listingId = "4607896120";
+    const url = `https://reviews.yandex.ru/product/tirzetta-rastvor-dlia-podkozhnogo-vved-10-mg--${listingId}`;
+    const correctTitle = "Тирзетта раствор для подкожного введ 10 мг шприцы в автоинжекторах 0,5 мл 4 шт";
+    const html = productHtml({
+      canonical: url,
+      product: {
+        "@type": "Product",
+        productID: listingId,
+        name: correctTitle,
+        brand: "Тирзетта",
+        aggregateRating: { "@type": "AggregateRating", reviewCount: 3, ratingValue: 5 }
+      }
+    });
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }), source: "reviews" });
+
+    const observation = await adapter.collect(ref({ listingId, brand: "Тирзетта", url }), context());
+    expect(observation).toMatchObject({ product: correctTitle, reviews: 3, rating: 5, status: "ok" });
+    expect(analyzeProductIdentity({
+      brand: observation.brand,
+      product: observation.product,
+      url: observation.canonicalUrl,
+      evidence: observation.productEvidence
+    })).toMatchObject({ label: "раствор 10 мг 0,5 мл №4", granularity: "variant", confidence: "exact" });
+  });
+
+  it("fails closed when the bound Tirzetta model drifts to 50 ml or omits volume", async () => {
+    const listingId = "4607896120";
+    const url = `https://reviews.yandex.ru/product/tirzetta-rastvor-dlia-podkozhnogo-vved-10-mg--${listingId}`;
+    const driftedTitles = [
+      "Тирзетта раствор для подкожного введ 10 мг шприцы в автоинжекторах 50 мл 4 шт",
+      "Тирзетта раствор для подкожного введ 10 мг шприцы в автоинжекторах 4 шт"
+    ];
+
+    for (const name of driftedTitles) {
+      const html = productHtml({
+        canonical: url,
+        product: {
+          "@type": "Product",
+          productID: listingId,
+          name,
+          brand: "Тирзетта",
+          aggregateRating: { "@type": "AggregateRating", reviewCount: 1, ratingValue: 5 }
+        }
+      });
+      const adapter = new YandexAdapter({
+        fetch: routeFetch({ [url]: htmlResponse(html) }),
+        source: "reviews"
+      });
+      await expect(adapter.collect(ref({ listingId, brand: "Тирзетта", url }), context()))
+        .rejects.toThrow(`Yandex model ${listingId} no longer matches the proven Tirzetta 10 mg volume correction`);
+    }
+  });
+
+  it("preserves unrelated 5 ml evidence while repairing only the full Tirzetta model identity", async () => {
+    const listingId = "4607896120";
+    const url = `https://reviews.yandex.ru/product/tirzetta-rastvor-dlia-podkozhnogo-vved-10-mg--${listingId}`;
+    const sourceTitle = "Тирзетта раствор для подкожного введ 10 мг шприцы в автоинжекторах 5 мл 4 шт";
+    const unrelatedEvidence = "Комплект поставки содержит сервисный контейнер 5 мл";
+    const html = productHtml({
+      canonical: url,
+      product: {
+        "@type": "Product",
+        productID: listingId,
+        name: sourceTitle,
+        description: unrelatedEvidence,
+        brand: "Тирзетта",
+        aggregateRating: { "@type": "AggregateRating", reviewCount: 2, ratingValue: 4.5 }
+      }
+    });
+    const adapter = new YandexAdapter({ fetch: routeFetch({ [url]: htmlResponse(html) }), source: "reviews" });
+
+    const observation = await adapter.collect(ref({ listingId, brand: "Тирзетта", url }), context());
+    expect(observation.product).toBe(
+      "Тирзетта раствор для подкожного введ 10 мг шприцы в автоинжекторах 0,5 мл 4 шт"
+    );
+    expect(observation.productEvidence?.signals).toContainEqual({
+      source: "json_ld",
+      text: unrelatedEvidence
+    });
+    expect(observation.productEvidence?.signals).not.toContainEqual({
+      source: "json_ld",
+      text: "Комплект поставки содержит сервисный контейнер 0,5 мл"
+    });
+  });
+
   it("bounds a product request that never returns and fails closed", async () => {
     const fetch = vi.fn(() => new Promise<Response>(() => undefined));
     const adapter = new YandexAdapter({ fetch: fetch as typeof globalThis.fetch, productRequestTimeoutMs: 10 });

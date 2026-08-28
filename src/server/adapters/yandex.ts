@@ -1086,11 +1086,16 @@ export class YandexAdapter implements SiteAdapter {
       );
     }
     const product = selectJsonLdProduct(products, listingId);
-    const title = nonEmptyString(product.name);
-    if (!title) throw new ParserChangedError(`Yandex model ${listingId} JSON-LD Product has no name`);
+    const sourceTitle = nonEmptyString(product.name);
+    if (!sourceTitle) throw new ParserChangedError(`Yandex model ${listingId} JSON-LD Product has no name`);
+    const knownTitleRepair = repairKnownYandexReviewTitle(listingId, ref.brand, sourceTitle);
+    const title = knownTitleRepair.title;
 
     const description = nonEmptyString(product.description);
     const reviewedProductTitles = extractReviewedProductTitles(html, ref.brand)
+      .map((reviewedTitle) => knownTitleRepair.repairEvidence
+        ? repairKnownYandexReviewEvidenceText(reviewedTitle, ref.brand)
+        : reviewedTitle)
       .filter((reviewedTitle) => reviewedVariantMatchesModel(title, reviewedTitle, ref.brand));
     // When no individual review exposes its bought variant, the canonical
     // JSON-LD Product name is still first-party evidence for the model-level
@@ -1104,7 +1109,7 @@ export class YandexAdapter implements SiteAdapter {
       : modelTitleIsFamily
         ? [expandedModelTitle]
         : [];
-    const productEvidence = extractPageProductEvidence(html, canonicalUrl, ref.brand, {
+    let productEvidence = extractPageProductEvidence(html, canonicalUrl, ref.brand, {
       // Yandex's page-level Product name is sometimes abbreviated to the
       // dosage form (for example, "Хондрофен мазь д/нар.прим.").  The
       // source-bound `reasonToTrust` field identifies the exact item bought by
@@ -1117,6 +1122,14 @@ export class YandexAdapter implements SiteAdapter {
       structuredSignals: [title, description]
         .filter((value): value is string => Boolean(value))
     });
+    if (knownTitleRepair.repairEvidence) {
+      // The page is still the authoritative rating source, but this one
+      // immutable model currently repeats the same decimal-comma omission in
+      // JSON-LD and review-bound variant text. Repair only strings that
+      // independently prove the same full SKU; unrelated or conflicting raw
+      // evidence must remain visible to the resolver.
+      productEvidence = repairKnownYandexReviewEvidence(productEvidence, ref.brand);
+    }
     if (modelTitleIsFamily && reviewedProductTitles.length === 0 && !productEvidence.variants.includes(expandedModelTitle)) {
       // `extractPageProductEvidence` deliberately accepts only common retail
       // spellings as variants. Yandex also abbreviates dosage forms (for
@@ -2168,6 +2181,78 @@ function expandYandexProductTitle(value: string): string {
     .replace(/(?<![\p{L}\p{N}])капс\.?(?![\p{L}\p{N}])/giu, "капсулы")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+const TIRZETTA_TEN_MG_VOLUME_TYPO_MODEL_ID = "4607896120";
+const STANDALONE_FIVE_ML = /(?<![\d,.])5([\s\u00a0\u202f]*)мл(?![\p{L}\p{N}])/iu;
+const CORRECT_HALF_ML = /(?<![\d,.])0[,.]5[\s\u00a0\u202f]*мл(?![\p{L}\p{N}])/iu;
+const ML_AMOUNT = /(?<![\d,.])(\d+(?:[,.]\d+)?)[\s\u00a0\u202f]*мл(?![\p{L}\p{N}])/giu;
+
+type KnownTirzettaTitleState = "correct" | "proven_typo" | "drift";
+
+function repairKnownYandexReviewTitle(
+  listingId: string,
+  brand: string,
+  title: string
+): { title: string; repairEvidence: boolean } {
+  if (listingId !== TIRZETTA_TEN_MG_VOLUME_TYPO_MODEL_ID || normalizeText(brand) !== "тирзетта") {
+    return { title, repairEvidence: false };
+  }
+  const state = knownTirzettaTenMgTitleState(title, brand);
+  if (state === "correct") return { title, repairEvidence: false };
+  if (state === "proven_typo") {
+    return { title: repairStandaloneFiveMl(title), repairEvidence: true };
+  }
+  throw new ParserChangedError(
+    `Yandex model ${listingId} no longer matches the proven Tirzetta 10 mg volume correction`
+  );
+}
+
+function knownTirzettaTenMgTitleState(value: string, brand: string): KnownTirzettaTitleState {
+  const expectedSourceIdentity = matchesBrand(value, brand) &&
+    normalizeText(brand) === "тирзетта" &&
+    /раствор/iu.test(value) &&
+    /подкожн/iu.test(value) &&
+    /автоинжектор/iu.test(value) &&
+    /(?<![\d,.])10\s*мг(?![\p{L}\p{N}])/iu.test(value) &&
+    /(?:№\s*4|(?<!\d)4\s*шт(?![\p{L}\p{N}]))/iu.test(value);
+  if (!expectedSourceIdentity) return "drift";
+
+  const volumes = [...value.matchAll(ML_AMOUNT)].map((match) => Number(match[1].replace(",", ".")));
+  if (volumes.length !== 1) return "drift";
+  if (volumes[0] === 0.5 && CORRECT_HALF_ML.test(value)) return "correct";
+  if (volumes[0] === 5 && STANDALONE_FIVE_ML.test(value)) return "proven_typo";
+  return "drift";
+}
+
+function repairStandaloneFiveMl(value: string): string {
+  return value.replace(STANDALONE_FIVE_ML, "0,5$1мл");
+}
+
+function repairKnownYandexReviewEvidenceText(value: string, brand: string): string {
+  return knownTirzettaTenMgTitleState(value, brand) === "proven_typo"
+    ? repairStandaloneFiveMl(value)
+    : value;
+}
+
+function repairKnownYandexReviewEvidence(
+  evidence: NonNullable<Observation["productEvidence"]>,
+  brand: string
+): NonNullable<Observation["productEvidence"]> {
+  const seenSignals = new Set<string>();
+  const signals = evidence.signals.flatMap((signal) => {
+    const text = signal.source === "url"
+      ? signal.text
+      : repairKnownYandexReviewEvidenceText(signal.text, brand);
+    const key = `${signal.source}:${normalizeText(text)}`;
+    if (seenSignals.has(key)) return [];
+    seenSignals.add(key);
+    return [{ ...signal, text }];
+  });
+  const variants = [...new Set(evidence.variants.map((variant) =>
+    repairKnownYandexReviewEvidenceText(variant, brand)
+  ))];
+  return { ...evidence, signals, variants };
 }
 
 function visibleMarketText(value: string): string {
