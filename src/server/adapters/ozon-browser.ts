@@ -1678,16 +1678,6 @@ export class OzonBrowserAdapter implements SiteAdapter {
 
     let translateFailure: AdapterBlockedError | ParserChangedError | undefined;
     if (this.translateEnabled) {
-      try {
-        const translated = await this.fetchTranslatedSearchPage(brand, page, context, stage);
-        if (stage === "health_check") this.searchPageCache.set(cacheKey, translated);
-        return translated;
-      } catch (error) {
-        if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
-        translateFailure = error instanceof ParserChangedError || error instanceof AdapterBlockedError
-          ? error
-          : new ParserChangedError(`Ozon translated search failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
-      }
       const verifiedCategory = verifiedCategoryTarget(brand, page);
       if (verifiedCategory) {
         try {
@@ -1700,6 +1690,16 @@ export class OzonBrowserAdapter implements SiteAdapter {
             ? error
             : new ParserChangedError(`Ozon verified category failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
         }
+      }
+      try {
+        const translated = await this.fetchTranslatedSearchPage(brand, page, context, stage);
+        if (stage === "health_check") this.searchPageCache.set(cacheKey, translated);
+        return translated;
+      } catch (error) {
+        if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
+        translateFailure = error instanceof ParserChangedError || error instanceof AdapterBlockedError
+          ? error
+          : new ParserChangedError(`Ozon translated search failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
