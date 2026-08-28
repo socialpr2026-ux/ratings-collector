@@ -1440,6 +1440,7 @@ function compactOtzyvProReaderProof(markdown: string, requested: URL): string | 
   return `<html><head><title>${escapeHtml(title)}</title>` +
     `<link rel="canonical" href="${escapeHtml(requested.toString())}"></head><body>` +
     `<h1 itemprop="name">${escapeHtml(heading)}</h1>` +
+    `<meta itemprop="itemReviewed" content="${escapeHtml(heading)}">` +
     `<div itemprop="aggregateRating"><meta itemprop="reviewCount" content="${reviews}">` +
     `${reviews > 0 ? `<meta itemprop="ratingValue" content="${rating}"><meta itemprop="bestRating" content="5">` : ""}` +
     `</div></body></html>`;
@@ -1478,12 +1479,22 @@ function compactWildberriesReaderProof(markdown: string, requested: URL, ids: re
     const product = value as Record<string, unknown>;
     const id = String(product.id ?? "");
     const title = typeof product.name === "string" ? product.name.trim() : "";
-    const brand = typeof product.brand === "string" ? product.brand.trim() : "";
     const feedbacks = Number(product.nmFeedbacks);
     const rating = Number(product.nmReviewRating);
-    if (!requestedIds.has(id) || returnedIds.has(id) || !title || !brand ||
-      !Number.isSafeInteger(feedbacks) || feedbacks < 0 || !Number.isFinite(rating) || rating < 0 || rating > 5 ||
-      feedbacks > 0 && rating === 0) return undefined;
+    const rootId = String(product.root ?? product.rootId ?? product.imtId ?? product.imtID ?? "");
+    const hasExactNmMetrics = Number.isSafeInteger(feedbacks) && feedbacks >= 0 &&
+      Number.isFinite(rating) && rating >= 0 && rating <= 5 && (feedbacks === 0 || rating > 0);
+    // The live v4 card response currently exposes only root-level
+    // `feedbacks`/`reviewRating` for some SKUs. Preserve that exact card when
+    // it has a numeric root: WildberriesAdapter will fetch and validate the
+    // root's nmValuationDistribution before publishing any SKU metric. Generic
+    // card counters are deliberately not promoted to nm-specific evidence.
+    // Some live seller-created cards leave `brand` empty even though the exact
+    // title contains the requested brand. The gateway proves transport and
+    // identity by the requested nmId set; WildberriesAdapter remains the only
+    // authority that can accept the product/brand text.
+    if (!requestedIds.has(id) || returnedIds.has(id) || !title ||
+      !hasExactNmMetrics && !/^[1-9]\d*$/.test(rootId)) return undefined;
     returnedIds.add(id);
   }
   if (returnedIds.size !== requestedIds.size || [...requestedIds].some((id) => !returnedIds.has(id))) return undefined;
@@ -3121,7 +3132,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         (target.searchParams.get("story")?.trim().length ?? 0) <= 160 &&
         [...target.searchParams.keys()].every((key) => ["do", "subaction", "story"].includes(key)) &&
         [...target.searchParams.keys()].every((key) => target.searchParams.getAll(key).length === 1) ||
-      /^\/category\/(?:[a-z0-9-]+\/)+\d+-[a-z0-9-]+\.html$/i.test(target.pathname) && !target.search
+      /^\/category\/(?:[a-z0-9_-]+\/)+\d+-[a-z0-9_-]+\.html$/i.test(target.pathname) && !target.search
     )
   );
   const utekaReviewsTarget = parseUtekaReviewsTarget(target);
@@ -4076,7 +4087,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       }
     });
   }
-  if (target.hostname === "otzyv.pro" && /^\/category\/(?:[a-z0-9-]+\/)+\d+-[a-z0-9-]+\.html$/i.test(target.pathname)) {
+  if (target.hostname === "otzyv.pro" && /^\/category\/(?:[a-z0-9_-]+\/)+\d+-[a-z0-9_-]+\.html$/i.test(target.pathname)) {
     try {
       const direct = await safeFetch(target.toString(), {
         method: "GET", redirect: "follow",

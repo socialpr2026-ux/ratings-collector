@@ -915,6 +915,29 @@ describe("first-party review-site adapters", () => {
     });
   });
 
+  it("keeps a product heading authoritative when Otzyv.pro SEO title mentions doctors", async () => {
+    const path = "/category/raznoe_kras_zdor/758265-respiratornyy-probiotik-bactoblis-baktoblis.html";
+    const adapter = adapterFor("otzyv.pro", (async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.pathname === "/") return new Response(
+        `<article><h2>Респираторный пробиотик Bactoblis Бактоблис</h2><a href="${path}">Бактоблис</a></article>`
+      );
+      return new Response(`<html><head><title>БАКТОБЛИС отзывы врачей отрицательные и реальные</title></head><body>
+        <h1 itemprop="name">Респираторный пробиотик Bactoblis Бактоблис - отзыв</h1>
+        <meta itemprop="itemReviewed" content="Респираторный пробиотик Bactoblis Бактоблис - отзыв">
+        <meta itemprop="ratingValue" content="5"><meta itemprop="reviewCount" content="1">
+      </body></html>`);
+    }) as typeof fetch);
+
+    const [ref] = await adapter.discover("Бактоблис", context);
+    await expect(adapter.collect(ref, context)).resolves.toMatchObject({
+      listingId: "758265",
+      reviews: 1,
+      rating: 5,
+      status: "ok"
+    });
+  });
+
   it("reuses an exact Otzovik search aggregate when the product route is unavailable", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = urlOf(input);

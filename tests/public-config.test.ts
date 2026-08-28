@@ -108,8 +108,31 @@ describe("new static collector gateways", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("x-ratings-source")).toBe("otzyv-pro-reader-compact");
     expect(html).toContain('<link rel="canonical" href="https://otzyv.pro/category/badyi/800945-baktoblis-otzyvy.html">');
+    expect(html).toContain('<meta itemprop="itemReviewed" content="Бактоблис отзывы">');
     expect(html).toContain('<meta itemprop="reviewCount" content="3">');
     expect(html).toContain('<meta itemprop="ratingValue" content="5">');
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("accepts the live underscore-shaped Otzyv.pro category and binds its product heading", async () => {
+    const target = "https://otzyv.pro/category/raznoe_kras_zdor/758265-respiratornyy-probiotik-bactoblis-baktoblis.html";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const requested = String(input);
+      if (requested === target) return new Response("fixed egress unavailable", { status: 400 });
+      expect(requested).toBe(`https://r.jina.ai/${target}`);
+      return new Response(`Title: РЕСПИРАТОРНЫЙ ПРОБИОТИК BACTOBLIS БАКТОБЛИС отзывы врачей отрицательные и реальные\n` +
+        `URL Source: ${target}\n\nMarkdown Content:\n# Респираторный пробиотик Bactoblis Бактоблис - отзыв\n\n` +
+        `Средняя оценка: 5 из 5\n\nОтзывы: 1\n`);
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target);
+    const html = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("otzyv-pro-reader-compact");
+    expect(html).toContain('<meta itemprop="itemReviewed" content="Респираторный пробиотик Bactoblis Бактоблис - отзыв">');
+    expect(html).toContain('<meta itemprop="reviewCount" content="1">');
     expect(upstream).toHaveBeenCalledTimes(2);
   });
 
@@ -162,6 +185,28 @@ describe("new static collector gateways", () => {
     expect(response.headers.get("x-ratings-source")).toBe("wildberries-reader-exact-batch");
     await expect(response.json()).resolves.toEqual({ products });
     expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps live Wildberries v4 cards with a root for exact downstream nm-distribution proof", async () => {
+    const target = "https://card.wb.ru/cards/v4/detail?appType=1&curr=rub&dest=-1257786&lang=ru&locale=ru&nm=822674760";
+    const product = {
+      id: 822674760,
+      root: 907239484,
+      name: "БактоБЛИС порошок в саше-пакетах по 1500 мг 30 шт",
+      brand: "",
+      feedbacks: 17,
+      reviewRating: 4.7
+    };
+    const upstream = vi.fn(async (input: RequestInfo | URL) => String(input) === target
+      ? new Response("fixed WB egress unavailable", { status: 502 })
+      : new Response(`Title: \nURL Source: ${target}\n\nMarkdown Content:\n${JSON.stringify({ products: [product] })}`));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("wildberries-reader-exact-batch");
+    await expect(response.json()).resolves.toEqual({ products: [product] });
   });
 
   it("keeps an incomplete or source-mismatched Wildberries reader batch blocked", async () => {
