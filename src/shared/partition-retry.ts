@@ -2,6 +2,8 @@ import type { PartitionResult } from "./types.js";
 
 const SUCCESSFUL_PARTITION_STATUSES = new Set<PartitionResult["status"]>(["complete", "no_results"]);
 const SOURCE_UNAVAILABLE = /\breview_(?:channel|aggregate)_unavailable\b/iu;
+const TERMINAL_FAILURE = /(?:quota(?:_exceeded)?|квот|monthly[^.]{0,100}GB-s|лимит[^.]{0,100}(?:исчерпан|превышен)|parser_changed|CAPTCHA|HTTP\s+(?:401|403|498)\b|incomplete[^.]{0,120}(?:proof|sitemap|xml)|proof[^.]{0,120}(?:incomplete|unproven)|непол[^.]{0,120}(?:доказ|sitemap|xml)|не доказ)/iu;
+const TRANSIENT_FAILURE = /(?:HTTP\s+(?:408|425|429|499|5\d\d)\b|fetch failed|network error|run_deadline_exceeded|timed?\s*out|exceeded (?:its )?deadline|econnreset|econnrefused|enotfound|eai_again)/iu;
 
 /**
  * The exact product exists, but the source does not publish a product-bound
@@ -24,6 +26,18 @@ export function isOnlySourceUnavailableMessage(message: string | undefined): boo
 }
 
 /**
+ * Old runs predate the explicit retryable bit. Keep pure quota/parser/access
+ * failures out of failed-only retry, but preserve mixed route failures (for
+ * example a fixed HTTP 502 plus an exhausted browser fallback) so a newly
+ * deployed free route can recover them once.
+ */
+export function isLegacyTerminalFailureMessage(message: string | undefined): boolean {
+  const value = message?.trim() ?? "";
+  return Boolean(value) && (isOnlySourceUnavailableMessage(value) ||
+    TERMINAL_FAILURE.test(value) && !TRANSIENT_FAILURE.test(value));
+}
+
+/**
  * Shared server/client policy for failed-only retry. The message fallback
  * keeps runs saved before `retryable` was introduced backward compatible.
  */
@@ -32,7 +46,7 @@ export function isFailedOnlyRetryTarget(partition: PartitionResult | undefined):
   if (SUCCESSFUL_PARTITION_STATUSES.has(partition.status)) return false;
   if (partition.retryable === true) return true;
   if (partition.retryable === false) return false;
-  return !isOnlySourceUnavailableMessage(partition.message);
+  return !isLegacyTerminalFailureMessage(partition.message);
 }
 
 export function retryableFailedPartitionCount(partitions: readonly PartitionResult[]): number {

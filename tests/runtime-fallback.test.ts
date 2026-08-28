@@ -557,6 +557,7 @@ describe("collector runtime fallback integration", () => {
       status: "blocked",
       discovered: 0,
       collected: 0,
+      retryable: true,
       message: "blocked: Yandex is unavailable for https://reviews.yandex.ru/ugcpub/sitemap.xml: HTTP 503"
     }]);
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { RunState } from "../src/shared/types.js";
 import { RatingsService } from "../src/server/orchestrator.js";
 import { MemoryRepository } from "../src/server/repository.js";
-import { AdapterQuotaError } from "../src/server/adapters/errors.js";
+import { AdapterBlockedError } from "../src/server/adapters/errors.js";
 import {
   completeBrowserPublication,
   failBrowserPublication,
@@ -98,7 +98,7 @@ describe("anonymous browser publication state", () => {
       async discover(brand) {
         calls.set(domain, (calls.get(domain) ?? 0) + 1);
         if (domain === "blocked.example" && blockedAttempts++ === 0) {
-          throw new AdapterQuotaError("temporary quota gate");
+          throw new AdapterBlockedError("temporary exact-card route returned HTTP 502");
         }
         return [{
           domain,

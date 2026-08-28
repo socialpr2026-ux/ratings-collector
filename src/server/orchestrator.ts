@@ -761,7 +761,7 @@ export class RatingsService {
           deadline.signal.throwIfAborted();
           const kind = errorStatus(error);
           const message = safeErrorMessage(error);
-          const retryable = failureEnvelope(error).category === "source_unavailable" ? false : undefined;
+          const retryable = failureEnvelope(error).retryable;
           healthReporter.warnActive(message);
           activity.warn(healthActivity, {
             ...runtimeSignals(message),
@@ -810,7 +810,7 @@ export class RatingsService {
             listingId: string;
             kind: ReturnType<typeof errorStatus>;
             message: string;
-            sourceUnavailable: boolean;
+            retryable: boolean;
           }> = [];
           const refreshedKeys = new Set<string>();
           const previousObservationKeys = new Set([...seen.entries()]
@@ -999,7 +999,7 @@ export class RatingsService {
                   listingId: ref.listingId,
                   kind,
                   message,
-                  sourceUnavailable: failureEnvelope(error).category === "source_unavailable"
+                  retryable: failureEnvelope(error).retryable
                 });
                 adapterReporter.warnActive(message);
                 if (activeCollection) activity.warn(activeCollection, { ...runtimeSignals(message), detail: message });
@@ -1019,8 +1019,16 @@ export class RatingsService {
               const retainedCount = [...seen.values()].filter((observation) =>
                 observation.domain === domain && normalizeText(observation.brand) === normalizeText(brand)
               ).length;
-              const sourceUnavailableOnly = !partialFailure && collectionFailures.length > 0 &&
-                collectionFailures.every((failure) => failure.sourceUnavailable);
+              const partialRetryable = partialFailure
+                ? failureEnvelope(
+                  partialFailure.status === "quota_exceeded"
+                    ? new AdapterQuotaError(partialFailure.message)
+                    : partialFailure.status === "parser_changed"
+                      ? new ParserChangedError(partialFailure.message)
+                      : new AdapterBlockedError(partialFailure.message)
+                ).retryable
+                : false;
+              const retryable = partialRetryable || collectionFailures.some((failure) => failure.retryable);
               this.addPartition(
                 run,
                 domain,
@@ -1029,9 +1037,7 @@ export class RatingsService {
                 partialFailure?.total ?? discoveredCount,
                 retainedCount,
                 message,
-                sourceUnavailableOnly
-                  ? false
-                  : collectionFailures.some((failure) => failure.sourceUnavailable) ? true : undefined
+                retryable
               );
             } else {
               for (const key of previousObservationKeys) {
@@ -1054,7 +1060,7 @@ export class RatingsService {
             deadline.signal.throwIfAborted();
             const kind = errorStatus(error);
             const message = safeErrorMessage(error);
-            const retryable = failureEnvelope(error).category === "source_unavailable" ? false : undefined;
+            const retryable = failureEnvelope(error).retryable;
             adapterReporter.warnActive(message);
             activity.warn(discoveryActivity, { ...runtimeSignals(message), detail: message });
             if (activeCollection) activity.warn(activeCollection, { ...runtimeSignals(message), detail: message });
@@ -1084,7 +1090,7 @@ export class RatingsService {
           if (domainStarted) throw error;
           const kind = errorStatus(error);
           const message = safeErrorMessage(error);
-          const retryable = failureEnvelope(error).category === "source_unavailable" ? false : undefined;
+          const retryable = failureEnvelope(error).retryable;
           for (const brand of retryBrands) {
             this.addPartition(
               run,

@@ -1406,6 +1406,90 @@ function escapeHtml(value: string): string {
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
+function exactReaderMarkdownBody(markdown: string, requested: URL): string | undefined {
+  const sourceMatches = [...markdown.matchAll(/^URL Source:\s*(\S+)\s*$/gmi)];
+  const contentMatches = [...markdown.matchAll(/^Markdown Content:\s*$/gmi)];
+  if (sourceMatches.length !== 1 || contentMatches.length !== 1 ||
+    /Warning:\s*Target URL returned error|captcha|access denied|проверка вашего веб-браузера/iu.test(markdown)) {
+    return undefined;
+  }
+  let source: URL;
+  try { source = new URL(sourceMatches[0]![1]!); }
+  catch { return undefined; }
+  if (exactUrlSignature(source) !== exactUrlSignature(requested)) return undefined;
+  const marker = contentMatches[0]!;
+  const body = markdown.slice((marker.index ?? 0) + marker[0].length).trim();
+  return body || undefined;
+}
+
+function compactOtzyvProReaderProof(markdown: string, requested: URL): string | undefined {
+  const body = exactReaderMarkdownBody(markdown, requested);
+  const titles = [...markdown.matchAll(/^Title:\s*(.+)$/gmi)];
+  if (!body || titles.length !== 1) return undefined;
+  const title = titles[0]![1]!.normalize("NFKC").replace(/\s+/gu, " ").trim();
+  const heading = body.match(/^#\s+([^\r\n]{2,320})\s*$/mu)?.[1]
+    ?.normalize("NFKC").replace(/\s+/gu, " ").trim();
+  const reviewMatches = [...body.matchAll(/(?:^|\n)\s*\[?Отзывы:\s*([\d\s\u00a0]+)\]?/giu)];
+  const ratingMatches = [...body.matchAll(/(?:^|\n)\s*Средняя оценка:\s*([0-5](?:[.,]\d+)?)\s+из\s+5\s*$/gimu)];
+  if (!title || !heading || reviewMatches.length !== 1 || ratingMatches.length > 1) return undefined;
+  const reviews = Number(reviewMatches[0]![1]!.replace(/[\s\u00a0]+/gu, ""));
+  const rating = ratingMatches.length === 1 ? Number(ratingMatches[0]![1]!.replace(",", ".")) : undefined;
+  if (!Number.isSafeInteger(reviews) || reviews < 0 ||
+    (reviews > 0 && (rating === undefined || !Number.isFinite(rating) || rating <= 0 || rating > 5)) ||
+    (reviews === 0 && rating !== undefined && rating !== 0)) return undefined;
+  return `<html><head><title>${escapeHtml(title)}</title>` +
+    `<link rel="canonical" href="${escapeHtml(requested.toString())}"></head><body>` +
+    `<h1 itemprop="name">${escapeHtml(heading)}</h1>` +
+    `<div itemprop="aggregateRating"><meta itemprop="reviewCount" content="${reviews}">` +
+    `${reviews > 0 ? `<meta itemprop="ratingValue" content="${rating}"><meta itemprop="bestRating" content="5">` : ""}` +
+    `</div></body></html>`;
+}
+
+function exactWildberriesCardTarget(target: URL): { ids: string[] } | undefined {
+  if (target.protocol !== "https:" || target.hostname !== "card.wb.ru" || target.port ||
+    target.username || target.password || target.hash || target.pathname !== "/cards/v4/detail" ||
+    [...target.searchParams.keys()].some((key) => !["appType", "curr", "dest", "lang", "locale", "nm"].includes(key)) ||
+    [...target.searchParams.keys()].some((key) => target.searchParams.getAll(key).length !== 1) ||
+    !["1", "32", "64"].includes(singleSearchParameter(target, "appType") ?? "") ||
+    singleSearchParameter(target, "curr") !== "rub" || singleSearchParameter(target, "lang") !== "ru" ||
+    singleSearchParameter(target, "locale") !== "ru" || !/^-?\d+$/.test(singleSearchParameter(target, "dest") ?? "")) {
+    return undefined;
+  }
+  const ids = (singleSearchParameter(target, "nm") ?? "").split(";");
+  if (ids.length < 1 || ids.length > 100 || new Set(ids).size !== ids.length || ids.some((id) => !/^[1-9]\d*$/.test(id))) {
+    return undefined;
+  }
+  return { ids };
+}
+
+function compactWildberriesReaderProof(markdown: string, requested: URL, ids: readonly string[]): string | undefined {
+  const body = exactReaderMarkdownBody(markdown, requested);
+  if (!body) return undefined;
+  let payload: unknown;
+  try { payload = JSON.parse(body) as unknown; }
+  catch { return undefined; }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload) ||
+    !Array.isArray((payload as { products?: unknown }).products)) return undefined;
+  const products = (payload as { products: unknown[] }).products;
+  const requestedIds = new Set(ids);
+  const returnedIds = new Set<string>();
+  for (const value of products) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const product = value as Record<string, unknown>;
+    const id = String(product.id ?? "");
+    const title = typeof product.name === "string" ? product.name.trim() : "";
+    const brand = typeof product.brand === "string" ? product.brand.trim() : "";
+    const feedbacks = Number(product.nmFeedbacks);
+    const rating = Number(product.nmReviewRating);
+    if (!requestedIds.has(id) || returnedIds.has(id) || !title || !brand ||
+      !Number.isSafeInteger(feedbacks) || feedbacks < 0 || !Number.isFinite(rating) || rating < 0 || rating > 5 ||
+      feedbacks > 0 && rating === 0) return undefined;
+    returnedIds.add(id);
+  }
+  if (returnedIds.size !== requestedIds.size || [...requestedIds].some((id) => !returnedIds.has(id))) return undefined;
+  return JSON.stringify(payload);
+}
+
 function compactYandexMarketTranslateHtml(
   html: string,
   requested: YandexMarketTranslateTarget
@@ -3094,6 +3178,12 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
     target.hostname === "card.wb.ru" && target.pathname === "/cards/v4/detail" ||
     wildberriesFeedbackTarget
   );
+  const wildberriesCardTarget = exactWildberriesCardTarget(target);
+  const vitaExpressTarget = target.protocol === "https:" && target.hostname === "vitaexpress.ru" &&
+    !target.port && !target.username && !target.password && !target.search && !target.hash && (
+      /^\/product\/[a-z0-9_]+\/?$/i.test(target.pathname) ||
+      /^\/tag\/[a-z0-9-]+\/?$/i.test(target.pathname)
+    );
   const yandexTarget = target.protocol === "https:" && target.hostname === "reviews.yandex.ru" &&
     !target.port && !target.username && !target.password && !target.hash && !target.search && (
       target.pathname === "/ugcpub/sitemap.xml" ||
@@ -3131,7 +3221,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         [...target.searchParams.keys()].every((key) => key === "url") && (safeSearch || safeProduct);
     } catch { /* invalid nested Ozon search URL */ }
   }
-  if (target.protocol !== "https:" || !(yandexBatch || reviewTarget || vaptekeAutocompleteTarget || vaptekeProductTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget || asnaSitemapTarget || yandexMarketTranslatedTarget)) {
+  if (target.protocol !== "https:" || !(yandexBatch || reviewTarget || vitaExpressTarget || vaptekeAutocompleteTarget || vaptekeProductTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget || asnaSitemapTarget || yandexMarketTranslatedTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
   }
   if (vaptekeAutocompleteTarget) {
@@ -3986,6 +4076,30 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       }
     });
   }
+  if (target.hostname === "otzyv.pro" && /^\/category\/(?:[a-z0-9-]+\/)+\d+-[a-z0-9-]+\.html$/i.test(target.pathname)) {
+    try {
+      const direct = await safeFetch(target.toString(), {
+        method: "GET", redirect: "follow",
+        headers: { accept: "text/html,application/xhtml+xml", "accept-language": "ru-RU,ru;q=0.9" }
+      }, fetch, 4, 15_000);
+      const directBody = await readTextBounded(direct, 12_000_000, 30_000);
+      if (direct.ok && /(?:text\/html|application\/xhtml\+xml)/iu.test(direct.headers.get("content-type") ?? "")) {
+        return new Response(directBody, { status: 200, headers: {
+          "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-ratings-source": "otzyv-pro-direct"
+        } });
+      }
+    } catch { /* use the exact source-bound reader below */ }
+    const reader = await safeFetch(readerProxyUrl(target).toString(), {
+      method: "GET", redirect: "follow",
+      headers: { accept: "text/plain; charset=utf-8", "x-return-format": "markdown", dnt: "1" }
+    });
+    const markdown = await readTextBounded(reader, 2_000_000, 60_000);
+    const compact = reader.ok ? compactOtzyvProReaderProof(markdown, target) : undefined;
+    if (!compact) return json({ error: "Otzyv.pro reader did not prove the exact product aggregate" }, 502);
+    return new Response(compact, { status: 200, headers: {
+      "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-ratings-source": "otzyv-pro-reader-compact"
+    } });
+  }
   if (vseotzyvyTarget) {
     const reader = await safeFetch(readerProxyUrl(vseotzyvyTarget.source).toString(), {
       method: "GET",
@@ -4190,6 +4304,32 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         "x-ratings-source": "reader-fallback"
       }
     });
+  }
+  if (wildberriesCardTarget) {
+    try {
+      const direct = await safeFetch(target.toString(), {
+        method: "GET", redirect: "follow",
+        headers: { accept: "application/json, text/plain, */*", origin: "https://www.wildberries.ru", referer: "https://www.wildberries.ru/" }
+      }, fetch, 0, 8_000);
+      const directBody = await readTextBounded(direct, 2_000_000, 20_000);
+      if (direct.ok && /json/i.test(direct.headers.get("content-type") ?? "")) {
+        return new Response(directBody, { status: 200, headers: {
+          "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-ratings-source": "wildberries-card-direct"
+        } });
+      }
+    } catch { /* use the exact source-bound reader below */ }
+    const reader = await safeFetch(readerProxyUrl(target).toString(), {
+      method: "GET", redirect: "follow",
+      headers: { accept: "text/plain; charset=utf-8", "x-return-format": "markdown", dnt: "1" }
+    });
+    const markdown = await readTextBounded(reader, 2_000_000, 60_000);
+    const compact = reader.ok
+      ? compactWildberriesReaderProof(markdown, target, wildberriesCardTarget.ids)
+      : undefined;
+    if (!compact) return json({ error: "Wildberries reader did not prove the exact complete card batch" }, 502);
+    return new Response(compact, { status: 200, headers: {
+      "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-ratings-source": "wildberries-reader-exact-batch"
+    } });
   }
   const upstream = await safeFetch(target.toString(), {
     method: "GET",

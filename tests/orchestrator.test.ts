@@ -266,7 +266,7 @@ describe("run orchestration and fail-closed QA", () => {
       async discover(brand) {
         calls.set(domain, (calls.get(domain) ?? 0) + 1);
         if (domain === "example.org" && flakyAttempts++ === 0) {
-          throw new AdapterQuotaError("temporary quota gate");
+          throw new AdapterBlockedError("temporary exact-card route returned HTTP 502");
         }
         return [{
           domain, platform: domain, listingId: "1", brand,
@@ -311,6 +311,33 @@ describe("run orchestration and fail-closed QA", () => {
     expect(retried.payloadHash).not.toBe(firstHash);
     expect(retried.collectionStartedAt).not.toBe("2020-01-01T00:00:00.000Z");
     expect(Date.parse(retried.collectionFinishedAt!) - Date.parse(retried.collectionStartedAt!)).toBeLessThan(10_000);
+  });
+
+  it("does not repeat an account quota partition automatically", async () => {
+    const repository = new MemoryRepository();
+    let calls = 0;
+    const service = new RatingsService(repository, async () => ({
+      id: "quota-terminal",
+      supportedDomains: ["example.com"],
+      async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
+      async discover() {
+        calls += 1;
+        throw new AdapterQuotaError("Monthly sandbox GB-s quota exceeded");
+      },
+      async collect() { throw new Error("collect must not run"); }
+    }));
+    const id = (await service.createRun(request)).id;
+
+    const first = await service.executeRun(id);
+    expect(first.partitions).toMatchObject([{
+      status: "blocked",
+      retryable: false,
+      message: expect.stringContaining("quota_exceeded")
+    }]);
+
+    const repeated = await service.executeRun(id);
+    expect(calls).toBe(1);
+    expect(repeated.partitions).toEqual(first.partitions);
   });
 
   it("retries only transient failures while preserving a terminal source blocker and all successes", async () => {
@@ -514,7 +541,7 @@ describe("run orchestration and fail-closed QA", () => {
       async discover(brand) {
         calls.set(domain, (calls.get(domain) ?? 0) + 1);
         if (domain === "example.org" && calls.get(domain) === 1) {
-          throw new AdapterBlockedError("temporary exact-proof failure");
+          throw new AdapterBlockedError("temporary exact-proof route returned HTTP 502");
         }
         return [{
           domain, platform: domain, listingId: "1", brand,
@@ -540,6 +567,7 @@ describe("run orchestration and fail-closed QA", () => {
       ["example.com", "complete"],
       ["example.org", "blocked"]
     ]);
+    expect(first.partitions[1]).toMatchObject({ retryable: true });
 
     const retried = await service.executeRun(id);
 
@@ -560,7 +588,7 @@ describe("run orchestration and fail-closed QA", () => {
       async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
       async discover(brand) {
         calls.set(domain, (calls.get(domain) ?? 0) + 1);
-        if (domain === "example.org") throw new AdapterQuotaError("still unavailable");
+        if (domain === "example.org") throw new AdapterBlockedError("still unavailable: HTTP 502");
         return [{ domain, platform: domain, listingId: "1", brand, url: `https://${domain}/p/1`, metadata: {} }];
       },
       async collect(ref) {
@@ -709,7 +737,7 @@ describe("run orchestration and fail-closed QA", () => {
       async healthCheck() { return { ok: true, checkedAt: new Date().toISOString() }; },
       async discover(brand): Promise<ProductRef[]> {
         attempt += 1;
-        if (attempt === 2) throw new AdapterQuotaError("quota still unavailable");
+        if (attempt === 2) throw new AdapterBlockedError("exact discovery route still unavailable: HTTP 502");
         const refs = ["1", ...(attempt >= 3 ? ["2"] : [])].map((listingId) => ({
           domain: "example.com",
           platform: "partial",
@@ -717,8 +745,8 @@ describe("run orchestration and fail-closed QA", () => {
           brand,
           url: `https://example.com/p/${listingId}`,
           metadata: attempt === 1 ? {
-            partialDiscoveryStatus: "quota_exceeded",
-            partialDiscoveryMessage: "quota interrupted exact proof",
+            partialDiscoveryStatus: "blocked",
+            partialDiscoveryMessage: "HTTP 502 interrupted exact proof",
             partialDiscoveryTotal: 2
           } : {}
         }));
@@ -744,7 +772,7 @@ describe("run orchestration and fail-closed QA", () => {
     const partial = await service.executeRun(id);
     expect(partial.partitions).toMatchObject([{
       status: "blocked", discovered: 2, collected: 1,
-      message: expect.stringContaining("quota_exceeded")
+      message: expect.stringContaining("HTTP 502")
     }]);
     expect(partial.observations).toHaveLength(1);
     const checkpoint = partial.observations[0];

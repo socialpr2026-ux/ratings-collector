@@ -89,6 +89,96 @@ describe("new static collector gateways", () => {
     expect(upstream).toHaveBeenCalledOnce();
   });
 
+  it("recovers an exact Otzyv.pro product through a source-bound reader proof", async () => {
+    const target = "https://otzyv.pro/category/badyi/800945-baktoblis-otzyvy.html";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const requested = String(input);
+      if (requested === target) return new Response("fixed egress unavailable", { status: 502 });
+      expect(requested).toBe(`https://r.jina.ai/${target}`);
+      return new Response(`Title: БАКТОБЛИС ОТЗЫВЫ отрицательные и реальные отзывы\n` +
+        `URL Source: ${target}\n\nMarkdown Content:\n# Бактоблис отзывы\n\nСредняя оценка: 5 из 5\n\nОтзывы: 3\n`, {
+        headers: { "content-type": "text/plain; charset=utf-8" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target);
+    const html = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("otzyv-pro-reader-compact");
+    expect(html).toContain('<link rel="canonical" href="https://otzyv.pro/category/badyi/800945-baktoblis-otzyvy.html">');
+    expect(html).toContain('<meta itemprop="reviewCount" content="3">');
+    expect(html).toContain('<meta itemprop="ratingValue" content="5">');
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects an Otzyv.pro reader response bound to another product", async () => {
+    const target = "https://otzyv.pro/category/badyi/800945-baktoblis-otzyvy.html";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => String(input) === target
+      ? new Response("fixed egress unavailable", { status: 502 })
+      : new Response(`Title: Бактоблис отзывы\nURL Source: https://otzyv.pro/category/badyi/999999-other.html\n` +
+        `Markdown Content:\n# Бактоблис отзывы\nСредняя оценка: 5 из 5\nОтзывы: 3\n`));
+    vi.stubGlobal("fetch", upstream);
+
+    expect((await callGateway(target)).status).toBe(502);
+  });
+
+  it("routes only exact VitaExpress registry page shapes through fixed egress", async () => {
+    const target = "https://vitaexpress.ru/product/baktoblis_tabletki_bad_30/";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe(target);
+      return new Response("<html><h1>Бактоблис Плюс таблетки для рассасывания №30</h1></html>", {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    expect((await callGateway(target)).status).toBe(200);
+    expect((await callGateway("https://vitaexpress.ru/product/baktoblis_tabletki_bad_30/?next=evil")).status).toBe(400);
+    expect((await callGateway("https://www.vitaexpress.ru/product/baktoblis_tabletki_bad_30/")).status).toBe(400);
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it("recovers an exact complete Wildberries card batch through the source-bound reader", async () => {
+    const target = "https://card.wb.ru/cards/v4/detail?appType=1&curr=rub&dest=-1257786&lang=ru&locale=ru&nm=11%3B22";
+    const products = [
+      { id: 11, name: "Бактоблис таблетки №30", brand: "Бактоблис", nmFeedbacks: 4, nmReviewRating: 5 },
+      { id: 22, name: "Бактоблис Дуо №10", brand: "Бактоблис", nmFeedbacks: 0, nmReviewRating: 0 }
+    ];
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      const requested = String(input);
+      if (requested === target) return new Response("fixed WB egress unavailable", { status: 502 });
+      expect(requested).toBe(`https://r.jina.ai/${target}`);
+      return new Response(`Title: \nURL Source: ${target}\n\nMarkdown Content:\n${JSON.stringify({ products })}`, {
+        headers: { "content-type": "text/plain; charset=utf-8" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-ratings-source")).toBe("wildberries-reader-exact-batch");
+    await expect(response.json()).resolves.toEqual({ products });
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps an incomplete or source-mismatched Wildberries reader batch blocked", async () => {
+    const target = "https://card.wb.ru/cards/v4/detail?appType=1&curr=rub&dest=-1257786&lang=ru&locale=ru&nm=11%3B22";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => String(input) === target
+      ? new Response("fixed WB egress unavailable", { status: 502 })
+      : new Response(`Title: \nURL Source: ${target}\n\nMarkdown Content:\n${JSON.stringify({ products: [
+        { id: 11, name: "Бактоблис таблетки №30", brand: "Бактоблис", nmFeedbacks: 4, nmReviewRating: 5 }
+      ] })}`));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await callGateway(target);
+
+    expect(response.status).toBe(502);
+    expect(await response.text()).not.toContain('"nmFeedbacks":0');
+  });
+
   it("proxies only one exact Wildberries root-feedback route", async () => {
     const upstream = vi.fn(async (input: RequestInfo | URL) => {
       expect(String(input)).toBe("https://feedbacks1.wb.ru/feedbacks/v2/214718282?appType=1");

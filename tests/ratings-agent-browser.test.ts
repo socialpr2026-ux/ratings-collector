@@ -721,7 +721,8 @@ describe("ratings Agent lazy Sandbox routing", () => {
       "https://apteka-ru.translate.goog/preparation/otsillokoktsinum/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
       "https://nfapteka-ru.translate.goog/catalog/?q=Оциллококцинум&_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
       "https://www-budzdorov-ru.translate.goog/forms/ocillokokcinum?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
-      "https://market-yandex-ru.translate.goog/card/mikroginon-tab-po/103544271955/reviews?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en"
+      "https://market-yandex-ru.translate.goog/card/mikroginon-tab-po/103544271955/reviews?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en",
+      "https://vitaexpress.ru/product/baktoblis_tabletki_bad_30/"
     ]) {
       const response = await routedFetch(target);
       expect(await response.text()).toBe("compact pharmacy proof");

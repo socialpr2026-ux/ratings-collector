@@ -754,6 +754,10 @@ export function browserFetch(
         /^\/g_[a-z0-9-]+\/$/i.test(url.pathname) ||
         /^\/p_[a-z0-9][a-z0-9-]*-\d+\.html$/i.test(url.pathname)
       );
+    const fixedVitaExpressTarget = request.method === "GET" && url.protocol === "https:" &&
+      url.hostname === "vitaexpress.ru" && !url.port && !url.username && !url.password && !url.search && !url.hash && (
+        /^\/product\/[a-z0-9_]+\/?$/i.test(url.pathname) || /^\/tag\/[a-z0-9-]+\/?$/i.test(url.pathname)
+      );
     const fixedPharmacy009Target = request.method === "GET" && url.protocol === "https:" && url.hostname === "009.xn--p1ai" &&
       !url.port && !url.username && !url.password && !url.hash && !url.search && (
         url.pathname === "/sitemap.xml" ||
@@ -1168,7 +1172,8 @@ export function browserFetch(
       host === "vseotzyvy.ru" ||
       host === "pravogolosa.net" ||
       host === "ru.otzyv.com" ||
-      host === "med-otzyv.ru"
+      host === "med-otzyv.ru" ||
+      fixedVitaExpressTarget
     )) {
       const proxied = await fetchViaStaticProxy(url, request.signal);
       // The fixed reader is normally the most reliable route for review

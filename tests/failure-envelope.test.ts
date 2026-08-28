@@ -12,6 +12,7 @@ describe("typed collection failure policy", () => {
   it.each([
     ["HTTP 429 Retry-After", "throttle", true],
     ["upstream returned HTTP 502", "transport", true],
+    ["vitaexpress.ru:175303: request failed: fetch failed", "transport", true],
     ["run_deadline_exceeded", "timeout", true],
     ["CAPTCHA challenge", "access_block", false]
   ] as const)("classifies %s", (message, category, retryable) => {

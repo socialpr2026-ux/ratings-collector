@@ -74,10 +74,13 @@ export function failureEnvelope(error: unknown, context: FailureContext = {}): F
   if (upstreamStatus === 429) {
     return { ...base, category: "throttle", retryable: true, scope: "host" };
   }
-  if (/run_deadline_exceeded|aborted due to timeout|timed?\s*out/iu.test(message) || upstreamStatus === 408) {
+  if (/run_deadline_exceeded|aborted due to timeout|timed?\s*out|exceeded (?:its )?deadline/iu.test(message) || upstreamStatus === 408) {
     return { ...base, category: "timeout", retryable: true, scope: "request" };
   }
   if (upstreamStatus === 425 || upstreamStatus === 499 || (upstreamStatus !== undefined && upstreamStatus >= 500)) {
+    return { ...base, category: "transport", retryable: true, scope: "request" };
+  }
+  if (/\b(?:fetch failed|network error|socket hang up|connection reset|econnreset|econnrefused|enotfound|eai_again)\b/iu.test(message)) {
     return { ...base, category: "transport", retryable: true, scope: "request" };
   }
   if (error instanceof AdapterBlockedError || /blocked|access denied|forbidden|заблокирован/iu.test(message)) {

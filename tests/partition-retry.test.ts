@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isFailedOnlyRetryTarget,
+  isLegacyTerminalFailureMessage,
   isOnlySourceUnavailableMessage,
   isSourceUnavailableMessage,
   retryableFailedPartitionCount
@@ -36,6 +37,21 @@ describe("failed-only partition retry policy", () => {
 
     expect(isSourceUnavailableMessage(mixed.message)).toBe(true);
     expect(isOnlySourceUnavailableMessage(mixed.message)).toBe(false);
+    expect(isFailedOnlyRetryTarget(mixed)).toBe(true);
+  });
+
+  it("skips pure legacy quota and parser failures but retries a mixed free-route transport failure", () => {
+    const quota = partition({ message: "quota_exceeded: Monthly sandbox GB-s quota exceeded" });
+    const parser = partition({ message: "parser_changed: exact product markup changed" });
+    const mixed = partition({
+      message: "Wildberries direct appType=1 HTTP 502; browser network error: monthly sandbox GB-s quota exceeded"
+    });
+
+    expect(isLegacyTerminalFailureMessage(quota.message)).toBe(true);
+    expect(isLegacyTerminalFailureMessage(parser.message)).toBe(true);
+    expect(isLegacyTerminalFailureMessage(mixed.message)).toBe(false);
+    expect(isFailedOnlyRetryTarget(quota)).toBe(false);
+    expect(isFailedOnlyRetryTarget(parser)).toBe(false);
     expect(isFailedOnlyRetryTarget(mixed)).toBe(true);
   });
 
