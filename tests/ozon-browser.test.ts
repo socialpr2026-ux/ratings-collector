@@ -354,8 +354,13 @@ describe("Ozon browser collector", () => {
 
   it("starts Baktoblis from its verified category without spending the run budget on entry search", async () => {
     const paths: string[] = [];
+    let composerCalls = 0;
     const fetch = vi.fn(async (input: URL | RequestInfo) => {
       const endpoint = new URL(String(input));
+      if (endpoint.pathname === "/api/composer-api.bx/page/json/v2") {
+        composerCalls += 1;
+        return new Response("upstream failed", { status: 502 });
+      }
       const source = sourceUrlFromTranslate(endpoint);
       paths.push(source.pathname);
       if (source.pathname === "/search/") throw new Error("Verified category must run before entry search");
@@ -371,13 +376,14 @@ describe("Ozon browser collector", () => {
         translatedTile("152369287", "BaktoBLIS+ lozenges No. 30", "4.9", 6894)
       ], 1), { headers: { "content-type": "text/html; charset=utf-8" } });
     }) as unknown as typeof globalThis.fetch;
-    const adapter = new OzonBrowserAdapter({ fetch, detailDelayMs: 0 });
+    const adapter = new OzonBrowserAdapter({ fetch, googleComposerEnabled: true, detailDelayMs: 0 });
 
     const refs = await adapter.discover("Бактоблис", { ...context, brands: ["Бактоблис"] });
 
     expect(paths[0]).toBe("/category/bady-6183/baktoblis-100260712/");
     expect(paths[1]).toMatch(/^\/product\//);
     expect(paths).not.toContain("/search/");
+    expect(composerCalls).toBe(0);
     expect(refs).toMatchObject([{ listingId: "152369287", title: "BaktoBLIS+ lozenges No. 30" }]);
   });
 

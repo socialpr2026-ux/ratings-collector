@@ -163,6 +163,22 @@ describe("new static collector gateways", () => {
     expect(upstream).toHaveBeenCalledOnce();
   });
 
+  it("allows only an exact Maksavit translated product through fixed egress", async () => {
+    const target = "https://maksavit-ru.translate.goog/catalog/945425/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const upstream = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe(target);
+      return new Response("<html><head><base href=\"https://maksavit.ru/catalog/945425/\"></head><body><h1>Бактоблис</h1></body></html>", {
+        headers: { "content-type": "text/html; charset=utf-8" }
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    expect((await callGateway(target)).status).toBe(200);
+    expect((await callGateway("https://maksavit-ru.translate.goog/catalog/private/export/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en")).status).toBe(400);
+    expect((await callGateway("https://maksavit-ru.translate.goog/catalog/945425/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en&debug=1")).status).toBe(400);
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
   it("recovers an exact complete Wildberries card batch through the source-bound reader", async () => {
     const target = "https://card.wb.ru/cards/v4/detail?appType=1&curr=rub&dest=-1257786&lang=ru&locale=ru&nm=11%3B22";
     const products = [

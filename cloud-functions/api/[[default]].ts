@@ -3254,6 +3254,10 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
       /^\/product\/[a-z0-9_]+\/?$/i.test(target.pathname) ||
       /^\/tag\/[a-z0-9-]+\/?$/i.test(target.pathname)
     );
+  const maksavitTranslatedTarget = target.protocol === "https:" && target.hostname === "maksavit-ru.translate.goog" &&
+    !target.port && !target.username && !target.password && !target.hash &&
+    /^\/catalog\/\d+\/$/u.test(target.pathname) && exactTranslateParameters(target) &&
+    [...target.searchParams.keys()].every((key) => PHARMACY_TRANSLATE_PARAMETERS.has(key) && target.searchParams.getAll(key).length === 1);
   const yandexTarget = target.protocol === "https:" && target.hostname === "reviews.yandex.ru" &&
     !target.port && !target.username && !target.password && !target.hash && !target.search && (
       target.pathname === "/ugcpub/sitemap.xml" ||
@@ -3291,7 +3295,7 @@ export async function staticReviewFetch(request: Request, env: Record<string, st
         [...target.searchParams.keys()].every((key) => key === "url") && (safeSearch || safeProduct);
     } catch { /* invalid nested Ozon search URL */ }
   }
-  if (target.protocol !== "https:" || !(yandexBatch || reviewTarget || vitaExpressTarget || vaptekeAutocompleteTarget || vaptekeProductTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget || asnaSitemapTarget || yandexMarketTranslatedTarget)) {
+  if (target.protocol !== "https:" || !(yandexBatch || reviewTarget || vitaExpressTarget || maksavitTranslatedTarget || vaptekeAutocompleteTarget || vaptekeProductTarget || medOtzyvSearchTarget || medOtzyvProductTarget || megamarketTranslatedTarget || wildberriesTarget || yandexTarget || zdravcityTarget || ozonTarget || ozonTranslatedTarget || ozonTranslatedComposerTarget || ozonYandexComposerTarget || pharmacyTranslatedTarget || aptekaRuTarget || asnaSitemapTarget || yandexMarketTranslatedTarget)) {
     return json({ error: "Static review fetch destination is not allowed" }, 400);
   }
   if (vaptekeAutocompleteTarget) {

@@ -1068,17 +1068,29 @@ export class OzonBrowserAdapter implements SiteAdapter {
           exactMetrics.set(product.listingId, cachedExact);
           return cachedExact;
         }
+        const preferTranslatedHtml = product.source === TRANSLATE_SOURCE && this.googleComposerEnabled;
         try {
-          exact = this.googleComposerEnabled
-            ? await this.fetchExactTranslatedComposerProduct(ref, product.listingId, context)
-            : this.yandexTranslateEnabled
-              ? await this.fetchExactYandexComposerProduct(ref, product.listingId, context)
-              : undefined;
+          // A card discovered from a verified translated category has already
+          // proved that this HTML route is healthy. Reuse it before probing a
+          // composer that can be independently rate-limited or return 502.
+          exact = preferTranslatedHtml
+            ? await this.fetchExactTranslatedProductWithRetry(ref, product.listingId, context)
+            : this.googleComposerEnabled
+              ? await this.fetchExactTranslatedComposerProduct(ref, product.listingId, context)
+              : this.yandexTranslateEnabled
+                ? await this.fetchExactYandexComposerProduct(ref, product.listingId, context)
+                : undefined;
           if (!exact) throw new AdapterBlockedError("Primary composer is disabled");
         } catch (primaryError) {
           if (!(primaryError instanceof AdapterBlockedError) && !(primaryError instanceof ParserChangedError)) throw primaryError;
           try {
-            exact = await this.fetchExactTranslatedProductWithRetry(ref, product.listingId, context);
+            exact = preferTranslatedHtml
+              ? this.googleComposerEnabled
+                ? await this.fetchExactTranslatedComposerProduct(ref, product.listingId, context)
+                : this.yandexTranslateEnabled
+                  ? await this.fetchExactYandexComposerProduct(ref, product.listingId, context)
+                  : await this.fetchExactTranslatedComposerProductWithRetry(ref, product.listingId, context)
+              : await this.fetchExactTranslatedProductWithRetry(ref, product.listingId, context);
           } catch (translateError) {
             if (!(translateError instanceof AdapterBlockedError)) throw translateError;
             let composerError: unknown;
@@ -1649,6 +1661,20 @@ export class OzonBrowserAdapter implements SiteAdapter {
       if (stage === "discovery") this.searchPageCache.delete(cacheKey);
       return cached;
     }
+    let translateFailure: AdapterBlockedError | ParserChangedError | undefined;
+    const verifiedCategory = this.translateEnabled ? verifiedCategoryTarget(brand, page) : undefined;
+    if (verifiedCategory) {
+      try {
+        const translated = await this.fetchTranslatedSearchPage(brand, page, context, stage, verifiedCategory);
+        if (stage === "health_check") this.searchPageCache.set(cacheKey, translated);
+        return translated;
+      } catch (error) {
+        if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
+        translateFailure = error instanceof ParserChangedError || error instanceof AdapterBlockedError
+          ? error
+          : new ParserChangedError(`Ozon verified category failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     let googleComposerFailure: AdapterBlockedError | ParserChangedError | undefined;
     if (this.googleComposerEnabled) {
       try {
@@ -1676,21 +1702,7 @@ export class OzonBrowserAdapter implements SiteAdapter {
       }
     }
 
-    let translateFailure: AdapterBlockedError | ParserChangedError | undefined;
     if (this.translateEnabled) {
-      const verifiedCategory = verifiedCategoryTarget(brand, page);
-      if (verifiedCategory) {
-        try {
-          const translated = await this.fetchTranslatedSearchPage(brand, page, context, stage, verifiedCategory);
-          if (stage === "health_check") this.searchPageCache.set(cacheKey, translated);
-          return translated;
-        } catch (error) {
-          if (context.signal?.aborted || error instanceof AdapterQuotaError) throw error;
-          translateFailure = error instanceof ParserChangedError || error instanceof AdapterBlockedError
-            ? error
-            : new ParserChangedError(`Ozon verified category failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
       try {
         const translated = await this.fetchTranslatedSearchPage(brand, page, context, stage);
         if (stage === "health_check") this.searchPageCache.set(cacheKey, translated);

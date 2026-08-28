@@ -488,6 +488,28 @@ describe("canonical product descriptors", () => {
     });
   });
 
+  it.each([
+    [
+      "БактоБЛИС саше с Д3 витамином, 1 упаковка по 15 штук",
+      "саше №15"
+    ],
+    [
+      "БактоБЛИС+ с вит. Д3, 2 упаковки по 30 таблеток, Комплект",
+      "Плюс таблетки №30 ×2 упаковки"
+    ],
+    [
+      "Бактоблис пищевая добавка к пище порошок в саше саше 1500 мг 15",
+      "порошок в саше 1500 мг №15"
+    ]
+  ])("extracts the factory pack from live marketplace wording %s", (product, label) => {
+    expect(analyzeProductIdentity({ brand: "Бактоблис", product })).toMatchObject({
+      label,
+      granularity: "variant",
+      confidence: "exact",
+      missing: []
+    });
+  });
+
   it("does not generalize the Baktoblis Plus equivalence to another strength, brand or missing pack", () => {
     const otherStrength = analyzeProductIdentity({ brand: "Бактоблис", product: "БактоБЛИС+ таблетки 810 мг №30" });
     const otherBrand = analyzeProductIdentity({ brand: "Другой бренд", product: "Другой бренд+ таблетки 950 мг №30" });

@@ -41,6 +41,7 @@ type AgentContext = {
 };
 
 export const STATIC_PROXY_REQUEST_TIMEOUT_MS = 55_000;
+export const STATIC_PROXY_MAX_BYTES = 15_000_000;
 export const OZON_DIRECT_MAX_BYTES = 15_000_000;
 export const PHARMACY009_DIRECT_TIMEOUT_MS = 15_000;
 export const OKAPTEKA_DIRECT_TIMEOUT_MS = 15_000;
@@ -382,6 +383,7 @@ export function browserFetch(
     if (!staticProxy) throw new Error("Static proxy is not configured");
     const attemptAbort = new AbortController();
     const combinedSignal = AbortSignal.any([signal, attemptAbort.signal]);
+    const startedAt = Date.now();
     try {
       const response = await withDeadline(fetch(staticProxy.endpoint, {
         method: "POST",
@@ -392,15 +394,26 @@ export function browserFetch(
         body: JSON.stringify({ url: url.toString() }),
         signal: combinedSignal
       }), STATIC_PROXY_REQUEST_TIMEOUT_MS, `Static proxy request exceeded ${STATIC_PROXY_REQUEST_TIMEOUT_MS} ms`);
+      const declaredLength = response.headers.get("content-length");
+      if (declaredLength !== null && Number(declaredLength) > STATIC_PROXY_MAX_BYTES) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new AdapterBlockedError(`Static proxy response exceeded ${STATIC_PROXY_MAX_BYTES} bytes`);
+      }
       // A fetch promise resolves as soon as response headers arrive. Buffer the
       // bounded proxy response before disposing the per-attempt signal; aborting
       // it while the caller still reads the stream produces a misleading
       // `This operation was aborted` health-check failure on selective retry.
+      // Headers and body share one wall-clock budget so a slow header phase
+      // cannot silently double the lifetime of a host slot and Agent memory.
+      const remainingMs = Math.max(1, STATIC_PROXY_REQUEST_TIMEOUT_MS - (Date.now() - startedAt));
       const body = await withDeadline(
         response.arrayBuffer(),
-        STATIC_PROXY_REQUEST_TIMEOUT_MS,
+        remainingMs,
         `Static proxy response exceeded ${STATIC_PROXY_REQUEST_TIMEOUT_MS} ms`
       );
+      if (body.byteLength > STATIC_PROXY_MAX_BYTES) {
+        throw new AdapterBlockedError(`Static proxy response exceeded ${STATIC_PROXY_MAX_BYTES} bytes`);
+      }
       return new Response(body, {
         status: response.status,
         statusText: response.statusText,
@@ -888,6 +901,18 @@ export function browserFetch(
         if (request.signal.aborted) throw error;
       }
 
+      if (staticProxy) {
+        try {
+          const proxied = await fetchViaStaticProxy(url, request.signal);
+          const shouldUseBrowser = proxied.status === 400 ||
+            TRANSIENT_STATIC_PROXY_STATUSES.has(proxied.status) || proxied.status >= 500;
+          if (!shouldUseBrowser) return proxied;
+          await proxied.body?.cancel().catch(() => undefined);
+        } catch (error) {
+          if (request.signal.aborted) throw error;
+        }
+      }
+
       return runBrowserTask("maksavit", async () => {
         request.signal.throwIfAborted();
         const source = await assertSafePublicDestination(`https://maksavit.ru/catalog/${fixedMaksavitTranslatedId}/`);
@@ -1202,17 +1227,13 @@ export function browserFetch(
       // only for the product URL; search still requires a healthy HTML page
       // and the adapter's explicit exact-results/no-results proof. A failed
       // fallback never becomes a zero.
-      if (
-        (
-          !["vseotzyvy.ru", "pravogolosa.net", "otzyv.pro"].includes(host) &&
-          !fixedRuOtzyvDirectTarget
-        ) ||
-        !TRANSIENT_STATIC_PROXY_STATUSES.has(proxied.status)
-      ) return proxied;
+      const boundedDirectFallback = fixedVitaExpressTarget || fixedRuOtzyvDirectTarget ||
+        ["vseotzyvy.ru", "pravogolosa.net", "otzyv.pro"].includes(host);
+      if (!boundedDirectFallback || !TRANSIENT_STATIC_PROXY_STATUSES.has(proxied.status)) return proxied;
       try {
         const direct = await fetch(
           request,
-          fixedRuOtzyvDirectTarget ? { redirect: "manual" } : undefined
+          fixedRuOtzyvDirectTarget || fixedVitaExpressTarget ? { redirect: "manual" } : undefined
         );
         if (direct.ok || (fixedRuOtzyvProductTarget && [404, 410].includes(direct.status))) {
           await proxied.body?.cancel().catch(() => undefined);

@@ -11,6 +11,7 @@ import {
   OZON_LEASE_HEARTBEAT_MS,
   OZON_LEASE_MS,
   runWithRenewableLease,
+  STATIC_PROXY_MAX_BYTES,
   STATIC_PROXY_REQUEST_TIMEOUT_MS,
   YANDEX_BATCH_GATEWAY_TIMEOUT_MS
 } from "../agents/ratings/index.js";
@@ -106,6 +107,41 @@ describe("ratings Agent lazy Sandbox routing", () => {
     await rejection;
     expect(directFetch).toHaveBeenCalledOnce();
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("uses one wall-clock budget for static-proxy headers and body", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
+      setTimeout(() => resolve(new Response(new ReadableStream<Uint8Array>({
+        start() { /* body intentionally stalls */ }
+      }))), 30_000);
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+    const rejection = expect(routedFetch("https://vitaexpress.ru/product/baktoblis_tabletki_bad_30/"))
+      .rejects.toSatisfy((error: unknown) => error instanceof AdapterBlockedError &&
+        error.message === `Static proxy response exceeded ${STATIC_PROXY_REQUEST_TIMEOUT_MS} ms`);
+
+    await vi.advanceTimersByTimeAsync(STATIC_PROXY_REQUEST_TIMEOUT_MS + 1);
+
+    await rejection;
+  });
+
+  it("rejects an oversized static-proxy proof before buffering it", async () => {
+    const fetchMock = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start() { /* must not be consumed */ }
+    }), { headers: { "content-length": String(STATIC_PROXY_MAX_BYTES + 1) } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const routedFetch = browserFetch(sandbox(vi.fn()), {
+      endpoint: "https://ratings.example/api/internal/static-review-fetch",
+      token: "internal-token"
+    });
+
+    await expect(routedFetch("https://vitaexpress.ru/product/baktoblis_tabletki_bad_30/"))
+      .rejects.toThrow(`Static proxy response exceeded ${STATIC_PROXY_MAX_BYTES} bytes`);
   });
 
   it("falls back directly only for one bounded Ozon translated product after fixed egress fails", async () => {
@@ -690,6 +726,46 @@ describe("ratings Agent lazy Sandbox routing", () => {
 
     expect(directFetch).toHaveBeenCalledOnce();
     expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("recovers an exact Maksavit card through fixed egress before spending Sandbox quota", async () => {
+    const run = vi.fn(async () => { throw new Error("Sandbox must stay idle"); });
+    const target = "https://maksavit-ru.translate.goog/catalog/945425/?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en";
+    const endpoint = "https://ratings.example/api/internal/static-review-fetch";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) => String(input) === endpoint
+      ? new Response("<html><head><base href=\"https://maksavit.ru/catalog/945425/\"></head><body><h1>Бактоблис</h1></body></html>", {
+          headers: { "content-type": "text/html; charset=utf-8" }
+        })
+      : new Response("Google Translate shell", { status: 400 }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), { endpoint, token: "internal-token" });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("Бактоблис");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("uses bounded Agent egress when the VitaExpress fixed gateway has a transient failure", async () => {
+    const run = vi.fn(async () => { throw new Error("Sandbox must stay idle"); });
+    const target = "https://vitaexpress.ru/product/baktoblis_tabletki_bad_30/";
+    const endpoint = "https://ratings.example/api/internal/static-review-fetch";
+    const directFetch = vi.fn(async (input: RequestInfo | URL) => String(input) === endpoint
+      ? new Response("fixed egress unavailable", { status: 502 })
+      : new Response("<html><h1>Бактоблис таблетки №30</h1></html>", {
+          headers: { "content-type": "text/html; charset=utf-8" }
+        }));
+    vi.stubGlobal("fetch", directFetch);
+    const routedFetch = browserFetch(sandbox(run), { endpoint, token: "internal-token" });
+
+    const response = await routedFetch(target);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("Бактоблис таблетки №30");
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
   });
 
   it("never acquires the Maksavit browser for an unbounded translated path", async () => {

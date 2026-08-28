@@ -160,7 +160,7 @@ function isAdministrationContext(value: string, index: number, length: number): 
   const after = normalizeText(value.slice(index + length, Math.min(value.length, index + length + 60)));
   // "15 саше-пакетов по 1500 мг" describes pack composition, not a dosing
   // instruction. Keep this common pharmacy wording as product evidence.
-  if (/(?:саше|пакет(?:ов|а)?|таблет(?:ок|ки)|капсул|флакон(?:ов|а)?|ампул(?:ы)?)\s+по$/u.test(before)) return false;
+  if (/(?:саше|пакет(?:ов|а)?|таблет(?:ок|ки)|капсул|флакон(?:ов|а)?|ампул(?:ы)?|упаков(?:ка|ки|ок))\s+по$/u.test(before)) return false;
   return /(?:принимать|принимают|применять|назначают|рекомендуется|употреблять|по)$/u.test(before)
     || /^(?:по\s+)?\d+\s+раз(?:а)?\s+(?:в|за)\s+(?:день|сутки)/u.test(after)
     || /^раз(?:а)?\s+(?:в|за)\s+(?:день|сутки)/u.test(after)
@@ -207,6 +207,12 @@ function countFromText(value: string): number | undefined {
   for (const before of value.matchAll(beforePattern)) {
     if (!isAdministrationContext(value, before.index ?? 0, before[0].length)) return Number(before[1]);
   }
+  // Some marketplace titles drop the final "шт" while retaining a complete
+  // sachet form and strength, for example "порошок в саше 1500 мг 15".
+  // Keep this deliberately narrow: a bare trailing number without both the
+  // sachet form and a measured strength remains unresolved.
+  const trailingSachetPack = value.match(/(?:порош(?:ок|ка)?[^,;]{0,80}(?:саше(?:[-\s]?пакет(?:ы|ов|а)?)?)?|саше(?:[-\s]?пакет(?:ы|ов|а)?)?)[^,;]{0,80}\d+(?:[.,]\d+)?\s*(?:мкг|мг|г)\s+(\d{1,4})\s*$/iu);
+  if (trailingSachetPack && Number(trailingSachetPack[1]) > 1) return Number(trailingSachetPack[1]);
   return undefined;
 }
 
